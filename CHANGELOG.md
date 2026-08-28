@@ -27,6 +27,19 @@ acceptable changelog line.
 - `docs/reference/webull/streaming-api.md`: the venue's MQTT-over-WebSocket streaming
   contract, committed verbatim, with its connection limits and protobuf schema.
 
+### Added — the package
+- Market data (snapshot, bars, catalogue), streaming, and the whole supervision
+  tree. 214 tests including Core's 28 conformance assertions, passing first run.
+- **Credentials are required for market data** — every OpenAPI call is signed and
+  there is no anonymous endpoint, so this is the family's first
+  `credential_benefit: :required`.
+- **`environment: :uat`** points REST at the UAT host. Streaming there refuses with
+  `{:streaming_unavailable, :uat}` rather than falling back to production: the venue
+  has no UAT broker, and a consumer testing against UAT that received production
+  prices would be reading real market data believing it was fake.
+- **No trade volume anywhere** on this venue, so `volume` is `nil` rather than `0`.
+  Zero would look like a real measurement of no trading.
+
 ### Measured against the live venue, 2026-08-28
 - **The documented "TCP/IP" endpoint speaks TLS, not plaintext MQTT.** Sending a
   well-formed MQTT 3.1.1 CONNECT to `data-api.webull.com:1883` returns

@@ -87,6 +87,11 @@ defmodule DpExchange.Webull.Feed do
        # healthy in isolation.
        session_id: Keyword.get_lazy(opts, :session_id, &generate_session_id/0),
        socket_opts: Keyword.take(opts, [:url, :environment]),
+       # Retained so a reconnect can replay the subscription. The venue restores
+       # nothing, and a replay needs credentials — so a consumer that wants
+       # automatic recovery hands them to the tree at start, exactly as the other
+       # venues in this family do. Per-call options still override these.
+       resubscribe_opts: Keyword.take(opts, [:credentials, :environment, :limiter, :plug]),
        socket: Keyword.get(opts, :socket),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
@@ -108,6 +113,10 @@ defmodule DpExchange.Webull.Feed do
 
       case ensure_socket(state, environment) do
         {:ok, state} ->
+          # Remember what a replay needs. Without this, a reconnect re-subscribes with no
+          # credentials and fails — the venue restores nothing, so the promise that a
+          # consumer never sees a reconnect would quietly stop being true.
+          state = %{state | resubscribe_opts: replayable(opts, state)}
           {:reply, Subscription.subscribe(state.session_id, symbols, opts), state}
 
         {:error, reason} ->
@@ -179,7 +188,7 @@ defmodule DpExchange.Webull.Feed do
   defp resubscribe(%{wanted: wanted} = state) do
     case MapSet.to_list(wanted) do
       [] -> :ok
-      symbols -> Subscription.subscribe(state.session_id, symbols, [])
+      symbols -> Subscription.subscribe(state.session_id, symbols, state.resubscribe_opts)
     end
   end
 
@@ -208,6 +217,15 @@ defmodule DpExchange.Webull.Feed do
       | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
         delivering: Map.drop(state.delivering, symbols)
     }
+  end
+
+  # Only what a replay needs, and per-call values win over the ones the tree started
+  # with — a caller that named credentials for one subscribe meant them for its replay.
+  defp replayable(opts, state) do
+    Keyword.merge(
+      state.resubscribe_opts,
+      Keyword.take(opts, [:credentials, :environment, :limiter, :plug, :req_adapter])
+    )
   end
 
   defp fan_out(subscribers, message) do

@@ -164,9 +164,9 @@ defmodule DpExchange.Webull.Socket do
 
   defp emit(state, "quote", payload) do
     case QuoteProto.decode_quote(payload) do
-      {:ok, %{bid: bid, ask: ask} = decoded} when not is_nil(bid) or not is_nil(ask) ->
-        # A book message carries no last price. `price` is left as the bid when there is
-        # one — a real quoted number, labelled as the bid too — and no mid is invented.
+      {:ok, %{bid: bid, ask: ask} = decoded} when is_binary(bid) or is_binary(ask) ->
+        # A book message carries no last price. `price` becomes the bid when there is one —
+        # a real quoted number, labelled as the bid too — and no mid is invented.
         emit_decoded(state, {:ok, Map.put(decoded, :price, bid || ask)})
 
       _no_levels ->

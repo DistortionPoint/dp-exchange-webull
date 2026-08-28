@@ -194,13 +194,13 @@ defmodule DpExchange.Webull do
   # --- streaming ---------------------------------------------------------
 
   @impl true
-  def subscribe(symbols, opts \\ []), do: Feed.subscribe(feed(opts), symbols, opts)
+  def subscribe(symbols, opts), do: Feed.subscribe(feed(opts), symbols, opts)
 
   @impl true
-  def unsubscribe(symbols, opts \\ []), do: Feed.unsubscribe(feed(opts), symbols, opts)
+  def unsubscribe(symbols, opts), do: Feed.unsubscribe(feed(opts), symbols, opts)
 
   @impl true
-  def update_symbols(symbols, opts \\ []), do: Feed.update_symbols(feed(opts), symbols, opts)
+  def update_symbols(symbols, opts), do: Feed.update_symbols(feed(opts), symbols, opts)
 
   @impl true
   def coverage(opts \\ []) do
@@ -209,7 +209,7 @@ defmodule DpExchange.Webull do
   end
 
   @impl true
-  def subscribe_notices(opts \\ []), do: Feed.subscribe_notices(feed(opts), opts)
+  def subscribe_notices(opts), do: Feed.subscribe_notices(feed(opts), opts)
 
   # --- health ------------------------------------------------------------
 
