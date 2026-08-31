@@ -23,6 +23,22 @@ defmodule DpExchange.WebullTest do
       end
     end
 
+    test "the FAKE says the same thing, for every declared-unsupported endpoint" do
+      # The facade sweep above proves the real module agrees with its declaration. This
+      # proves the fake does too — and it matters more than it looks: a consumer's test
+      # suite runs against the fake, so a fake that answered differently would let a
+      # consumer write a passing test against behaviour the real package does not have.
+      #
+      # It also keeps the stubs honest. Thirty-three callbacks arrived with Core 0.1.16 and
+      # are declared, not implemented; without this they are uncovered lines that nothing
+      # would notice going wrong.
+      for {{name, arity}, :unsupported} <- Webull.capabilities().endpoints do
+        assert apply(Webull.Fake, name, unsupported_args(name, arity)) ==
+                 {:error, :not_supported},
+               "#{name}/#{arity} is declared :unsupported but the fake did not say so"
+      end
+    end
+
     test "credentials are REQUIRED, which no other venue in this family declares" do
       # Every OpenAPI call is signed, including the ones that look public. A consumer
       # branching on this learns it before calling; one that assumed market data is free
