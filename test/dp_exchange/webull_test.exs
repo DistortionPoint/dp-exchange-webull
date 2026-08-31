@@ -268,6 +268,7 @@ defmodule DpExchange.WebullTest do
       {:get_market_overview, 1} -> [[]]
       {:get_order_book, 2} -> ["BTC-USD", []]
       {:place_order, 3} -> [@credentials, %{}, []]
+      {:replace_order, 4} -> [@credentials, "id", %{}, []]
       {_name, 3} -> [@credentials, "id", []]
       {_name, 2} -> [@credentials, []]
       {_name, 1} -> [[]]
