@@ -261,7 +261,47 @@ defmodule DpExchange.WebullTest do
     end
   end
 
+  # Argument shapes for the declared-unsupported sweep. A lookup rather than a case, so a
+  # callback added to the facade adds a row instead of a branch.
+  @wide_facade_args %{
+    {:withdraw, 5} => ["BTC", "bitcoin", :one, "addr", []],
+    {:estimate_withdrawal_fee, 4} => ["BTC", "bitcoin", :one, []],
+    {:quote_conversion, 4} => ["BTC", "USD", :one, []],
+    {:get_deposit_address, 3} => ["BTC", "bitcoin", []],
+    {:create_watchlist, 3} => ["name", [], []],
+    {:get_financials, 3} => ["BTC-USD", :balance_sheet, []],
+    {:rename_account, 3} => ["id", "name", []],
+    {:stake, 3} => ["BTC", :one, []],
+    {:unstake, 3} => ["BTC", :one, []],
+    {:get_funding, 2} => ["BTC-USD", []],
+    {:get_contract_stats, 2} => ["BTC-USD", []],
+    {:get_option_chain, 2} => ["BTC-USD", []],
+    {:get_option_expirations, 2} => ["BTC-USD", []],
+    {:get_option_greeks, 2} => ["id", []],
+    {:get_watchlist, 2} => ["id", []],
+    {:update_watchlist, 2} => ["id", []],
+    {:delete_watchlist, 2} => ["id", []],
+    {:get_filings, 2} => ["id", []],
+    {:get_screener, 2} => ["id", []],
+    {:commit_conversion, 2} => ["id", []],
+    {:get_conversion, 2} => ["id", []],
+    {:get_top_of_book, 2} => ["BTC-USD", []]
+  }
+
   defp unsupported_args(name, arity) do
+    case Map.fetch(@wide_facade_args, {name, arity}) do
+      {:ok, args} ->
+        Enum.map(args, fn
+          :one -> Decimal.new("1")
+          other -> other
+        end)
+
+      :error ->
+        legacy_args(name, arity)
+    end
+  end
+
+  defp legacy_args(name, arity) do
     case {name, arity} do
       {:quantization, 1} -> ["BTC-USD"]
       {:list_instruments, 1} -> [[]]

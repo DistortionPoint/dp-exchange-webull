@@ -4,7 +4,7 @@ defmodule DpExchange.Webull.SocketTest do
   import Bitwise
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull.Socket
 
   @moduletag :capture_log
@@ -100,17 +100,23 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
     end
 
-    test "a book message uses the bid as the price and invents no mid" do
+    test "a book message delivers top-of-book, and never a price" do
+      # This asserted the opposite until 2026-08-31: that `price` became the bid, with a
+      # comment calling the bid "a real quoted number, labelled as the bid too". It is
+      # real, and it is not a price — a bid is a resting order and a price is an execution.
+      # The same substitution was found on two other venues in this family.
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
       bid_level = proto_field(1, "77845.79")
       frame = publish("quote", proto_field(1, basic) <> proto_field(3, bid_level))
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      assert_receive {:dp_exchange, :webull, %Quote{} = quote_struct}
-      assert Decimal.equal?(quote_struct.bid, Decimal.new("77845.79"))
-      assert Decimal.equal?(quote_struct.price, quote_struct.bid)
-      assert quote_struct.ask == nil
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
+      assert top.ask == nil
+      refute Map.has_key?(top, :price)
+
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
     end
 
     test "a book with no levels at all delivers nothing" do

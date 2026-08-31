@@ -20,6 +20,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+- **Every endpoint moved to its documented path (D6).** All five calls used an `/openapi/…`
+  prefix that appears nowhere in Webull's current documentation; they were inherited from an
+  older reading of the site.
+
+      /openapi/market-data/crypto/snapshot       ->  /market-data/crypto/snapshots/list
+      /openapi/market-data/crypto/bars           ->  /market-data/crypto/bars/list
+      /openapi/instrument/crypto/list            ->  /trading/instruments/crypto/profiles/list
+      /openapi/market-data/streaming/subscribe   ->  /market-data/streaming/subscribe
+      /openapi/market-data/streaming/unsubscribe ->  /market-data/streaming/unsubscribe
+
+  **Three of the five changed more than their path**, and a path-only rewrite would have
+  compiled and passed:
+  - snapshots stamp rows `last_trade_time` / `quote_time`; the timestamp reader accepted
+    neither, so every quote would have failed `:missing_venue_timestamp`
+  - bars renamed `symbol` to `symbols` and added a **required** `real_time_required`
+  - instruments made `category` required and is now **paginated**
+
+- **`get_symbols/1` follows pagination.** The replacement returns one page per call, so a
+  single request would have returned a plausible, silently truncated catalogue. The walk is
+  bounded (`@max_pages`) and refuses a key that does not advance.
+
+### Added
+- `DocumentedPathsTest` — asserts the documented paths are called and the `/openapi/` ones
+  are not. **No test asserted any path before this**, which is why the wrong ones survived.
+
 ### Added
 - Repo scaffold from the DpExchange standard; extraction pinned to the host's `553fa787`
   with per-file SHA-256, since the Webull subtree was dirty at extraction time — the third

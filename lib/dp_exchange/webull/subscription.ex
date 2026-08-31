@@ -2,7 +2,7 @@ defmodule DpExchange.Webull.Subscription do
   @moduledoc """
   The HTTP half of subscribing — internal.
 
-  Webull steers an MQTT stream with REST calls. `POST /openapi/market-data/streaming/subscribe`
+  Webull steers an MQTT stream with REST calls. `POST /market-data/streaming/subscribe`
   names the `session_id` that the MQTT connection registered as its client id, and the
   broker begins publishing to that session.
 
@@ -23,8 +23,8 @@ defmodule DpExchange.Webull.Subscription do
   alias DpExchange.Core.HttpClient
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
-  @subscribe_path "/openapi/market-data/streaming/subscribe"
-  @unsubscribe_path "/openapi/market-data/streaming/unsubscribe"
+  @subscribe_path "/market-data/streaming/subscribe"
+  @unsubscribe_path "/market-data/streaming/unsubscribe"
 
   @doc """
   Starts publication for `symbols` on the MQTT session registered under `session_id`.

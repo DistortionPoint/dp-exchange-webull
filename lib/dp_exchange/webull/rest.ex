@@ -4,7 +4,7 @@ defmodule DpExchange.Webull.Rest do
 
   ## Every call is signed, including the public-looking ones
 
-  There is no anonymous path here. `/openapi/market-data/crypto/snapshot` needs the same
+  There is no anonymous path here. `/market-data/crypto/snapshots/list` needs the same
   App Key and signature as an order. That is why this venue declares
   `credential_benefit: :required` — the first in the family to do so — and why
   `get_price/2` takes credentials that other venues' `get_price/2` does not need.
@@ -37,7 +37,7 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -46,6 +46,11 @@ defmodule DpExchange.Webull.Rest do
   # depends on which weekday the venue starts its week, `Core.Timeframe` models no
   # alignment rule for it, and a bar nobody can verify the boundary of is a bar nobody
   # should store.
+  # Bounds the instrument pagination loop. 342 symbols were measured at a page size the
+  # venue no longer documents; 50 pages is far above any plausible catalogue and far below
+  # forever.
+  @max_pages 50
+
   @timespans %{
     "1m" => "M1",
     "5m" => "M5",
@@ -68,7 +73,7 @@ defmodule DpExchange.Webull.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
     params = %{"symbols" => native, "category" => "US_CRYPTO"}
 
-    with {:ok, body} <- get("/openapi/market-data/crypto/snapshot", params, credentials, opts),
+    with {:ok, body} <- get("/market-data/crypto/snapshots/list", params, credentials, opts),
          {:ok, row} <- first_row(body),
          {:ok, price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
          {:ok, timestamp} <- venue_time(row) do
@@ -76,8 +81,6 @@ defmodule DpExchange.Webull.Rest do
        %Quote{
          symbol: SymbolFormat.to_canonical_symbol(native),
          price: decimal(price),
-         bid: decimal(value(row, ["bidPrice", "bid_price", "bid"])),
-         ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
          # Not an oversight and not a zero: this venue reports no crypto volume anywhere.
          volume: nil,
          timestamp: timestamp,
@@ -98,11 +101,20 @@ defmodule DpExchange.Webull.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
     with {:ok, timespan} <- timespan(timeframe) do
+      # `symbols`, not `symbol`. The replacement endpoint took a rename with the path, and
+      # `real_time_required` is **required** where the old path had no such parameter.
+      # `false` asks for completed bars only: an in-progress bar has a boundary that has
+      # not happened yet, and this package will not store one (see the `@timespans` note).
       params =
-        %{"symbol" => native, "category" => "US_CRYPTO", "timespan" => timespan}
+        %{
+          "symbols" => native,
+          "category" => "US_CRYPTO",
+          "timespan" => timespan,
+          "real_time_required" => "false"
+        }
         |> put_present("count", Keyword.get(opts, :limit))
 
-      with {:ok, body} <- get("/openapi/market-data/crypto/bars", params, credentials, opts),
+      with {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_bars(body, symbol, timeframe) do
         {:ok, Enum.filter(bars, &within?(&1, range))}
       end
@@ -110,25 +122,104 @@ defmodule DpExchange.Webull.Rest do
   end
 
   @doc """
+  Best bid and ask for `symbol` — the top of the book, not a traded price.
+
+  Same snapshot payload as `get_price/3`; the venue returns the last trade and the top of
+  the book together, and this splits them. The documented schema carries `bid`, `ask`,
+  `bid_size` and `ask_size`, so unlike some venues in this family the sizes are real here
+  rather than `nil`.
+  """
+  @spec get_top_of_book(String.t(), map(), keyword()) ::
+          {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
+  def get_top_of_book(symbol, credentials, opts) do
+    native = SymbolFormat.to_exchange_symbol(symbol)
+    params = %{"symbols" => native, "category" => "US_CRYPTO"}
+
+    with {:ok, body} <- get("/market-data/crypto/snapshots/list", params, credentials, opts),
+         {:ok, row} <- first_row(body) do
+      {:ok,
+       %TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(native),
+         bid: decimal(value(row, ["bidPrice", "bid_price", "bid"])),
+         ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
+         bid_size: decimal(value(row, ["bidSize", "bid_size"])),
+         ask_size: decimal(value(row, ["askSize", "ask_size"])),
+         venue_time: top_of_book_time(row),
+         observed_at: DateTime.utc_now(),
+         provider: :webull
+       }}
+    end
+  end
+
+  # The book's own stamp where the row carries one. `nil` rather than the local clock —
+  # `observed_at` already holds that, and says which it is.
+  defp top_of_book_time(row) do
+    case venue_time(row) do
+      {:ok, at} -> at
+      _no_venue_time -> nil
+    end
+  end
+
+  @doc """
   Every crypto symbol the venue lists, canonical.
 
-  Measured 2026-08-05 against `/openapi/instrument/crypto/list`: 342 symbols, every one
-  quoted in USD.
+  Measured 2026-08-05 against the old `/openapi/instrument/crypto/list`: 342 symbols, every
+  one quoted in USD. **That measurement predates the D6 migration** and has not been retaken
+  against `/trading/instruments/crypto/profiles/list`, which needs a credential this
+  repository does not hold.
+
+  ## This endpoint paginates, and the old one did not
+
+  The replacement returns a `pagination_key` and expects it back to get the next page. A
+  single call therefore returns *a page*, not the catalogue — and a truncated symbol list
+  is the worst shape of failure this family has: every symbol in it is real, so nothing
+  looks wrong, and the ones missing are simply never traded.
+
+  So this follows the key until the venue stops sending one. `@max_pages` bounds it: a
+  server that always returns a key would otherwise loop forever, and an infinite loop
+  inside a facade call is worse than an error.
   """
   @spec get_symbols(map(), keyword()) ::
           {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
   def get_symbols(credentials, opts) do
-    with {:ok, body} <- get("/openapi/instrument/crypto/list", %{}, credentials, opts) do
+    with {:ok, rows} <- all_instrument_rows(nil, credentials, opts, [], 0) do
       {:ok,
-       body
-       |> rows()
-       |> Enum.map(&value(&1, ["symbol", "disSymbol"]))
+       rows
+       |> Enum.map(&value(&1, ["symbol", "disSymbol", "name"]))
        |> Enum.reject(&is_nil/1)
        |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
        |> Enum.sort()
        |> Enum.uniq()}
     end
   end
+
+  defp all_instrument_rows(_key, _credentials, _opts, _acc, page) when page >= @max_pages,
+    do: {:error, :too_many_instrument_pages}
+
+  defp all_instrument_rows(key, credentials, opts, acc, page) do
+    params = put_present(%{"category" => "US_CRYPTO"}, "pagination_key", key)
+
+    with {:ok, body} <-
+           get("/trading/instruments/crypto/profiles/list", params, credentials, opts) do
+      collected = acc ++ rows(body)
+
+      case next_pagination_key(body) do
+        nil -> {:ok, collected}
+        ^key -> {:error, :pagination_key_did_not_advance}
+        next -> all_instrument_rows(next, credentials, opts, collected, page + 1)
+      end
+    end
+  end
+
+  # A key echoed back unchanged would page forever without this; see the clause above.
+  defp next_pagination_key(body) when is_map(body) do
+    case value(body, ["pagination_key", "paginationKey", "next_page_key"]) do
+      "" -> nil
+      found -> found
+    end
+  end
+
+  defp next_pagination_key(_body), do: nil
 
   # --- request ------------------------------------------------------------
 
@@ -222,7 +313,18 @@ defmodule DpExchange.Webull.Rest do
   # client's clock and became indistinguishable from a real one — the same substitution
   # found on two other venues in this family.
   defp venue_time(row) do
-    case value(row, ["time", "ts", "timestamp", "tradeTime", "trade_time"]) do
+    case value(row, [
+           "time",
+           "ts",
+           "timestamp",
+           "tradeTime",
+           "trade_time",
+           # Added with the D6 migration: the documented replacement endpoints stamp rows
+           # with these instead, and the list above silently produced
+           # `:missing_venue_timestamp` for every row until they were added.
+           "last_trade_time",
+           "quote_time"
+         ]) do
       nil -> {:error, :missing_venue_timestamp}
       raw -> parse_time(raw)
     end

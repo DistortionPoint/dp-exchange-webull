@@ -36,7 +36,7 @@ defmodule DpExchange.Webull.Socket do
   use WebSockex
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull.{MqttPacket, QuoteProto, SymbolFormat}
 
   require Logger
@@ -160,14 +160,20 @@ defmodule DpExchange.Webull.Socket do
   defp emit(state, "snapshot", payload),
     do: emit_decoded(state, QuoteProto.decode_snapshot(payload))
 
-  defp emit(state, "tick", payload), do: emit_decoded(state, QuoteProto.decode_tick(payload))
-
+  # A `quote` message is the book: bid and ask, and no last price — the venue does not send
+  # one on this topic.
+  #
+  # This used to build a `Core.Types.Quote` with `price: bid || ask`, defended in a comment
+  # as "a real quoted number, labelled as the bid too". It is real, and it is not a price.
+  # A bid is a resting order; a price is an execution. The same substitution was found on
+  # two other venues in this family, one of which had shipped it.
+  #
+  # A book message is top-of-book data and now delivers `Core.Types.TopOfBook`, which has
+  # no `price` field to misuse.
   defp emit(state, "quote", payload) do
     case QuoteProto.decode_quote(payload) do
       {:ok, %{bid: bid, ask: ask} = decoded} when is_binary(bid) or is_binary(ask) ->
-        # A book message carries no last price. `price` becomes the bid when there is one —
-        # a real quoted number, labelled as the bid too — and no mid is invented.
-        emit_decoded(state, {:ok, Map.put(decoded, :price, bid || ask)})
+        emit_top_of_book(state, decoded)
 
       _no_levels ->
         :ok
@@ -186,6 +192,29 @@ defmodule DpExchange.Webull.Socket do
 
   defp emit(_state, _topic, _payload), do: :ok
 
+  defp emit_top_of_book(state, decoded) do
+    with {:ok, timestamp} <- venue_time(decoded) do
+      send(
+        state.subscriber,
+        {:dp_exchange, :webull,
+         %TopOfBook{
+           symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
+           bid: decimal(decoded[:bid]),
+           ask: decimal(decoded[:ask]),
+           # The venue's book message carries prices and no sizes, so these stay nil —
+           # not published, and specifically not zero.
+           bid_size: nil,
+           ask_size: nil,
+           venue_time: timestamp,
+           observed_at: DateTime.utc_now(),
+           provider: :webull
+         }}
+      )
+    end
+
+    :ok
+  end
+
   defp emit_decoded(state, {:ok, decoded}) do
     with {:ok, timestamp} <- venue_time(decoded) do
       send(
@@ -194,8 +223,6 @@ defmodule DpExchange.Webull.Socket do
          %Quote{
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
            price: decimal(decoded[:price]),
-           bid: decimal(decoded[:bid]),
-           ask: decimal(decoded[:ask]),
            volume: nil,
            timestamp: timestamp,
            provider: :webull

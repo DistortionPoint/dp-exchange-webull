@@ -110,7 +110,16 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
 
       assert Decimal.equal?(quote_struct.price, Decimal.new(1))
-      assert Decimal.equal?(quote_struct.bid, Decimal.from_float(0.5))
+
+      # The bid moved to `TopOfBook` when the book left the quote. Same rule, same payload,
+      # a type that says which of the two numbers it is holding.
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(top.bid, Decimal.from_float(0.5))
     end
   end
 
