@@ -37,7 +37,7 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Candle, Order, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Balance, Candle, Order, Position, Quote, TopOfBook}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -306,6 +306,151 @@ defmodule DpExchange.Webull.Rest do
   defp query(params) when map_size(params) == 0, do: ""
   defp query(params), do: "?" <> URI.encode_query(stringify(params))
 
+  @doc """
+  Every account this credential can reach — `/trading/accounts/list`.
+
+  Takes no parameters: the credential decides what it sees.
+
+  **`account_class` is where this venue's breadth shows.** The documented values are
+  `INDIVIDUAL_CASH`, `INDIVIDUAL_MARGIN`, `ROTH_IRA`, `TRADITIONAL_IRA`, `ROLLOVER_IRA`,
+  `MANAGED_ROTH_IRA`, `MANAGED_TRADITIONAL_IRA`, `CRYPTO`, `FUTURES` and `EVENTS_CASH` — so
+  a single credential can hold crypto, futures and event-contract accounts alongside cash
+  and margin ones. This package serves crypto today; the accounts endpoint sees all of them
+  and says so, which is why the rows come back whole rather than filtered.
+
+  Rows are the venue's own maps. An account is not a value type in this contract, and
+  normalising `account_label` into something else would lose exactly the field a caller
+  picking an account needs.
+  """
+  @spec get_accounts(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_accounts(credentials, opts) do
+    with {:ok, body} <- get("/trading/accounts/list", %{}, credentials, opts) do
+      {:ok, rows(body)}
+    end
+  end
+
+  @doc """
+  Balances for one account — `/trading/assets/balances/get`.
+
+  Requires `opts[:account_id]`, as every account call on this venue does. There is no
+  all-accounts variant; a caller holding several asks per account, and which one is theirs
+  to choose.
+
+  ## What this deliberately does not fill in
+
+  The venue publishes several *different* restrictions on a currency balance —
+  `frozen_amount`, `held_amount` (in transit), `unsettled_cash`, and the derived
+  `buying_power`, `option_buying_power`, `day_buying_power` and `available_withdrawal`. They
+  are not the same number and they do not agree.
+
+  `Core.Types.Balance` has one `available_balance`, and **there is no honest way to pick
+  which of those it is.** `available_withdrawal` is what can leave the account;
+  `buying_power` is what can be traded and on a margin account exceeds the cash; settled and
+  unsettled cash differ again. So `available_balance` is `nil` — the venue said several
+  things and this package will not choose one and label it "available".
+
+  `balance` is `cash_balance` and `hold` is `frozen_amount`, both of which are the venue's
+  own single-meaning fields. The rest is reachable through `get_accounts/2` on a package
+  that carries it, and is a known gap in this contract rather than in this venue.
+  """
+  @spec get_balances(map(), keyword()) ::
+          {:ok, [Balance.t()]} | {:error, term()} | {:refused, term()}
+  def get_balances(credentials, opts) do
+    asked_at = DateTime.utc_now()
+
+    with {:ok, account_id} <- account_id(opts),
+         {:ok, body} <-
+           get("/trading/assets/balances/get", %{"account_id" => account_id}, credentials, opts) do
+      {:ok,
+       body
+       |> currency_assets()
+       |> Enum.map(&to_balance(&1, asked_at))}
+    end
+  end
+
+  defp currency_assets(body) when is_map(body) do
+    case value(body, ["account_currency_assets", "accountCurrencyAssets"]) do
+      rows when is_list(rows) -> rows
+      _absent -> []
+    end
+  end
+
+  defp currency_assets(_body), do: []
+
+  defp to_balance(row, asked_at) do
+    %Balance{
+      currency: value(row, ["currency"]),
+      balance: decimal(value(row, ["cash_balance", "cashBalance"])),
+      # Not derived. See the note on get_balances/2: this venue publishes several
+      # different "available" figures and they disagree.
+      available_balance: nil,
+      hold: decimal(value(row, ["frozen_amount", "frozenAmount"])),
+      # When we asked. A balance has no venue event time.
+      timestamp: asked_at,
+      provider: :webull
+    }
+  end
+
+  @doc """
+  Open positions on one account — `/trading/assets/positions/list`.
+
+  Requires `opts[:account_id]`.
+
+  **This venue states no side.** Every documented field is a quantity, a price or a P&L, and
+  direction is carried in the sign of `quantity` — so `Position.from_signed_quantity/1` does
+  the conversion, which is exactly what it exists for. A package that assumed `:long`
+  because equities are usually long would produce a short position that is exactly backwards
+  with every number in it still plausible.
+
+  `instrument_type` comes from the venue's own `EQUITY | OPTION | FUTURES | CRYPTO | EVENT`.
+  An unknown one is `nil`, not the nearest.
+
+  `liquidation_price` and `leverage` stay `nil`: **the venue publishes neither on this
+  endpoint.** `nil` there means "not stated", never "no liquidation risk" — see
+  `Core.Types.Position`.
+  """
+  @spec get_positions(map(), keyword()) ::
+          {:ok, [Position.t()]} | {:error, term()} | {:refused, term()}
+  def get_positions(credentials, opts) do
+    with {:ok, account_id} <- account_id(opts),
+         {:ok, body} <-
+           get("/trading/assets/positions/list", %{"account_id" => account_id}, credentials, opts) do
+      {:ok, body |> rows() |> Enum.map(&to_position/1)}
+    end
+  end
+
+  defp to_position(row) do
+    {side, quantity} =
+      row
+      |> value(["quantity"])
+      |> decimal()
+      |> signed_quantity()
+
+    %Position{
+      symbol: row |> value(["symbol"]) |> canonical_or_nil(),
+      side: side,
+      quantity: quantity,
+      instrument_type: row |> value(["instrument_type", "instrumentType"]) |> instrument_atom(),
+      average_cost: decimal(value(row, ["cost_price", "costPrice"])),
+      mark_price: decimal(value(row, ["last_price", "lastPrice"])),
+      # Marked, not booked. The venue reports only the open figure here.
+      unrealised_pnl: decimal(value(row, ["unrealized_profit_loss", "unrealizedProfitLoss"])),
+      provider: :webull
+    }
+  end
+
+  # A position with no quantity has no direction either, and `:long` would be a guess about
+  # a row the venue sent empty.
+  defp signed_quantity(nil), do: {nil, nil}
+  defp signed_quantity(%Decimal{} = quantity), do: Position.from_signed_quantity(quantity)
+
+  defp instrument_atom("EQUITY"), do: :equity
+  defp instrument_atom("OPTION"), do: :option
+  defp instrument_atom("FUTURES"), do: :futures
+  defp instrument_atom("CRYPTO"), do: :crypto
+  defp instrument_atom("EVENT"), do: :event
+  defp instrument_atom(_other), do: nil
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row

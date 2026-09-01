@@ -64,7 +64,6 @@ defmodule DpExchange.Webull do
   @unsupported [
     # Core 0.1.16's wider facade — declared, not yet implemented. Each is a Phase 3–13
     # item. `:unsupported` is about this package unless the note says otherwise.
-    {:get_positions, 1},
     {:get_funding, 2},
     {:get_contract_stats, 2},
     {:get_staking_rates, 1},
@@ -139,11 +138,9 @@ defmodule DpExchange.Webull do
     {:get_order_book, 2},
     {:get_market_overview, 1},
     {:list_instruments, 1},
-    {:get_accounts, 2},
     {:get_fees, 2},
     {:get_transfers, 2},
     {:get_trade_history, 2},
-    {:get_balances, 2},
     {:get_rate_limit_status, 2},
     {:test_connection, 2},
     {:quantization, 1}
@@ -256,9 +253,21 @@ defmodule DpExchange.Webull do
   # --- account and trading -----------------------------------------------
 
   @impl true
-  def get_balances(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  Balances for one account. Requires `opts[:account_id]`.
+
+  See `DpExchange.Webull.Rest.get_balances/2` — in particular why `available_balance` is
+  `nil` on this venue.
+  """
+  def get_balances(credentials, opts), do: Rest.get_balances(credentials, with_limiter(opts))
   @impl true
-  def get_accounts(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  Every account this credential can reach, as the venue records them.
+
+  See `DpExchange.Webull.Rest.get_accounts/2`, including what `account_class` reveals about
+  this venue's breadth.
+  """
+  def get_accounts(credentials, opts), do: Rest.get_accounts(credentials, with_limiter(opts))
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
@@ -383,7 +392,13 @@ defmodule DpExchange.Webull do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts), do: Venue.not_supported()
+  @doc """
+  Open positions on one account. Requires `opts[:account_id]`.
+
+  See `DpExchange.Webull.Rest.get_positions/2`, including why the side comes from the sign
+  of the quantity rather than an assumption.
+  """
+  def get_positions(opts), do: Rest.get_positions(credentials(opts), with_limiter(opts))
 
   @impl true
   def get_funding(_symbol, _opts), do: Venue.not_supported()

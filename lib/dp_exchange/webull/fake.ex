@@ -134,9 +134,47 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
   @impl true
-  def get_balances(_credentials, _opts), do: Venue.not_supported()
+  def get_balances(_credentials, opts) do
+    with :ok <- fake_account(opts) do
+      {:ok,
+       [
+         %Types.Balance{
+           currency: "USD",
+           balance: Decimal.new("485705.95"),
+           # `nil`, as in the real package: this venue publishes several disagreeing
+           # "available" figures and neither it nor this fake picks one.
+           available_balance: nil,
+           hold: Decimal.new("485705"),
+           timestamp: DateTime.utc_now(),
+           provider: :webull
+         }
+       ]}
+    end
+  end
+
   @impl true
-  def get_accounts(_credentials, _opts), do: Venue.not_supported()
+  def get_accounts(_credentials, _opts) do
+    # Two accounts of different classes, because that is the fact about this venue a
+    # consumer most needs to handle: one credential reaches crypto and cash alike.
+    {:ok,
+     [
+       %{
+         "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+         "account_number" => "10010048",
+         "account_type" => "CASH",
+         "account_label" => "Crypto",
+         "account_class" => "CRYPTO"
+       },
+       %{
+         "account_id" => "LOJOQITOD49R6G9BPQM489CISA",
+         "account_number" => "10010049",
+         "account_type" => "MARGIN",
+         "account_label" => "Individual Margin",
+         "account_class" => "INDIVIDUAL_MARGIN"
+       }
+     ]}
+  end
+
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
@@ -262,7 +300,30 @@ defmodule DpExchange.Webull.Fake do
   # not offer something, the comment beside it says so.
 
   @impl true
-  def get_positions(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_positions(opts \\ []) do
+    with :ok <- fake_account(opts) do
+      # A SHORT position, because that is the case a fake must carry: the venue states
+      # direction only in the sign of the quantity, and a package that assumed :long would
+      # be exactly backwards with every number still plausible.
+      {:ok,
+       [
+         %Types.Position{
+           symbol: "BTC-USD",
+           side: :short,
+           quantity: Decimal.new("0.4"),
+           instrument_type: :crypto,
+           average_cost: Decimal.new("41000"),
+           mark_price: Decimal.new("40000"),
+           unrealised_pnl: Decimal.new("400"),
+           # Not published on this endpoint. `nil` means the venue did not say, never
+           # "no liquidation risk".
+           liquidation_price: nil,
+           leverage: nil,
+           provider: :webull
+         }
+       ]}
+    end
+  end
 
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()

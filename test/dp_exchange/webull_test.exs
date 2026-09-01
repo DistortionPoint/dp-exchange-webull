@@ -248,8 +248,9 @@ defmodule DpExchange.WebullTest do
       assert Fake.get_order_book("BTC-USD", []) == {:error, :not_supported}
       assert Fake.get_market_overview([]) == {:error, :not_supported}
       assert Fake.list_instruments([]) == {:error, :not_supported}
-      assert Fake.get_balances(@credentials, []) == {:error, :not_supported}
-      assert Fake.get_accounts(@credentials, []) == {:error, :not_supported}
+      # get_balances/2, get_accounts/2 and get_positions/1 are implemented now.
+      # get_balances and get_positions refuse without an `account_id`, which is the venue's
+      # requirement rather than a missing implementation; get_accounts takes none.
       assert Fake.get_fees(@credentials, []) == {:error, :not_supported}
       assert Fake.get_transfers(@credentials, []) == {:error, :not_supported}
       # place_order is implemented now, so it no longer belongs in this sweep. It refuses

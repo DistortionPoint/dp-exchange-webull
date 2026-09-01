@@ -21,6 +21,34 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`get_accounts/2`, `get_balances/2` and `get_positions/1`.** The package could not say
+  what the credential holds or what it is exposed to.
+
+  **`account_class` is where this venue's breadth shows.** The documented values are
+  `INDIVIDUAL_CASH`, `INDIVIDUAL_MARGIN`, four IRA classes, `CRYPTO`, `FUTURES` and
+  `EVENTS_CASH` — one credential reaches all of them. `get_accounts/2` returns the venue's
+  rows whole rather than filtered, because an account is not a value type here and
+  normalising `account_label` away would lose the field a caller picking an account needs.
+
+  **`available_balance` is `nil`, deliberately.** The venue publishes `frozen_amount`,
+  `held_amount` (in transit), `unsettled_cash`, `buying_power` and `available_withdrawal` —
+  five different numbers that do not agree. `available_withdrawal` is what can leave the
+  account; `buying_power` is what can be traded and on a margin account exceeds the cash.
+  Each is "available" to a different caller, and labelling one of them as *the* available
+  balance would be right once and wrong four times. `balance` is `cash_balance` and `hold`
+  is `frozen_amount`, both single-meaning fields of the venue's own. The rest is a gap in
+  `Core.Types.Balance` rather than in this venue.
+
+  **A position's side comes from the sign of the quantity**, via
+  `Position.from_signed_quantity/1`. It is the only place this venue states direction, and a
+  package that assumed `:long` because equities usually are would report a short that is
+  exactly backwards with every number in it still plausible. `liquidation_price` and
+  `leverage` stay `nil` — the venue publishes neither here, and `nil` means "not stated",
+  never "no liquidation risk".
+
+  `get_balances/2` and `get_positions/1` require `opts[:account_id]`, as every account call
+  on this venue does. `get_accounts/2` takes none: the credential decides what it sees.
+
 - **`place_order/3`.** This venue could not place an order; it can now.
 
   **The venue documents which crypto pairs it accepts, and the list is short**: `MARKET`
