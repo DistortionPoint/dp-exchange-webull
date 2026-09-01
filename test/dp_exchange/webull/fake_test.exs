@@ -111,7 +111,7 @@ defmodule DpExchange.Webull.FakeTest do
     end
 
     test "MARKET with anything but IOC is refused" do
-      assert {:error, {:unsupported_order_combination, :market, :gtc}} =
+      assert {:error, {:unsupported_order_combination, :crypto, :market, :gtc}} =
                Fake.place_order(
                  @credentials,
                  request(%{order_type: :market, time_in_force: :gtc}),
@@ -168,6 +168,109 @@ defmodule DpExchange.Webull.FakeTest do
       assert :ok = Fake.subscribe(["BTC-USD"], @opts)
       assert Fake.coverage([])["BTC-USD"] == :stream
       assert :ok = Fake.unsubscribe(["BTC-USD"], @opts)
+    end
+  end
+
+  describe "the fake's account surface" do
+    test "balances carry a hold and no available figure, as production does" do
+      # The venue publishes five disagreeing "available" numbers. A fake that picked one
+      # would teach a consumer to rely on a field that is nil in production.
+      assert {:ok, [balance]} = Fake.get_balances(@credentials, @order_opts)
+
+      assert balance.available_balance == nil
+      assert Decimal.positive?(balance.hold)
+      assert balance.currency == "USD"
+    end
+
+    test "accounts span more than one class, because one credential does" do
+      assert {:ok, accounts} = Fake.get_accounts(@credentials, [])
+      classes = Enum.map(accounts, & &1["account_class"])
+
+      assert "CRYPTO" in classes
+      assert "INDIVIDUAL_MARGIN" in classes
+    end
+
+    test "a position is SHORT, which is the case a fake must carry" do
+      # Direction is in the sign of the quantity and nowhere else on this venue. A fake that
+      # only ever returned a long would never exercise the conversion.
+      assert {:ok, [position]} = Fake.get_positions(@order_opts)
+
+      assert position.side == :short
+      assert Decimal.positive?(position.quantity)
+      assert position.liquidation_price == nil
+    end
+
+    test "cash activities exclude dividends by default" do
+      assert {:ok, [only]} = Fake.get_transfers(@credentials, @order_opts)
+      assert only["activity_type"] == "DEPOSIT"
+
+      assert {:ok, both} =
+               Fake.get_transfers(
+                 @credentials,
+                 [activity_types: ~w(DEPOSIT DIVIDENDS)] ++ @order_opts
+               )
+
+      assert length(both) == 2
+    end
+
+    test "every account call refuses without an account_id" do
+      only_credentials = [credentials: @credentials]
+
+      assert {:error, :account_id_required} = Fake.get_balances(@credentials, only_credentials)
+      assert {:error, :account_id_required} = Fake.get_positions(only_credentials)
+      assert {:error, :account_id_required} = Fake.get_transfers(@credentials, only_credentials)
+    end
+  end
+
+  describe "the fake's preview and replace" do
+    test "crypto is refused, as it is in production" do
+      assert {:error, {:preview_not_supported, :crypto}} =
+               Fake.preview_order(@credentials, request(%{}), @order_opts)
+    end
+
+    test "an equity order is priced" do
+      assert {:ok, preview} =
+               Fake.preview_order(
+                 @credentials,
+                 request(%{instrument_type: :equity, symbol: "AAPL", time_in_force: :day}),
+                 @order_opts
+               )
+
+      assert preview.instrument_type == :equity
+      assert Decimal.positive?(preview.estimated_cost)
+    end
+
+    test "replacing a crypto order is refused" do
+      assert {:error, {:preview_not_supported, :crypto}} =
+               Fake.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 [instrument_type: :crypto] ++ @order_opts
+               )
+    end
+
+    test "an empty amendment is refused" do
+      assert {:error, :no_order_changes} =
+               Fake.replace_order(@credentials, "abc", %{}, @order_opts)
+    end
+
+    test "an edit the venue does not allow is refused" do
+      assert {:error, {:unsupported_order_edit, :limit, [:side]}} =
+               Fake.replace_order(@credentials, "abc", %{side: :sell}, @order_opts)
+    end
+
+    test "a price change comes back on the order" do
+      assert {:ok, order} =
+               Fake.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("41000")},
+                 @order_opts
+               )
+
+      assert order.id == "abc"
+      assert Decimal.equal?(order.price, Decimal.new("41000"))
     end
   end
 end

@@ -74,7 +74,9 @@ defmodule DpExchange.WebullTest do
     test "provider is the atom, everywhere" do
       assert Webull.runtime_id() == :webull
       assert Webull.provider_name() == "Webull"
-      assert Webull.asset_classes() == [:crypto]
+      # The order builder serves all five of the venue's instrument types, so the
+      # declaration says so. It follows the code rather than leading it.
+      assert Webull.asset_classes() == [:crypto, :equity]
       assert Webull.market_status([]) == {:ok, :open}
     end
 
@@ -214,7 +216,7 @@ defmodule DpExchange.WebullTest do
       assert Fake.market_status([]) == {:ok, :open}
       assert Fake.provider_name() == "Webull"
       assert Fake.runtime_id() == :webull
-      assert Fake.asset_classes() == [:crypto]
+      assert Fake.asset_classes() == [:crypto, :equity]
     end
   end
 

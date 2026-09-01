@@ -529,6 +529,139 @@ defmodule DpExchange.Webull.Rest do
     do: at |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
 
   defp iso_millis(other), do: other
+
+  @doc """
+  Prices an order **without placing it** — `/trading/orders/preview`.
+
+  Takes the same request `place_order/3` does and builds the same order body, so a preview
+  and the order it previews cannot diverge.
+
+  **Crypto is refused before the request.** The vendor states it plainly: *"For crypto
+  trading, this feature is currently not supported."* Sending one anyway would return a
+  business error a caller cannot distinguish from a rejected order, so this refuses with
+  `{:preview_not_supported, :crypto}` and names the reason.
+
+  Returns the venue's own two figures: `estimated_cost` and `estimated_transaction_fee`.
+  **What `estimated_cost` means depends on the instrument** — for stocks and options it is
+  the total consideration including premium and charges; for futures it is the initial
+  margin required to open the position. Those are different quantities, and the key carries
+  the instrument so a caller cannot read one as the other.
+  """
+  @spec preview_order(map(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def preview_order(credentials, request, opts) do
+    instrument = instrument_type(request)
+
+    with :ok <- previewable(instrument),
+         {:ok, account_id} <- account_id(opts),
+         {:ok, order_type, tif} <- combination(request),
+         {:ok, leaf} <- order_leaf(request, order_type, tif) do
+      body = %{
+        "account_id" => account_id,
+        "new_orders" => [Map.put(leaf, "client_order_id", client_order_id(request))]
+      }
+
+      with {:ok, response} <- post("/trading/orders/preview", body, credentials, opts) do
+        to_preview(response, instrument)
+      end
+    end
+  end
+
+  defp previewable(:crypto), do: {:error, {:preview_not_supported, :crypto}}
+  defp previewable(_instrument), do: :ok
+
+  defp to_preview(response, instrument) do
+    row = response |> rows() |> List.first() || response
+
+    case value(row, ["estimated_cost", "estimatedCost"]) do
+      nil ->
+        {:error, :unexpected_response_shape}
+
+      cost ->
+        {:ok,
+         %{
+           instrument_type: instrument,
+           # Total consideration on stocks and options; initial margin on futures. The
+           # instrument above says which, because they are not the same quantity.
+           estimated_cost: decimal(cost),
+           estimated_fee:
+             decimal(value(row, ["estimated_transaction_fee", "estimatedTransactionFee"]))
+         }}
+    end
+  end
+
+  @doc """
+  Amends a working order in place — `/trading/orders/replace`.
+
+  **Crypto is refused before the request**, for the same documented reason as
+  `preview_order/3`: the vendor's own page says the endpoint modifies equity, options and
+  futures orders and that crypto is not supported. A crypto caller wanting a different
+  order cancels and re-places, and that window is the venue's rather than this package's.
+
+  **The venue restricts what may change, per order type**, and this refuses the rest rather
+  than sending it:
+
+      MARKET               quantity only
+      LIMIT                order_type, time_in_force, quantity, limit_price
+      STOP_LOSS            order_type, time_in_force, quantity, stop_price
+      STOP_LOSS_LIMIT      order_type, time_in_force, quantity, limit_price, stop_price
+      TRAILING_STOP_LOSS   trailing_stop_step only
+
+  Keyed on `client_order_id`, like every other order call on this venue.
+
+  The venue's response carries no order, so **the order is read back**: reporting the change
+  a caller asked for as though the venue had confirmed it is a different claim from
+  reporting what the venue did.
+  """
+  @spec replace_order(map(), String.t(), map(), keyword()) ::
+          {:ok, Order.t()} | {:error, term()} | {:refused, term()}
+  def replace_order(credentials, client_order_id, changes, opts) do
+    instrument = Keyword.get(opts, :instrument_type, :equity)
+    order_type = Keyword.get(opts, :order_type, :limit)
+
+    with :ok <- previewable(instrument),
+         :ok <- amendable(order_type, changes),
+         {:ok, account_id} <- account_id(opts) do
+      body =
+        %{"account_id" => account_id, "client_order_id" => client_order_id}
+        |> put_present("quantity", Map.get(changes, :quantity))
+        |> put_present("limit_price", Map.get(changes, :price))
+        |> put_present("stop_price", Map.get(changes, :stop_price))
+        |> put_present("trailing_stop_step", Map.get(changes, :trailing_stop_step))
+        |> put_present("time_in_force", changes |> Map.get(:time_in_force) |> tif_name())
+
+      with {:ok, _response} <- post("/trading/orders/replace", body, credentials, opts) do
+        get_order(credentials, client_order_id, opts)
+      end
+    end
+  end
+
+  @amendable %{
+    market: [:quantity],
+    limit: [:order_type, :time_in_force, :quantity, :price],
+    stop: [:order_type, :time_in_force, :quantity, :stop_price],
+    stop_limit: [:order_type, :time_in_force, :quantity, :price, :stop_price],
+    trailing_stop: [:trailing_stop_step]
+  }
+
+  defp amendable(order_type, changes) do
+    case Map.fetch(@amendable, order_type) do
+      :error ->
+        {:error, {:unsupported_order_type, order_type}}
+
+      {:ok, allowed} ->
+        case Map.keys(changes) -- allowed do
+          [] -> present?(changes)
+          rejected -> {:error, {:unsupported_order_edit, order_type, rejected}}
+        end
+    end
+  end
+
+  # An amendment with nothing in it is not an amendment. Sending one would have the venue
+  # re-accept the order unchanged, which looks like success and achieves nothing.
+  defp present?(changes) when map_size(changes) == 0, do: {:error, :no_order_changes}
+  defp present?(_changes), do: :ok
+
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
@@ -730,7 +863,7 @@ defmodule DpExchange.Webull.Rest do
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
     with {:ok, account_id} <- account_id(opts),
-         {:ok, {order_type, tif}} <- crypto_combination(request),
+         {:ok, order_type, tif} <- combination(request),
          {:ok, leaf} <- order_leaf(request, order_type, tif) do
       body = %{
         "account_id" => account_id,
@@ -750,51 +883,152 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # The venue's documented crypto matrix, written out so a pair outside it cannot be sent.
-  @crypto_combinations %{
-    {:market, :ioc} => {"MARKET", "IOC"},
-    {:limit, :day} => {"LIMIT", "DAY"},
-    {:limit, :gtc} => {"LIMIT", "GTC"},
-    {:stop_limit, :day} => {"STOP_LOSS_LIMIT", "DAY"},
-    {:stop_limit, :gtc} => {"STOP_LOSS_LIMIT", "GTC"}
+  # **The venue's matrix is per instrument type, and the differences are not cosmetic.**
+  # Written out so a pair outside a type's list cannot be sent, and so the reason a caller
+  # gets names both halves.
+  #
+  # Read from the vendor's order reference, 2026-09-01:
+  #
+  #   CRYPTO   MARKET/IOC, LIMIT/DAY|GTC, STOP_LOSS_LIMIT/DAY|GTC
+  #   EQUITY   MARKET, LIMIT, STOP_LOSS, STOP_LOSS_LIMIT, TRAILING_STOP_LOSS × DAY|GTC
+  #   OPTION   as EQUITY minus TRAILING_STOP_LOSS ("Options not supported")
+  #   FUTURES  as OPTION; BUY and SELL only
+  #   EVENT    LIMIT only, and DAY|GTC|IOC|GTD|FOK
+  #
+  # The institutional-only types (MARKET_ON_OPEN, MARKET_ON_CLOSE, LIMIT_ON_OPEN) are
+  # absent deliberately: the vendor restricts them to institutional stock orders, and a
+  # package that sent one for an ordinary account would get a refusal it could not explain.
+  @order_type_names %{
+    market: "MARKET",
+    limit: "LIMIT",
+    stop: "STOP_LOSS",
+    stop_limit: "STOP_LOSS_LIMIT",
+    trailing_stop: "TRAILING_STOP_LOSS"
   }
 
-  defp crypto_combination(request) do
-    type = Map.get(request, :order_type, :limit)
-    tif = Map.get(request, :time_in_force, :gtc)
+  @tif_names %{day: "DAY", gtc: "GTC", ioc: "IOC", gtd: "GTD", fok: "FOK"}
 
-    case Map.fetch(@crypto_combinations, {type, tif}) do
-      {:ok, pair} -> {:ok, pair}
-      :error -> {:error, {:unsupported_order_combination, type, tif}}
+  defp tif_name(nil), do: nil
+  defp tif_name(tif), do: Map.get(@tif_names, tif)
+
+  @equity_types [:market, :limit, :stop, :stop_limit, :trailing_stop]
+  @option_types [:market, :limit, :stop, :stop_limit]
+  @stock_tifs [:day, :gtc]
+  @event_tifs [:day, :gtc, :ioc, :gtd, :fok]
+
+  @combinations %{
+    crypto: [
+      {:market, :ioc},
+      {:limit, :day},
+      {:limit, :gtc},
+      {:stop_limit, :day},
+      {:stop_limit, :gtc}
+    ],
+    equity: for(type <- @equity_types, tif <- @stock_tifs, do: {type, tif}),
+    option: for(type <- @option_types, tif <- @stock_tifs, do: {type, tif}),
+    futures: for(type <- @option_types, tif <- @stock_tifs, do: {type, tif}),
+    event: for(tif <- @event_tifs, do: {:limit, tif})
+  }
+
+  @instrument_names %{
+    crypto: "CRYPTO",
+    equity: "EQUITY",
+    option: "OPTION",
+    futures: "FUTURES",
+    event: "EVENT"
+  }
+
+  @doc """
+  Every instrument type this package can build an order for, as the venue names them.
+
+  Exposed because `capabilities/0` declares from it, and a declaration that can disagree
+  with the builder it describes is a declaration worth nothing.
+  """
+  @spec order_instrument_types() :: [atom()]
+  def order_instrument_types, do: @combinations |> Map.keys() |> Enum.sort()
+
+  @doc """
+  The type/time-in-force pairs this venue accepts for `instrument`, or an error naming an
+  instrument type this package cannot build an order for.
+
+  Exposed so the fake enforces the same matrix rather than a hand-copied one that drifts.
+  """
+  @spec order_combinations(atom()) :: {:ok, [{atom(), atom()}]} | {:error, term()}
+  def order_combinations(instrument), do: allowed_combinations(instrument)
+
+  # A request that does not say is crypto, which is what this package served before the
+  # instrument types widened. Changing that default would silently re-route existing
+  # callers' orders onto a different market.
+  defp instrument_type(request), do: Map.get(request, :instrument_type, :crypto)
+
+  defp combination(request) do
+    instrument = instrument_type(request)
+    type = Map.get(request, :order_type, :limit)
+    tif = Map.get(request, :time_in_force, default_tif(instrument))
+
+    with {:ok, allowed} <- allowed_combinations(instrument) do
+      if {type, tif} in allowed do
+        {:ok, @order_type_names[type], @tif_names[tif]}
+      else
+        {:error, {:unsupported_order_combination, instrument, type, tif}}
+      end
+    end
+  end
+
+  # GTC on everything the venue lists it for; crypto keeps the default it always had.
+  defp default_tif(:event), do: :gtc
+  defp default_tif(_instrument), do: :gtc
+
+  defp allowed_combinations(instrument) do
+    case Map.fetch(@combinations, instrument) do
+      {:ok, allowed} -> {:ok, allowed}
+      :error -> {:error, {:unsupported_instrument_type, instrument}}
     end
   end
 
   defp order_leaf(request, order_type, tif) do
-    with {:ok, entrust, sizing} <- entrust(request, order_type) do
+    instrument = instrument_type(request)
+
+    with {:ok, entrust, sizing} <- entrust(request, order_type, instrument) do
       leaf =
         %{
           "combo_type" => "NORMAL",
-          "instrument_type" => "CRYPTO",
+          "instrument_type" => Map.fetch!(@instrument_names, instrument),
           "market" => "US",
-          "symbol" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
+          "symbol" => order_symbol(request, instrument),
           "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
           "order_type" => order_type,
           "time_in_force" => tif,
           "entrust_type" => entrust
         }
         |> Map.merge(sizing)
+        |> put_present("limit_price", price_for(request, order_type))
+        |> put_present("stop_price", stop_for(request, order_type))
+        |> put_present("expire_date", expire_date(request, tif))
+        |> put_present("event_outcome", Map.get(request, :event_outcome))
 
-      {:ok, put_present(leaf, "limit_price", price_for(request, order_type))}
-      |> then(fn {:ok, l} ->
-        {:ok, put_present(l, "stop_price", stop_for(request, order_type))}
-      end)
+      {:ok, leaf}
     end
   end
+
+  # **Only crypto symbols go through the canonical mapper.** An equity ticker is already the
+  # venue's own identifier — `AAPL` is `AAPL` — and pushing it through a pair splitter that
+  # looks for a quote currency would mangle any ticker ending in one of them.
+  defp order_symbol(request, :crypto),
+    do: SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol))
+
+  defp order_symbol(request, _instrument), do: Map.fetch!(request, :symbol)
+
+  # GTD is the only time-in-force with a date, and the venue requires one with it. Missing
+  # is left missing rather than defaulted: a date chosen here would be an expiry the caller
+  # never asked for.
+  defp expire_date(request, "GTD"), do: Map.get(request, :expire_date)
+  defp expire_date(_request, _tif), do: nil
 
   # `QTY` sizes in units, `AMOUNT` in cash. They are different orders and the venue names
   # them separately; a caller that gave neither gets an error rather than a default, and a
   # caller that gave both is asking for two things at once.
-  defp entrust(request, order_type) do
+  defp entrust(request, order_type, instrument) do
     quantity = Map.get(request, :quantity)
     amount = Map.get(request, :amount)
 
@@ -806,21 +1040,29 @@ defmodule DpExchange.Webull.Rest do
         {:ok, "QTY", %{"qty" => to_string(quantity)}}
 
       {nil, amount} ->
-        amount_entrust(order_type, amount)
+        amount_entrust(order_type, instrument, amount)
 
       {_quantity, _amount} ->
         {:error, :ambiguous_order_size}
     end
   end
 
+  # **`AMOUNT` is not available everywhere.** The vendor states it for U.S. stock and event
+  # contract trading; futures and options take `QTY` only. Refusing here names the reason,
+  # where sending it would return a business error about a field the caller thought was
+  # supported.
+  defp amount_entrust(_order_type, instrument, _amount) when instrument in [:futures, :option],
+    do: {:error, {:cash_sizing_not_supported, instrument}}
+
   # The venue restricts `AMOUNT` on a stop-limit sell to `QTY` only. Rather than encode the
   # side rule twice, cash sizing is refused for stop-limit outright: a caller sizing a stop
   # in cash is asking for something the venue will not do on one side of the book, and
   # accepting it on the other invites a surprise later.
-  defp amount_entrust("STOP_LOSS_LIMIT", _amount),
+  defp amount_entrust("STOP_LOSS_LIMIT", _instrument, _amount),
     do: {:error, :cash_sizing_not_supported_for_stop}
 
-  defp amount_entrust(_order_type, amount), do: {:ok, "AMOUNT", %{"amount" => to_string(amount)}}
+  defp amount_entrust(_order_type, _instrument, amount),
+    do: {:ok, "AMOUNT", %{"amount" => to_string(amount)}}
 
   defp price_for(_request, "MARKET"), do: nil
   defp price_for(request, _order_type), do: Map.get(request, :price)

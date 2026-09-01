@@ -103,28 +103,14 @@ defmodule DpExchange.Webull do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
-    # **Both endpoints exist. The venue excludes crypto from them — and this package's
-    # `[:crypto]` is a statement about the package today, not about the venue.** Read from
-    # the vendor's own reference pages on 2026-09-01:
+    # **`preview_replace/4` has no endpoint here.** The venue previews an order that does
+    # not exist yet (`/trading/orders/preview`) and amends one that does
+    # (`/trading/orders/replace`); it does not price an amendment in advance. Read from the
+    # vendor's reference, 2026-09-01.
     #
-    #   /trading/orders/preview  — "For crypto trading, this feature is currently not
-    #                              supported."
-    #   /trading/orders/replace  — "Modifies equity, options and futures orders […] For
-    #                              crypto trading, this feature is currently not supported."
-    #
-    # An earlier note here said preview "has no endpoint at all", which was false — a claim
-    # about the venue that the venue contradicts. A later one said there was therefore
-    # nothing to implement, which was also wrong: it read this package's current
-    # `asset_classes` as a permanent boundary. Webull publishes stocks, options, futures
-    # and event contracts, and both endpoints serve them.
-    #
-    # So these are **unimplemented, not unavailable**, and they unblock when this package's
-    # asset classes widen. `replace_order/4`'s absence still costs a caller the atomic
-    # amendment: a cancel-and-re-place opens a window in which no order is live, and on
-    # crypto that window is the venue's rather than this package's.
-    {:preview_order, 3},
+    # `preview_order/3` and `replace_order/4` are implemented — both exclude crypto, which
+    # they say for themselves, and this package now serves more than crypto.
     {:preview_replace, 4},
-    {:replace_order, 4},
     # **No bulk cancel on this venue — read from its reference, 2026-09-01.**
     # `/trading/orders/cancel` takes one `client_order_id`. There is no cancel-all and no
     # cancel-session; a loop over `get_orders/2` would be N partial outcomes that cannot
@@ -163,8 +149,27 @@ defmodule DpExchange.Webull do
   @impl true
   def runtime_id, do: :webull
 
+  @doc """
+  The asset classes this package serves.
+
+  **`:equity` is here because the order builder serves it, not because the venue does.**
+  Webull publishes stocks, options, futures and event contracts alongside crypto; this
+  package's order path now builds all five instrument types, its preview and replace
+  endpoints work on the four non-crypto ones, and `get_accounts/2` already returns the
+  `CRYPTO`, `FUTURES` and `EVENTS_CASH` account classes the credential reaches.
+
+  The coarse vocabulary here is `:crypto | :equity`; the finer statement is
+  `supported_instrument_types` below, which names option, future and event contract
+  separately. A declaration that outran the code would be the worse error — a consumer
+  routes on this.
+
+  **Market data for the non-crypto classes is not implemented yet** (the stock, option,
+  futures and event-contract endpoints are open in the coverage plan's Phases 7, 8 and 11).
+  Each is declared per endpoint through `capabilities/0`'s `endpoints` map, which is why
+  that map exists rather than one flag per package.
+  """
   @impl true
-  def asset_classes, do: [:crypto]
+  def asset_classes, do: [:crypto, :equity]
 
   @impl true
   def capabilities do
@@ -177,13 +182,26 @@ defmodule DpExchange.Webull do
       # retaken — it needs a credential this repository does not hold. Treat 342 as the
       # last observed figure, not a current one.
       supported_quotes: ["USD"],
-      supported_instrument_types: [:spot],
+      # Five, because the order builder builds five. `Rest.order_instrument_types/0` is the
+      # same list, so this cannot drift from what can actually be sent.
+      # A share bought outright is `:spot` — the vocabulary has no separate `:equity`, and
+      # does not need one: the distinction that matters is settled vs derivative.
+      supported_instrument_types: [:spot, :option, :future, :event_contract],
 
       # The venue's documented crypto matrix: MARKET takes IOC only; LIMIT and
       # STOP_LOSS_LIMIT take DAY or GTC. There is no market GTC and no limit IOC, and
       # `place_order/3` refuses a pair outside it rather than letting the venue reject it.
-      supported_order_types: [:market, :limit, :stop_limit],
-      supported_time_in_force: [:ioc, :day, :gtc],
+      # The union across instrument types. Which pairs a given type accepts is narrower and
+      # is enforced per instrument by `Rest.order_combinations/1` — crypto has five pairs,
+      # an event contract has LIMIT only.
+      supported_order_types: [:market, :limit, :stop, :stop_limit, :trailing_stop],
+      supported_time_in_force: [:ioc, :day, :gtc, :gtd, :fok],
+
+      # **Both true, and both scoped to the four non-crypto instrument types.** The venue
+      # excludes crypto from its preview and replace endpoints and says so; the endpoints
+      # themselves refuse a crypto request before it is sent, naming the reason.
+      supports_order_preview: true,
+      supports_order_replace: true,
       supports_short_selling: false,
       streamable: [:quotes],
       historical_timeframes: Rest.timeframes(),
@@ -282,23 +300,25 @@ defmodule DpExchange.Webull do
   def place_order(credentials, request, opts \\ []),
     do: Rest.place_order(credentials, request, with_limiter(opts))
 
-  @doc """
-  **Not supported.** This venue publishes no order-preview endpoint.
-
-  Declared through `supports_order_preview: false`, so a consumer routes around it rather
-  than discovering the refusal at call time.
-  """
   @impl true
-  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
-
   @doc """
-  **Not supported.** This venue has no atomic replace; a caller cancels and re-places.
+  Prices an order without placing it. Requires `opts[:account_id]`.
 
-  That is not equivalent — it opens a window in which no order is live — which is why
-  `supports_order_replace: false` is a claim about **risk** rather than convenience.
+  See `DpExchange.Webull.Rest.preview_order/3` — including why crypto is refused, and what
+  `estimated_cost` means on a futures order.
   """
+  def preview_order(credentials, request, opts \\ []),
+    do: Rest.preview_order(credentials, request, with_limiter(opts))
+
   @impl true
-  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
+  @doc """
+  Amends a working order in place, keyed on its client order id.
+
+  See `DpExchange.Webull.Rest.replace_order/4` — including which fields each order type
+  allows, and why the order is read back rather than reported from the request.
+  """
+  def replace_order(credentials, client_order_id, changes, opts \\ []),
+    do: Rest.replace_order(credentials, client_order_id, changes, with_limiter(opts))
 
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()

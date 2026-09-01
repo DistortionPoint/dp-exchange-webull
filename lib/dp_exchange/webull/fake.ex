@@ -215,10 +215,61 @@ defmodule DpExchange.Webull.Fake do
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
-  def preview_order(_credentials, _request, _opts \\ []), do: Venue.not_supported()
+  def preview_order(_credentials, request, opts \\ []) do
+    # Crypto is refused here as it is in production. A fake that priced a crypto order
+    # would let a consumer's suite go green on a call the venue rejects.
+    instrument = Map.get(request, :instrument_type, :crypto)
+
+    if instrument == :crypto do
+      {:error, {:preview_not_supported, :crypto}}
+    else
+      with :ok <- fake_account(opts),
+           :ok <- fake_combination(request) do
+        {:ok,
+         %{
+           instrument_type: instrument,
+           estimated_cost: Decimal.new("100"),
+           estimated_fee: Decimal.new("1")
+         }}
+      end
+    end
+  end
 
   @impl true
-  def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
+  def replace_order(_credentials, client_order_id, changes, opts \\ []) do
+    instrument = Keyword.get(opts, :instrument_type, :equity)
+    order_type = Keyword.get(opts, :order_type, :limit)
+
+    cond do
+      instrument == :crypto ->
+        {:error, {:preview_not_supported, :crypto}}
+
+      changes == %{} ->
+        {:error, :no_order_changes}
+
+      true ->
+        # The same per-type edit surface the real package enforces: a LIMIT order takes
+        # order_type, time_in_force, quantity and limit price and nothing else.
+        allowed = [
+          :order_type,
+          :time_in_force,
+          :quantity,
+          :price,
+          :stop_price,
+          :trailing_stop_step
+        ]
+
+        case Map.keys(changes) -- allowed do
+          [] ->
+            with :ok <- fake_account(opts) do
+              {:ok, %{fake_order() | id: client_order_id, price: Map.get(changes, :price)}}
+            end
+
+          rejected ->
+            {:error, {:unsupported_order_edit, order_type, rejected}}
+        end
+    end
+  end
 
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
@@ -489,20 +540,22 @@ defmodule DpExchange.Webull.Fake do
     if Keyword.get(opts, :account_id), do: :ok, else: {:error, :account_id_required}
   end
 
+  # The fake enforces the same per-instrument matrix the real package does, from the same
+  # source of truth — `Rest.order_combinations/1`. A hand-copied list here would drift from
+  # the builder it stands in for, one instrument type at a time.
   defp fake_combination(request) do
-    pair = {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)}
+    instrument = Map.get(request, :instrument_type, :crypto)
+    type = Map.get(request, :order_type, :limit)
+    tif = Map.get(request, :time_in_force, :gtc)
 
-    if pair in [
-         {:market, :ioc},
-         {:limit, :day},
-         {:limit, :gtc},
-         {:stop_limit, :day},
-         {:stop_limit, :gtc}
-       ] do
-      :ok
-    else
-      {type, tif} = pair
-      {:error, {:unsupported_order_combination, type, tif}}
+    case Rest.order_combinations(instrument) do
+      {:ok, allowed} ->
+        if {type, tif} in allowed,
+          do: :ok,
+          else: {:error, {:unsupported_order_combination, instrument, type, tif}}
+
+      error ->
+        error
     end
   end
 

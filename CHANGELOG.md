@@ -21,6 +21,50 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **BREAKING: this package is no longer crypto-only. `asset_classes` is
+  `[:crypto, :equity]`.**
+
+  The order builder now serves all five instrument types the venue names, and **the matrix
+  is per type because the venue's rules differ per type**:
+
+      CRYPTO   MARKET/IOC, LIMIT/DAY|GTC, STOP_LOSS_LIMIT/DAY|GTC
+      EQUITY   MARKET, LIMIT, STOP_LOSS, STOP_LOSS_LIMIT, TRAILING_STOP_LOSS × DAY|GTC
+      OPTION   as EQUITY minus TRAILING_STOP_LOSS ("Options not supported")
+      FUTURES  as OPTION
+      EVENT    LIMIT only, and DAY|GTC|IOC|GTD|FOK
+
+  One matrix for all five would be wrong four times, and wrong in the direction that gets an
+  order rejected after it was sent. `{:unsupported_order_combination, instrument, type, tif}`
+  now names the instrument, and the fake enforces the same matrix from the same source —
+  `Rest.order_combinations/1` — rather than a hand-copied list that drifts.
+
+  **A request that does not say `instrument_type` is still crypto.** Changing that default
+  would silently re-route existing callers' orders onto a different market.
+
+  **Only crypto symbols go through the canonical pair mapper.** An equity ticker is already
+  the venue's own identifier, and pushing `SOLV` through a splitter that hunts for a quote
+  currency would mangle it.
+
+  Cash sizing (`AMOUNT`) is refused on futures and options, naming the instrument — the
+  vendor states it for U.S. stock and event contract trading only. `GTD` carries an expire
+  date and nothing else does; a missing one is left missing rather than defaulted, because a
+  date chosen here would be an expiry the caller never asked for.
+
+- **`preview_order/3` and `replace_order/4`.** Both endpoints exist and both exclude crypto,
+  which they refuse before sending — the vendor's own words, rather than a business error a
+  caller cannot tell from a rejected order.
+
+  `preview_order/3` builds the **same body a placement would**, so a preview cannot diverge
+  from the order it previews. It returns the venue's `estimated_cost` and
+  `estimated_transaction_fee`, **with the instrument type alongside them**: for stocks and
+  options the cost is total consideration, for futures it is initial margin, and a caller
+  reading one as the other is off by the whole notional.
+
+  `replace_order/4` enforces the venue's per-type edit surface — a MARKET order takes
+  quantity only, a trailing stop takes only its step — and **reads the order back**, because
+  the venue's response carries no order and reporting the requested change as though it were
+  confirmed is a different claim.
+
 - **`get_transfers/2` — cash activities.**
 
   **The endpoint is much wider than transfers.** It lists `TRADE`, `FEES`, `DIVIDENDS`,

@@ -90,7 +90,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a market GTC is refused — MARKET takes IOC only" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :market, :gtc}} =
+      assert {:error, {:unsupported_order_combination, :crypto, :market, :gtc}} =
                place(limit_request(%{order_type: :market, time_in_force: :gtc}),
                  plug: exploding,
                  account_id: @account
@@ -100,14 +100,14 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a limit IOC is refused — LIMIT takes DAY or GTC" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :limit, :ioc}} =
+      assert {:error, {:unsupported_order_combination, :crypto, :limit, :ioc}} =
                place(limit_request(%{time_in_force: :ioc}), plug: exploding, account_id: @account)
     end
 
     test "a stop-limit IOC is refused" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :stop_limit, :ioc}} =
+      assert {:error, {:unsupported_order_combination, :crypto, :stop_limit, :ioc}} =
                place(limit_request(%{order_type: :stop_limit, time_in_force: :ioc}),
                  plug: exploding,
                  account_id: @account
