@@ -98,6 +98,10 @@ defmodule DpExchange.Webull.Rest do
 
   defp snapshot_path("US_OPTION"), do: {:ok, "/market-data/options/snapshots/list"}
 
+  defp snapshot_path("US_FUTURES"), do: {:ok, "/market-data/futures/snapshots/list"}
+
+  defp snapshot_path("US_EVENT"), do: {:ok, "/market-data/event-contracts/snapshots/list"}
+
   defp snapshot_path(category) when category in ["US_STOCK", "US_ETF"],
     do: {:ok, "/market-data/stocks/snapshots/list"}
 
@@ -111,7 +115,8 @@ defmodule DpExchange.Webull.Rest do
   # Crypto and options take neither: crypto trades continuously, so there are no hours to
   # extend, and the option snapshot is its own endpoint with its own parameters. Sending
   # them anyway would be this package asserting a session model the venue did not offer.
-  defp snapshot_params(native, category, opts) when category not in ["US_CRYPTO", "US_OPTION"] do
+  defp snapshot_params(native, category, opts)
+       when category not in ["US_CRYPTO", "US_OPTION", "US_FUTURES", "US_EVENT"] do
     %{"symbols" => native, "category" => category}
     |> Map.put("extend_hour_required", to_string(Keyword.get(opts, :extended_hours, false)))
     |> Map.put("overnight_required", to_string(Keyword.get(opts, :overnight, false)))
@@ -181,13 +186,74 @@ defmodule DpExchange.Webull.Rest do
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
-    # Crypto, stocks and options are three different endpoints — and crypto is a different
-    # HTTP verb. `opts[:category]` picks, defaulting to crypto, which is what this package
-    # served before its asset classes widened.
+    # Crypto, stocks, options, futures and event contracts are five different endpoints —
+    # and crypto is a different HTTP verb. `opts[:category]` picks, defaulting to crypto,
+    # which is what this package served before its asset classes widened.
     case Keyword.get(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
       "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
+      "US_FUTURES" -> futures_bars(symbol, timeframe, credentials, opts)
+      "US_EVENT" -> event_bars(symbol, timeframe, credentials, opts)
       _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
+    end
+  end
+
+  # **Futures bars take no range and no `real_time_required`.** The venue's page names
+  # `symbols`, `category`, `timespan` and `count` and nothing else, so a caller's start and
+  # end are not silently dropped into parameters this endpoint does not read — they simply
+  # have nowhere to go, and `opts[:limit]` is how a caller bounds the read here.
+  defp futures_bars(symbol, timeframe, credentials, opts) do
+    with {:ok, timespan} <- stock_timespan(timeframe) do
+      params =
+        %{
+          "symbols" => symbol,
+          "category" => "US_FUTURES",
+          # The venue marks `count` REQUIRED and documents 200 as its default; sending it
+          # explicitly keeps the page size this package asked for rather than one that can
+          # change under it.
+          "count" => to_string(Keyword.get(opts, :limit, 200)),
+          "timespan" => timespan
+        }
+
+      with {:ok, body} <- get("/market-data/futures/bars/list", params, credentials, opts) do
+        decode_stock_bars(body, symbol, timeframe, [])
+      end
+    end
+  end
+
+  # **Event-contract bars do not say which side they are.** A binary market has a YES price
+  # and a NO price that sum to one, and the venue's schema names `open`, `close`, `high`,
+  # `low` without saying which. They are returned as the venue's own numbers under the
+  # market's symbol; a caller reconciling against `get_event_trades/3`, which does name both
+  # sides, is the way to find out. Labelling them here would be this package asserting a
+  # side the venue did not state.
+  defp event_bars(symbol, timeframe, credentials, opts) do
+    with {:ok, timespan} <- event_timespan(timeframe) do
+      params =
+        %{
+          "symbols" => symbol,
+          "category" => "US_EVENT",
+          "timespan" => timespan,
+          # Required by the venue. `false` asks for completed bars only: an in-progress bar
+          # has a boundary that has not happened yet.
+          "real_time_required" => to_string(Keyword.get(opts, :real_time, false))
+        }
+        |> put_present("count", Keyword.get(opts, :limit))
+
+      with {:ok, body} <-
+             get("/market-data/event-contracts/bars/list", params, credentials, opts) do
+        decode_stock_bars(body, symbol, timeframe, [])
+      end
+    end
+  end
+
+  # The event endpoint's enum stops at `D` — no weekly, monthly or yearly, which the stock
+  # and futures ones carry. A width the venue does not serve is an error rather than the
+  # nearest one it does.
+  defp event_timespan(timeframe) do
+    case Map.fetch(@timespans, timeframe) do
+      {:ok, timespan} -> {:ok, timespan}
+      :error -> {:error, {:unsupported_timeframe, timeframe}}
     end
   end
 
@@ -874,22 +940,36 @@ defmodule DpExchange.Webull.Rest do
   def get_order_book(symbol, credentials, opts) do
     category = Keyword.get(opts, :category, "US_STOCK")
 
-    with :ok <- book_category(category) do
-      params = %{
-        "symbol" => symbol,
-        "category" => category,
-        "depth" => to_string(Keyword.get(opts, :depth, 10)),
-        # The venue marks this REQUIRED, so it is always sent — an omitted required
-        # parameter is a refusal the caller cannot read.
-        "overnight_required" => to_string(Keyword.get(opts, :overnight, false))
-      }
+    with {:ok, path} <- book_path(category) do
+      params =
+        %{
+          "symbol" => symbol,
+          "category" => category,
+          "depth" => to_string(Keyword.get(opts, :depth, 10))
+        }
+        |> put_present("overnight_required", book_overnight(category, opts))
 
-      with {:ok, body} <- get("/market-data/stocks/depths/list", params, credentials, opts),
+      with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body) do
         to_order_book(row, symbol)
       end
     end
   end
+
+  # Futures have their own depth endpoint, at the same two-sided shape. `US_EVENT` does not
+  # belong here at all — see `get_event_order_book/3`.
+  defp book_path("US_FUTURES"), do: {:ok, "/market-data/futures/depths/list"}
+
+  defp book_path(category) do
+    with :ok <- book_category(category), do: {:ok, "/market-data/stocks/depths/list"}
+  end
+
+  # The venue marks `overnight_required` REQUIRED on the **stock** depth endpoint, so it is
+  # always sent there — an omitted required parameter is a refusal the caller cannot read.
+  # The futures endpoint does not take it, and sending it would assert a session model that
+  # endpoint did not offer.
+  defp book_overnight("US_FUTURES", _opts), do: nil
+  defp book_overnight(_category, opts), do: to_string(Keyword.get(opts, :overnight, false))
 
   # The vendor's own enum. `US_OPTION` is listed as not supported here, and crypto has no
   # depth endpoint at all — its snapshot publishes a top of book and nothing beneath it.
@@ -959,12 +1039,15 @@ defmodule DpExchange.Webull.Rest do
   @spec get_volume_profile(String.t(), String.t(), map(), keyword()) ::
           {:ok, [VolumeProfile.t()]} | {:error, term()} | {:refused, term()}
   def get_volume_profile(symbol, timeframe, credentials, opts) do
-    with {:ok, span} <- footprint_span(timeframe),
+    category = Keyword.get(opts, :category, "US_STOCK")
+
+    with {:ok, path} <- footprint_path(category),
+         {:ok, span} <- footprint_span(timeframe),
          {:ok, session} <- footprint_session(Keyword.get(opts, :session)) do
       params =
         %{
           "symbols" => symbol,
-          "category" => "US_STOCK",
+          "category" => category,
           "timespan" => span,
           # Completed intervals only; an unfinished footprint's split still moves.
           "real_time_required" => "false"
@@ -972,12 +1055,26 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("count", Keyword.get(opts, :count))
         |> put_present("trading_sessions", session)
 
-      with {:ok, body} <- get("/market-data/stocks/footprints/list", params, credentials, opts),
+      with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body) do
         decode_profiles(row, symbol, timeframe)
       end
     end
   end
+
+  # Futures publish a footprint at the same shape and their own path.
+  #
+  # **The futures page's `category` prose says "Only US_STOCK type queries are supported"
+  # while its enum lists only `US_FUTURES`.** The enum is what this package sends: the
+  # sentence reads as copied from the stock page, and a category the endpoint's own enum
+  # does not list cannot be the one it wants. Recorded rather than quietly resolved, because
+  # if the prose turns out to be right this is where a reader will look.
+  defp footprint_path("US_FUTURES"), do: {:ok, "/market-data/futures/footprints/list"}
+
+  defp footprint_path(category) when category in ["US_STOCK", "US_ETF"],
+    do: {:ok, "/market-data/stocks/footprints/list"}
+
+  defp footprint_path(category), do: {:error, {:unsupported_footprint_category, category}}
 
   defp footprint_span(timeframe) do
     case Map.fetch(@footprint_spans, timeframe) do
@@ -1181,18 +1278,26 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # Options have their own tape endpoint. The stock one refuses `US_OPTION`, which is the
-  # venue's split rather than an absence.
+  # Options and futures each have their own tape endpoint. The stock one refuses both,
+  # which is the venue's split rather than an absence.
   defp tick_path("US_OPTION"), do: {:ok, "/market-data/options/ticks/list"}
+
+  defp tick_path("US_FUTURES"), do: {:ok, "/market-data/futures/ticks/list"}
+
+  # **`US_EVENT` is refused here on purpose.** An event tick carries a `yes_price` and a
+  # `no_price` and a `side` of `yes`/`no`; `Types.Trade` carries one price and a side of
+  # `:buy`/`:sell`. Mapping yes to buy would file a trade in the other instrument of a
+  # two-instrument market. `get_event_trades/3` returns the venue's own rows instead.
+  defp tick_path("US_EVENT"), do: {:error, {:use_get_event_trades, "US_EVENT"}}
 
   defp tick_path(category) do
     with :ok <- book_category(category), do: {:ok, "/market-data/stocks/ticks/list"}
   end
 
   # Required on the stock tape, where `RTH` is the default because it is the session the
-  # rest of this package's price data comes from. The option tape does not take it, and
-  # sending it would assert a session model that endpoint did not offer.
-  defp tick_sessions("US_OPTION", _opts), do: nil
+  # rest of this package's price data comes from. Neither the option nor the futures tape
+  # takes it, and sending it would assert a session model they did not offer.
+  defp tick_sessions(category, _opts) when category in ["US_OPTION", "US_FUTURES"], do: nil
   defp tick_sessions(_category, opts), do: sessions_param(Keyword.get(opts, :sessions, ["RTH"]))
 
   defp sessions_param(sessions) when is_list(sessions), do: Enum.join(sessions, ",")
@@ -1352,6 +1457,255 @@ defmodule DpExchange.Webull.Rest do
 
       error ->
         error
+    end
+  end
+
+  # --- futures and event contracts ---------------------------------------
+
+  @doc """
+  Futures contracts by symbol or by product code —
+  `GET /trading/instruments/futures/contracts/list`.
+
+  **Either `opts[:symbols]` or `opts[:code]`, and the venue requires one of them.** Missing
+  both is `{:error, :symbols_or_code_required}` before a request is made, because the venue
+  answers a request with neither in a way a caller cannot tell from "no contracts listed".
+
+  `opts[:status]` filters `OC` (tradable), `CO` (liquidate only) or `NT` (non-tradable). The
+  venue's own default is `OC`, and this package does not send one — a filter this package
+  chose would hide contracts the caller did not ask to hide.
+
+  Rows come back as the venue sends them. **`instrument_id` on a continuous contract is the
+  continuous contract's id**, and the venue states an order needs the actual month
+  contract's; nothing here resolves one to the other.
+  """
+  @spec list_futures_contracts(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_contracts(credentials, opts) do
+    with :ok <- symbols_or_code(opts) do
+      params =
+        %{"category" => "US_FUTURES"}
+        |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+        |> put_present("code", symbols_param(Keyword.get(opts, :code)))
+        |> put_present("status", Keyword.get(opts, :status))
+
+      with {:ok, body} <-
+             get("/trading/instruments/futures/contracts/list", params, credentials, opts) do
+        {:ok, rows(body)}
+      end
+    end
+  end
+
+  defp symbols_or_code(opts) do
+    if Keyword.get(opts, :symbols) || Keyword.get(opts, :code) do
+      :ok
+    else
+      {:error, :symbols_or_code_required}
+    end
+  end
+
+  defp symbols_param(nil), do: nil
+  defp symbols_param(list) when is_list(list), do: Enum.join(list, ",")
+  defp symbols_param(value), do: to_string(value)
+
+  @doc """
+  The futures product classification groups —
+  `GET /trading/instruments/futures/product-classes/list`.
+
+  Two fields, `product_class_id` and `product_class_name`, and the ids are what
+  `list_futures_contracts/2` rows carry. Returned as the venue's own maps because there is
+  nothing to normalise.
+  """
+  @spec list_futures_product_classes(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_product_classes(credentials, opts) do
+    params = %{"category" => "US_FUTURES"}
+
+    with {:ok, body} <-
+           get("/trading/instruments/futures/product-classes/list", params, credentials, opts) do
+      {:ok, rows(body)}
+    end
+  end
+
+  @doc """
+  Every event-contract category — `GET /trading/instruments/event-contracts/categories/list`.
+
+  **Takes no parameters at all.** It is the root of this venue's event hierarchy:
+  category → series → event → market, and each level's symbol addresses the next.
+  """
+  @spec list_event_categories(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_categories(credentials, opts) do
+    with {:ok, body} <-
+           get("/trading/instruments/event-contracts/categories/list", %{}, credentials, opts) do
+      {:ok, rows(body)}
+    end
+  end
+
+  @doc """
+  Event-contract series — `GET /trading/instruments/event-contracts/series/list`.
+
+  A series is the venue's template for a recurring event ("Monthly Jobs Report"), not a
+  tradable thing.
+
+  **Paged, and the absence of a key is the end.** `opts[:pagination_key]` continues, and the
+  page's own `pagination_key` is returned alongside the rows as
+  `{:ok, %{rows: [...], pagination_key: key_or_nil}}` — `nil` means this was the last page.
+  Returning a bare list would make the last page and a truncated one look identical.
+  """
+  @spec list_event_series(map(), keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_series(credentials, opts) do
+    params =
+      %{}
+      |> put_present("category", Keyword.get(opts, :category))
+      |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+      |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
+
+    with {:ok, body} <-
+           get("/trading/instruments/event-contracts/series/list", params, credentials, opts) do
+      {:ok, paged(body)}
+    end
+  end
+
+  @doc """
+  The events under one series — `GET /trading/instruments/event-contracts/events/list`.
+
+  `opts[:series_symbol]` is **required** by the venue; missing it is
+  `{:error, :series_symbol_required}` before a request is made.
+
+  `opts[:status]` takes the venue's `ACTIVE` or `INACTIVE` and is not defaulted: an event
+  that has settled is still a real event, and filtering it out for a caller who did not ask
+  would hide history.
+  """
+  @spec list_event_events(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_events(credentials, opts) do
+    case Keyword.get(opts, :series_symbol) do
+      nil ->
+        {:error, :series_symbol_required}
+
+      series ->
+        params =
+          %{"series_symbol" => series}
+          |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+          |> put_present("status", Keyword.get(opts, :status))
+
+        with {:ok, body} <-
+               get("/trading/instruments/event-contracts/events/list", params, credentials, opts) do
+          {:ok, rows(body)}
+        end
+    end
+  end
+
+  @doc """
+  The tradable markets under a series or an event —
+  `GET /trading/instruments/event-contracts/markets/list`.
+
+  This is the level that is actually tradable; the three above it are addressing.
+
+  **`status` and `tradable_status` are two different fields with two different
+  vocabularies**, and a market can be `LISTING` and `NT` at the same time. Both survive on
+  the row, because collapsing them into one "is it tradable" boolean is how a caller ends up
+  routing an order at a market that is listed and not accepting one.
+
+  Paged like `list_event_series/2`, and returned the same way.
+  """
+  @spec list_event_markets(map(), keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_markets(credentials, opts) do
+    params =
+      %{}
+      |> put_present("series_symbol", Keyword.get(opts, :series_symbol))
+      |> put_present("event_symbol", Keyword.get(opts, :event_symbol))
+      |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+      |> put_present("expiration_date_after", date_param(Keyword.get(opts, :expiring_after)))
+      |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
+
+    with {:ok, body} <-
+           get("/trading/instruments/event-contracts/markets/list", params, credentials, opts) do
+      {:ok, paged(body)}
+    end
+  end
+
+  defp date_param(%Date{} = date), do: Date.to_iso8601(date)
+  defp date_param(other), do: other
+
+  # `nil` where the venue sent no key, which is its way of saying this was the last page.
+  # A missing key and an empty string are the same thing here and both mean the end.
+  defp paged(%{"data" => data} = body) when is_list(data),
+    do: %{rows: data, pagination_key: presence(body["pagination_key"])}
+
+  defp paged(body), do: %{rows: rows(body), pagination_key: nil}
+
+  defp presence(""), do: nil
+  defp presence(value), do: value
+
+  @doc """
+  The tape for one event-contract market —
+  `GET /market-data/event-contracts/ticks/list`.
+
+  **Not `get_trades/3`, and that is not an omission.** An event tick carries a `yes_price`
+  *and* a `no_price` and a `side` of `yes`/`no`; `Types.Trade` carries one price and a side
+  of `:buy`/`:sell`. Mapping `yes` to `:buy` would file the print against the other
+  instrument of a two-instrument market, and the number would look right. So the venue's own
+  rows are returned and nothing is normalised.
+
+  The venue's default count here is **30**, not the 200 its other tapes use.
+  """
+  @spec get_event_trades(String.t(), map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_event_trades(symbol, credentials, opts) do
+    params =
+      %{"symbol" => symbol, "category" => "US_EVENT"}
+      |> put_present("count", Keyword.get(opts, :limit))
+
+    with {:ok, body} <-
+           get("/market-data/event-contracts/ticks/list", params, credentials, opts),
+         {:ok, row} <- first_row(body) do
+      {:ok, row |> value(["result"]) |> List.wrap()}
+    end
+  end
+
+  @doc """
+  The order book for one event-contract market —
+  `GET /market-data/event-contracts/depths/list`.
+
+  **Four books, not two**, and that is why this is not `get_order_book/3`. The venue returns
+  `yes_bids`, `yes_asks`, `no_bids` and `no_asks`; `Types.OrderBook` has one bid side and one
+  ask side. Picking the YES pair to be "the book" would answer about an instrument the caller
+  never named, and the prices would be plausible — a YES ask of 0.13 and a NO ask of 0.92 are
+  both real and neither is the other.
+
+  The venue notes that in a binary market a yes bid at X equals a no ask at 1−X. That
+  identity is the venue's; this package does not derive one side from the other, because a
+  derived level cannot be told from a quoted one.
+
+  Returned as `%{yes_bids:, yes_asks:, no_bids:, no_asks:, quote_time:}` with the venue's own
+  level maps and its `quote_time` in milliseconds.
+  """
+  @spec get_event_order_book(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_event_order_book(symbol, credentials, opts) do
+    params =
+      %{"symbol" => symbol, "category" => "US_EVENT"}
+      |> put_present("depth", Keyword.get(opts, :depth))
+
+    with {:ok, body} <-
+           get("/market-data/event-contracts/depths/list", params, credentials, opts),
+         {:ok, row} <- first_row(body) do
+      {:ok,
+       %{
+         symbol: value(row, ["symbol"]) || symbol,
+         yes_bids: List.wrap(value(row, ["yes_bids"])),
+         yes_asks: List.wrap(value(row, ["yes_asks"])),
+         no_bids: List.wrap(value(row, ["no_bids"])),
+         no_asks: List.wrap(value(row, ["no_asks"])),
+         quote_time: value(row, ["quote_time"])
+       }}
     end
   end
 

@@ -22,6 +22,50 @@ acceptable changelog line.
 
 ### Added
 
+- **Futures and event contracts** — sixteen endpoints, and a reference document
+  (`docs/reference/webull/futures-and-event-contracts.md`) recording every parameter and
+  response field.
+
+  **The parameters needed a browser to read.** These pages render their tables in
+  JavaScript: a plain fetch returns the method, the path and a one-line description and
+  nothing else, which is exactly what the 2026-08-31 inventory captured. A capture that
+  stops at the method and path looks complete and cannot be implemented from.
+
+  Futures route by `US_FUTURES` through the existing callbacks — `get_price/2`,
+  `get_historical_prices/4`, `get_trades/2`, `get_order_book/2` and `get_volume_profile/3`,
+  each to its own endpoint with **its own parameter set**, which is not the union of all of
+  them: futures bars take no `real_time_required` and no range, the futures tape and depth
+  take no session flags, and the futures snapshot takes no extended-hours block.
+
+  Event contracts add the venue's four-level hierarchy — `list_event_categories/1`,
+  `list_event_series/1`, `list_event_events/1`, `list_event_markets/1` — alongside
+  `list_futures_contracts/1` and `list_futures_product_classes/1`.
+
+  **Two event endpoints are deliberately not behind the contract's callbacks.** An event
+  tick carries a `yes_price` *and* a `no_price` and a side of `yes`/`no`; `Types.Trade` has
+  one price and a side of `:buy`/`:sell`. An event book returns `yes_bids`, `yes_asks`,
+  `no_bids` and `no_asks`; `Types.OrderBook` has two sides. In both cases the nearest
+  mapping produces a number that looks right and belongs to **the other instrument of a
+  two-instrument market**, so `get_trades/2` and `get_order_book/2` refuse `US_EVENT` and
+  `get_event_trades/2` and `get_event_order_book/2` return the venue's own rows. The venue
+  notes that a yes bid at X equals a no ask at 1−X; this package does not derive one side
+  from the other, because a derived level cannot be told from a quoted one.
+
+  **Paged lists return their key.** `list_event_series/1` and `list_event_markets/1` answer
+  `%{rows: [...], pagination_key: key_or_nil}`; a bare list would make the last page and a
+  truncated one look identical.
+
+  **`status` and `tradable_status` are two fields on an event market**, and both survive: a
+  market can be `LISTING` and `NT` at once, and one boolean would route an order at a market
+  that is listed and not accepting one.
+
+  Recorded as found, not resolved: the futures footprint page's `category` prose says "Only
+  US_STOCK type queries are supported" while its own enum lists only `US_FUTURES`. The enum
+  is what this package sends.
+
+  `asset_classes/0` gains `:future` and `:event_contract`.
+
+
 - **`get_transactions/2`** — the same `/trading/activities/cash-activities/list` endpoint
   `get_transfers/2` narrows, asked without the filter.
 

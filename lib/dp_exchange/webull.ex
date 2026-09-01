@@ -188,13 +188,21 @@ defmodule DpExchange.Webull do
   `US_OPTION` reaches its own endpoints rather than being refused on the stock ones — which
   is what this package claimed until that date, and was a false negative about the venue.
 
-  **Futures and event contracts are still open** (the coverage plan's Phase 11), which is
-  why neither is declared here yet. Each class is declared per endpoint through
-  `capabilities/0`'s `endpoints` map, which is why that map exists rather than one flag per
-  package.
+  **Futures and event contracts joined on the same day**: futures snapshots, bars, ticks,
+  depths and footprints route by `US_FUTURES`, and the event-contract hierarchy — category,
+  series, event, market — plus its snapshots, bars, ticks and depths are reachable. Each
+  class is declared per endpoint through `capabilities/0`'s `endpoints` map, which is why
+  that map exists rather than one flag per package.
+
+  **Two event-contract endpoints are deliberately not behind the contract's callbacks.** An
+  event tick has a yes price, a no price and a side of `yes`/`no`; an event book has four
+  sides. `Types.Trade` and `Types.OrderBook` have room for neither, so `get_event_trades/2`
+  and `get_event_order_book/2` return the venue's own rows and `get_trades/2` and
+  `get_order_book/2` refuse `US_EVENT` rather than filing a print against the other
+  instrument of a two-instrument market.
   """
   @impl true
-  def asset_classes, do: [:crypto, :equity, :option]
+  def asset_classes, do: [:crypto, :equity, :option, :future, :event_contract]
 
   @impl true
   def capabilities do
@@ -607,6 +615,95 @@ defmodule DpExchange.Webull do
   @impl true
   def get_option_expirations(underlying, opts \\ []),
     do: Rest.get_option_expirations(underlying, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Futures contracts by symbol or by product code.
+
+  Venue-specific: the contract has no callback for a futures chain. See
+  `DpExchange.Webull.Rest.list_futures_contracts/2` — one of `opts[:symbols]` or
+  `opts[:code]` is required.
+  """
+  @spec list_futures_contracts(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_contracts(opts \\ []),
+    do: Rest.list_futures_contracts(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The futures product classification groups.
+
+  See `DpExchange.Webull.Rest.list_futures_product_classes/2`.
+  """
+  @spec list_futures_product_classes(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_product_classes(opts \\ []),
+    do: Rest.list_futures_product_classes(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Every event-contract category — the root of category → series → event → market.
+
+  See `DpExchange.Webull.Rest.list_event_categories/2`.
+  """
+  @spec list_event_categories(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_categories(opts \\ []),
+    do: Rest.list_event_categories(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Event-contract series, paged.
+
+  See `DpExchange.Webull.Rest.list_event_series/2`. The returned `:pagination_key` is `nil`
+  on the last page, which is how the end is told from a truncation.
+  """
+  @spec list_event_series(keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_series(opts \\ []),
+    do: Rest.list_event_series(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The events under one series. `opts[:series_symbol]` is required.
+
+  See `DpExchange.Webull.Rest.list_event_events/2`.
+  """
+  @spec list_event_events(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_events(opts \\ []),
+    do: Rest.list_event_events(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The tradable markets under a series or an event, paged.
+
+  See `DpExchange.Webull.Rest.list_event_markets/2`. `status` and `tradable_status` are two
+  different fields and both survive.
+  """
+  @spec list_event_markets(keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_markets(opts \\ []),
+    do: Rest.list_event_markets(credentials(opts), with_limiter(opts))
+
+  @doc """
+  The tape for one event-contract market.
+
+  **Not `get_trades/2`.** See `DpExchange.Webull.Rest.get_event_trades/3`: an event tick has
+  a yes price, a no price and a side of `yes`/`no`, and `Types.Trade` has room for one price
+  and a side of `:buy`/`:sell`.
+  """
+  @spec get_event_trades(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_event_trades(symbol, opts \\ []),
+    do: Rest.get_event_trades(symbol, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The order book for one event-contract market — **four books, not two**.
+
+  See `DpExchange.Webull.Rest.get_event_order_book/3`. `Types.OrderBook` has one bid side and
+  one ask side; a binary market quotes YES and NO separately and neither is the other.
+  """
+  @spec get_event_order_book(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_event_order_book(symbol, opts \\ []),
+    do: Rest.get_event_order_book(symbol, credentials(opts), with_limiter(opts))
 
   @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
