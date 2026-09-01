@@ -22,6 +22,13 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_symbols/2` reaches the stock instrument profiles**,
+  `/trading/instruments/stocks/profiles/list`, routed by `opts[:category]`. Both endpoints
+  paginate the same way and both are bounded — a truncated instrument list is the worst
+  shape this family has, because every symbol in it is real and the missing ones are simply
+  never traded.
+
+
 - **`get_historical_prices/5` reaches the stock bars**, `POST /market-data/stocks/bars/list`,
   routed by `opts[:category]`. **A POST where the crypto bars are a GET**, with its
   parameters in a JSON body.

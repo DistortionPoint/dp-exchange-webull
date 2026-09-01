@@ -760,4 +760,105 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert path == "/market-data/crypto/bars/list"
     end
   end
+
+  describe "crypto and stock instruments are different endpoints" do
+    test "a stock category reads the stocks profiles" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => [%{"symbol" => "AAPL"}]}))
+      end
+
+      assert {:ok, symbols} =
+               Rest.get_symbols(@credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path, query}
+      assert path == "/trading/instruments/stocks/profiles/list"
+      assert query =~ "category=US_STOCK"
+      assert is_list(symbols)
+    end
+
+    test "the default is still crypto" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => []}))
+      end
+
+      assert {:ok, []} = Rest.get_symbols(@credentials, plug: plug, retry_attempts: 0)
+      assert_receive {:path, "/trading/instruments/crypto/profiles/list"}
+    end
+
+    test "an unsupported category is refused before the request" do
+      exploding = fn _conn -> raise "must not list instruments for an unknown category" end
+
+      assert {:error, {:unsupported_instrument_category, "US_OPTION"}} =
+               Rest.get_symbols(@credentials,
+                 category: "US_OPTION",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a key echoed back unchanged is caught before the page bound" do
+      # The more precise of the two guards, and it fires first: a venue repeating its key is
+      # a different fault from one that genuinely has many pages.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"data" => [%{"symbol" => "AAPL"}], "pagination_key" => "same"})
+        )
+      end
+
+      assert {:error, :pagination_key_did_not_advance} =
+               Rest.get_symbols(@credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an always-advancing key is stopped by the page bound, on either endpoint" do
+      # A truncated instrument list is the worst shape this family has — every symbol in it
+      # is real and the missing ones are simply never traded — so the walk is bounded
+      # rather than trusted.
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        page = :counters.get(counter, 1)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "data" => [%{"symbol" => "AAPL"}],
+            "pagination_key" => "page-#{page}"
+          })
+        )
+      end
+
+      assert {:error, :too_many_instrument_pages} =
+               Rest.get_symbols(@credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
+  end
 end

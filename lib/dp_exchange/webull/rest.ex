@@ -283,10 +283,11 @@ defmodule DpExchange.Webull.Rest do
     do: {:error, :too_many_instrument_pages}
 
   defp all_instrument_rows(key, credentials, opts, acc, page) do
-    params = put_present(%{"category" => "US_CRYPTO"}, "pagination_key", key)
+    category = Keyword.get(opts, :category, "US_CRYPTO")
+    params = put_present(%{"category" => category}, "pagination_key", key)
 
-    with {:ok, body} <-
-           get("/trading/instruments/crypto/profiles/list", params, credentials, opts) do
+    with {:ok, path} <- instruments_path(category),
+         {:ok, body} <- get(path, params, credentials, opts) do
       collected = acc ++ rows(body)
 
       case next_pagination_key(body) do
@@ -296,6 +297,16 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  # **Crypto and stock instruments are different endpoints**, and both paginate the same
+  # way. The category picks; the default is crypto, which is what this package listed before
+  # its asset classes widened.
+  defp instruments_path("US_CRYPTO"), do: {:ok, "/trading/instruments/crypto/profiles/list"}
+
+  defp instruments_path(category) when category in ["US_STOCK", "US_ETF"],
+    do: {:ok, "/trading/instruments/stocks/profiles/list"}
+
+  defp instruments_path(category), do: {:error, {:unsupported_instrument_category, category}}
 
   # A key echoed back unchanged would page forever without this; see the clause above.
   defp next_pagination_key(body) when is_map(body) do
