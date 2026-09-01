@@ -20,6 +20,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Every negative this package makes is audited** —
+  `docs/reference/webull/negative-claims.md`, fourteen claims with the source and date
+  consulted for each. Eleven hold; **three were wrong, and all three were the same mistake**:
+  a true statement about the *stock* endpoint restated as a claim about the venue. The tell
+  is in the wording — "the vendor states the stock snapshot does not serve it" is correct,
+  and was used to justify a refusal that was not.
+
+  It also records why this vendor's pages have to be **rendered** to be read: their
+  parameter and schema tables are built in JavaScript, so a plain fetch returns the method,
+  the path and a one-line description. **An inventory captured that way looks finished and
+  cannot be implemented from** — which is exactly what the 2026-08-31 capture was.
+
+- **`usage-rules.md` is rewritten around the surface this release added.** Its "what this
+  package does not do yet" section listed order placement, balances and accounts as
+  unimplemented; all of them ship. What replaces it points at `capabilities/0` and states the
+  one group that will not arrive — money movement, which this venue's API does not do.
+
+  New sections cover the five categories and why their parameter sets differ, event
+  contracts' two prices and four books, the option chain and the greeks that do not exist
+  here, the twenty-three fundamentals endpoints, watchlists' three absences and their
+  boolean, batch orders, and the token lifecycle.
+
+- **`AGENTS.md` gains a pointer** to this package's own `usage-rules.md`.
+
 ### Added
 
 - **`place_orders/3` — batch order placement**, `POST /trading/orders/batch-place`. This is
