@@ -64,6 +64,12 @@ acceptable changelog line.
 
 ### Changed
 
+- **`convert/4` and `get_trade_volume/2` (Core 0.1.22) are declared unsupported.** The venue
+  publishes neither a one-step conversion nor the two-step quote/commit pair, and no
+  account-volume report. Summing fills here would be this package's arithmetic rather than
+  the venue's ledger, which is the number its fee tiers actually come from.
+
+
 - **Core 0.1.21's three new callbacks are declared, each with the venue checked.**
   `preview_replace/4` follows `replace_order/4` — the venue excludes crypto from the
   amendment endpoint, so there is nothing to preview. `cancel_all_orders/2` has no endpoint
