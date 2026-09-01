@@ -2871,6 +2871,84 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  @doc """
+  Places several orders in one request — `POST /trading/orders/batch-place`.
+
+  **Not `place_order/3` in a loop.** The venue accepts the batch as one request, and a
+  caller that looped would be reconciling N outcomes instead of reading one response.
+
+  **The venue's limits, enforced here rather than discovered.** A maximum of **50** orders
+  per request, and **equities only** — its page says so in both cases. A batch over the cap
+  is refused before it is sent rather than split, because splitting turns one request into
+  several and undoes the only reason to call this. An order whose instrument type is not
+  equity is refused by index, so a caller knows which one.
+
+  **The vendor also says this is not available to every client.** A refusal here can mean
+  the account is not entitled rather than that the batch was wrong, and the venue's own
+  message is carried through unchanged for that reason.
+
+  Each order takes the same shape `place_order/3` builds, and `client_order_id` is generated
+  per order where the caller did not supply one — the venue requires one per order and
+  requires them unique per account.
+
+  Returns the venue's own rows, one per order, unnormalised: the venue validates per order
+  and a batch where three of five were accepted is the normal shape, not the exception.
+  """
+  @spec place_orders(map(), [map()], keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def place_orders(credentials, requests, opts) do
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- batch_size(requests),
+         {:ok, orders} <- batch_orders(requests) do
+      body = %{"account_id" => account_id, "batch_orders" => orders}
+
+      with {:ok, response} <- post("/trading/orders/batch-place", body, credentials, opts) do
+        {:ok, rows(response)}
+      end
+    end
+  end
+
+  @batch_limit 50
+
+  defp batch_size([]), do: {:error, :empty_batch}
+
+  defp batch_size(requests) when length(requests) > @batch_limit,
+    do: {:error, {:batch_too_large, length(requests), @batch_limit}}
+
+  defp batch_size(_requests), do: :ok
+
+  defp batch_orders(requests) do
+    requests
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {request, index}, {:ok, acc} ->
+      case batch_order(request, index) do
+        {:ok, order} -> {:cont, {:ok, acc ++ [order]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  # Equities only, by the venue's own note. A crypto order in a batch is refused by index so
+  # a caller knows which of fifty it was, rather than reading a venue message about a field.
+  #
+  # The builders never return a refusal — a refusal means the *venue* declined, and nothing
+  # has been sent at this point. Dialyzer proved that clause unreachable and it is gone: a
+  # clause for a shape that never arrives reads as though it had been tested.
+  defp batch_order(request, index) do
+    case Map.get(request, :instrument_type, :equity) do
+      :equity ->
+        with {:ok, order_type, tif} <- combination(request),
+             {:ok, leaf} <- order_leaf(request, order_type, tif) do
+          {:ok, Map.put(leaf, "client_order_id", client_order_id(request))}
+        else
+          {:error, reason} -> {:error, {:batch_order_rejected, index, reason}}
+        end
+
+      other ->
+        {:error, {:batch_instrument_not_supported, index, other}}
+    end
+  end
+
   defp account_id(opts) do
     case Keyword.get(opts, :account_id) do
       nil -> {:error, :account_id_required}

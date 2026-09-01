@@ -927,6 +927,39 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @impl true
+  def place_orders(_credentials, requests, opts) do
+    # The venue's two limits, and a per-order result. A fake that answered ok-or-error would
+    # let a consumer ship code that believes "the batch failed" when most of it was placed.
+    cond do
+      not is_binary(Keyword.get(opts, :account_id)) ->
+        {:error, :account_id_required}
+
+      requests == [] ->
+        {:error, :empty_batch}
+
+      length(requests) > 50 ->
+        {:error, {:batch_too_large, length(requests), 50}}
+
+      Enum.any?(requests, &(Map.get(&1, :instrument_type, :equity) != :equity)) ->
+        index = Enum.find_index(requests, &(Map.get(&1, :instrument_type, :equity) != :equity))
+
+        {:error,
+         {:batch_instrument_not_supported, index,
+          requests |> Enum.at(index) |> Map.get(:instrument_type)}}
+
+      true ->
+        {:ok,
+         requests
+         |> Enum.with_index()
+         |> Enum.map(fn
+           # The second one refused, because a partial batch is the normal shape.
+           {_request, 1} -> %{"code" => "INSUFFICIENT_BUYING_POWER"}
+           {request, index} -> %{"order_id" => "batch-#{index}", "symbol" => request[:symbol]}
+         end)}
+    end
+  end
+
   defp fake_account(opts) do
     if Keyword.get(opts, :account_id), do: :ok, else: {:error, :account_id_required}
   end

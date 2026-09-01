@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ### Added
 
+- **`place_orders/3` — batch order placement**, `POST /trading/orders/batch-place`. This is
+  the last open endpoint in the coverage plan's implementation phases.
+
+  **Not `place_order/3` in a loop.** The venue accepts the batch as one request; a caller
+  that looped would reconcile N outcomes instead of reading one response, and the
+  reconciliation is what goes wrong when the third of five fails.
+
+  **Both of the venue's limits are enforced before the request.** A maximum of **50** orders,
+  and **equities only** — its page says so in both cases. A batch over the cap is refused
+  rather than split, because splitting turns one atomic request into several and undoes the
+  only reason to call this. A non-equity order, or one outside the venue's own order matrix,
+  is refused **by index**: a caller with fifty orders needs to know which.
+
+  **The result is per order, because a partial batch is the normal shape.** The venue
+  validates each and returns each; collapsing that into ok-or-error would let a caller
+  believe "the batch failed" while holding four positions it does not know about.
+
+  The vendor notes the endpoint is not available to every client, so a refusal can mean the
+  account is not entitled rather than that the batch was wrong — the venue's own message is
+  carried through unchanged.
+
+
 - **The token lifecycle** — `create_token/1`, `check_token/2` and `oauth_token/3`.
 
   **A token that exists is not a token that works.** `create_token/1` returns one that is

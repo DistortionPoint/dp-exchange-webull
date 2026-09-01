@@ -360,6 +360,17 @@ defmodule DpExchange.Webull do
   def place_order(credentials, request, opts \\ []),
     do: Rest.place_order(credentials, request, with_limiter(opts))
 
+  @doc """
+  Places several orders in one request. **This moves funds.**
+
+  See `DpExchange.Webull.Rest.place_orders/3`. **Fifty at most and equities only**, both the
+  venue's own limits and both enforced before the request; the vendor also notes the endpoint
+  is not available to every client.
+  """
+  @impl true
+  def place_orders(credentials, requests, opts),
+    do: Rest.place_orders(credentials, requests, with_limiter(opts))
+
   @impl true
   @doc """
   Prices an order without placing it. Requires `opts[:account_id]`.
