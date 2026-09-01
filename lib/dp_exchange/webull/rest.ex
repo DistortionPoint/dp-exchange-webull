@@ -42,15 +42,21 @@ defmodule DpExchange.Webull.Rest do
     AuctionImbalance,
     Balance,
     Candle,
+    CorporateEvent,
+    Filing,
+    FinancialStatement,
+    NewsItem,
     OptionChain,
     OptionContract,
     Order,
     OrderBook,
     Position,
     Quote,
+    ScreenerResult,
     TopOfBook,
     Trade,
-    VolumeProfile
+    VolumeProfile,
+    Watchlist
   }
 
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
@@ -1458,6 +1464,642 @@ defmodule DpExchange.Webull.Rest do
       error ->
         error
     end
+  end
+
+  # --- watchlists ---------------------------------------------------------
+
+  @doc """
+  The watchlists held at the venue — `GET /market-data/watchlists/list`.
+
+  **`symbols` is `nil` on every row, and that is not an empty watchlist.** This endpoint
+  names watchlists and does not list their membership; `get_watchlist/3` reads that with a
+  second request. `nil` says "not asked"; `[]` would say "this watchlist is empty", and the
+  two are not the same answer.
+
+  The venue caps an account at 20 watchlists.
+  """
+  @spec list_watchlists(map(), keyword()) ::
+          {:ok, [Watchlist.t()]} | {:error, term()} | {:refused, term()}
+  def list_watchlists(credentials, opts) do
+    with {:ok, body} <- get("/market-data/watchlists/list", %{}, credentials, opts) do
+      {:ok, body |> rows() |> Enum.map(&to_watchlist(&1, nil))}
+    end
+  end
+
+  @doc """
+  One watchlist including its membership —
+  `GET /market-data/watchlists/instruments/list`.
+
+  The membership endpoint returns the instruments and **not the watchlist's name**, so
+  `name` is `nil` here where `list_watchlists/2` has it. Reading the listing to fill it in
+  would be a second request this function did not make, and a name from a moment ago beside
+  a membership from now.
+  """
+  @spec get_watchlist(String.t(), map(), keyword()) ::
+          {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
+  def get_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+    params = %{"watchlist_id" => watchlist_id}
+
+    with {:ok, body} <-
+           get("/market-data/watchlists/instruments/list", params, credentials, opts),
+         {:ok, row} <- first_row(body) do
+      symbols =
+        row
+        |> value(["instruments"])
+        |> List.wrap()
+        |> Enum.map(&value(&1, ["symbol"]))
+        |> Enum.reject(&is_nil/1)
+
+      {:ok,
+       %Watchlist{
+         id: value(row, ["watchlist_id"]) || watchlist_id,
+         name: nil,
+         symbols: symbols,
+         venue_time: nil,
+         provider: :webull
+       }}
+    end
+  end
+
+  @doc """
+  Creates a watchlist and adds `symbols` to it —
+  `POST /market-data/watchlists/create`, then `.../instruments/add`.
+
+  **Two requests, and the second can fail after the first succeeded.** The venue creates an
+  empty watchlist and adds members separately; where the add fails, the watchlist exists and
+  is empty, and this returns the error rather than the id — a caller that saw
+  `{:ok, watchlist}` would believe the membership took. The id is in the error term so the
+  watchlist can be found and dealt with.
+
+  An empty `symbols` list makes one request and creates an empty watchlist, which is a real
+  thing to want.
+
+  **The venue does not accept event contracts, futures or options here**, by its own note on
+  the add endpoint. Symbols default to `US_STOCK`; `opts[:category]` overrides.
+  """
+  @spec create_watchlist(String.t(), [String.t()], map(), keyword()) ::
+          {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
+  def create_watchlist(name, symbols, credentials, opts) when is_binary(name) do
+    body = put_present(%{"name" => name}, "sort", Keyword.get(opts, :sort))
+
+    with {:ok, response} <- post("/market-data/watchlists/create", body, credentials, opts),
+         {:ok, row} <- first_row(response) do
+      id = value(row, ["watchlist_id"])
+      add_created_members(id, name, symbols, credentials, opts)
+    end
+  end
+
+  defp add_created_members(id, name, [], _credentials, _opts) do
+    {:ok, %Watchlist{id: id, name: name, symbols: [], venue_time: nil, provider: :webull}}
+  end
+
+  defp add_created_members(id, name, symbols, credentials, opts) do
+    case add_watchlist_instruments(id, symbols, credentials, opts) do
+      {:ok, _result} ->
+        {:ok,
+         %Watchlist{id: id, name: name, symbols: symbols, venue_time: nil, provider: :webull}}
+
+      {:error, reason} ->
+        {:error, {:watchlist_created_without_members, id, reason}}
+
+      {:refused, reason} ->
+        {:error, {:watchlist_created_without_members, id, reason}}
+    end
+  end
+
+  @doc """
+  Renames a watchlist or changes its sort order — `POST /market-data/watchlists/update`.
+
+  **This does not change membership.** The venue's update endpoint touches the watchlist's
+  own properties and nothing else; `add_watchlist_instruments/4` and
+  `remove_watchlist_instruments/4` are the membership writes. A contract caller reading
+  "replaces a watchlist's name or membership" gets the first half here, and the second is
+  refused rather than silently skipped — `opts[:symbols]` is
+  `{:error, :membership_not_updatable_here}`.
+
+  Only what is given is changed: the venue leaves unprovided fields alone.
+  """
+  @spec update_watchlist(String.t(), map(), keyword()) ::
+          {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
+  def update_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+    if Keyword.has_key?(opts, :symbols) do
+      {:error, :membership_not_updatable_here}
+    else
+      body =
+        %{"watchlist_id" => watchlist_id}
+        |> put_present("name", Keyword.get(opts, :name))
+        |> put_present("sort", Keyword.get(opts, :sort))
+
+      with {:ok, _response} <- post("/market-data/watchlists/update", body, credentials, opts) do
+        {:ok,
+         %Watchlist{
+           id: watchlist_id,
+           name: Keyword.get(opts, :name),
+           # Membership was not touched and was not read. `nil` says so.
+           symbols: nil,
+           venue_time: nil,
+           provider: :webull
+         }}
+      end
+    end
+  end
+
+  @doc """
+  Deletes a watchlist and everything in it — `POST /market-data/watchlists/delete`.
+
+  **Irreversible, in the venue's own words.** Returns `:ok` rather than the venue's
+  `%{"success" => true}`, because the contract's `delete_watchlist/2` is documented as
+  returning `:ok` — and a `false` in that field is an error here rather than a successful
+  call that deleted nothing.
+  """
+  @spec delete_watchlist(String.t(), map(), keyword()) ::
+          {:ok, :ok} | {:error, term()} | {:refused, term()}
+  def delete_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+    body = %{"watchlist_id" => watchlist_id}
+
+    with {:ok, response} <- post("/market-data/watchlists/delete", body, credentials, opts),
+         :ok <- watchlist_success(response) do
+      {:ok, :ok}
+    end
+  end
+
+  @doc """
+  Adds instruments to an existing watchlist — `POST /market-data/watchlists/instruments/add`.
+
+  The venue caps an account at **1000 instruments across all watchlists** and rejects event
+  contracts, futures and options here.
+  """
+  @spec add_watchlist_instruments(String.t(), [String.t()], map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def add_watchlist_instruments(watchlist_id, symbols, credentials, opts),
+    do: watchlist_membership("add", watchlist_id, symbols, credentials, opts)
+
+  @doc """
+  Removes instruments from a watchlist —
+  `POST /market-data/watchlists/instruments/remove`.
+
+  Removal is by symbol and category, not by the instrument id the listing returns — the
+  venue's own asymmetry.
+  """
+  @spec remove_watchlist_instruments(String.t(), [String.t()], map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def remove_watchlist_instruments(watchlist_id, symbols, credentials, opts),
+    do: watchlist_membership("remove", watchlist_id, symbols, credentials, opts)
+
+  @doc """
+  Reorders instruments within a watchlist —
+  `POST /market-data/watchlists/instruments/update`.
+
+  **`opts[:sorts]` is required and is a map of symbol to position.** The endpoint updates
+  sort order and nothing else, and a call without positions would send the venue a list of
+  symbols with no change in it.
+  """
+  @spec sort_watchlist_instruments(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def sort_watchlist_instruments(watchlist_id, credentials, opts) do
+    case Keyword.get(opts, :sorts) do
+      %{} = sorts when map_size(sorts) > 0 ->
+        instruments =
+          Enum.map(sorts, fn {symbol, position} ->
+            %{
+              "symbol" => symbol,
+              "category" => fundamental_category(opts),
+              "sort" => position
+            }
+          end)
+
+        watchlist_write("update", watchlist_id, instruments, credentials, opts)
+
+      _missing ->
+        {:error, :sorts_required}
+    end
+  end
+
+  defp watchlist_membership(action, watchlist_id, symbols, credentials, opts) do
+    case List.wrap(symbols) do
+      [] ->
+        {:error, :symbols_required}
+
+      list ->
+        instruments =
+          Enum.map(list, &%{"symbol" => &1, "category" => fundamental_category(opts)})
+
+        watchlist_write(action, watchlist_id, instruments, credentials, opts)
+    end
+  end
+
+  defp watchlist_write(action, watchlist_id, instruments, credentials, opts) do
+    body = %{"watchlist_id" => watchlist_id, "instruments" => instruments}
+    path = "/market-data/watchlists/instruments/#{action}"
+
+    with {:ok, response} <- post(path, body, credentials, opts),
+         :ok <- watchlist_success(response) do
+      {:ok, %{"success" => true}}
+    end
+  end
+
+  # `{"success": false}` is a 200 that did nothing. Reporting it as `{:ok, _}` is the
+  # failure this venue's watchlist endpoints invite: every one of them answers with a
+  # boolean rather than an error status.
+  defp watchlist_success(response) do
+    case response |> rows() |> List.first() do
+      %{"success" => true} -> :ok
+      %{"success" => false} -> {:refused, :watchlist_write_rejected}
+      nil -> {:error, :unexpected_response_shape}
+      _other -> :ok
+    end
+  end
+
+  defp to_watchlist(row, symbols) do
+    %Watchlist{
+      id: value(row, ["watchlist_id"]) || "",
+      name: value(row, ["name"]),
+      # `nil`, not `[]`: this endpoint does not list membership, and an empty list would say
+      # the watchlist is empty.
+      symbols: symbols,
+      venue_time: nil,
+      provider: :webull
+    }
+  end
+
+  # --- fundamentals, screeners and news -----------------------------------
+
+  # Every fundamentals endpoint takes `symbol` and `category` and differs only in what it
+  # adds. The table is the endpoint list; the extras each one accepts are named beside it,
+  # so a parameter that belongs to one cannot leak into another.
+  #
+  # `US_STOCK` is the only category any of them documents. It is sent explicitly rather than
+  # omitted: a required parameter left out is a refusal the caller cannot read.
+  @fundamentals %{
+    analyst_ratings: {"/market-data/fundamentals/analysis/ratings/get", []},
+    analyst_target_prices: {"/market-data/fundamentals/analysis/target-prices/get", []},
+    balance_sheet: {"/market-data/fundamentals/balance-sheets/get", [:type, :count]},
+    capital_flows: {"/market-data/fundamentals/capital-flows/get", [:count]},
+    cash_flow: {"/market-data/fundamentals/cash-flows/get", [:type, :count]},
+    company_profile: {"/market-data/fundamentals/company-profiles/get", []},
+    dividend_calendar: {"/market-data/fundamentals/dividend-calendars/list", []},
+    earnings_calendar: {"/market-data/fundamentals/earnings-calendars/list", []},
+    filings: {"/market-data/fundamentals/filings/list", []},
+    financial_alerts: {"/market-data/fundamentals/financial-alerts/get", []},
+    forecast_eps: {"/market-data/fundamentals/forecast-eps/get", []},
+    fund_allocations: {"/market-data/fundamentals/fund-allocations/get", []},
+    fund_brief: {"/market-data/fundamentals/fund-brief/get", []},
+    fund_dividends: {"/market-data/fundamentals/fund-dividends/get", [:count]},
+    fund_files: {"/market-data/fundamentals/fund-files/get", [:count]},
+    fund_holdings: {"/market-data/fundamentals/fund-holdings/get", [:count]},
+    fund_net_values: {"/market-data/fundamentals/fund-net-values/get", [:count]},
+    fund_performances: {"/market-data/fundamentals/fund-performances/get", []},
+    fund_ratings: {"/market-data/fundamentals/fund-ratings/get", []},
+    fund_splits: {"/market-data/fundamentals/fund-splits/get", [:count]},
+    income_statement: {"/market-data/fundamentals/income-statements/get", [:type, :count]},
+    indicators: {"/market-data/fundamentals/indicators/get", [:type, :count]},
+    industry_comparisons: {"/market-data/fundamentals/industry-comparisons/get", []}
+  }
+
+  @doc """
+  The fundamentals kinds this venue publishes, as atoms.
+
+  Twenty-three endpoints under one shape. `get_fundamental/4` reaches any of them; the
+  contract's own callbacks — `get_financials/3`, `get_corporate_events/1`, `get_filings/2` —
+  reach the handful the contract has types for.
+  """
+  @spec fundamental_kinds() :: [atom()]
+  def fundamental_kinds, do: @fundamentals |> Map.keys() |> Enum.sort()
+
+  @doc """
+  One fundamentals endpoint, by kind — the venue's own rows, unnormalised.
+
+  **A kind this venue does not publish is `{:error, {:unknown_fundamental, kind}}` before a
+  request is made.** Guessing a path from an atom would produce a 404 that reads like a
+  venue outage.
+
+  `opts[:type]` (`ANNUAL` or `QUARTERLY`) and `opts[:count]` are accepted **only on the
+  endpoints that document them**, and are dropped elsewhere rather than sent — a parameter
+  an endpoint does not know is at best ignored and at worst a refusal, and neither tells the
+  caller which happened.
+
+  Rows come back as the venue sends them. A balance sheet has ninety-odd line items under
+  the venue's own names, and a normalised schema would either drop most of them or invent a
+  common shape three statement types do not share.
+  """
+  @spec get_fundamental(atom(), String.t(), map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_fundamental(kind, symbol, credentials, opts) do
+    case Map.fetch(@fundamentals, kind) do
+      {:ok, {path, allowed}} ->
+        params =
+          %{"symbol" => symbol, "category" => fundamental_category(opts)}
+          |> put_allowed(allowed, opts)
+
+        with {:ok, body} <- get(path, params, credentials, opts), do: {:ok, rows(body)}
+
+      :error ->
+        {:error, {:unknown_fundamental, kind}}
+    end
+  end
+
+  defp fundamental_category(opts), do: Keyword.get(opts, :category, "US_STOCK")
+
+  defp put_allowed(params, allowed, opts) do
+    Enum.reduce(allowed, params, fn key, acc ->
+      put_present(acc, to_string(key), Keyword.get(opts, key))
+    end)
+  end
+
+  @doc """
+  Financial statements for an issuer — `Types.FinancialStatement`.
+
+  `kind` is the contract's own vocabulary: `:balance_sheet`, `:income`, `:cash_flow` or
+  `:indicators`. **Anything else is refused**, including a fundamentals kind this venue
+  publishes that is not a statement: `:company_profile` is real and is not a financial
+  statement, and answering with it would put a profile in a statement's shape.
+
+  Line items are the venue's own names, unchanged — see `Core.Types.FinancialStatement`.
+
+  **`fiscal_period` is the venue's integer code translated through the venue's own legend**,
+  which its page states as `0=FY, 1=Q1, 2=Q2, 3=Q3, 4=Q4`. The contract wants a label and
+  the venue publishes a code, so the code is mapped with the venue's own key and the raw
+  integer stays in `line_items` — a code this legend does not cover leaves the label `nil`
+  rather than inventing one, and the integer is still there to read.
+  """
+  @spec get_financials(String.t(), atom(), map(), keyword()) ::
+          {:ok, [FinancialStatement.t()]} | {:error, term()} | {:refused, term()}
+  def get_financials(symbol, kind, credentials, opts)
+      when kind in [:balance_sheet, :income, :cash_flow, :indicators] do
+    with {:ok, rows} <- get_fundamental(statement_endpoint(kind), symbol, credentials, opts) do
+      {:ok, Enum.map(rows, &to_statement(&1, symbol, kind))}
+    end
+  end
+
+  def get_financials(_symbol, kind, _credentials, _opts),
+    do: {:error, {:unsupported_statement_kind, kind}}
+
+  defp statement_endpoint(:income), do: :income_statement
+  defp statement_endpoint(kind), do: kind
+
+  defp to_statement(row, symbol, kind) do
+    %FinancialStatement{
+      symbol: symbol,
+      kind: kind,
+      # The whole row, the venue's names intact. The identifying fields are copied out
+      # rather than removed: a line item map that lost its own period would be unreadable
+      # beside a second one.
+      line_items: row,
+      period_end: statement_date(value(row, ["end_date"])),
+      fiscal_period: fiscal_period_label(value(row, ["fiscal_period"])),
+      currency: value(row, ["currency"]),
+      venue_time: nil,
+      provider: :webull
+    }
+  end
+
+  # The venue's own legend, from its page: `0=FY, 1=Q1, 2=Q2, 3=Q3, 4=Q4`. A code outside it
+  # is `nil` — the raw integer is still in `line_items`, and a label this package invented
+  # would be indistinguishable from one the venue published.
+  defp fiscal_period_label(0), do: "FY"
+  defp fiscal_period_label(period) when period in 1..4, do: "Q#{period}"
+  defp fiscal_period_label(period) when is_binary(period), do: period
+  defp fiscal_period_label(_other), do: nil
+
+  defp statement_date(nil), do: nil
+
+  defp statement_date(value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> date
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp statement_date(_other), do: nil
+
+  @doc """
+  Dividends and earnings dates — `Types.CorporateEvent`.
+
+  **Two endpoints, and `opts[:kind]` chooses.** `:dividend` reads the dividend calendar and
+  `:earnings` the earnings one; without it both are read and the results concatenated, which
+  is two requests and is stated here so a caller counting requests is not surprised.
+
+  `opts[:symbol]` is **required**: this venue's calendars are per issuer, not market-wide.
+  A market-wide calendar and one issuer's are different questions, and this endpoint answers
+  only the second.
+
+  **Splits are not here.** Webull publishes `fund-splits` for funds and nothing for equities,
+  so a `:split` kind would be answerable for some symbols and silently empty for the rest.
+  `get_fundamental(:fund_splits, …)` reaches the one that exists.
+  """
+  @spec get_corporate_events(map(), keyword()) ::
+          {:ok, [CorporateEvent.t()]} | {:error, term()} | {:refused, term()}
+  def get_corporate_events(credentials, opts) do
+    with {:ok, symbol} <- required_symbol(opts),
+         {:ok, kinds} <- corporate_event_kinds(Keyword.get(opts, :kind)) do
+      Enum.reduce_while(kinds, {:ok, []}, fn kind, {:ok, acc} ->
+        case get_fundamental(calendar_endpoint(kind), symbol, credentials, opts) do
+          {:ok, rows} ->
+            {:cont, {:ok, acc ++ Enum.map(rows, &to_corporate_event(&1, symbol, kind))}}
+
+          error ->
+            {:halt, error}
+        end
+      end)
+    end
+  end
+
+  defp corporate_event_kinds(nil), do: {:ok, [:dividend, :earnings]}
+  defp corporate_event_kinds(kind) when kind in [:dividend, :earnings], do: {:ok, [kind]}
+  defp corporate_event_kinds(kind), do: {:error, {:unsupported_event_kind, kind}}
+
+  defp calendar_endpoint(:dividend), do: :dividend_calendar
+  defp calendar_endpoint(:earnings), do: :earnings_calendar
+
+  defp to_corporate_event(row, symbol, kind) do
+    %CorporateEvent{
+      symbol: symbol,
+      kind: kind,
+      ex_date: statement_date(value(row, ["ex_dividend_date", "ex_date"])),
+      record_date: statement_date(value(row, ["record_date"])),
+      pay_date: statement_date(value(row, ["pay_date", "payment_date"])),
+      announced_date: statement_date(value(row, ["announce_date", "announcement_date"])),
+      amount: decimal(value(row, ["amount", "dividend"])),
+      currency: value(row, ["currency"]),
+      ratio: nil,
+      # The venue publishes no confirmed/estimated flag on either calendar. `nil` says so;
+      # `true` would claim a date is final when an earnings date routinely is not.
+      confirmed: nil,
+      details: row,
+      provider: :webull
+    }
+  end
+
+  @doc """
+  Regulatory filings this venue indexes — `Types.Filing`.
+
+  **This points at filings; it does not fetch them.** The `url` on each row is the venue's
+  own link and nothing here follows it.
+  """
+  @spec get_filings(String.t(), map(), keyword()) ::
+          {:ok, [Filing.t()]} | {:error, term()} | {:refused, term()}
+  def get_filings(symbol, credentials, opts) do
+    with {:ok, rows} <- get_fundamental(:filings, symbol, credentials, opts) do
+      {:ok, Enum.map(rows, &to_filing(&1, symbol))}
+    end
+  end
+
+  defp to_filing(row, symbol) do
+    %Filing{
+      symbol: symbol,
+      id: value(row, ["id", "filing_id"]),
+      form_type: value(row, ["form_type", "type"]),
+      title: value(row, ["title", "name"]),
+      url: value(row, ["url", "link"]),
+      filed_at: filing_time(row),
+      period_end: statement_date(value(row, ["period_end", "end_date"])),
+      provider: :webull
+    }
+  end
+
+  defp filing_time(row) do
+    case venue_time(row) do
+      {:ok, at} -> at
+      _other -> nil
+    end
+  end
+
+  @doc """
+  News summaries — `POST /market-data/news/summaries/get`.
+
+  **This one is generated, not reported.** The vendor's own description is "Invokes LLM to
+  generate news summaries", so the `summary` on each row is a model's paraphrase and not the
+  publisher's text. That is recorded here because a caller quoting it is quoting a summary,
+  and `source` names the venue rather than a wire.
+
+  `opts[:symbols]` is required — the endpoint summarises a watchlist, not the market —
+  and takes a list. `opts[:lang]` is the venue's own enum and is sent only when given.
+  """
+  @spec get_news(map(), keyword()) ::
+          {:ok, [NewsItem.t()]} | {:error, term()} | {:refused, term()}
+  def get_news(credentials, opts) do
+    with {:ok, symbols} <- required_symbols(opts) do
+      body =
+        %{
+          "category_symbols" => [
+            %{"category" => fundamental_category(opts), "symbols" => symbols}
+          ]
+        }
+        |> put_present("lang", Keyword.get(opts, :lang))
+
+      with {:ok, response} <- post("/market-data/news/summaries/get", body, credentials, opts) do
+        {:ok, response |> rows() |> Enum.map(&to_news_item(&1, symbols))}
+      end
+    end
+  end
+
+  defp required_symbols(opts) do
+    case Keyword.get(opts, :symbols) do
+      [_first | _rest] = symbols -> {:ok, symbols}
+      symbol when is_binary(symbol) -> {:ok, [symbol]}
+      _missing -> {:error, :symbols_required}
+    end
+  end
+
+  defp required_symbol(opts) do
+    case Keyword.get(opts, :symbol) do
+      symbol when is_binary(symbol) -> {:ok, symbol}
+      _missing -> {:error, :symbol_required}
+    end
+  end
+
+  defp to_news_item(row, asked_for) do
+    %NewsItem{
+      id: value(row, ["id", "news_id"]) || value(row, ["symbol"]) || "",
+      headline: value(row, ["title", "headline"]),
+      summary: value(row, ["summary", "content"]),
+      url: value(row, ["url", "link"]),
+      # The venue generated this; naming a publisher would attribute a paraphrase to them.
+      source: "webull",
+      symbols: List.wrap(value(row, ["symbols"]) || value(row, ["symbol"]) || asked_for),
+      published_at: filing_time(row),
+      provider: :webull
+    }
+  end
+
+  # The five screeners, each with its own required parameters. `gainers_losers` needs a
+  # ranking window and a sort field; the sector ones need an aggregation and a period; the
+  # rest need only the category. A shared parameter set would send every screener the union.
+  @screeners %{
+    "gainers_losers" =>
+      {"/market-data/screeners/gainers-losers/list", [:rank_type, :sort_by, :direction]},
+    "high_dividend_ranks" => {"/market-data/screeners/high-dividend-ranks/list", [:direction]},
+    "market_sectors" =>
+      {"/market-data/screeners/market-sectors/list",
+       [:agg_type, :period, :direction, :pagination_key]},
+    "market_sector" =>
+      {"/market-data/screeners/market-sectors/get",
+       [:sector_id, :agg_type, :period, :direction, :pagination_key]},
+    "top_actives" => {"/market-data/screeners/top-actives/list", [:rank_type, :direction]},
+    "week52_high_low" => {"/market-data/screeners/week52-high-low/list", [:rank_type, :direction]}
+  }
+
+  @doc "The screeners this venue publishes, by the identifier `get_screener/4` takes."
+  @spec screeners() :: [String.t()]
+  def screeners, do: @screeners |> Map.keys() |> Enum.sort()
+
+  @doc """
+  A venue screener, by the venue's own identifier for it — `Types.ScreenerResult`.
+
+  **Two venues' "top movers" answer different questions**, and nothing here merges or
+  re-ranks them: the rank is the position the venue returned the row in, and the metrics are
+  its own fields under its own names.
+
+  Each screener takes different parameters and this sends **only** the ones its own page
+  documents. `gainers_losers` requires `rank_type` and `sort_by`; both default to the
+  venue's own documented defaults rather than being omitted, because the venue marks them
+  required and an omitted required parameter is a refusal a caller cannot read.
+
+  An identifier this venue does not publish is `{:error, {:unknown_screener, name}}`.
+  """
+  @spec get_screener(String.t(), map(), keyword()) ::
+          {:ok, [ScreenerResult.t()]} | {:error, term()} | {:refused, term()}
+  def get_screener(name, credentials, opts) do
+    case Map.fetch(@screeners, name) do
+      {:ok, {path, allowed}} ->
+        params =
+          %{"category" => fundamental_category(opts)}
+          |> put_allowed(allowed, opts)
+          |> screener_defaults(name)
+
+        with {:ok, body} <- get(path, params, credentials, opts) do
+          {:ok, body |> rows() |> Enum.with_index(1) |> Enum.map(&to_screener_result(&1, name))}
+        end
+
+      :error ->
+        {:error, {:unknown_screener, name}}
+    end
+  end
+
+  # The venue's own documented defaults, sent explicitly. `gainers_losers` marks `rank_type`
+  # and `sort_by` REQUIRED; `top_actives` and `week52_high_low` take a ranking window too.
+  defp screener_defaults(params, "gainers_losers") do
+    params
+    |> Map.put_new("rank_type", "DAY_1")
+    |> Map.put_new("sort_by", "CHANGE_RATIO")
+  end
+
+  defp screener_defaults(params, name) when name in ["top_actives", "week52_high_low"],
+    do: Map.put_new(params, "rank_type", "DAY_1")
+
+  defp screener_defaults(params, _name), do: params
+
+  defp to_screener_result({row, rank}, name) do
+    %ScreenerResult{
+      symbol: value(row, ["symbol", "sector_name", "name"]) || "",
+      screener: name,
+      # The venue's returned order. It publishes no rank field, and the position it chose to
+      # return a row in is the ranking — inventing one from a metric would re-rank the list.
+      rank: rank,
+      metrics: row,
+      venue_time: nil,
+      provider: :webull
+    }
   end
 
   # --- futures and event contracts ---------------------------------------

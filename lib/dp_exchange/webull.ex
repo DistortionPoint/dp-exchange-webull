@@ -113,16 +113,6 @@ defmodule DpExchange.Webull do
     # publish either, so every number would be this package's model presented as the
     # venue's. `get_option_chain/2` and `get_option_expirations/2` are live.
     {:get_option_greeks, 2},
-    {:list_watchlists, 1},
-    {:get_watchlist, 2},
-    {:create_watchlist, 3},
-    {:update_watchlist, 2},
-    {:delete_watchlist, 2},
-    {:get_financials, 3},
-    {:get_corporate_events, 1},
-    {:get_filings, 2},
-    {:get_news, 1},
-    {:get_screener, 2},
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
@@ -708,35 +698,154 @@ defmodule DpExchange.Webull do
   @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
 
-  @impl true
-  def list_watchlists(_opts), do: Venue.not_supported()
+  @doc """
+  The watchlists held at the venue.
 
+  See `DpExchange.Webull.Rest.list_watchlists/2`. `symbols` is `nil` on every row — this
+  endpoint names watchlists and does not list membership, and `nil` is "not asked" where
+  `[]` would be "empty".
+  """
   @impl true
-  def get_watchlist(_id, _opts), do: Venue.not_supported()
+  def list_watchlists(opts \\ []),
+    do: Rest.list_watchlists(credentials(opts), with_limiter(opts))
 
-  @impl true
-  def create_watchlist(_name, _symbols, _opts), do: Venue.not_supported()
+  @doc """
+  One watchlist including its membership.
 
+  See `DpExchange.Webull.Rest.get_watchlist/3`. `name` is `nil` here: the membership
+  endpoint does not return it.
+  """
   @impl true
-  def update_watchlist(_id, _opts), do: Venue.not_supported()
+  def get_watchlist(id, opts \\ []),
+    do: Rest.get_watchlist(id, credentials(opts), with_limiter(opts))
 
-  @impl true
-  def delete_watchlist(_id, _opts), do: Venue.not_supported()
+  @doc """
+  Creates a watchlist and adds `symbols` to it.
 
+  See `DpExchange.Webull.Rest.create_watchlist/4`. **Two requests**, and where the second
+  fails the watchlist exists and is empty — the error carries its id.
+  """
   @impl true
-  def get_financials(_symbol, _kind, _opts), do: Venue.not_supported()
+  def create_watchlist(name, symbols, opts \\ []),
+    do: Rest.create_watchlist(name, symbols, credentials(opts), with_limiter(opts))
 
-  @impl true
-  def get_corporate_events(_opts), do: Venue.not_supported()
+  @doc """
+  Renames a watchlist or changes its sort order. **Does not change membership.**
 
+  See `DpExchange.Webull.Rest.update_watchlist/3` — `opts[:symbols]` is refused rather than
+  silently skipped, and `add_watchlist_instruments/3` is the membership write.
+  """
   @impl true
-  def get_filings(_symbol, _opts), do: Venue.not_supported()
+  def update_watchlist(id, opts \\ []),
+    do: Rest.update_watchlist(id, credentials(opts), with_limiter(opts))
 
-  @impl true
-  def get_news(_opts), do: Venue.not_supported()
+  @doc """
+  Deletes a watchlist and everything in it. **Irreversible.**
 
+  See `DpExchange.Webull.Rest.delete_watchlist/3`.
+  """
   @impl true
-  def get_screener(_name, _opts), do: Venue.not_supported()
+  def delete_watchlist(id, opts \\ []),
+    do: Rest.delete_watchlist(id, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Adds instruments to a watchlist.
+
+  Venue-specific: the contract's `update_watchlist/2` does not reach membership on this
+  venue. See `DpExchange.Webull.Rest.add_watchlist_instruments/4`.
+  """
+  @spec add_watchlist_instruments(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def add_watchlist_instruments(id, symbols, opts \\ []),
+    do: Rest.add_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Removes instruments from a watchlist, by symbol and category.
+
+  See `DpExchange.Webull.Rest.remove_watchlist_instruments/4`.
+  """
+  @spec remove_watchlist_instruments(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def remove_watchlist_instruments(id, symbols, opts \\ []),
+    do: Rest.remove_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Reorders instruments within a watchlist. `opts[:sorts]` maps symbol to position.
+
+  See `DpExchange.Webull.Rest.sort_watchlist_instruments/3`.
+  """
+  @spec sort_watchlist_instruments(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def sort_watchlist_instruments(id, opts \\ []),
+    do: Rest.sort_watchlist_instruments(id, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Financial statements for an issuer.
+
+  See `DpExchange.Webull.Rest.get_financials/4`. Line items keep the venue's own names, and
+  `fiscal_period` keeps its integer code — `0` for the full year, `1`–`4` for quarters.
+  """
+  @impl true
+  def get_financials(symbol, kind, opts \\ []),
+    do: Rest.get_financials(symbol, kind, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Dividends and earnings dates for one issuer. `opts[:symbol]` is required.
+
+  See `DpExchange.Webull.Rest.get_corporate_events/2`. Without `opts[:kind]` both calendars
+  are read, which is two requests.
+  """
+  @impl true
+  def get_corporate_events(opts \\ []),
+    do: Rest.get_corporate_events(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Regulatory filings this venue indexes. **Points at them; never fetches them.**
+
+  See `DpExchange.Webull.Rest.get_filings/3`.
+  """
+  @impl true
+  def get_filings(symbol, opts \\ []),
+    do: Rest.get_filings(symbol, credentials(opts), with_limiter(opts))
+
+  @doc """
+  News summaries. **Generated, not reported** — the venue's own description is "invokes LLM
+  to generate news summaries", so each `summary` is a model's paraphrase.
+
+  See `DpExchange.Webull.Rest.get_news/2`. `opts[:symbols]` is required.
+  """
+  @impl true
+  def get_news(opts \\ []), do: Rest.get_news(credentials(opts), with_limiter(opts))
+
+  @doc """
+  A venue screener by the venue's own identifier — `screeners/0` lists them.
+
+  See `DpExchange.Webull.Rest.get_screener/3`. Nothing is merged or re-ranked: the rank is
+  the position the venue returned the row in.
+  """
+  @impl true
+  def get_screener(name, opts \\ []),
+    do: Rest.get_screener(name, credentials(opts), with_limiter(opts))
+
+  @doc """
+  One fundamentals endpoint by kind — the venue's own rows, unnormalised.
+
+  Venue-specific: twenty-three endpoints under one shape, of which the contract has types
+  for four. `fundamental_kinds/0` lists them; see
+  `DpExchange.Webull.Rest.get_fundamental/4`.
+  """
+  @spec get_fundamental(atom(), String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_fundamental(kind, symbol, opts \\ []),
+    do: Rest.get_fundamental(kind, symbol, credentials(opts), with_limiter(opts))
+
+  @doc "The fundamentals kinds `get_fundamental/3` reaches."
+  @spec fundamental_kinds() :: [atom()]
+  defdelegate fundamental_kinds(), to: Rest
+
+  @doc "The screener identifiers `get_screener/2` takes."
+  @spec screeners() :: [String.t()]
+  defdelegate screeners(), to: Rest
 
   @impl true
   def create_account(_opts), do: Venue.not_supported()

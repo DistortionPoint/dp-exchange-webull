@@ -22,6 +22,53 @@ acceptable changelog line.
 
 ### Added
 
+- **Reference data and watchlists** — thirty-eight endpoints: twenty-three fundamentals, six
+  screeners, news summaries, and the eight watchlist calls.
+
+  **The fundamentals table is the design.** Every one of the twenty-three takes `symbol` and
+  `category` and differs only in what it adds, so the table names each endpoint's own extras
+  and `type`/`count` are **dropped** on the endpoints that do not document them — an unknown
+  parameter is at best ignored and at worst a refusal, and neither tells the caller which
+  happened. `get_fundamental/3` reaches any of them, `fundamental_kinds/0` lists them, and a
+  kind this venue does not publish is refused before a request is made.
+
+  **`fiscal_period` is translated through the venue's own legend** — its page states
+  `0=FY, 1=Q1, 2=Q2, 3=Q3, 4=Q4` — because the contract wants a label and the venue publishes
+  a code. The raw integer stays in `line_items`, and a code outside the legend leaves the
+  label `nil` rather than inventing one.
+
+  **`get_financials/3` refuses a fundamentals kind that is real but is not a statement.**
+  `:company_profile` exists on this venue and answering `get_financials/3` with it would put
+  a profile in a statement's shape.
+
+  **`get_corporate_events/1` has no `:split`.** Webull publishes `fund-splits` for funds and
+  nothing for equities, so a split kind would be answerable for some symbols and silently
+  empty for the rest. Without `opts[:kind]` both calendars are read, which is two requests,
+  and `opts[:symbol]` is required — these calendars are per issuer, not market-wide.
+
+  **`get_news/1` is generated, not reported.** The vendor's own description is "invokes LLM
+  to generate news summaries", so each `summary` is a model's paraphrase and `source` names
+  the venue rather than a wire. A caller quoting it is quoting a summary.
+
+  **A screener's rank is the position the venue returned the row in.** Nothing is merged or
+  re-ranked: two venues' "top movers" answer different questions. Each screener sends only
+  the parameters its own page documents, and the venue's documented defaults are sent
+  explicitly where it marks them required.
+
+  **Watchlists: three absences and a boolean.** `symbols` is `nil` on a listing row — that
+  endpoint names watchlists and does not read membership, where `[]` would say the watchlist
+  is empty. `name` is `nil` on a membership read, because that endpoint does not return it.
+  `update_watchlist/2` **refuses** `opts[:symbols]` rather than silently skipping it: this
+  venue's update endpoint touches properties only, and `add_watchlist_instruments/3` and
+  `remove_watchlist_instruments/3` are the membership writes.
+
+  **Every watchlist write answers `{"success": …}` rather than an error status**, so a
+  `false` is a 200 that did nothing — reported as `{:refused, :watchlist_write_rejected}`.
+  And **creating with members is two requests**: where the add fails, the watchlist exists
+  and is empty, and that returns `{:error, {:watchlist_created_without_members, id, reason}}`
+  carrying the id rather than an `{:ok, watchlist}` a caller would read as complete.
+
+
 - **Futures and event contracts** — sixteen endpoints, and a reference document
   (`docs/reference/webull/futures-and-event-contracts.md`) recording every parameter and
   response field.

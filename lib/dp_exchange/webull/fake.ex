@@ -724,34 +724,178 @@ defmodule DpExchange.Webull.Fake do
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def list_watchlists(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def list_watchlists(_opts \\ []) do
+    # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
+    # membership, and a fake returning `[]` would teach a consumer that they are empty.
+    {:ok,
+     [
+       %Types.Watchlist{
+         id: "wl-1",
+         name: "My Tech Stocks",
+         symbols: nil,
+         venue_time: nil,
+         provider: :webull
+       }
+     ]}
+  end
 
   @impl true
-  def get_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_watchlist(id, _opts \\ []) do
+    # And `name: nil` here, because the membership endpoint does not return it.
+    {:ok,
+     %Types.Watchlist{
+       id: id,
+       name: nil,
+       symbols: ["AAPL", "GOOG"],
+       venue_time: nil,
+       provider: :webull
+     }}
+  end
 
   @impl true
-  def create_watchlist(_name, _symbols, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def create_watchlist(name, symbols, _opts \\ []) do
+    {:ok,
+     %Types.Watchlist{
+       id: "wl-new",
+       name: name,
+       symbols: symbols,
+       venue_time: nil,
+       provider: :webull
+     }}
+  end
 
   @impl true
-  def update_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def update_watchlist(id, opts \\ []) do
+    if Keyword.has_key?(opts, :symbols) do
+      # Refused rather than silently skipped, as in the package: this venue's update
+      # endpoint does not touch membership.
+      {:error, :membership_not_updatable_here}
+    else
+      {:ok,
+       %Types.Watchlist{
+         id: id,
+         name: Keyword.get(opts, :name),
+         symbols: nil,
+         venue_time: nil,
+         provider: :webull
+       }}
+    end
+  end
 
   @impl true
-  def delete_watchlist(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def delete_watchlist(_id, _opts \\ []), do: {:ok, :ok}
 
   @impl true
-  def get_financials(_symbol, _kind, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_financials(symbol, kind, _opts \\ []) do
+    {:ok,
+     [
+       %Types.FinancialStatement{
+         symbol: symbol,
+         kind: kind,
+         line_items: %{
+           "total_assets" => "379297000000",
+           "fiscal_year" => 2026,
+           "fiscal_period" => 0
+         },
+         period_end: ~D[2025-12-27],
+         # The venue's integer code, not a string. `0` is the full year.
+         fiscal_period: "FY",
+         currency: "USD",
+         venue_time: nil,
+         provider: :webull
+       }
+     ]}
+  end
 
   @impl true
-  def get_corporate_events(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_corporate_events(opts \\ []) do
+    case Keyword.get(opts, :symbol) do
+      symbol when is_binary(symbol) ->
+        {:ok,
+         [
+           %Types.CorporateEvent{
+             symbol: symbol,
+             kind: :dividend,
+             ex_date: ~D[2026-08-10],
+             record_date: ~D[2026-08-11],
+             pay_date: ~D[2026-08-14],
+             announced_date: nil,
+             amount: Decimal.new("0.25"),
+             currency: "USD",
+             ratio: nil,
+             # The venue publishes no confirmed flag. `true` would claim an earnings date is
+             # final when one routinely is not.
+             confirmed: nil,
+             details: %{},
+             provider: :webull
+           }
+         ]}
+
+      _missing ->
+        {:error, :symbol_required}
+    end
+  end
 
   @impl true
-  def get_filings(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_filings(symbol, _opts \\ []) do
+    {:ok,
+     [
+       %Types.Filing{
+         symbol: symbol,
+         id: "f-1",
+         form_type: "10-Q",
+         title: "Quarterly report",
+         url: "https://example.invalid/f-1",
+         filed_at: nil,
+         period_end: ~D[2025-12-27],
+         provider: :webull
+       }
+     ]}
+  end
 
   @impl true
-  def get_news(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_news(opts \\ []) do
+    case Keyword.get(opts, :symbols) do
+      [_first | _rest] = symbols ->
+        {:ok,
+         [
+           %Types.NewsItem{
+             id: "n-1",
+             headline: "Summary",
+             summary: "A model's paraphrase, not the publisher's text.",
+             url: nil,
+             # The venue generated it; naming a publisher would attribute a paraphrase.
+             source: "webull",
+             symbols: symbols,
+             published_at: nil,
+             provider: :webull
+           }
+         ]}
+
+      _missing ->
+        {:error, :symbols_required}
+    end
+  end
 
   @impl true
-  def get_screener(_name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_screener(name, _opts \\ []) do
+    if name in Rest.screeners() do
+      {:ok,
+       [
+         %Types.ScreenerResult{
+           symbol: "AAPL",
+           screener: name,
+           # The venue's returned order, not a metric this package ranked on.
+           rank: 1,
+           metrics: %{"change_ratio" => "0.031"},
+           venue_time: nil,
+           provider: :webull
+         }
+       ]}
+    else
+      {:error, {:unknown_screener, name}}
+    end
+  end
 
   @impl true
   def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
