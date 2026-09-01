@@ -64,6 +64,14 @@ acceptable changelog line.
 
 ### Changed
 
+- **Core 0.1.21's three new callbacks are declared, each with the venue checked.**
+  `preview_replace/4` follows `replace_order/4` — the venue excludes crypto from the
+  amendment endpoint, so there is nothing to preview. `cancel_all_orders/2` has no endpoint
+  at all: `/trading/orders/cancel` takes one `client_order_id` and the venue publishes no
+  cancel-all or cancel-session. `close_position/3` likewise —
+  `/trading/assets/positions/list` reads positions and nothing closes one.
+
+
 - **Corrected a false claim about the venue.** `@unsupported` said `preview_order/3` "has
   no endpoint at all". `/trading/orders/preview` exists and is documented; what the vendor
   says is *"For crypto trading, this feature is currently not supported"*, and the same

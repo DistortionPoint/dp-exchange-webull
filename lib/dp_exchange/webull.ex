@@ -115,7 +115,18 @@ defmodule DpExchange.Webull do
     # equivalent — it opens a window in which no order is live — and that window is the
     # venue's, not this package's.
     {:preview_order, 3},
+    {:preview_replace, 4},
     {:replace_order, 4},
+    # **No bulk cancel on this venue — read from its reference, 2026-09-01.**
+    # `/trading/orders/cancel` takes one `client_order_id`. There is no cancel-all and no
+    # cancel-session; a loop over `get_orders/2` would be N partial outcomes that cannot
+    # reach an order placed between the listing and the cancels.
+    {:cancel_all_orders, 2},
+    # `/trading/assets/positions/list` exists and there is no endpoint that *closes* one.
+    # Reading a position and placing the opposite order sizes against the last read, and a
+    # position that moved leaves a residue — which is exactly what a venue-side close
+    # avoids, and this venue does not offer.
+    {:close_position, 3},
     {:get_order_book, 2},
     {:get_market_overview, 1},
     {:list_instruments, 1},
@@ -264,6 +275,15 @@ defmodule DpExchange.Webull do
   """
   @impl true
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
   @impl true
   def cancel_order(credentials, client_order_id, opts \\ []),
