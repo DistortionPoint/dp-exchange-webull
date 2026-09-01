@@ -847,6 +847,39 @@ defmodule DpExchange.Webull do
   @spec screeners() :: [String.t()]
   defdelegate screeners(), to: Rest
 
+  @doc """
+  Creates a server-to-server token. **The token comes back `PENDING` and is not usable yet.**
+
+  Venue-specific. See `DpExchange.Webull.Rest.create_token/2` — verification happens through
+  an SMS code in the Webull app, which needs a person.
+  """
+  @spec create_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_token(opts \\ []),
+    do: Rest.create_token(credentials(opts), with_limiter(opts))
+
+  @doc """
+  Checks a token's status — the call that tells `PENDING` from `EXPIRED` from `INVALID`.
+
+  See `DpExchange.Webull.Rest.check_token/3`. All three fail the same way at the next
+  request, and only this endpoint says which.
+  """
+  @spec check_token(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def check_token(token, opts \\ []),
+    do: Rest.check_token(token, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The OAuth code exchange and refresh — one endpoint, two operations.
+
+  See `DpExchange.Webull.Rest.oauth_token/3`. `opts[:code]` exchanges, `opts[:refresh_token]`
+  refreshes, and exactly one of them is required. **Two expiries come back and they are not
+  the same clock**: `rt_expires_in` is the one that ends the session.
+  """
+  @spec oauth_token(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def oauth_token(client_id, client_secret, opts \\ []),
+    do: Rest.oauth_token(client_id, client_secret, with_limiter(opts))
+
   @impl true
   def create_account(_opts), do: Venue.not_supported()
 

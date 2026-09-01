@@ -1466,6 +1466,132 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # --- token lifecycle ----------------------------------------------------
+
+  @doc """
+  Creates a server-to-server token — `POST /auth/tokens/create`.
+
+  **The token this returns is not usable yet.** It comes back `PENDING`, and the venue's own
+  note says verification happens through an SMS code in the Webull app — which needs a
+  person, and is not something this package can do. A caller that treats a successful
+  response as an authenticated session will find every subsequent call refused.
+
+  `status` travels unmapped for that reason: `PENDING`, `NORMAL`, `INVALID` and `EXPIRED`
+  are the venue's four, and only the second is a token that works.
+
+  Tokens default to **15 days** and must be recreated, not renewed — there is no refresh on
+  this endpoint. `expires_at` is milliseconds.
+  """
+  @spec create_token(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_token(credentials, opts) do
+    with {:ok, response} <- post("/auth/tokens/create", %{}, credentials, opts),
+         {:ok, row} <- first_row(response) do
+      {:ok, row}
+    end
+  end
+
+  @doc """
+  Checks a token's status — `POST /auth/tokens/check`.
+
+  **This is the call that distinguishes the four states**, and the reason to make it before
+  trusting a stored token: `PENDING` has never been verified, `EXPIRED` has run out, and
+  `INVALID` was revoked or never existed. All three fail the same way at the next request,
+  and only this endpoint says which.
+
+  The status comes back as the venue's own string. Nothing is mapped to a boolean, because
+  "not usable" covers three different problems with three different remedies.
+  """
+  @spec check_token(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def check_token(token, credentials, opts) when is_binary(token) do
+    with {:ok, response} <- post("/auth/tokens/check", %{"token" => token}, credentials, opts),
+         {:ok, row} <- first_row(response) do
+      {:ok, row}
+    end
+  end
+
+  @doc """
+  The OAuth token exchange and refresh — `POST /oauth2/tokens/create` on the Connect host.
+
+  **One endpoint, two operations, and `grant_type` picks.** With `opts[:code]` it exchanges
+  the authorization code the host obtained — the second leg of the consent flow. With
+  `opts[:refresh_token]` it refreshes. Neither is `{:error, :code_or_refresh_token_required}`
+  rather than a call the venue would reject.
+
+  **A different host from every other endpoint** — `oauth-open-api…` — and a form body
+  rather than the signed JSON the rest of this package sends. That is why the package/host
+  split cannot be read off a path: the same URL serves the host's code exchange and the
+  package's refresh.
+
+  **Two expiries come back, and they are not the same clock.** `expires_in` is the access
+  token's, in seconds; `rt_expires_in` is the refresh token's, and it is the one that ends
+  the session when it runs out. A caller tracking only the first will be surprised.
+  """
+  @spec oauth_token(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def oauth_token(client_id, client_secret, opts)
+      when is_binary(client_id) and is_binary(client_secret) do
+    with {:ok, grant} <- oauth_grant(opts) do
+      form =
+        Map.merge(
+          %{"client_id" => client_id, "client_secret" => client_secret},
+          grant
+        )
+
+      url = Keyword.get(opts, :oauth_url, oauth_url(opts)) <> "/oauth2/tokens/create"
+      headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
+
+      case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
+        {:ok, %{status: status, body: body}} when status in 200..299 ->
+          {:ok, decode_map(body)}
+
+        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+          {:refused, body}
+
+        {:ok, %{status: status, body: body}} ->
+          {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(body)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
+  # `code` and `refresh_token` are the venue's two grants and it takes exactly one. Sending
+  # both would leave the venue to choose, and which it chose is not something the caller
+  # could read back from the response.
+  defp oauth_grant(opts) do
+    case {Keyword.get(opts, :code), Keyword.get(opts, :refresh_token)} do
+      {code, nil} when is_binary(code) ->
+        {:ok, %{"grant_type" => "authorization_code", "code" => code}}
+
+      {nil, refresh} when is_binary(refresh) ->
+        {:ok, %{"grant_type" => "refresh_token", "refresh_token" => refresh}}
+
+      {code, refresh} when is_binary(code) and is_binary(refresh) ->
+        {:error, :code_and_refresh_token_are_exclusive}
+
+      _neither ->
+        {:error, :code_or_refresh_token_required}
+    end
+  end
+
+  defp oauth_url(opts) do
+    case Environment.resolve(opts) do
+      :production -> "https://oauth-open-api.webull.com"
+      _sandbox -> "https://oauth-open-api.sandbox.webull.com"
+    end
+  end
+
+  defp decode_map(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{} = decoded} -> decoded
+      _other -> %{}
+    end
+  end
+
+  defp decode_map(%{} = body), do: body
+  defp decode_map(_body), do: %{}
   # --- watchlists ---------------------------------------------------------
 
   @doc """

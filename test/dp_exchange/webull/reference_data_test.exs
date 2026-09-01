@@ -489,4 +489,106 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert DpExchange.Webull.screeners() == Rest.screeners()
     end
   end
+
+  describe "the readers that have to cope with a venue saying something else" do
+    test "a fiscal period the venue already worded is passed through" do
+      # The legend covers 0–4. A venue that starts sending "FY2026" is sending a label, and
+      # a label is what this field wants.
+      body = [%{"fiscal_period" => "FY2026", "end_date" => "2025-12-27"}]
+
+      assert {:ok, [statement]} =
+               Rest.get_financials("AAPL", :indicators, @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert statement.fiscal_period == "FY2026"
+    end
+
+    test "a fiscal period outside the legend is nil, and the integer is still readable" do
+      body = [%{"fiscal_period" => 9, "end_date" => "2025-12-27"}]
+
+      assert {:ok, [statement]} =
+               Rest.get_financials("AAPL", :indicators, @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert statement.fiscal_period == nil
+      assert statement.line_items["fiscal_period"] == 9
+    end
+
+    test "an end date that is not a string leaves the period nil" do
+      body = [%{"end_date" => 20_251_227}]
+
+      assert {:ok, [statement]} =
+               Rest.get_financials("AAPL", :cash_flow, @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert statement.period_end == nil
+    end
+
+    test "a filing with no timestamp the reader knows leaves filed_at nil" do
+      assert {:ok, [filing]} =
+               Rest.get_filings("AAPL", @credentials,
+                 plug: responding([%{"id" => "f-1"}]),
+                 retry_attempts: 0
+               )
+
+      assert filing.filed_at == nil
+    end
+
+    test "a filing that carries one is read" do
+      body = [%{"id" => "f-1", "time" => "2026-08-31T10:15:30.691Z"}]
+
+      assert {:ok, [filing]} =
+               Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert filing.filed_at.year == 2026
+    end
+
+    test "a single symbol reaches get_news/2 as a one-element list" do
+      me = self()
+
+      assert {:ok, _news} =
+               Rest.get_news(@credentials,
+                 symbols: "AAPL",
+                 plug: capturing([%{}], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "POST", _path, _query, raw}
+
+      assert Jason.decode!(raw)["category_symbols"] == [
+               %{"category" => "US_STOCK", "symbols" => ["AAPL"]}
+             ]
+    end
+
+    test "a corporate-event calendar that errors halts rather than returning half" do
+      # Concatenating one calendar's rows with the other's failure would report a partial
+      # answer as a whole one.
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(500, Jason.encode!(%{"error" => "nope"}))
+      end
+
+      assert {:error, _reason} =
+               Rest.get_corporate_events(@credentials,
+                 symbol: "AAPL",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a paged listing that answers with a bare list still comes back paged" do
+      assert {:ok, %{rows: [_row], pagination_key: nil}} =
+               Rest.list_event_markets(@credentials,
+                 plug: responding([%{"symbol" => "KX-T1"}]),
+                 retry_attempts: 0
+               )
+    end
+  end
 end

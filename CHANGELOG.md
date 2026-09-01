@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ### Added
 
+- **The token lifecycle** — `create_token/1`, `check_token/2` and `oauth_token/3`.
+
+  **A token that exists is not a token that works.** `create_token/1` returns one that is
+  `PENDING`, and the venue's own note says verification happens through an SMS code in the
+  Webull app — which needs a person and is not something this package can do. A caller
+  treating a successful response as an authenticated session finds every subsequent call
+  refused.
+
+  **`check_token/2` is the only call that distinguishes the four states.** `PENDING` has
+  never been verified, `EXPIRED` has run out, `INVALID` was revoked or never existed — all
+  three fail identically at the next request and each has a different remedy, so the venue's
+  own string travels unmapped rather than being collapsed into a boolean.
+
+  **`oauth_token/3` is one endpoint doing two jobs on a different host.** `opts[:code]`
+  exchanges the authorization code the host obtained; `opts[:refresh_token]` refreshes.
+  Exactly one is required — both together is refused, because the venue would choose and the
+  response would not say which. The host is `oauth-open-api…` and the body is a form, where
+  every other endpoint in this package signs JSON: the same URL serves the host's code
+  exchange and the package's refresh, which is why the boundary cannot be read off a path.
+
+  **Two expiries come back and they are not the same clock.** `expires_in` is the access
+  token's; `rt_expires_in` is the refresh token's, and it is the one that ends the session.
+
+
 - **Reference data and watchlists** — thirty-eight endpoints: twenty-three fundamentals, six
   screeners, news summaries, and the eight watchlist calls.
 
