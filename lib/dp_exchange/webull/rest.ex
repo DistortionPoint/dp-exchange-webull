@@ -37,7 +37,7 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Order, Quote, TopOfBook}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -257,6 +257,46 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # A POST carrying a JSON body.
+  #
+  # **This venue signs the body**, unlike Coinbase's URI-scoped JWT, so the exact bytes sent
+  # must be the exact bytes signed. The encoded string is built once and used for both —
+  # encoding twice risks two different orderings of the same map and a signature that does
+  # not match the payload, which the venue would reject as an authentication failure rather
+  # than as the encoding bug it is.
+  defp post(path, body, credentials, opts) do
+    environment = Environment.resolve(opts)
+    host = Environment.host(environment)
+    encoded = Jason.encode!(body)
+
+    request = %{
+      path: path,
+      query_params: %{},
+      body: encoded,
+      host: host,
+      timestamp: Auth.timestamp(),
+      nonce: Auth.nonce()
+    }
+
+    with {:ok, headers} <- Auth.headers(request, credentials) do
+      url = Environment.rest_url(environment) <> path
+
+      case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
+        {:ok, %{status: status, body: response}} when status in 200..299 ->
+          {:ok, decode(response)}
+
+        {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
+          {:refused, refusal(response)}
+
+        {:ok, %{status: status, body: response}} ->
+          {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
+
+        {:error, reason} ->
+          {:error, reason}
+      end
+    end
+  end
+
   defp request_opts(opts) do
     opts
     |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
@@ -432,4 +472,176 @@ defmodule DpExchange.Webull.Rest do
   defp decimal(value) when is_binary(value), do: Decimal.new(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  @doc """
+  Places a crypto order.
+
+  ## The venue documents which type/time-in-force pairs it accepts, and the list is short
+
+  Webull states the crypto rules outright rather than encoding them in a key name the way
+  Coinbase does, and the effect is the same — most pairs do not exist:
+
+      MARKET            -> IOC only
+      LIMIT             -> DAY or GTC only
+      STOP_LOSS_LIMIT   -> DAY or GTC only
+
+  There is no market GTC and no limit IOC. **A pair the venue does not accept is refused
+  here, before the request is sent**, rather than being sent and rejected — the venue's
+  rejection would arrive as a business error the caller has to interpret, and the local
+  refusal names both halves of what was wrong.
+
+  ## `account_id` is required and is never inferred
+
+  The venue takes the account on every order. This package does **not** look one up and
+  choose: an account is where the money is, and a package picking one for a caller who has
+  several would place a real order against the wrong balance. It comes from `opts[:account_id]`
+  or the call fails.
+
+  ## Only `NORMAL` combo orders
+
+  The venue supports MASTER, OTO, OCO and OTOCO groupings, and states that **crypto supports
+  only `NORMAL`**. Multi-leg and bracket orders are a Phase 11 shape for the venues that
+  have them; sending one here would be rejected upstream.
+  """
+  @spec place_order(map(), map(), keyword()) ::
+          {:ok, Order.t()} | {:error, term()} | {:refused, term()}
+  def place_order(credentials, request, opts) do
+    with {:ok, account_id} <- account_id(opts),
+         {:ok, {order_type, tif}} <- crypto_combination(request),
+         {:ok, leaf} <- order_leaf(request, order_type, tif) do
+      body = %{
+        "account_id" => account_id,
+        "new_orders" => [Map.put(leaf, "client_order_id", client_order_id(request))]
+      }
+
+      with {:ok, response} <- post("/trading/orders/place", body, credentials, opts) do
+        to_placed_order(response, request, order_type, tif)
+      end
+    end
+  end
+
+  defp account_id(opts) do
+    case Keyword.get(opts, :account_id) do
+      nil -> {:error, :account_id_required}
+      account_id -> {:ok, account_id}
+    end
+  end
+
+  # The venue's documented crypto matrix, written out so a pair outside it cannot be sent.
+  @crypto_combinations %{
+    {:market, :ioc} => {"MARKET", "IOC"},
+    {:limit, :day} => {"LIMIT", "DAY"},
+    {:limit, :gtc} => {"LIMIT", "GTC"},
+    {:stop_limit, :day} => {"STOP_LOSS_LIMIT", "DAY"},
+    {:stop_limit, :gtc} => {"STOP_LOSS_LIMIT", "GTC"}
+  }
+
+  defp crypto_combination(request) do
+    type = Map.get(request, :order_type, :limit)
+    tif = Map.get(request, :time_in_force, :gtc)
+
+    case Map.fetch(@crypto_combinations, {type, tif}) do
+      {:ok, pair} -> {:ok, pair}
+      :error -> {:error, {:unsupported_order_combination, type, tif}}
+    end
+  end
+
+  defp order_leaf(request, order_type, tif) do
+    with {:ok, entrust, sizing} <- entrust(request, order_type) do
+      leaf =
+        %{
+          "combo_type" => "NORMAL",
+          "instrument_type" => "CRYPTO",
+          "market" => "US",
+          "symbol" => SymbolFormat.to_exchange_symbol(Map.fetch!(request, :symbol)),
+          "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+          "order_type" => order_type,
+          "time_in_force" => tif,
+          "entrust_type" => entrust
+        }
+        |> Map.merge(sizing)
+
+      {:ok, put_present(leaf, "limit_price", price_for(request, order_type))}
+      |> then(fn {:ok, l} ->
+        {:ok, put_present(l, "stop_price", stop_for(request, order_type))}
+      end)
+    end
+  end
+
+  # `QTY` sizes in units, `AMOUNT` in cash. They are different orders and the venue names
+  # them separately; a caller that gave neither gets an error rather than a default, and a
+  # caller that gave both is asking for two things at once.
+  defp entrust(request, order_type) do
+    quantity = Map.get(request, :quantity)
+    amount = Map.get(request, :amount)
+
+    case {quantity, amount} do
+      {nil, nil} ->
+        {:error, :missing_order_size}
+
+      {quantity, nil} ->
+        {:ok, "QTY", %{"qty" => to_string(quantity)}}
+
+      {nil, amount} ->
+        amount_entrust(order_type, amount)
+
+      {_quantity, _amount} ->
+        {:error, :ambiguous_order_size}
+    end
+  end
+
+  # The venue restricts `AMOUNT` on a stop-limit sell to `QTY` only. Rather than encode the
+  # side rule twice, cash sizing is refused for stop-limit outright: a caller sizing a stop
+  # in cash is asking for something the venue will not do on one side of the book, and
+  # accepting it on the other invites a surprise later.
+  defp amount_entrust("STOP_LOSS_LIMIT", _amount),
+    do: {:error, :cash_sizing_not_supported_for_stop}
+
+  defp amount_entrust(_order_type, amount), do: {:ok, "AMOUNT", %{"amount" => to_string(amount)}}
+
+  defp price_for(_request, "MARKET"), do: nil
+  defp price_for(request, _order_type), do: Map.get(request, :price)
+
+  defp stop_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :stop_price)
+  defp stop_for(_request, _order_type), do: nil
+
+  # 32 characters maximum, unique per account, and the venue's own reference for the order.
+  defp client_order_id(request) do
+    case Map.get(request, :client_order_id) do
+      nil ->
+        16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower) |> binary_part(0, 32)
+
+      given ->
+        given
+    end
+  end
+
+  defp to_placed_order(response, request, order_type, tif) do
+    case first_row(response) do
+      {:ok, row} ->
+        {:ok,
+         %Order{
+           id: value(row, ["order_id", "orderId", "client_order_id"]),
+           symbol: Map.fetch!(request, :symbol),
+           side: Map.fetch!(request, :side),
+           order_type: order_type_atom(order_type),
+           time_in_force: tif_atom(tif),
+           quantity: Map.get(request, :quantity),
+           price: Map.get(request, :price),
+           status: :pending,
+           provider: :webull
+         }}
+
+      _no_row ->
+        {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp order_type_atom("MARKET"), do: :market
+  defp order_type_atom("LIMIT"), do: :limit
+  defp order_type_atom("STOP_LOSS_LIMIT"), do: :stop_limit
+
+  defp tif_atom("IOC"), do: :ioc
+  defp tif_atom("DAY"), do: :day
+  defp tif_atom("GTC"), do: :gtc
 end

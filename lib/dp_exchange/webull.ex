@@ -108,7 +108,6 @@ defmodule DpExchange.Webull do
     {:get_accounts, 2},
     {:get_fees, 2},
     {:get_transfers, 2},
-    {:place_order, 3},
     {:cancel_order, 3},
     {:get_order, 3},
     {:get_orders, 2},
@@ -152,6 +151,12 @@ defmodule DpExchange.Webull do
       # last observed figure, not a current one.
       supported_quotes: ["USD"],
       supported_instrument_types: [:spot],
+
+      # The venue's documented crypto matrix: MARKET takes IOC only; LIMIT and
+      # STOP_LOSS_LIMIT take DAY or GTC. There is no market GTC and no limit IOC, and
+      # `place_order/3` refuses a pair outside it rather than letting the venue reject it.
+      supported_order_types: [:market, :limit, :stop_limit],
+      supported_time_in_force: [:ioc, :day, :gtc],
       supports_short_selling: false,
       streamable: [:quotes],
       historical_timeframes: Rest.timeframes(),
@@ -228,7 +233,8 @@ defmodule DpExchange.Webull do
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def place_order(_credentials, _request, _opts), do: Venue.not_supported()
+  def place_order(credentials, request, opts \\ []),
+    do: Rest.place_order(credentials, request, with_limiter(opts))
 
   @doc """
   **Not supported.** This venue publishes no order-preview endpoint.

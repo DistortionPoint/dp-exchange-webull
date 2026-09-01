@@ -252,7 +252,10 @@ defmodule DpExchange.WebullTest do
       assert Fake.get_accounts(@credentials, []) == {:error, :not_supported}
       assert Fake.get_fees(@credentials, []) == {:error, :not_supported}
       assert Fake.get_transfers(@credentials, []) == {:error, :not_supported}
-      assert Fake.place_order(@credentials, %{}, []) == {:error, :not_supported}
+      # place_order is implemented now, so it no longer belongs in this sweep. It refuses
+      # for its own reason — the venue requires an account on every order and this package
+      # will not choose one — which is a different answer from "not implemented" and is
+      # asserted in the order tests.
       assert Fake.cancel_order(@credentials, "id", []) == {:error, :not_supported}
       assert Fake.get_order(@credentials, "id", []) == {:error, :not_supported}
       assert Fake.get_orders(@credentials, []) == {:error, :not_supported}

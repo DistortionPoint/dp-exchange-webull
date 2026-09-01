@@ -141,8 +141,6 @@ defmodule DpExchange.Webull.Fake do
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
   def get_transfers(_credentials, _opts), do: Venue.not_supported()
-  @impl true
-  def place_order(_credentials, _request, _opts), do: Venue.not_supported()
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
@@ -362,4 +360,46 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+
+  @impl true
+  def place_order(_credentials, request, opts \\ []) do
+    # The fake enforces the venue's crypto matrix and its account requirement, so a
+    # consumer's suite cannot go green on an order this venue would reject.
+    with :ok <- fake_account(opts),
+         :ok <- fake_combination(request) do
+      {:ok,
+       %Types.Order{
+         id: "fake-webull-order-1",
+         symbol: Map.fetch!(request, :symbol),
+         side: Map.fetch!(request, :side),
+         order_type: Map.get(request, :order_type, :limit),
+         time_in_force: Map.get(request, :time_in_force, :gtc),
+         quantity: Map.get(request, :quantity),
+         price: Map.get(request, :price),
+         status: :pending,
+         provider: :webull
+       }}
+    end
+  end
+
+  defp fake_account(opts) do
+    if Keyword.get(opts, :account_id), do: :ok, else: {:error, :account_id_required}
+  end
+
+  defp fake_combination(request) do
+    pair = {Map.get(request, :order_type, :limit), Map.get(request, :time_in_force, :gtc)}
+
+    if pair in [
+         {:market, :ioc},
+         {:limit, :day},
+         {:limit, :gtc},
+         {:stop_limit, :day},
+         {:stop_limit, :gtc}
+       ] do
+      :ok
+    else
+      {type, tif} = pair
+      {:error, {:unsupported_order_combination, type, tif}}
+    end
+  end
 end

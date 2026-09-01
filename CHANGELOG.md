@@ -20,6 +20,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+- **`place_order/3`.** This venue could not place an order; it can now.
+
+  **The venue documents which crypto pairs it accepts, and the list is short**: `MARKET`
+  takes `IOC` only, `LIMIT` and `STOP_LOSS_LIMIT` take `DAY` or `GTC`. There is no market
+  GTC and no limit IOC. A pair outside that list is **refused before the request is sent**,
+  so a caller gets both halves of what was wrong rather than the venue's business error.
+
+  **`account_id` is required and never inferred.** An account is where the money is, and a
+  package that looked one up and chose would place a real order against the wrong balance
+  for a caller holding several. It comes from `opts[:account_id]` or the call fails.
+
+  **`QTY` and `AMOUNT` are different orders.** Sizing in units and sizing in cash are named
+  separately by the venue; giving neither is an error rather than a default, and giving both
+  is refused as ambiguous. Cash sizing on a stop-limit is refused outright — the venue allows
+  it on a buy and not on a sell, and accepting it on one side invites a surprise on the other.
+
+  Crypto orders are sent as `NORMAL` combos only, which is what the venue supports; MASTER,
+  OTO, OCO and OTOCO are equities groupings.
+
+- **`Rest.post/4`, which signs the body.** Unlike Coinbase's URI-scoped JWT, this venue signs
+  the payload, so the encoded string is built **once** and used for both the signature and
+  the request. Encoding twice risks two orderings of the same map and a signature that does
+  not match what was sent — which the venue would reject as an authentication failure rather
+  than as the encoding bug it is.
+
 ### Changed
 - **Every endpoint moved to its documented path (D6).** All five calls used an `/openapi/…`
   prefix that appears nowhere in Webull's current documentation; they were inherited from an
