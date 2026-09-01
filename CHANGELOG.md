@@ -22,6 +22,63 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_transactions/2`** — the same `/trading/activities/cash-activities/list` endpoint
+  `get_transfers/2` narrows, asked without the filter.
+
+  `get_transfers/2` sends `DEPOSIT,WITHDRAW,TRANSFER` because the contract documents it as
+  deposit and withdrawal history. This sends no `activity_types` at all, which is what asks
+  the venue for everything it carries — `TRADE`, `FEES`, `DIVIDENDS`, `TAX`, `INTERESTS`,
+  `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and `OTHER` beside the three.
+  A default list here would be this package deciding what "every activity" means.
+
+  **The two are not interchangeable in either direction.** A dividend and a deposit both
+  credit cash and neither is the other: a caller computing contributions uses
+  `get_transfers/2`, and one reconciling a balance uses this — summing the former leaves out
+  the fees. Summing either is still not a balance; `get_balances/2` is the authority.
+
+### Changed
+
+- **Core dependency moves to `~> 0.1.34`**, and eleven further callbacks are declared rather
+  than missing — all of them **absent, with the reason**, checked against the venue's own
+  endpoint list on 2026-09-01.
+
+  **Webull's published API moves no money.** There is no payment-method endpoint at either
+  scope, no bank registration, no crypto network list, no allowlist and no transfer between
+  accounts; funding happens in Webull's own applications, which need a person.
+  `/trading/activities/cash-activities/list` *reports* money that moved and does not move
+  any. No fee-promotion list, FX publication, notional valuation or custody product either.
+
+
+- **The options surface**: `get_option_chain/2`, `get_option_expirations/2`, and `US_OPTION`
+  on the snapshot, bars and tape — `/trading/instruments/options/contracts/list`,
+  `/market-data/options/snapshots/list`, `/market-data/options/bars/list` and
+  `/market-data/options/ticks/list`.
+
+  **Three of those four were previously recorded as refusals, and the refusals were false
+  negatives.** This package held that `US_OPTION` "is refused: the vendor states the stock
+  snapshot does not serve it" — true of the *stock* snapshot, and wrong about the venue,
+  which publishes a separate option endpoint beside each one. Three tests asserted the
+  refusal, which is how a claim about the venue survived being wrong.
+
+  **A chain is expiry × strike, and Webull publishes a flat list.** The grid is rebuilt
+  here, because a flat list is lossless in data and answers none of the questions a chain is
+  asked. **A contract this package cannot address is refused, naming the keys the venue
+  actually sent** — an expiry, a strike and a right are what address a contract, and a
+  dropped row leaves a chain with a hole in it that looks complete. A strike listed with one
+  side keeps a `nil` on the other rather than being absent.
+
+  `:underlying_price` is `nil`: this endpoint lists contracts and does not quote the
+  underlying, and fetching it separately would be two observations at two times presented
+  as one.
+
+  **`get_option_greeks/2` stays absent, and that one is real.** Webull publishes no delta,
+  gamma or implied volatility on any endpoint. Computing them would need a rate and a
+  volatility surface it does not publish either — every number would be this package's model
+  presented as the venue's, which is the most tempting substitution available here.
+
+  `asset_classes/0` gains `:option`.
+
+
 - **`get_symbols/2` reaches the stock instrument profiles**,
   `/trading/instruments/stocks/profiles/list`, routed by `opts[:category]`. Both endpoints
   paginate the same way and both are bounded — a truncated instrument list is the worst

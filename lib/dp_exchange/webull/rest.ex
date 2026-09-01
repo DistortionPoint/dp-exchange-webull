@@ -42,6 +42,8 @@ defmodule DpExchange.Webull.Rest do
     AuctionImbalance,
     Balance,
     Candle,
+    OptionChain,
+    OptionContract,
     Order,
     OrderBook,
     Position,
@@ -79,15 +81,22 @@ defmodule DpExchange.Webull.Rest do
   @spec timeframes() :: [String.t()]
   def timeframes, do: ~w(1m 5m 15m 30m 1h 2h 4h 1d)
 
-  # **Two snapshot endpoints, one per market**, and they are not interchangeable: the crypto
-  # one takes `US_CRYPTO` and the stock one takes `US_STOCK` or `US_ETF` and refuses
-  # `US_OPTION`. Sending a stock symbol to the crypto endpoint returns nothing rather than
-  # an error, which is why the category picks the path here rather than being passed through.
+  # **Three snapshot endpoints, one per market**, and they are not interchangeable: the
+  # crypto one takes `US_CRYPTO`, the stock one takes `US_STOCK` or `US_ETF` and refuses
+  # `US_OPTION`, and options have **their own** endpoint. That last was previously recorded
+  # here as "`US_OPTION` is refused: the vendor states the stock snapshot does not serve
+  # it" — true of the stock snapshot, and a false negative about the venue, which publishes
+  # `/market-data/options/snapshots/list` alongside it.
+  #
+  # Sending a stock symbol to the crypto endpoint returns nothing rather than an error,
+  # which is why the category picks the path here rather than being passed through.
   #
   # `opts[:category]` selects; the default is `US_CRYPTO`, which is what this package served
   # before its asset classes widened. Changing that default would silently re-route existing
   # callers onto a different market.
   defp snapshot_path("US_CRYPTO"), do: {:ok, "/market-data/crypto/snapshots/list"}
+
+  defp snapshot_path("US_OPTION"), do: {:ok, "/market-data/options/snapshots/list"}
 
   defp snapshot_path(category) when category in ["US_STOCK", "US_ETF"],
     do: {:ok, "/market-data/stocks/snapshots/list"}
@@ -95,19 +104,21 @@ defmodule DpExchange.Webull.Rest do
   defp snapshot_path(category), do: {:error, {:unsupported_snapshot_category, category}}
 
   # The stock snapshot publishes extended-hours and overnight blocks only when asked. Both
+  # The stock snapshot publishes extended-hours and overnight blocks only when asked. Both
   # are marked optional by the venue and default to false, and this sends them explicitly so
   # a caller reading `nil` knows it did not ask rather than that the venue had nothing.
-  defp snapshot_params(native, category, opts) do
-    base = %{"symbols" => native, "category" => category}
-
-    if category == "US_CRYPTO" do
-      base
-    else
-      base
-      |> Map.put("extend_hour_required", to_string(Keyword.get(opts, :extended_hours, false)))
-      |> Map.put("overnight_required", to_string(Keyword.get(opts, :overnight, false)))
-    end
+  #
+  # Crypto and options take neither: crypto trades continuously, so there are no hours to
+  # extend, and the option snapshot is its own endpoint with its own parameters. Sending
+  # them anyway would be this package asserting a session model the venue did not offer.
+  defp snapshot_params(native, category, opts) when category not in ["US_CRYPTO", "US_OPTION"] do
+    %{"symbols" => native, "category" => category}
+    |> Map.put("extend_hour_required", to_string(Keyword.get(opts, :extended_hours, false)))
+    |> Map.put("overnight_required", to_string(Keyword.get(opts, :overnight, false)))
   end
+
+  defp snapshot_params(native, category, _opts),
+    do: %{"symbols" => native, "category" => category}
 
   @doc """
   Last price for one symbol.
@@ -170,12 +181,34 @@ defmodule DpExchange.Webull.Rest do
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
-    # Crypto and stocks are different endpoints — and different HTTP verbs. `opts[:category]`
-    # picks, defaulting to crypto, which is what this package served before its asset
-    # classes widened.
+    # Crypto, stocks and options are three different endpoints — and crypto is a different
+    # HTTP verb. `opts[:category]` picks, defaulting to crypto, which is what this package
+    # served before its asset classes widened.
     case Keyword.get(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
+      "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
       _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
+    end
+  end
+
+  # Options have their own bars endpoint and take the same `timespan` vocabulary the stock
+  # one does. It is a GET where the stock bars are a POST — the venue's own split, not a
+  # simplification here.
+  defp option_bars(symbol, timeframe, range, credentials, opts) do
+    with {:ok, timespan} <- stock_timespan(timeframe) do
+      params =
+        %{
+          "symbols" => symbol,
+          "category" => "US_OPTION",
+          "timespan" => timespan
+        }
+        |> put_present("count", Keyword.get(opts, :limit))
+        |> put_present("start_time", epoch_ms(Keyword.get(range, :start)))
+        |> put_present("end_time", epoch_ms(Keyword.get(range, :end)))
+
+      with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts) do
+        decode_stock_bars(body, symbol, timeframe, range)
+      end
     end
   end
 
@@ -607,6 +640,59 @@ defmodule DpExchange.Webull.Rest do
              get("/trading/activities/cash-activities/list", params, credentials, opts) do
         {:ok, rows(body)}
       end
+    end
+  end
+
+  @doc """
+  **Every** cash activity on one account — the same endpoint `get_transfers/2` narrows.
+
+  Requires `opts[:account_id]`.
+
+  `get_transfers/2` asks the venue for `DEPOSIT,WITHDRAW,TRANSFER` because the contract
+  documents it as deposit and withdrawal history. This asks for none of that filtering and
+  returns what the endpoint actually carries: `TRADE`, `FEES`, `DIVIDENDS`, `TAX`,
+  `INTERESTS`, `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and `OTHER`
+  alongside the three.
+
+  **The two are not interchangeable in either direction.** A dividend and a deposit both
+  credit cash and neither is the other: a caller computing what it put in must use
+  `get_transfers/2`, and a caller reconciling a balance against everything that moved must
+  use this — summing `get_transfers/2` leaves out the fees.
+
+  **Summing this is not a balance either.** `get_balances/2` is the authority; this is the
+  explanation for the difference between two of them.
+
+  The venue's two constraints hold here as they do there: without a time range it answers
+  the last **7 days**, and a range spanning two calendar years is refused up front rather
+  than silently truncated.
+  """
+  @spec get_transactions(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_transactions(credentials, opts) do
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
+      params =
+        %{"account_id" => account_id}
+        |> put_present("activity_types", transaction_types(opts))
+        |> put_present("start_time", iso_millis(Keyword.get(opts, :start)))
+        |> put_present("end_time", iso_millis(Keyword.get(opts, :end)))
+        |> put_present("page_size", Keyword.get(opts, :limit))
+        |> put_present("last_activity_id", Keyword.get(opts, :after))
+
+      with {:ok, body} <-
+             get("/trading/activities/cash-activities/list", params, credentials, opts) do
+        {:ok, rows(body)}
+      end
+    end
+  end
+
+  # Absent by default, which is what asks the venue for everything. A default list here
+  # would be this package deciding what "every activity" means.
+  defp transaction_types(opts) do
+    case Keyword.get(opts, :activity_types) do
+      nil -> nil
+      types when is_list(types) -> Enum.join(types, ",")
+      types -> to_string(types)
     end
   end
 
@@ -1079,22 +1165,35 @@ defmodule DpExchange.Webull.Rest do
   def get_trades(symbol, credentials, opts) do
     category = Keyword.get(opts, :category, "US_STOCK")
 
-    with :ok <- book_category(category) do
-      params = %{
-        "symbol" => symbol,
-        "category" => category,
-        "count" => to_string(Keyword.get(opts, :limit, 30)),
-        # Required by the venue. `RTH` is the default because it is the session the rest of
-        # this package's price data comes from.
-        "trading_sessions" => sessions_param(Keyword.get(opts, :sessions, ["RTH"]))
-      }
+    with {:ok, path} <- tick_path(category) do
+      params =
+        %{
+          "symbol" => symbol,
+          "category" => category,
+          "count" => to_string(Keyword.get(opts, :limit, 30))
+        }
+        |> put_present("trading_sessions", tick_sessions(category, opts))
 
-      with {:ok, body} <- get("/market-data/stocks/ticks/list", params, credentials, opts),
+      with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body) do
         decode_ticks(row, symbol)
       end
     end
   end
+
+  # Options have their own tape endpoint. The stock one refuses `US_OPTION`, which is the
+  # venue's split rather than an absence.
+  defp tick_path("US_OPTION"), do: {:ok, "/market-data/options/ticks/list"}
+
+  defp tick_path(category) do
+    with :ok <- book_category(category), do: {:ok, "/market-data/stocks/ticks/list"}
+  end
+
+  # Required on the stock tape, where `RTH` is the default because it is the session the
+  # rest of this package's price data comes from. The option tape does not take it, and
+  # sending it would assert a session model that endpoint did not offer.
+  defp tick_sessions("US_OPTION", _opts), do: nil
+  defp tick_sessions(_category, opts), do: sessions_param(Keyword.get(opts, :sessions, ["RTH"]))
 
   defp sessions_param(sessions) when is_list(sessions), do: Enum.join(sessions, ",")
   defp sessions_param(session), do: to_string(session)
@@ -1254,6 +1353,186 @@ defmodule DpExchange.Webull.Rest do
       error ->
         error
     end
+  end
+
+  # --- options -----------------------------------------------------------
+
+  @doc """
+  The option chain for an underlying — `GET /trading/instruments/options/contracts/list`.
+
+  Returns `Types.OptionChain`: **expiry × strike, both sides**. The venue publishes a flat
+  list of contracts; a flat list is lossless in data and answers none of the questions a
+  chain is asked, so the grid is rebuilt here.
+
+  **A contract this package cannot read is refused, not skipped.** An expiry, a strike and a
+  right are what address a contract; a row missing any of them yields
+  `{:error, {:unreadable_option_contract, keys}}` naming the keys the venue actually sent.
+  Dropping the row would return a chain with a hole in it that looks complete, and a caller
+  walking strikes would never learn the strike was there.
+
+  **`:underlying_price` is `nil`.** This endpoint lists contracts and does not quote the
+  underlying. Fetching it separately and stamping it on would be two observations at two
+  times presented as one, which is how a "delta-neutral" position turns out not to be.
+
+  `opts[:expiry]` and `opts[:strike]` are passed to the venue where given — a full chain is
+  large, and narrowing it at the venue is not the same as narrowing it here.
+  """
+  @spec get_option_chain(String.t(), map(), keyword()) ::
+          {:ok, OptionChain.t()} | {:error, term()} | {:refused, term()}
+  def get_option_chain(underlying, credentials, opts) do
+    with {:ok, contracts} <- option_contracts(underlying, credentials, opts) do
+      {:ok,
+       %OptionChain{
+         underlying: underlying,
+         expiries: chain_grid(contracts),
+         underlying_price: nil,
+         venue_time: nil,
+         provider: :webull
+       }}
+    end
+  end
+
+  @doc """
+  The expiries listed on an underlying, without the strikes.
+
+  Webull publishes no expiry-only endpoint, so this reads the contract list and returns its
+  distinct expiries, earliest first. **That is a narrowing of a real response, not a
+  substitute for a missing one** — the dates are the venue's own, and no date appears here
+  that was not on a contract the venue listed.
+
+  A caller that needs the strikes as well should call `get_option_chain/3` once rather than
+  this and then that: the two would be two reads of a list that moves.
+  """
+  @spec get_option_expirations(String.t(), map(), keyword()) ::
+          {:ok, [Date.t()]} | {:error, term()} | {:refused, term()}
+  def get_option_expirations(underlying, credentials, opts) do
+    with {:ok, contracts} <- option_contracts(underlying, credentials, opts) do
+      {:ok,
+       contracts
+       |> Enum.map(& &1.expiry)
+       |> Enum.uniq()
+       |> Enum.sort(Date)}
+    end
+  end
+
+  defp option_contracts(underlying, credentials, opts) do
+    params =
+      %{"underlying_symbol" => underlying, "category" => "US_OPTION"}
+      |> put_present("expire_date", option_date_param(Keyword.get(opts, :expiry)))
+      |> put_present("strike_price", option_decimal_param(Keyword.get(opts, :strike)))
+      |> put_present("page_size", Keyword.get(opts, :limit))
+
+    with {:ok, body} <-
+           get("/trading/instruments/options/contracts/list", params, credentials, opts) do
+      body |> rows() |> decode_option_contracts(underlying)
+    end
+  end
+
+  defp option_date_param(%Date{} = date), do: Date.to_iso8601(date)
+  defp option_date_param(other), do: other
+
+  defp option_decimal_param(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp option_decimal_param(other), do: other
+
+  defp decode_option_contracts(rows, underlying) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case to_option_contract(row, underlying) do
+        {:ok, contract} -> {:cont, {:ok, [contract | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, contracts} -> {:ok, Enum.reverse(contracts)}
+      error -> error
+    end
+  end
+
+  # The three addressing fields are required together. A row that yields two of them is a
+  # row this package misread, and naming the keys the venue sent is what lets a reader fix
+  # it — a `nil` strike would sit in the grid looking like a contract.
+  defp to_option_contract(row, underlying) when is_map(row) do
+    with {:ok, expiry} <- option_expiry(value(row, ["expire_date", "expireDate", "expiration"])),
+         {:ok, strike} <- option_strike(value(row, ["strike_price", "strikePrice", "strike"])),
+         {:ok, right} <- option_right(value(row, ["direction", "option_type", "optionType"])) do
+      {:ok,
+       %OptionContract{
+         underlying: underlying,
+         expiry: expiry,
+         strike: strike,
+         right: right,
+         venue_symbol: value(row, ["symbol", "instrument_id", "instrumentId"]),
+         multiplier: decimal(value(row, ["multiplier", "unit"])),
+         settlement_type: value(row, ["settlement_type", "settlementType"]),
+         expiration_type: value(row, ["expiration_type", "expirationType"]),
+         last_trading_day: option_last_trading_day(row),
+         # The venue names none of these three on this endpoint. `nil` says "not published",
+         # and `false` would say "the venue told us it is not one".
+         index_option: nil,
+         mini: nil,
+         non_standard: nil,
+         provider: :webull
+       }}
+    else
+      :error -> {:error, {:unreadable_option_contract, Map.keys(row)}}
+    end
+  end
+
+  defp to_option_contract(row, _underlying), do: {:error, {:unreadable_option_contract, row}}
+
+  defp option_expiry(nil), do: :error
+
+  defp option_expiry(value) when is_binary(value) do
+    case Date.from_iso8601(value) do
+      {:ok, date} -> {:ok, date}
+      {:error, _reason} -> :error
+    end
+  end
+
+  defp option_expiry(_other), do: :error
+
+  defp option_strike(nil), do: :error
+
+  defp option_strike(value) do
+    case decimal(value) do
+      nil -> :error
+      strike -> {:ok, strike}
+    end
+  end
+
+  # The venue's own words for the two sides. Anything else is `:error` rather than a default
+  # side — a put filed as a call is a position the opposite way round.
+  defp option_right(value) when is_binary(value) do
+    case String.upcase(value) do
+      "CALL" -> {:ok, :call}
+      "C" -> {:ok, :call}
+      "PUT" -> {:ok, :put}
+      "P" -> {:ok, :put}
+      _other -> :error
+    end
+  end
+
+  defp option_right(_other), do: :error
+
+  defp option_last_trading_day(row) do
+    case option_expiry(value(row, ["last_trade_date", "lastTradeDate", "last_trading_day"])) do
+      {:ok, date} -> date
+      :error -> nil
+    end
+  end
+
+  # A strike listed with only one side keeps a `nil` on the other, rather than being absent:
+  # a caller iterating strikes has to see that the put is missing.
+  defp chain_grid(contracts) do
+    Enum.reduce(contracts, %{}, fn contract, grid ->
+      strikes = Map.get(grid, contract.expiry, %{})
+      row = Map.get(strikes, contract.strike, %{call: nil, put: nil})
+
+      Map.put(
+        grid,
+        contract.expiry,
+        Map.put(strikes, contract.strike, Map.put(row, contract.right, contract))
+      )
+    end)
   end
 
   # --- decoding -----------------------------------------------------------

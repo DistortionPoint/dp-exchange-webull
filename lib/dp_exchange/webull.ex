@@ -87,8 +87,31 @@ defmodule DpExchange.Webull do
     {:list_approved_addresses, 1},
     {:estimate_withdrawal_fee, 4},
     {:withdraw, 5},
-    {:get_option_chain, 2},
-    {:get_option_expirations, 2},
+    # **Webull's published API moves no money and holds no funding rails.** Checked against
+    # the venue's own endpoint list on 2026-09-01: there is no payment-method endpoint at
+    # either scope, no bank registration, no crypto network list, no allowlist, and no
+    # transfer between accounts. Funding is done in Webull's own applications, which need a
+    # person. `/trading/activities/cash-activities/list` **reports** money that moved; it
+    # does not move any.
+    {:list_payment_methods, 2},
+    {:get_payment_method, 3},
+    {:add_payment_method, 2},
+    {:transfer_internal, 4},
+    {:request_approved_address, 4},
+    {:remove_approved_address, 3},
+    {:list_networks, 2},
+    # No promotional fee list, no FX publication, no notional valuation and no custody
+    # product on this venue's API either.
+    {:list_fee_promos, 1},
+    {:get_fx_rate, 3},
+    {:get_notional_balances, 3},
+    {:list_custody_fees, 2},
+    # **Webull publishes no greeks anywhere.** The option snapshot quotes the contract; it
+    # does not publish delta, gamma or an implied volatility, and neither does any other
+    # endpoint on this venue. Computing them here would be the most tempting substitution in
+    # this package — Black-Scholes needs a rate and a volatility surface this venue does not
+    # publish either, so every number would be this package's model presented as the
+    # venue's. `get_option_chain/2` and `get_option_expirations/2` are live.
     {:get_option_greeks, 2},
     {:list_watchlists, 1},
     {:get_watchlist, 2},
@@ -157,18 +180,21 @@ defmodule DpExchange.Webull do
   endpoints work on the four non-crypto ones, and `get_accounts/2` already returns the
   `CRYPTO`, `FUTURES` and `EVENTS_CASH` account classes the credential reaches.
 
-  The coarse vocabulary here is `:crypto | :equity`; the finer statement is
-  `supported_instrument_types` below, which names option, future and event contract
-  separately. A declaration that outran the code would be the worse error — a consumer
-  routes on this.
+  The coarse vocabulary is `:crypto | :equity | :option | :future | :event_contract`; the
+  finer statement is `supported_instrument_types` below. A declaration that outran the code
+  would be the worse error — a consumer routes on this.
 
-  **Market data for the non-crypto classes is not implemented yet** (the stock, option,
-  futures and event-contract endpoints are open in the coverage plan's Phases 7, 8 and 11).
-  Each is declared per endpoint through `capabilities/0`'s `endpoints` map, which is why
-  that map exists rather than one flag per package.
+  **Options joined on 2026-09-01**: the contract list, snapshot, bars and tape are live, and
+  `US_OPTION` reaches its own endpoints rather than being refused on the stock ones — which
+  is what this package claimed until that date, and was a false negative about the venue.
+
+  **Futures and event contracts are still open** (the coverage plan's Phase 11), which is
+  why neither is declared here yet. Each class is declared per endpoint through
+  `capabilities/0`'s `endpoints` map, which is why that map exists rather than one flag per
+  package.
   """
   @impl true
-  def asset_classes, do: [:crypto, :equity]
+  def asset_classes, do: [:crypto, :equity, :option]
 
   @impl true
   def capabilities do
@@ -516,11 +542,71 @@ defmodule DpExchange.Webull do
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Every cash activity on one account — wider than `get_transfers/2` and wider than fills.
+
+  See `DpExchange.Webull.Rest.get_transactions/2`. The two are not interchangeable: a
+  dividend and a deposit both credit cash and neither is the other, so a caller computing
+  contributions uses `get_transfers/2` and one reconciling a balance uses this.
+  """
   @impl true
-  def get_option_chain(_underlying, _opts), do: Venue.not_supported()
+  def get_transactions(credentials, opts),
+    do: Rest.get_transactions(credentials, with_limiter(opts))
 
   @impl true
-  def get_option_expirations(_underlying, _opts), do: Venue.not_supported()
+  def list_payment_methods(_credentials, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_payment_method(_credentials, _id, _opts), do: Venue.not_supported()
+
+  @impl true
+  def add_payment_method(_details, _opts), do: Venue.not_supported()
+
+  @impl true
+  def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
+
+  @doc """
+  The option chain for an underlying — expiry × strike, both sides.
+
+  See `DpExchange.Webull.Rest.get_option_chain/3`. The venue publishes a flat contract list
+  and the grid is rebuilt here; a contract this package cannot address is refused rather
+  than dropped, so a chain never comes back with a hole in it that looks complete.
+  """
+  @impl true
+  def get_option_chain(underlying, opts \\ []),
+    do: Rest.get_option_chain(underlying, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The expiries listed on an underlying.
+
+  See `DpExchange.Webull.Rest.get_option_expirations/3`. Webull publishes no expiry-only
+  endpoint, so these are the distinct expiries of a real contract list — a narrowing of a
+  response the venue sent, not a substitute for one it did not.
+  """
+  @impl true
+  def get_option_expirations(underlying, opts \\ []),
+    do: Rest.get_option_expirations(underlying, credentials(opts), with_limiter(opts))
 
   @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()

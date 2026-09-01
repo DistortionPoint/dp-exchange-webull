@@ -356,6 +356,70 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @impl true
+  def get_transactions(_credentials, opts) do
+    with :ok <- fake_account(opts) do
+      # Unfiltered by default: the dividend and the fee are here beside the deposit, which
+      # is the whole difference from `get_transfers/2`. A fake that returned only the three
+      # transfer kinds would make the two functions look interchangeable.
+      {:ok,
+       [
+         %{
+           "id" => "a1b2c3",
+           "activity_type" => "DEPOSIT",
+           "currency" => "USD",
+           "net_amount" => "1500.0"
+         },
+         %{
+           "id" => "d4e5f6",
+           "activity_type" => "DIVIDENDS",
+           "currency" => "USD",
+           "net_amount" => "12.40"
+         },
+         %{
+           "id" => "g7h8i9",
+           "activity_type" => "FEES",
+           "currency" => "USD",
+           "net_amount" => "-0.35"
+         }
+       ]}
+    end
+  end
+
+  @impl true
+  def list_payment_methods(_credentials, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
+
+  @impl true
+  def request_approved_address(_asset, _network, _address, _opts \\ []),
+    do: Venue.not_supported()
+
+  @impl true
+  def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_fee_promos(_opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
+
+  @impl true
+  def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
+
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
@@ -612,10 +676,49 @@ defmodule DpExchange.Webull.Fake do
     do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_option_chain(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_option_chain(underlying, _opts \\ []) do
+    # A strike with only a call on it, because that is the case a consumer iterating strikes
+    # has to see. A fake whose grid was always complete would let one ship code that skips it.
+    call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
+    put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
+    lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
+
+    {:ok,
+     %Types.OptionChain{
+       underlying: underlying,
+       expiries: %{
+         ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
+         ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
+       },
+       # The contract list does not quote the underlying, and a fake that filled this in
+       # would teach a consumer to rely on a field that is nil in production.
+       underlying_price: nil,
+       venue_time: nil,
+       provider: :webull
+     }}
+  end
 
   @impl true
-  def get_option_expirations(_underlying, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_option_expirations(_underlying, _opts \\ []),
+    do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+
+  defp fake_contract(underlying, expiry, strike, right) do
+    %Types.OptionContract{
+      underlying: underlying,
+      expiry: expiry,
+      strike: strike,
+      right: right,
+      venue_symbol: "#{underlying}#{Date.to_iso8601(expiry)}#{right}",
+      multiplier: Decimal.new("100"),
+      settlement_type: nil,
+      expiration_type: nil,
+      last_trading_day: nil,
+      index_option: nil,
+      mini: nil,
+      non_standard: nil,
+      provider: :webull
+    }
+  end
 
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()

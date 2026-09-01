@@ -15,7 +15,7 @@ defmodule DpExchange.Webull.AccountsTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Config, Types}
-  alias DpExchange.Webull.Rest
+  alias DpExchange.Webull.{Fake, Rest}
 
   @moduletag :capture_log
 
@@ -474,6 +474,97 @@ defmodule DpExchange.Webull.AccountsTest do
 
       assert {:error, :account_id_required} =
                Rest.get_transfers(@credentials, plug: exploding, retry_attempts: 0)
+    end
+  end
+
+  describe "get_transactions/2 — the same endpoint, unfiltered" do
+    test "no activity_types parameter is sent, which is what asks for everything" do
+      # A default list here would be this package deciding what "every activity" means.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_transactions(@credentials,
+                 account_id: "acct-1",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "account_id=acct-1"
+      refute query =~ "activity_types"
+    end
+
+    test "a caller's own types still go to the venue" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_transactions(@credentials,
+                 account_id: "acct-1",
+                 activity_types: ~w(FEES DIVIDENDS),
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "activity_types=FEES%2CDIVIDENDS"
+    end
+
+    test "the account id is required, as it is on get_transfers/2" do
+      assert {:error, :account_id_required} = Rest.get_transactions(@credentials, [])
+    end
+
+    test "a cross-year range is refused up front here too" do
+      # A venue that silently truncates to one year returns a real list missing the other
+      # half, which reads as "nothing happened then".
+      assert {:error, {:cross_year_range, 2025, 2026}} =
+               Rest.get_transactions(@credentials,
+                 account_id: "acct-1",
+                 start: ~U[2025-12-01 00:00:00Z],
+                 end: ~U[2026-01-31 00:00:00Z]
+               )
+    end
+
+    test "the fake returns kinds get_transfers/2 filters out" do
+      # The two functions looking interchangeable is the failure this guards.
+      assert {:ok, rows} = Fake.get_transactions(%{}, account_id: "acct-1")
+      types = Enum.map(rows, & &1["activity_type"])
+      assert "DEPOSIT" in types
+      assert "FEES" in types
+      assert "DIVIDENDS" in types
+
+      assert {:ok, transfers} = Fake.get_transfers(%{}, account_id: "acct-1")
+      refute Enum.any?(transfers, &(&1["activity_type"] == "FEES"))
+    end
+
+    test "the facade reaches it" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([%{"activity_type" => "FEES"}]))
+      end
+
+      assert {:ok, [_row]} =
+               DpExchange.Webull.get_transactions(@credentials,
+                 account_id: "acct-1",
+                 plug: plug,
+                 retry_attempts: 0
+               )
     end
   end
 end

@@ -381,15 +381,33 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert multi =~ "count=500"
     end
 
-    test "US_OPTION is refused, as it is on the depth endpoint" do
-      exploding = fn _conn -> raise "must not ask the tick endpoint for options" end
+    test "US_OPTION reaches the option tape, not the stock one" do
+      # This asserted a refusal until 2026-09-01. It was a false negative: the *stock* tape
+      # refuses options, and the venue publishes a separate option tape beside it.
+      me = self()
 
-      assert {:error, {:unsupported_book_category, "US_OPTION"}} =
-               Rest.get_trades("AAPL", @credentials,
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([%{"symbol" => "AAPL250321C00100000", "result" => []}])
+        )
+      end
+
+      assert {:ok, []} =
+               Rest.get_trades("AAPL250321C00100000", @credentials,
                  category: "US_OPTION",
-                 plug: exploding,
+                 plug: plug,
                  retry_attempts: 0
                )
+
+      assert_receive {:path, "/market-data/options/ticks/list", query}
+      # The option tape takes no session filter, and sending one would assert a session
+      # model that endpoint did not offer.
+      refute query =~ "trading_sessions"
     end
 
     test "an empty tape is an empty list" do
@@ -470,15 +488,42 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert_receive {:path, "/market-data/crypto/snapshots/list"}
     end
 
-    test "US_OPTION is refused — the vendor says the stock snapshot does not serve it" do
-      exploding = fn _conn -> raise "must not ask the stock snapshot for options" end
+    test "US_OPTION reaches the option snapshot, not the stock one" do
+      # This asserted a refusal until 2026-09-01, on the reading that "the vendor says the
+      # stock snapshot does not serve it". True of the stock snapshot; a false negative
+      # about the venue, which publishes `/market-data/options/snapshots/list` beside it.
+      me = self()
 
-      assert {:error, {:unsupported_snapshot_category, "US_OPTION"}} =
-               Rest.get_price("AAPL", @credentials,
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([
+            %{
+              "symbol" => "AAPL250321C00100000",
+              "price" => "3.25",
+              "quote_time" => "2026-09-01T14:30:00.000+00:00"
+            }
+          ])
+        )
+      end
+
+      assert {:ok, quote_row} =
+               Rest.get_price("AAPL250321C00100000", @credentials,
                  category: "US_OPTION",
-                 plug: exploding,
+                 plug: plug,
                  retry_attempts: 0
                )
+
+      assert Decimal.equal?(quote_row.price, Decimal.new("3.25"))
+      assert_receive {:path, "/market-data/options/snapshots/list", query}
+      # No extended-hours or overnight flags: they belong to the stock snapshot, and
+      # sending them here would assert a session model this endpoint did not offer.
+      refute query =~ "extend_hour_required"
+      refute query =~ "overnight_required"
     end
 
     test "stock volume is real, and crypto volume stays nil" do
@@ -684,11 +729,37 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert Rest.adjusted?("3m") == nil
     end
 
-    test "US_OPTION is refused, as on every other stock endpoint" do
+    test "US_OPTION reaches the option bars, and get_stock_bars/5 still refuses it" do
+      # Two different claims, and only the second was ever true. `get_historical_prices/5`
+      # routes by category and options have their own bars endpoint; `get_stock_bars/5` is
+      # the stock endpoint by name and refuses, which is not the venue lacking the data.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.method})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([%{"symbol" => "AAPL250321C00100000", "bars" => []}])
+        )
+      end
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL250321C00100000", "1d", [], @credentials,
+                 category: "US_OPTION",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      # A GET where the stock bars are a POST — the venue's own split.
+      assert_receive {:path, "/market-data/options/bars/list", "GET"}
+
       exploding = fn _conn -> raise "must not ask the stock bars for options" end
 
       assert {:error, {:unsupported_book_category, "US_OPTION"}} =
-               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+               Rest.get_stock_bars("AAPL", "1d", [], @credentials,
                  category: "US_OPTION",
                  plug: exploding,
                  retry_attempts: 0
