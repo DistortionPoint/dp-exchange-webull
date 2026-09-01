@@ -104,23 +104,25 @@ defmodule DpExchange.Webull do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
-    # **Both endpoints exist. The venue excludes crypto from them, which this package only
-    # serves.** Read from the vendor's own reference pages on 2026-09-01:
+    # **Both endpoints exist. The venue excludes crypto from them — and this package's
+    # `[:crypto]` is a statement about the package today, not about the venue.** Read from
+    # the vendor's own reference pages on 2026-09-01:
     #
     #   /trading/orders/preview  — "For crypto trading, this feature is currently not
     #                              supported."
     #   /trading/orders/replace  — "Modifies equity, options and futures orders […] For
     #                              crypto trading, this feature is currently not supported."
     #
-    # The previous note here said preview "has no endpoint at all", which was false — a
-    # claim about the venue that the venue contradicts. What is true is narrower and worth
-    # stating exactly: the endpoints are documented, and they are documented as excluding
-    # the one asset class this package declares.
+    # An earlier note here said preview "has no endpoint at all", which was false — a claim
+    # about the venue that the venue contradicts. A later one said there was therefore
+    # nothing to implement, which was also wrong: it read this package's current
+    # `asset_classes` as a permanent boundary. Webull publishes stocks, options, futures
+    # and event contracts, and both endpoints serve them.
     #
-    # So `replace_order/4` is not merely unimplemented; on crypto there is nothing to
-    # implement. A caller wanting a different order cancels and re-places, which is NOT
-    # equivalent — it opens a window in which no order is live — and that window is the
-    # venue's, not this package's.
+    # So these are **unimplemented, not unavailable**, and they unblock when this package's
+    # asset classes widen. `replace_order/4`'s absence still costs a caller the atomic
+    # amendment: a cancel-and-re-place opens a window in which no order is live, and on
+    # crypto that window is the venue's rather than this package's.
     {:preview_order, 3},
     {:preview_replace, 4},
     {:replace_order, 4},

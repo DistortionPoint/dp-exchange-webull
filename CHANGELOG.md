@@ -71,19 +71,24 @@ acceptable changelog line.
 
 
 - **Core 0.1.21's three new callbacks are declared, each with the venue checked.**
-  `preview_replace/4` follows `replace_order/4` — the venue excludes crypto from the
-  amendment endpoint, so there is nothing to preview. `cancel_all_orders/2` has no endpoint
-  at all: `/trading/orders/cancel` takes one `client_order_id` and the venue publishes no
-  cancel-all or cancel-session. `close_position/3` likewise —
-  `/trading/assets/positions/list` reads positions and nothing closes one.
+  `preview_replace/4` follows `replace_order/4`: the venue excludes **crypto** from the
+  amendment endpoint, and crypto is what this package declares today — so it is
+  **unimplemented rather than unavailable**, and it unblocks when this package's
+  `asset_classes` widen to the stocks, options and futures Webull also serves.
+  `cancel_all_orders/2` has no endpoint at all: `/trading/orders/cancel` takes one
+  `client_order_id` and the venue publishes no cancel-all or cancel-session.
+  `close_position/3` likewise — `/trading/assets/positions/list` reads positions and
+  nothing closes one, at any asset class.
 
 
 - **Corrected a false claim about the venue.** `@unsupported` said `preview_order/3` "has
   no endpoint at all". `/trading/orders/preview` exists and is documented; what the vendor
   says is *"For crypto trading, this feature is currently not supported"*, and the same
   sentence appears on `/trading/orders/replace`. `/trading/orders/batch-place` is stocks
-  only and gated per client. The endpoints are unimplemented for the same reason as before,
-  but the reason is now the one the venue gives rather than one this package invented.
+  only and gated per client.
+  **They are unimplemented, not unavailable.** `asset_classes: [:crypto]` describes this
+  package as it stands, not a boundary of the venue, and treating the two as the same is
+  the same mistake in a different place. Widening the package reaches all three.
 
 - **BREAKING: `get_historical_prices/4` returns `Core.Types.Candle` structs, and the bar's
   time is `opened_at`.** It returned bare maps keyed on `:timestamp`.
