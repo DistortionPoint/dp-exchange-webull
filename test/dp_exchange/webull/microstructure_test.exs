@@ -226,7 +226,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
     end
 
     test "the imbalance comes back with the venue's three prices" do
-      assert {:ok, %Types.AuctionImbalance{} = imbalance} =
+      assert {:ok, [%Types.AuctionImbalance{} = imbalance]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(noii_body()),
@@ -244,7 +244,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
       # The venue documents `imbalance_side` with the example "2" and does not say what 2
       # means. Guessing it backwards tells a caller there is unmatched buying when there is
       # selling, at the moment of the day with the most volume behind it.
-      assert {:ok, imbalance} =
+      assert {:ok, [imbalance]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(noii_body()),
@@ -258,7 +258,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
     test "the venue's time and observed_at are both carried, and they differ" do
       # Outside the auction window the venue returns the LAST imbalance. Without both times
       # a caller cannot tell this morning's from a running one.
-      assert {:ok, imbalance} =
+      assert {:ok, [imbalance]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(noii_body()),
@@ -275,7 +275,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
       # stale imbalance look like a fresh one.
       body = noii_body() |> put_in([Access.at(0), "imbalance_time"], nil)
 
-      assert {:ok, imbalance} =
+      assert {:ok, [imbalance]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(body),
@@ -297,7 +297,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
         |> Plug.Conn.resp(200, Jason.encode!(noii_body()))
       end
 
-      assert {:ok, _opening} =
+      assert {:ok, [_opening]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :opening,
                  plug: plug,
@@ -307,7 +307,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
       assert_receive {:query, opening}
       assert opening =~ "imbalance_action_type=PRE_OPEN"
 
-      assert {:ok, _closing} =
+      assert {:ok, [_closing]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: plug,
@@ -341,8 +341,81 @@ defmodule DpExchange.Webull.MicrostructureTest do
                )
     end
 
+    test "history: true reads the bars endpoint, not the snapshot" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(noii_body()))
+      end
+
+      assert {:ok, [_snapshot]} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :closing,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, "/market-data/stocks/noii-snapshots/list"}
+
+      assert {:ok, [_bar]} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :closing,
+                 history: true,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, "/market-data/stocks/noii-bars/list"}
+    end
+
+    test "a bars entry carries no quantities and no side, and the ratio is nil" do
+      # The bars endpoint publishes the three prices and the time and nothing else. `nil`
+      # says the venue did not publish them there — it is not an imbalance of zero, and a
+      # caller computing a ratio must not get a number that looks balanced.
+      bars = [
+        %{
+          "instrument_id" => "913256135",
+          "symbol" => "AAPL",
+          "imbalance_time" => 1_711_262_998_500,
+          "imbalance_ref_price" => "172.35",
+          "imbalance_near_price" => "173.1",
+          "imbalance_far_price" => "175.5",
+          "imbalance_action_type" => "PRE_OPEN"
+        }
+      ]
+
+      assert {:ok, [entry]} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :opening,
+                 history: true,
+                 plug: responding(bars),
+                 retry_attempts: 0
+               )
+
+      assert entry.paired_quantity == nil
+      assert entry.imbalance_quantity == nil
+      assert entry.side == nil
+      assert Types.AuctionImbalance.imbalance_ratio(entry) == nil
+      # The prices the bars DO publish are there.
+      assert Decimal.equal?(entry.near_price, Decimal.new("173.1"))
+    end
+
+    test "an empty series is an empty list, not an error" do
+      assert {:ok, []} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :opening,
+                 history: true,
+                 plug: responding([]),
+                 retry_attempts: 0
+               )
+    end
+
     test "the ratio is available and reflects the venue's own two numbers" do
-      assert {:ok, imbalance} =
+      assert {:ok, [imbalance]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(noii_body()),

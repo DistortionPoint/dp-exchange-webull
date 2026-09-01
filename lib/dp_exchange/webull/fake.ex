@@ -202,24 +202,7 @@ defmodule DpExchange.Webull.Fake do
     case Keyword.get(opts, :auction) do
       auction when auction in [:opening, :closing] ->
         with :ok <- authenticated(opts) do
-          {:ok,
-           %Types.AuctionImbalance{
-             symbol: symbol,
-             auction: auction,
-             paired_quantity: Decimal.new("701859"),
-             imbalance_quantity: Decimal.new("5715"),
-             # The venue's code, unmapped in the fake as in production.
-             side: "2",
-             reference_price: Decimal.new("253.83"),
-             near_price: Decimal.new("253.93"),
-             far_price: Decimal.new("253.98"),
-             # Deliberately earlier than observed_at: outside an auction window the venue
-             # returns the last imbalance, and a fake where the two agree would never
-             # exercise a consumer's staleness check.
-             venue_time: @at,
-             observed_at: DateTime.add(@at, 3600, :second),
-             provider: :webull
-           }}
+          {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
         end
 
       nil ->
@@ -228,6 +211,28 @@ defmodule DpExchange.Webull.Fake do
       other ->
         {:error, {:unsupported_auction, other}}
     end
+  end
+
+  defp fake_imbalance(symbol, auction, history?) do
+    %Types.AuctionImbalance{
+      symbol: symbol,
+      auction: auction,
+      # **The bars endpoint publishes none of these**, and the fake says so rather than
+      # filling them in — a consumer computing a ratio over the series must find `nil`
+      # here, not a number that looks balanced.
+      paired_quantity: unless(history?, do: Decimal.new("701859")),
+      imbalance_quantity: unless(history?, do: Decimal.new("5715")),
+      side: unless(history?, do: "2"),
+      reference_price: Decimal.new("253.83"),
+      near_price: Decimal.new("253.93"),
+      far_price: Decimal.new("253.98"),
+      # Deliberately earlier than observed_at: outside an auction window the venue returns
+      # the last imbalance, and a fake where the two agree would never exercise a
+      # consumer's staleness check.
+      venue_time: @at,
+      observed_at: DateTime.add(@at, 3600, :second),
+      provider: :webull
+    }
   end
 
   @impl true

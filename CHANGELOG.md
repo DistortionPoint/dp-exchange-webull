@@ -38,9 +38,15 @@ acceptable changelog line.
 
   Requires a separate Webull subscription, which the vendor states on the endpoint.
 
-- **`get_auction_imbalance/2` — the NOII snapshot**,
+- **`get_auction_imbalance/2` — the NOII snapshot and the published series**,
   `/market-data/stocks/noii-snapshots/list`. `opts[:auction]` is required: `:opening` and
   `:closing` are different auctions with different windows.
+
+  **Two endpoints.** `history: true` reads `/noii-bars/list` instead of
+  `/noii-snapshots/list`, and **the bars publish the three prices and the time and nothing
+  else** — no paired quantity, no imbalance quantity, no side. Those come back `nil`, which
+  says the venue did not publish them there; a caller computing a ratio over the series
+  gets `nil` rather than a number that looks balanced.
 
   **Outside the auction window the venue returns the last imbalance, not nothing** — its own
   documentation says so. Both the venue's `imbalance_time` and this package's `observed_at`

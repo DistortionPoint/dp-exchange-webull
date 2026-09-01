@@ -126,7 +126,7 @@ defmodule DpExchange.Webull.DelegationTest do
     test "get_auction_imbalance/2" do
       body = [%{"symbol" => "AAPL", "paired_shares" => "100", "imbalance_shares" => "5"}]
 
-      assert {:ok, imbalance} =
+      assert {:ok, [imbalance]} =
                Webull.get_auction_imbalance("AAPL", base(auction: :closing, plug: json(body)))
 
       assert imbalance.auction == :closing

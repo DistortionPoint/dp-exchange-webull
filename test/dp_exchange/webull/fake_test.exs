@@ -297,7 +297,7 @@ defmodule DpExchange.Webull.FakeTest do
     test "the imbalance's venue time is older than when it was observed" do
       # Outside an auction window the venue returns the last imbalance. A fake where the
       # two agree would never exercise a consumer's staleness check.
-      assert {:ok, imbalance} = Fake.get_auction_imbalance("AAPL", [auction: :closing] ++ @opts)
+      assert {:ok, [imbalance]} = Fake.get_auction_imbalance("AAPL", [auction: :closing] ++ @opts)
 
       assert DateTime.compare(imbalance.observed_at, imbalance.venue_time) == :gt
       assert imbalance.side == "2"

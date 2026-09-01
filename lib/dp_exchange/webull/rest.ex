@@ -871,41 +871,57 @@ defmodule DpExchange.Webull.Rest do
   defp session_atom(_other), do: nil
 
   @doc """
-  The auction order imbalance — `/market-data/stocks/noii-snapshots/list`.
+  The auction order imbalance — snapshot or published series.
 
-  **Requires a Nasdaq TotalView non-display subscription**, which the vendor states on the
-  endpoint.
+  **Requires a Nasdaq TotalView non-display subscription**, which the vendor states on both
+  endpoints.
 
   `opts[:auction]` is required and is `:opening` or `:closing`; the venue names them
   `PRE_OPEN` and `PRE_CLOSE`. They are different auctions with different windows, and
   choosing one for a caller who did not say would answer a question nobody asked.
 
-  ## Outside the auction window this returns the last one, not nothing
+  ## Two endpoints, and the series carries less than the snapshot
+
+      snapshot          /market-data/stocks/noii-snapshots/list
+      history: true     /market-data/stocks/noii-bars/list
+
+  **The bars publish the three auction prices and the time and nothing else** — no
+  `paired_shares`, no `imbalance_shares`, no `imbalance_side`. Those come back `nil`, which
+  says the venue did not publish them on that endpoint. `nil` there is not an imbalance of
+  zero, and a caller computing a ratio from the series gets `nil` rather than a number that
+  looks balanced.
+
+  ## Outside the auction window the snapshot returns the last one, not nothing
 
   The vendor is explicit: published during ET 9:28–9:30 and 15:50–16:00, updating every 5
   seconds, and **"outside these periods, historical data is returned"**. So the venue's own
   `imbalance_time` is carried alongside `observed_at`, and the two together are the only way
-  a caller can tell a live imbalance from this morning's. A package returning only one of
-  them would make a stale auction indistinguishable from a running one.
+  a caller can tell a live imbalance from this morning's.
 
   `side` is the venue's own value, unmapped — see `Core.Types.AuctionImbalance` for why.
   """
   @spec get_auction_imbalance(String.t(), map(), keyword()) ::
-          {:ok, AuctionImbalance.t()} | {:error, term()} | {:refused, term()}
+          {:ok, [AuctionImbalance.t()]} | {:error, term()} | {:refused, term()}
   def get_auction_imbalance(symbol, credentials, opts) do
     observed_at = DateTime.utc_now()
 
     with {:ok, auction, action_type} <- auction_type(Keyword.get(opts, :auction)) do
+      path =
+        if Keyword.get(opts, :history, false),
+          do: "/market-data/stocks/noii-bars/list",
+          else: "/market-data/stocks/noii-snapshots/list"
+
       params = %{
         "symbol" => symbol,
         "category" => "US_STOCK",
         "imbalance_action_type" => action_type
       }
 
-      with {:ok, body} <-
-             get("/market-data/stocks/noii-snapshots/list", params, credentials, opts),
-           {:ok, row} <- first_row(body) do
-        {:ok, to_imbalance(row, symbol, auction, observed_at)}
+      with {:ok, body} <- get(path, params, credentials, opts) do
+        {:ok,
+         body
+         |> rows()
+         |> Enum.map(&to_imbalance(&1, symbol, auction, observed_at))}
       end
     end
   end
