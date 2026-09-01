@@ -399,4 +399,172 @@ defmodule DpExchange.Webull.OrderBookTest do
                Rest.get_trades("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
     end
   end
+
+  describe "the two snapshot endpoints are not interchangeable" do
+    defp stock_snapshot(overrides \\ %{}) do
+      [
+        Map.merge(
+          %{
+            "symbol" => "AAPL",
+            "instrument_id" => "913256135",
+            "price" => "100",
+            "open" => "99",
+            "high" => "105",
+            "low" => "99",
+            "volume" => "1000",
+            "bid" => "99.99",
+            "ask" => "100.01",
+            "bid_size" => "5",
+            "ask_size" => "7",
+            "last_trade_time" => 1_787_936_147_000
+          },
+          overrides
+        )
+      ]
+    end
+
+    test "a stock category reads the stock endpoint, not the crypto one" do
+      # Sending a stock symbol to the crypto endpoint returns nothing rather than an error,
+      # which is why the category picks the path rather than being passed through.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(stock_snapshot()))
+      end
+
+      assert {:ok, quote_} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path, query}
+      assert path == "/market-data/stocks/snapshots/list"
+      assert query =~ "category=US_STOCK"
+      assert quote_.symbol == "AAPL"
+    end
+
+    test "the default is still crypto, which is what this package served before" do
+      # Changing it would silently re-route existing callers onto a different market.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([%{"symbol" => "BTCUSD", "price" => "40000", "last_trade_time" => 1}])
+        )
+      end
+
+      assert {:ok, _quote} =
+               Rest.get_price("BTC-USD", @credentials, plug: plug, retry_attempts: 0)
+
+      assert_receive {:path, "/market-data/crypto/snapshots/list"}
+    end
+
+    test "US_OPTION is refused — the vendor says the stock snapshot does not serve it" do
+      exploding = fn _conn -> raise "must not ask the stock snapshot for options" end
+
+      assert {:error, {:unsupported_snapshot_category, "US_OPTION"}} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_OPTION",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "stock volume is real, and crypto volume stays nil" do
+      # This venue publishes no crypto volume anywhere. `nil` says so; zero would claim a
+      # genuinely flat interval.
+      assert {:ok, stock} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding(stock_snapshot()),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(stock.volume, Decimal.new("1000"))
+
+      crypto = [%{"symbol" => "BTCUSD", "price" => "40000", "last_trade_time" => 1}]
+
+      assert {:ok, quote_} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(crypto),
+                 retry_attempts: 0
+               )
+
+      assert quote_.volume == nil
+    end
+
+    test "an equity ticker is sent as-is, not through the pair splitter" do
+      # A splitter hunting for a quote currency would mangle a ticker ending in one.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(stock_snapshot(%{"symbol" => "SOLV"})))
+      end
+
+      assert {:ok, quote_} =
+               Rest.get_price("SOLV", @credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "symbols=SOLV"
+      assert quote_.symbol == "SOLV"
+    end
+
+    test "the extended-hours flags are sent explicitly on stocks and absent on crypto" do
+      # Both default to false at the venue. Sending them means a caller reading `nil` knows
+      # it did not ask, rather than that the venue had nothing.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(stock_snapshot()))
+      end
+
+      assert {:ok, _quote} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 extended_hours: true,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "extend_hour_required=true"
+      assert query =~ "overnight_required=false"
+    end
+
+    test "the stock snapshot also serves the top of book" do
+      assert {:ok, top} =
+               Rest.get_top_of_book("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding(stock_snapshot()),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(top.bid, Decimal.new("99.99"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("7"))
+      assert top.symbol == "AAPL"
+    end
+  end
 end

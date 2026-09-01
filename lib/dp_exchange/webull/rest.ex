@@ -79,28 +79,87 @@ defmodule DpExchange.Webull.Rest do
   @spec timeframes() :: [String.t()]
   def timeframes, do: ~w(1m 5m 15m 30m 1h 2h 4h 1d)
 
-  @doc "Last price for one symbol, from the crypto snapshot endpoint."
+  # **Two snapshot endpoints, one per market**, and they are not interchangeable: the crypto
+  # one takes `US_CRYPTO` and the stock one takes `US_STOCK` or `US_ETF` and refuses
+  # `US_OPTION`. Sending a stock symbol to the crypto endpoint returns nothing rather than
+  # an error, which is why the category picks the path here rather than being passed through.
+  #
+  # `opts[:category]` selects; the default is `US_CRYPTO`, which is what this package served
+  # before its asset classes widened. Changing that default would silently re-route existing
+  # callers onto a different market.
+  defp snapshot_path("US_CRYPTO"), do: {:ok, "/market-data/crypto/snapshots/list"}
+
+  defp snapshot_path(category) when category in ["US_STOCK", "US_ETF"],
+    do: {:ok, "/market-data/stocks/snapshots/list"}
+
+  defp snapshot_path(category), do: {:error, {:unsupported_snapshot_category, category}}
+
+  # The stock snapshot publishes extended-hours and overnight blocks only when asked. Both
+  # are marked optional by the venue and default to false, and this sends them explicitly so
+  # a caller reading `nil` knows it did not ask rather than that the venue had nothing.
+  defp snapshot_params(native, category, opts) do
+    base = %{"symbols" => native, "category" => category}
+
+    if category == "US_CRYPTO" do
+      base
+    else
+      base
+      |> Map.put("extend_hour_required", to_string(Keyword.get(opts, :extended_hours, false)))
+      |> Map.put("overnight_required", to_string(Keyword.get(opts, :overnight, false)))
+    end
+  end
+
+  @doc """
+  Last price for one symbol.
+
+  **Crypto and stocks are different endpoints**, chosen by `opts[:category]` — `US_CRYPTO`
+  (the default), `US_STOCK` or `US_ETF`. `US_OPTION` is refused: the vendor states the stock
+  snapshot does not serve it.
+
+  ## Volume is `nil` on crypto and real on stocks
+
+  This venue publishes no crypto volume anywhere, so a crypto quote's volume is `nil` —
+  never zero, which would claim a genuinely flat interval. The **stock** snapshot does
+  publish `volume`, and it is the day's aggregate rather than the last trade's size; the
+  venue names no per-trade size on this endpoint, so that is what a caller gets and the
+  field carries the venue's own meaning.
+  """
   @spec get_price(String.t(), map(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, credentials, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-    params = %{"symbols" => native, "category" => "US_CRYPTO"}
+    category = Keyword.get(opts, :category, "US_CRYPTO")
 
-    with {:ok, body} <- get("/market-data/crypto/snapshots/list", params, credentials, opts),
-         {:ok, row} <- first_row(body),
-         {:ok, price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
-         {:ok, timestamp} <- venue_time(row) do
-      {:ok,
-       %Quote{
-         symbol: SymbolFormat.to_canonical_symbol(native),
-         price: decimal(price),
-         # Not an oversight and not a zero: this venue reports no crypto volume anywhere.
-         volume: nil,
-         timestamp: timestamp,
-         provider: :webull
-       }}
+    with {:ok, path} <- snapshot_path(category) do
+      native = snapshot_symbol(symbol, category)
+      params = snapshot_params(native, category, opts)
+
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, row} <- first_row(body),
+           {:ok, price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
+           {:ok, timestamp} <- venue_time(row) do
+        {:ok,
+         %Quote{
+           symbol: snapshot_canonical(native, category),
+           price: decimal(price),
+           volume: snapshot_volume(row, category),
+           timestamp: timestamp,
+           provider: :webull
+         }}
+      end
     end
   end
+
+  # Only crypto pairs go through the canonical mapper — an equity ticker is already the
+  # venue's own identifier, and a splitter hunting for a quote currency would mangle one.
+  defp snapshot_symbol(symbol, "US_CRYPTO"), do: SymbolFormat.to_exchange_symbol(symbol)
+  defp snapshot_symbol(symbol, _category), do: symbol
+
+  defp snapshot_canonical(native, "US_CRYPTO"), do: SymbolFormat.to_canonical_symbol(native)
+  defp snapshot_canonical(native, _category), do: native
+
+  # `nil` on crypto because the venue reports none — not zero, which claims a flat interval.
+  defp snapshot_volume(_row, "US_CRYPTO"), do: nil
+  defp snapshot_volume(row, _category), do: decimal(value(row, ["volume"]))
 
   @doc """
   OHLC bars for a symbol and canonical timeframe.
@@ -145,22 +204,26 @@ defmodule DpExchange.Webull.Rest do
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, credentials, opts) do
-    native = SymbolFormat.to_exchange_symbol(symbol)
-    params = %{"symbols" => native, "category" => "US_CRYPTO"}
+    category = Keyword.get(opts, :category, "US_CRYPTO")
 
-    with {:ok, body} <- get("/market-data/crypto/snapshots/list", params, credentials, opts),
-         {:ok, row} <- first_row(body) do
-      {:ok,
-       %TopOfBook{
-         symbol: SymbolFormat.to_canonical_symbol(native),
-         bid: decimal(value(row, ["bidPrice", "bid_price", "bid"])),
-         ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
-         bid_size: decimal(value(row, ["bidSize", "bid_size"])),
-         ask_size: decimal(value(row, ["askSize", "ask_size"])),
-         venue_time: top_of_book_time(row),
-         observed_at: DateTime.utc_now(),
-         provider: :webull
-       }}
+    with {:ok, path} <- snapshot_path(category) do
+      native = snapshot_symbol(symbol, category)
+      params = snapshot_params(native, category, opts)
+
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        {:ok,
+         %TopOfBook{
+           symbol: snapshot_canonical(native, category),
+           bid: decimal(value(row, ["bidPrice", "bid_price", "bid"])),
+           ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
+           bid_size: decimal(value(row, ["bidSize", "bid_size"])),
+           ask_size: decimal(value(row, ["askSize", "ask_size"])),
+           venue_time: top_of_book_time(row),
+           observed_at: DateTime.utc_now(),
+           provider: :webull
+         }}
+      end
     end
   end
 

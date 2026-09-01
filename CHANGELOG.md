@@ -22,6 +22,27 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_price/3` and `get_top_of_book/3` reach the stock snapshot**,
+  `/market-data/stocks/snapshots/list`, chosen by `opts[:category]`.
+
+  **The two snapshot endpoints are not interchangeable and the category picks the path.**
+  Sending a stock symbol to the crypto endpoint returns *nothing* rather than an error, so
+  passing the category through to one endpoint would have produced silence. `US_OPTION` is
+  refused — the vendor states the stock snapshot does not serve it.
+
+  **The default is still `US_CRYPTO`**, which is what this package served before its asset
+  classes widened; changing it would silently re-route existing callers onto a different
+  market.
+
+  **Volume is real on stocks and stays `nil` on crypto.** The venue publishes no crypto
+  volume anywhere, and `nil` says so where zero would claim a genuinely flat interval. The
+  stock figure is the day's aggregate, which is what the venue names on this endpoint.
+
+  `extend_hour_required` and `overnight_required` are sent explicitly on stocks so a caller
+  reading `nil` knows it did not ask, rather than that the venue had nothing. Equity tickers
+  bypass the canonical pair mapper, as they do on the order path.
+
+
 - **`get_trades/2` — tick-by-tick public trades**, `/market-data/stocks/ticks/list`.
 
   **The venue documents `side` as "Such as: B S G L N" and defines none of them.** `B` and
