@@ -451,6 +451,84 @@ defmodule DpExchange.Webull.Rest do
   defp instrument_atom("CRYPTO"), do: :crypto
   defp instrument_atom("EVENT"), do: :event
   defp instrument_atom(_other), do: nil
+
+  # The venue's own activity types. `get_transfers/2` is documented in the contract as
+  # "deposit and withdrawal history", so these three are what it asks for — the endpoint
+  # itself carries far more.
+  @transfer_activity_types ~w(DEPOSIT WITHDRAW TRANSFER)
+
+  @doc """
+  Money into and out of one account — `/trading/activities/cash-activities/list`.
+
+  Requires `opts[:account_id]`.
+
+  ## This endpoint is much wider than transfers, and that matters
+
+  It lists **every** cash activity: `TRADE`, `FEES`, `DIVIDENDS`, `TAX`, `INTERESTS`,
+  `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and `OTHER` alongside
+  `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks `get_transfers/2` for deposit and
+  withdrawal history, because that is what a cost basis for transferred-in assets needs.
+
+  **Returning all of it under that name would be wrong in a way that costs money.** A
+  dividend and a deposit both credit cash and neither is the other; a caller computing what
+  it put in would count income as contribution. So this asks the venue for
+  `DEPOSIT,WITHDRAW,TRANSFER` and `opts[:activity_types]` widens it, taking the venue's own
+  strings.
+
+  **The filter goes to the venue, not to the page.** Filtering here would silently drop
+  matching rows that were on the next page.
+
+  ## The venue's two constraints, enforced rather than discovered
+
+  Without a time range the venue answers **the last 7 days** — its default, not this
+  package's, and stated here so a caller does not read an empty list as "no deposits ever".
+
+  `start_time` and `end_time` must fall in the **same calendar year**; the venue says
+  cross-year queries are not supported. This refuses such a range up front rather than
+  sending it and reading whatever comes back, because a venue that silently truncates to
+  one year returns a real list that is missing the other half.
+
+  Rows come back as the venue sends them. `activity_sub_type` alone has 60-odd values
+  carrying the distinction between an ACH deposit and a wire, a reversal and a payment —
+  and no struct in this contract has anywhere to put them.
+  """
+  @spec get_transfers(map(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_transfers(credentials, opts) do
+    types = Keyword.get(opts, :activity_types, @transfer_activity_types)
+
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
+      params =
+        %{"account_id" => account_id, "activity_types" => Enum.join(types, ",")}
+        |> put_present("start_time", iso_millis(Keyword.get(opts, :start)))
+        |> put_present("end_time", iso_millis(Keyword.get(opts, :end)))
+        |> put_present("page_size", Keyword.get(opts, :limit))
+        |> put_present("last_activity_id", Keyword.get(opts, :after))
+
+      with {:ok, body} <-
+             get("/trading/activities/cash-activities/list", params, credentials, opts) do
+        {:ok, rows(body)}
+      end
+    end
+  end
+
+  # The venue's stated limit. Sending a cross-year range and reading the answer would give a
+  # real list missing whichever half the venue dropped.
+  defp same_year(%DateTime{year: year}, %DateTime{year: year}), do: :ok
+
+  defp same_year(%DateTime{year: from}, %DateTime{year: to}),
+    do: {:error, {:cross_year_range, from, to}}
+
+  defp same_year(_start, _finish), do: :ok
+
+  # The venue's documented format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'.
+  defp iso_millis(nil), do: nil
+
+  defp iso_millis(%DateTime{} = at),
+    do: at |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
+
+  defp iso_millis(other), do: other
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row

@@ -252,7 +252,8 @@ defmodule DpExchange.WebullTest do
       # get_balances and get_positions refuse without an `account_id`, which is the venue's
       # requirement rather than a missing implementation; get_accounts takes none.
       assert Fake.get_fees(@credentials, []) == {:error, :not_supported}
-      assert Fake.get_transfers(@credentials, []) == {:error, :not_supported}
+      # get_transfers/2 is implemented now. It refuses without an account_id, which is the
+      # venue's requirement rather than a missing implementation.
       # place_order is implemented now, so it no longer belongs in this sweep. It refuses
       # for its own reason — the venue requires an account on every order and this package
       # will not choose one — which is a different answer from "not implemented" and is

@@ -321,4 +321,159 @@ defmodule DpExchange.Webull.AccountsTest do
                Rest.get_positions(@credentials, plug: exploding, retry_attempts: 0)
     end
   end
+
+  describe "cash activities — a dividend is not a deposit" do
+    defp activity(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "id" => "a1b2c3d4e5f6g7h8i9j0",
+          "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+          "activity_type" => "DEPOSIT",
+          "activity_sub_type" => "ACH",
+          "currency" => "USD",
+          "trade_date" => "2026-08-31",
+          "net_amount" => "1500.0",
+          "biz_time" => "2026-08-31T10:15:30.691Z"
+        },
+        overrides
+      )
+    end
+
+    test "only deposits, withdrawals and transfers are asked for by default" do
+      # This endpoint also lists TRADE, FEES, DIVIDENDS, TAX, INTERESTS, CORPORATE_ACTION
+      # and more. A dividend and a deposit both credit cash and neither is the other; a
+      # caller computing what it put in would count income as contribution.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_transfers(@credentials,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "activity_types=DEPOSIT%2CWITHDRAW%2CTRANSFER"
+    end
+
+    test "the filter goes to the venue, not to the page it returned" do
+      # Filtering here would silently drop matching rows that were on the next page.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([activity(%{"activity_type" => "DIVIDENDS"})]))
+      end
+
+      assert {:ok, [row]} =
+               Rest.get_transfers(@credentials,
+                 activity_types: ["DIVIDENDS"],
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "activity_types=DIVIDENDS"
+      # The venue answered with what it was asked for, and nothing here second-guessed it.
+      assert row["activity_type"] == "DIVIDENDS"
+    end
+
+    test "rows come back whole, sub-type included" do
+      # activity_sub_type alone has 60-odd values carrying the distinction between an ACH
+      # deposit and a wire, and no struct in this contract has anywhere to put them.
+      assert {:ok, [row]} =
+               Rest.get_transfers(@credentials,
+                 plug: responding([activity()]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert row["activity_sub_type"] == "ACH"
+      assert row["net_amount"] == "1500.0"
+      assert row["biz_time"] == "2026-08-31T10:15:30.691Z"
+    end
+
+    test "a cross-year range is refused before the request" do
+      # The venue says cross-year queries are not supported. Sending one and reading the
+      # answer would give a real list missing whichever half it dropped.
+      exploding = fn _conn -> raise "must not send a cross-year activity range" end
+
+      assert {:error, {:cross_year_range, 2025, 2026}} =
+               Rest.get_transfers(@credentials,
+                 start: ~U[2025-12-31 00:00:00Z],
+                 end: ~U[2026-01-02 00:00:00Z],
+                 plug: exploding,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a range inside one year is sent in the venue's own format" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_transfers(@credentials,
+                 start: ~U[2026-01-05 22:59:59Z],
+                 end: ~U[2026-01-06 22:59:59Z],
+                 limit: 100,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "start_time=2026-01-05T22%3A59%3A59"
+      assert query =~ "page_size=100"
+    end
+
+    test "no range means the venue's own 7-day default, not this package's" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_transfers(@credentials,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      refute query =~ "start_time"
+      refute query =~ "end_time"
+    end
+
+    test "without an account_id nothing is sent" do
+      exploding = fn _conn -> raise "must not read activities without an account" end
+
+      assert {:error, :account_id_required} =
+               Rest.get_transfers(@credentials, plug: exploding, retry_attempts: 0)
+    end
+  end
 end

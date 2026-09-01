@@ -21,6 +21,25 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`get_transfers/2` — cash activities.**
+
+  **The endpoint is much wider than transfers.** It lists `TRADE`, `FEES`, `DIVIDENDS`,
+  `TAX`, `INTERESTS`, `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and
+  `OTHER` alongside `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks
+  `get_transfers/2` for deposit and withdrawal history, and returning all of it under that
+  name would be wrong in a way that costs money: a dividend and a deposit both credit cash
+  and neither is the other, so a caller computing what it put in would count income as
+  contribution. This asks the venue for the three, and `opts[:activity_types]` widens it.
+
+  **The venue's two constraints are enforced rather than discovered.** Without a range it
+  answers the last 7 days — its default, stated in the docs here so an empty list is not
+  read as "no deposits ever". `start_time` and `end_time` must be in the same calendar year,
+  and a cross-year range is refused up front rather than sent: a venue that silently
+  truncates returns a real list missing the other half.
+
+  Rows come back whole. `activity_sub_type` alone has 60-odd values carrying the difference
+  between an ACH deposit and a wire, and no struct in this contract has anywhere to put them.
+
 - **`get_accounts/2`, `get_balances/2` and `get_positions/1`.** The package could not say
   what the credential holds or what it is exposed to.
 

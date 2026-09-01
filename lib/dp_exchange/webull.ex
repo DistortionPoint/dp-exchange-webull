@@ -139,7 +139,6 @@ defmodule DpExchange.Webull do
     {:get_market_overview, 1},
     {:list_instruments, 1},
     {:get_fees, 2},
-    {:get_transfers, 2},
     {:get_trade_history, 2},
     {:get_rate_limit_status, 2},
     {:test_connection, 2},
@@ -271,7 +270,14 @@ defmodule DpExchange.Webull do
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def get_transfers(_credentials, _opts), do: Venue.not_supported()
+  @doc """
+  Money into and out of one account. Requires `opts[:account_id]`.
+
+  See `DpExchange.Webull.Rest.get_transfers/2` — in particular why the endpoint's wider
+  activity types are excluded unless asked for, and what the venue's 7-day default means
+  for an empty answer.
+  """
+  def get_transfers(credentials, opts), do: Rest.get_transfers(credentials, with_limiter(opts))
   @impl true
   def place_order(credentials, request, opts \\ []),
     do: Rest.place_order(credentials, request, with_limiter(opts))

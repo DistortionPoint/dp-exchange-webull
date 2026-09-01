@@ -178,7 +178,40 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_fees(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def get_transfers(_credentials, _opts), do: Venue.not_supported()
+  def get_transfers(_credentials, opts) do
+    with :ok <- fake_account(opts) do
+      # A dividend alongside a deposit, because that is the distinction a consumer must
+      # handle: both credit cash and neither is the other. The fake filters the same way
+      # the real package does.
+      types = Keyword.get(opts, :activity_types, ~w(DEPOSIT WITHDRAW TRANSFER))
+
+      rows = [
+        %{
+          "id" => "a1b2c3",
+          "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+          "activity_type" => "DEPOSIT",
+          "activity_sub_type" => "ACH",
+          "currency" => "USD",
+          "trade_date" => "2026-08-31",
+          "net_amount" => "1500.0",
+          "biz_time" => "2026-08-31T10:15:30.691Z"
+        },
+        %{
+          "id" => "d4e5f6",
+          "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+          "activity_type" => "DIVIDENDS",
+          "activity_sub_type" => "INCOME",
+          "currency" => "USD",
+          "trade_date" => "2026-08-30",
+          "net_amount" => "12.40",
+          "biz_time" => "2026-08-30T10:15:30.691Z"
+        }
+      ]
+
+      {:ok, Enum.filter(rows, &(&1["activity_type"] in types))}
+    end
+  end
+
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
