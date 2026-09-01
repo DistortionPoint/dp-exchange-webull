@@ -567,4 +567,197 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert top.symbol == "AAPL"
     end
   end
+
+  describe "stock bars are a POST, and the adjustment differs by width" do
+    defp bars_response do
+      [
+        %{
+          "symbol" => "AAPL",
+          "instrument_id" => "913256135",
+          "result" => [
+            %{
+              "time" => "2021-12-28T09:00:09.945+0000",
+              "open" => "1.3362",
+              "close" => "1.3400",
+              "high" => "1.3450",
+              "low" => "1.3300",
+              "volume" => "10"
+            }
+          ]
+        }
+      ]
+    end
+
+    test "a stock category posts a JSON body, where crypto sends a query" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, conn.method, conn.request_path, Jason.decode!(raw)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(bars_response()))
+      end
+
+      assert {:ok, [_candle]} =
+               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, "POST", path, body}
+      assert path == "/market-data/stocks/bars/list"
+      assert body["symbols"] == ["AAPL"]
+      assert body["timespan"] == "D"
+    end
+
+    test "completed bars only — the venue's own default here is the opposite" do
+      # On the crypto bars and footprints real_time_required defaults to false. Here the
+      # vendor's default is Y, which includes an in-progress bar whose boundary has not
+      # happened yet. A package storing that saves a bar that changes after it is written.
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(bars_response()))
+      end
+
+      assert {:ok, [_candle]} =
+               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, body}
+      assert body["real_time_required"] == false
+    end
+
+    test "the three widths the crypto endpoint does not serve are accepted" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(bars_response()))
+      end
+
+      for {canonical, timespan} <- [{"1w", "W"}, {"1M", "M"}, {"1y", "Y"}] do
+        assert {:ok, _bars} =
+                 Rest.get_historical_prices("AAPL", canonical, [], @credentials,
+                   category: "US_STOCK",
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+
+        assert_receive {:sent, body}
+        assert body["timespan"] == timespan
+      end
+    end
+
+    test "daily and above are adjusted; minute bars are NOT" do
+      # The vendor's rule. These are not the same series at different resolutions: stitching
+      # 1m bars onto a daily series across a split gives a discontinuity that is real in
+      # each half and wrong where they meet, and nothing in the data says which side was
+      # adjusted.
+      assert Rest.adjusted?("1d")
+      assert Rest.adjusted?("1w")
+      assert Rest.adjusted?("1M")
+      assert Rest.adjusted?("1y")
+
+      refute Rest.adjusted?("1m")
+      refute Rest.adjusted?("1h")
+      refute Rest.adjusted?("4h")
+    end
+
+    test "a width this package does not serve has no adjustment answer" do
+      # `false` would be a claim. `nil` says there is no answer.
+      assert Rest.adjusted?("3m") == nil
+    end
+
+    test "US_OPTION is refused, as on every other stock endpoint" do
+      exploding = fn _conn -> raise "must not ask the stock bars for options" end
+
+      assert {:error, {:unsupported_book_category, "US_OPTION"}} =
+               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                 category: "US_OPTION",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a width neither endpoint serves is an error" do
+      exploding = fn _conn -> raise "must not ask for a width the venue lacks" end
+
+      assert {:error, {:unsupported_timeframe, "3s"}} =
+               Rest.get_historical_prices("AAPL", "3s", [], @credentials,
+                 category: "US_STOCK",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "the range goes to the venue as milliseconds" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(bars_response()))
+      end
+
+      assert {:ok, _bars} =
+               Rest.get_historical_prices(
+                 "AAPL",
+                 "1d",
+                 [start: ~U[2021-12-01 00:00:00Z], end: ~U[2021-12-31 00:00:00Z]],
+                 @credentials,
+                 category: "US_STOCK",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, body}
+      assert body["start_time"] == 1_638_316_800_000
+      assert body["end_time"] == 1_640_908_800_000
+    end
+
+    test "crypto still goes to the GET endpoint" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:method, conn.method, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([
+            %{"result" => [%{"time" => 1_787_935_740_000, "open" => "1", "close" => "1"}]}
+          ])
+        )
+      end
+
+      assert {:ok, _bars} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:method, "GET", path}
+      assert path == "/market-data/crypto/bars/list"
+    end
+  end
 end

@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ### Added
 
+- **`get_historical_prices/5` reaches the stock bars**, `POST /market-data/stocks/bars/list`,
+  routed by `opts[:category]`. **A POST where the crypto bars are a GET**, with its
+  parameters in a JSON body.
+
+  **Daily and above are forward-adjusted; minute bars are not** — the vendor states it, and
+  it means these are *not the same series at different resolutions*. Stitching 1m bars onto
+  a daily series across a split gives a discontinuity that is entirely real in each half and
+  wrong where they meet, and nothing in the bar data says which side was adjusted. This
+  package cannot fix that, so it reports it: **`adjusted?/1`** answers it for a width, and
+  returns `nil` for a width it does not serve rather than `false`, which would be a claim.
+
+  **`real_time_required` defaults to `Y` on this endpoint**, unlike every other one here —
+  that is an in-progress bar whose boundary has not happened yet. `false` is sent unless
+  asked, matching the crypto path: a package that stored the venue's default would save a
+  bar that changes after it is written.
+
+  Three widths the crypto endpoint does not serve — `1w`, `1M`, `1y` — are available here.
+
+  The body sends `count`, `start_time` and `end_time` as **numbers, not strings**: the venue
+  types them `int32`/`int64`, and a quoted number in a typed JSON field is a different value.
+
+
 - **`get_price/3` and `get_top_of_book/3` reach the stock snapshot**,
   `/market-data/stocks/snapshots/list`, chosen by `opts[:category]`.
 

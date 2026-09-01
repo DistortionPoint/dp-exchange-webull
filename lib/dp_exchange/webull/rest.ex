@@ -170,6 +170,16 @@ defmodule DpExchange.Webull.Rest do
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_historical_prices(symbol, timeframe, range, credentials, opts) do
+    # Crypto and stocks are different endpoints — and different HTTP verbs. `opts[:category]`
+    # picks, defaulting to crypto, which is what this package served before its asset
+    # classes widened.
+    case Keyword.get(opts, :category, "US_CRYPTO") do
+      "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
+      _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
+    end
+  end
+
+  defp crypto_bars(symbol, timeframe, range, credentials, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
     with {:ok, timespan} <- timespan(timeframe) do
@@ -1118,6 +1128,123 @@ defmodule DpExchange.Webull.Rest do
   defp tick_side("B"), do: :buy
   defp tick_side("S"), do: :sell
   defp tick_side(_undocumented), do: nil
+
+  # The stock bars endpoint serves **three widths the crypto one does not** — week, month
+  # and year — on top of the eight they share.
+  @stock_timespans Map.merge(@timespans, %{"1w" => "W", "1M" => "M", "1y" => "Y"})
+
+  @doc """
+  Historical bars for an equity or ETF — `POST /market-data/stocks/bars/list`.
+
+  **A POST, where the crypto bars are a GET**, and its parameters go in a JSON body rather
+  than a query string. Same endpoint family, different verb; the vendor documents it so.
+
+  ## Daily and above are adjusted; minute bars are not
+
+  The vendor states it plainly: *"Daily and above are forward-adjusted; minute bars are
+  unadjusted."* **These are not the same series at different resolutions.** A caller
+  stitching 1m bars onto a daily series across a split gets a discontinuity that is entirely
+  real in each half and wrong where they meet, and nothing in the data says which side was
+  adjusted.
+
+  This package cannot fix that — the venue publishes what it publishes — so it reports it:
+  every bar from this endpoint carries the width it was asked for, and the adjustment
+  follows from that width by the venue's rule. `adjusted?/1` answers it for a width without
+  a request.
+
+  ## `real_time_required` defaults to **Y** here, unlike every other endpoint
+
+  On the crypto bars and the footprints it defaults to false. Here the vendor's default is
+  *"Y: The returned data includes the latest market data"* — an **in-progress bar whose
+  boundary has not happened yet**. This sends `false` unless asked, matching what
+  `get_historical_prices/5` does for crypto: a package that stored the venue's default would
+  save a bar that changes after it is written.
+
+  Widths: the eight the crypto endpoint serves plus `1w`, `1M` and `1y`.
+  """
+  @spec get_stock_bars(String.t(), String.t(), keyword(), map(), keyword()) ::
+          {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
+  def get_stock_bars(symbol, timeframe, range, credentials, opts) do
+    category = Keyword.get(opts, :category, "US_STOCK")
+
+    with :ok <- book_category(category),
+         {:ok, timespan} <- stock_timespan(timeframe) do
+      body =
+        %{
+          "symbols" => [symbol],
+          "category" => category,
+          "timespan" => timespan,
+          # Completed bars only. The venue's own default is the opposite here.
+          "real_time_required" => Keyword.get(opts, :real_time, false)
+        }
+        |> put_raw("count", Keyword.get(opts, :limit))
+        |> put_raw("start_time", epoch_ms(Keyword.get(range, :start)))
+        |> put_raw("end_time", epoch_ms(Keyword.get(range, :end)))
+        |> put_present("trading_sessions", sessions_param(Keyword.get(opts, :sessions)))
+
+      with {:ok, response} <- post("/market-data/stocks/bars/list", body, credentials, opts) do
+        decode_stock_bars(response, symbol, timeframe, range)
+      end
+    end
+  end
+
+  defp stock_timespan(timeframe) do
+    case Map.fetch(@stock_timespans, timeframe) do
+      {:ok, timespan} -> {:ok, timespan}
+      :error -> {:error, {:unsupported_timeframe, timeframe}}
+    end
+  end
+
+  @doc """
+  Whether bars of `timeframe` are forward-adjusted, per the venue's rule.
+
+  Daily and above are; minute bars are not. **`nil` for a width this package does not
+  serve** — an unknown width has no answer, and `false` would be a claim.
+
+  Exposed because a caller stitching two widths together needs to know they are not the same
+  series, and nothing in the bar data itself says so.
+  """
+  @spec adjusted?(String.t()) :: boolean() | nil
+  def adjusted?(timeframe) do
+    case Map.fetch(@stock_timespans, timeframe) do
+      {:ok, timespan} -> timespan in ~w(D W M Y)
+      :error -> nil
+    end
+  end
+
+  # **A JSON body, not a query string.** `put_present/3` stringifies, which is right for a
+  # query and wrong here: the venue documents `count`, `start_time` and `end_time` as
+  # `int32`/`int64`, and a quoted number in a typed JSON field is a different value.
+  defp put_raw(map, _key, nil), do: map
+  defp put_raw(map, key, value), do: Map.put(map, key, value)
+
+  defp epoch_ms(nil), do: nil
+  defp epoch_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
+  defp epoch_ms(other), do: other
+
+  defp decode_stock_bars(response, symbol, timeframe, range) do
+    response
+    |> rows()
+    |> Enum.flat_map(fn row -> row |> value(["result"]) |> List.wrap() end)
+    |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
+      case decode_bar(bar, symbol, timeframe) do
+        {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, bars} ->
+        {:ok,
+         bars
+         |> Enum.reverse()
+         |> Enum.filter(&within?(&1, range))
+         |> Enum.sort_by(& &1.opened_at, DateTime)}
+
+      error ->
+        error
+    end
+  end
+
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
