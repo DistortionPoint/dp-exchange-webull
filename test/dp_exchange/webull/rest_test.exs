@@ -185,7 +185,7 @@ defmodule DpExchange.Webull.RestTest do
                  retry_attempts: 0
                )
 
-      assert DateTime.compare(first.timestamp, second.timestamp) == :lt
+      assert DateTime.compare(first.opened_at, second.opened_at) == :lt
     end
 
     test "a bar with no venue timestamp fails the whole call" do
@@ -243,7 +243,7 @@ defmodule DpExchange.Webull.RestTest do
                  retry_attempts: 0
                )
 
-      assert bar.timestamp == DateTime.from_unix!(1_787_935_740_000, :millisecond)
+      assert bar.opened_at == DateTime.from_unix!(1_787_935_740_000, :millisecond)
     end
   end
 

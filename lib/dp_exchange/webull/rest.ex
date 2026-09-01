@@ -37,7 +37,7 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Order, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Candle, Order, Quote, TopOfBook}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -325,7 +325,7 @@ defmodule DpExchange.Webull.Rest do
       end
     end)
     |> case do
-      {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
+      {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
       error -> error
     end
   end
@@ -333,10 +333,10 @@ defmodule DpExchange.Webull.Rest do
   defp decode_bar(row, symbol, timeframe) do
     with {:ok, timestamp} <- venue_time(row) do
       {:ok,
-       %{
+       %Candle{
          symbol: symbol,
          timeframe: timeframe,
-         timestamp: timestamp,
+         opened_at: timestamp,
          open: decimal(value(row, ["open"])),
          high: decimal(value(row, ["high"])),
          low: decimal(value(row, ["low"])),
@@ -406,10 +406,10 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp after_start?(_bar, nil), do: true
-  defp after_start?(bar, start), do: DateTime.compare(bar.timestamp, start) != :lt
+  defp after_start?(bar, start), do: DateTime.compare(bar.opened_at, start) != :lt
 
   defp before_end?(_bar, nil), do: true
-  defp before_end?(bar, finish), do: DateTime.compare(bar.timestamp, finish) != :gt
+  defp before_end?(bar, finish), do: DateTime.compare(bar.opened_at, finish) != :gt
 
   defp rows(body) when is_list(body), do: body
   defp rows(%{"data" => rows}) when is_list(rows), do: rows
@@ -621,7 +621,13 @@ defmodule DpExchange.Webull.Rest do
       {:ok, row} ->
         {:ok,
          %Order{
-           id: value(row, ["order_id", "orderId", "client_order_id"]),
+           # **The client_order_id, not the venue's order id.**
+           #
+           # Webull's whole order API is keyed on the client id: `/orders/cancel` takes it,
+           # `/orders/get` takes it. Returning the venue's own `order_id` here would hand a
+           # caller an identifier that round-trips nowhere — place, then cancel, and the
+           # cancel fails on an id the venue does not accept.
+           id: value(row, ["client_order_id", "clientOrderId"]),
            symbol: Map.fetch!(request, :symbol),
            side: Map.fetch!(request, :side),
            order_type: order_type_atom(order_type),
@@ -638,10 +644,114 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp order_type_atom("MARKET"), do: :market
+  defp order_type_atom(nil), do: nil
   defp order_type_atom("LIMIT"), do: :limit
   defp order_type_atom("STOP_LOSS_LIMIT"), do: :stop_limit
+  defp order_type_atom(_other), do: nil
 
   defp tif_atom("IOC"), do: :ioc
   defp tif_atom("DAY"), do: :day
   defp tif_atom("GTC"), do: :gtc
+  defp tif_atom(_other), do: nil
+
+  @doc """
+  Cancels an order by its **client order id**.
+
+  Webull's order API is keyed on the id the caller supplied, not the one the venue returned
+  — `/orders/cancel` and `/orders/get` both take `client_order_id`. `Order.id` carries it
+  for exactly that reason, so `place_order/3` then `cancel_order/3` round-trips.
+
+  Requires `opts[:account_id]`, as every order call on this venue does.
+  """
+  @spec cancel_order(map(), String.t(), keyword()) ::
+          {:ok, :cancelled} | {:error, term()} | {:refused, term()}
+  def cancel_order(credentials, client_order_id, opts) do
+    with {:ok, account_id} <- account_id(opts) do
+      body = %{"account_id" => account_id, "client_order_id" => client_order_id}
+
+      with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, opts) do
+        {:ok, :cancelled}
+      end
+    end
+  end
+
+  @doc """
+  One order by its client order id.
+
+  Requires `opts[:account_id]`.
+  """
+  @spec get_order(map(), String.t(), keyword()) ::
+          {:ok, Order.t()} | {:error, term()} | {:refused, term()}
+  def get_order(credentials, client_order_id, opts) do
+    with {:ok, account_id} <- account_id(opts) do
+      params = %{"account_id" => account_id, "client_order_id" => client_order_id}
+
+      with {:ok, body} <- get("/trading/orders/get", params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        {:ok, to_order(row)}
+      end
+    end
+  end
+
+  @doc """
+  Open orders, or historical ones with `history: true`.
+
+  **These are two endpoints, not one with a filter.** `/orders/open-orders/list` and
+  `/orders/historical-orders/list` answer different questions, and a caller asking for
+  "orders" without saying which gets the open ones — the set that can still change.
+
+  Requires `opts[:account_id]`. Returns one page; the venue paginates on `client_order_id`
+  as a cursor and this does not follow it.
+  """
+  @spec get_orders(map(), keyword()) ::
+          {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
+  def get_orders(credentials, opts) do
+    with {:ok, account_id} <- account_id(opts) do
+      path =
+        if Keyword.get(opts, :history, false),
+          do: "/trading/orders/historical-orders/list",
+          else: "/trading/orders/open-orders/list"
+
+      params = put_present(%{"account_id" => account_id}, "page_size", Keyword.get(opts, :limit))
+
+      with {:ok, body} <- get(path, params, credentials, opts) do
+        {:ok, body |> rows() |> Enum.map(&to_order/1)}
+      end
+    end
+  end
+
+  # The venue's own order row. Anything it names that this package does not recognise
+  # becomes `nil` rather than the nearest atom.
+  defp to_order(row) do
+    %Order{
+      id: value(row, ["client_order_id", "clientOrderId"]),
+      symbol: row |> value(["symbol"]) |> canonical_or_nil(),
+      side: row |> value(["side"]) |> side_atom(),
+      order_type: row |> value(["order_type", "orderType"]) |> order_type_atom(),
+      time_in_force: row |> value(["time_in_force", "timeInForce"]) |> tif_atom(),
+      quantity: decimal(value(row, ["qty", "quantity"])),
+      filled_quantity: decimal(value(row, ["filled_qty", "filledQty"])),
+      price: decimal(value(row, ["limit_price", "limitPrice"])),
+      average_price: decimal(value(row, ["avg_filled_price", "avgFilledPrice"])),
+      status: row |> value(["order_status", "status"]) |> status_atom(),
+      provider: :webull
+    }
+  end
+
+  defp canonical_or_nil(nil), do: nil
+  defp canonical_or_nil(native), do: SymbolFormat.to_canonical_symbol(native)
+
+  defp side_atom("BUY"), do: :buy
+  defp side_atom("SELL"), do: :sell
+  defp side_atom(_other), do: nil
+
+  defp status_atom("PENDING"), do: :pending
+  defp status_atom("WORKING"), do: :open
+  defp status_atom("PARTIAL_FILLED"), do: :open
+  defp status_atom("FILLED"), do: :filled
+  defp status_atom("CANCELLED"), do: :cancelled
+  defp status_atom("CANCELED"), do: :cancelled
+  defp status_atom("REJECTED"), do: :rejected
+  defp status_atom("EXPIRED"), do: :expired
+  defp status_atom(_other), do: nil
 end

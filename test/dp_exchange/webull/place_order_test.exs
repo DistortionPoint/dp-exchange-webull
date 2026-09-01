@@ -253,7 +253,9 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert leaf["stop_price"] == "39000"
     end
 
-    test "a client_order_id is generated when absent, within the venue's 32-char limit", %{plug: plug} do
+    test "a client_order_id is generated when absent, within the venue's 32-char limit", %{
+      plug: plug
+    } do
       assert {:ok, _order} = place(limit_request(), plug: plug, account_id: @account)
 
       assert_receive {:sent, %{"new_orders" => [leaf]}}
@@ -262,7 +264,10 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
     test "a caller's own client_order_id is used", %{plug: plug} do
       assert {:ok, _order} =
-               place(limit_request(%{client_order_id: "mine-1"}), plug: plug, account_id: @account)
+               place(limit_request(%{client_order_id: "mine-1"}),
+                 plug: plug,
+                 account_id: @account
+               )
 
       assert_receive {:sent, %{"new_orders" => [%{"client_order_id" => "mine-1"}]}}
     end
@@ -273,7 +278,10 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert {:ok, order} =
                place(limit_request(), plug: responding(accepted()), account_id: @account)
 
-      assert order.id == "wb-1"
+      # The client_order_id, not the venue's order_id: this venue's cancel and get both
+      # take the client id, so returning the other would hand back an id that round-trips
+      # nowhere.
+      assert order.id == "abc"
       assert order.status == :pending
       assert order.provider == :webull
       assert order.order_type == :limit
@@ -283,6 +291,131 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a body with no order row is unreadable" do
       assert {:error, :unexpected_response_shape} =
                place(limit_request(), plug: responding([]), account_id: @account)
+    end
+  end
+
+  describe "the order id this venue actually uses" do
+    test "cancel and get both take the client order id, not the venue's" do
+      # Webull keys its whole order API on the id the caller supplied. A package returning
+      # the venue's own order_id from place_order/3 would hand back something that
+      # round-trips nowhere: place, then cancel, and the cancel fails.
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(body)})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"client_order_id" => "abc"}))
+      end
+
+      assert {:ok, :cancelled} =
+               Rest.cancel_order(@credentials, "abc",
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, %{"client_order_id" => "abc", "account_id" => @account}}
+    end
+
+    test "cancelling without an account is refused before the call" do
+      exploding = fn _conn -> raise "must not call the venue without an account" end
+
+      assert {:error, :account_id_required} =
+               Rest.cancel_order(@credentials, "abc", plug: exploding, retry_attempts: 0)
+    end
+  end
+
+  describe "reading orders back" do
+    defp order_row(overrides \\ %{}) do
+      Map.merge(
+        %{
+          "client_order_id" => "abc",
+          "symbol" => "BTCUSD",
+          "side" => "BUY",
+          "order_type" => "LIMIT",
+          "time_in_force" => "GTC",
+          "order_status" => "WORKING",
+          "qty" => "0.5",
+          "filled_qty" => "0.1",
+          "limit_price" => "40000",
+          "avg_filled_price" => "40010"
+        },
+        overrides
+      )
+    end
+
+    test "get_order returns the venue's own view" do
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding([order_row()]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert order.id == "abc"
+      assert order.symbol == "BTC-USD"
+      assert order.side == :buy
+      assert order.order_type == :limit
+      assert order.time_in_force == :gtc
+      assert order.status == :open
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.1"))
+      assert order.provider == :webull
+    end
+
+    test "a status this package does not recognise is nil, never a guess" do
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding([order_row(%{"order_status" => "SOMETHING_NEW"})]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert order.status == nil
+    end
+
+    test "PARTIAL_FILLED is open, because the rest can still fill" do
+      assert {:ok, order} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding([order_row(%{"order_status" => "PARTIAL_FILLED"})]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert order.status == :open
+    end
+
+    test "open and historical orders are different endpoints, not a filter" do
+      # Asking for \"orders\" without saying which gets the open ones — the set that can
+      # still change.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      assert {:ok, []} =
+               Rest.get_orders(@credentials, plug: plug, account_id: @account, retry_attempts: 0)
+
+      assert_receive {:path, open_path}
+      assert open_path =~ "open-orders"
+
+      assert {:ok, []} =
+               Rest.get_orders(@credentials,
+                 history: true,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, history_path}
+      assert history_path =~ "historical-orders"
     end
   end
 end

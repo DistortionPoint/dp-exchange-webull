@@ -150,12 +150,6 @@ defmodule DpExchange.Webull.Fake do
   def replace_order(_credentials, _id, _request, _opts \\ []), do: Venue.not_supported()
 
   @impl true
-  def cancel_order(_credentials, _id, _opts), do: Venue.not_supported()
-  @impl true
-  def get_order(_credentials, _id, _opts), do: Venue.not_supported()
-  @impl true
-  def get_orders(_credentials, _opts), do: Venue.not_supported()
-  @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()
   @impl true
   def test_connection(_credentials, _opts), do: Venue.not_supported()
@@ -223,10 +217,10 @@ defmodule DpExchange.Webull.Fake do
   defp candle(symbol, timeframe) do
     price = Decimal.new(@price[symbol])
 
-    %{
+    %Types.Candle{
       symbol: symbol,
       timeframe: timeframe,
-      timestamp: @at,
+      opened_at: @at,
       open: price,
       high: price,
       low: price,
@@ -242,10 +236,10 @@ defmodule DpExchange.Webull.Fake do
   end
 
   defp after_start?(_candle, nil), do: true
-  defp after_start?(candle, start), do: DateTime.compare(candle.timestamp, start) != :lt
+  defp after_start?(candle, start), do: DateTime.compare(candle.opened_at, start) != :lt
 
   defp before_end?(_candle, nil), do: true
-  defp before_end?(candle, finish), do: DateTime.compare(candle.timestamp, finish) != :gt
+  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) != :gt
 
   # --- Declared but not yet implemented -----------------------------------
   #
@@ -401,5 +395,52 @@ defmodule DpExchange.Webull.Fake do
       {type, tif} = pair
       {:error, {:unsupported_order_combination, type, tif}}
     end
+  end
+
+  @impl true
+  def cancel_order(_credentials, client_order_id, opts \\ []) do
+    with :ok <- fake_account(opts) do
+      case client_order_id do
+        "fake-webull-order-1" -> {:ok, :cancelled}
+        _unknown -> {:refused, :not_found}
+      end
+    end
+  end
+
+  @impl true
+  def get_order(_credentials, client_order_id, opts \\ []) do
+    with :ok <- fake_account(opts) do
+      case client_order_id do
+        "fake-webull-order-1" -> {:ok, fake_order()}
+        _unknown -> {:refused, :not_found}
+      end
+    end
+  end
+
+  @impl true
+  def get_orders(_credentials, opts \\ []) do
+    with :ok <- fake_account(opts) do
+      # Open by default, history when asked — the venue has two endpoints, not a filter.
+      if Keyword.get(opts, :history, false) do
+        {:ok, [%{fake_order() | status: :filled}]}
+      else
+        {:ok, [fake_order()]}
+      end
+    end
+  end
+
+  defp fake_order do
+    %Types.Order{
+      id: "fake-webull-order-1",
+      symbol: "BTC-USD",
+      side: :buy,
+      order_type: :limit,
+      time_in_force: :gtc,
+      quantity: Decimal.new("0.5"),
+      filled_quantity: Decimal.new("0"),
+      price: Decimal.new("40000"),
+      status: :open,
+      provider: :webull
+    }
   end
 end

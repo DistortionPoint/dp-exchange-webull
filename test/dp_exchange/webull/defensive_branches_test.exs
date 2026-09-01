@@ -201,7 +201,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                  retry_attempts: 0
                )
 
-      assert bar.timestamp == DateTime.from_unix!(1_787_935_680_000, :millisecond)
+      assert bar.opened_at == DateTime.from_unix!(1_787_935_680_000, :millisecond)
     end
 
     test "a limit is passed to the venue rather than applied here" do

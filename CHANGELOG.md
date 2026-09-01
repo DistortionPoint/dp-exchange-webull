@@ -40,6 +40,22 @@ acceptable changelog line.
   Crypto orders are sent as `NORMAL` combos only, which is what the venue supports; MASTER,
   OTO, OCO and OTOCO are equities groupings.
 
+- **`cancel_order/3`, `get_order/3` and `get_orders/2`.** The order lifecycle, which stopped
+  at placement.
+
+  **This venue's order API is keyed on the client order id, not the venue's.** Both
+  `/trading/orders/cancel` and `/trading/orders/get` take `client_order_id`, so `Order.id`
+  now carries it and `place_order/3` was corrected to return it. Returning the venue's own
+  `order_id` handed a caller an identifier that round-trips nowhere: place, then cancel, and
+  the cancel fails on an id the venue does not accept.
+
+  **Open and historical orders are two endpoints, not one with a filter.**
+  `/orders/open-orders/list` and `/orders/historical-orders/list` answer different questions,
+  and a caller asking for "orders" without saying which gets the open ones — the set that can
+  still change. `history: true` asks for the other.
+
+  `account_id` is required on all three, as it is on placement.
+
 - **`Rest.post/4`, which signs the body.** Unlike Coinbase's URI-scoped JWT, this venue signs
   the payload, so the encoded string is built **once** and used for both the signature and
   the request. Encoding twice risks two orderings of the same map and a signature that does
@@ -47,6 +63,16 @@ acceptable changelog line.
   than as the encoding bug it is.
 
 ### Changed
+- **BREAKING: `get_historical_prices/4` returns `Core.Types.Candle` structs, and the bar's
+  time is `opened_at`.** It returned bare maps keyed on `:timestamp`.
+
+  `timestamp` did not say *which* time it was. A bar covers an interval, and the only time
+  a venue publishes for it is the interval's opening — a caller reading `timestamp` as "when
+  this bar closed" is off by exactly one interval, in a value that looks entirely reasonable.
+  `opened_at` says which end it is. The struct also brings `Candle.coherent?/1`, which
+  catches a high below the close at the boundary rather than downstream in a range or
+  volatility calculation that will not error on it.
+
 - **Every endpoint moved to its documented path (D6).** All five calls used an `/openapi/…`
   prefix that appears nowhere in Webull's current documentation; they were inherited from an
   older reading of the site.

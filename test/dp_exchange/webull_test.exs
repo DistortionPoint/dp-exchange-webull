@@ -256,9 +256,9 @@ defmodule DpExchange.WebullTest do
       # for its own reason — the venue requires an account on every order and this package
       # will not choose one — which is a different answer from "not implemented" and is
       # asserted in the order tests.
-      assert Fake.cancel_order(@credentials, "id", []) == {:error, :not_supported}
-      assert Fake.get_order(@credentials, "id", []) == {:error, :not_supported}
-      assert Fake.get_orders(@credentials, []) == {:error, :not_supported}
+      # cancel_order, get_order and get_orders are implemented now. They refuse without an
+      # account_id, which is the venue's requirement rather than a missing implementation,
+      # and is asserted in the order tests.
       assert Fake.get_trade_history(@credentials, []) == {:error, :not_supported}
       assert Fake.test_connection(@credentials, []) == {:error, :not_supported}
       assert Fake.get_rate_limit_status(@credentials, []) == {:error, :not_supported}
