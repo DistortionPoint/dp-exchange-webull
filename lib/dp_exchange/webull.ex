@@ -268,6 +268,16 @@ defmodule DpExchange.Webull do
     do: Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
 
   @doc """
+  Tick-by-tick public trades for an equity or ETF — the tape.
+
+  See `DpExchange.Webull.Rest.get_trades/3`, including why three of the venue's five side
+  codes map to `nil`.
+  """
+  @impl true
+  def get_trades(symbol, opts \\ []),
+    do: Rest.get_trades(symbol, credentials(opts), with_limiter(opts))
+
+  @doc """
   Traded volume split by price and by side, for an equity.
 
   See `DpExchange.Webull.Rest.get_volume_profile/4` — including the five widths this

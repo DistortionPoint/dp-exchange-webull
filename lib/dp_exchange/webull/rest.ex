@@ -47,6 +47,7 @@ defmodule DpExchange.Webull.Rest do
     Position,
     Quote,
     TopOfBook,
+    Trade,
     VolumeProfile
   }
 
@@ -965,6 +966,95 @@ defmodule DpExchange.Webull.Rest do
 
   defp to_string_or_nil(nil), do: nil
   defp to_string_or_nil(value), do: to_string(value)
+
+  @doc """
+  Tick-by-tick public trades — `/market-data/stocks/ticks/list`.
+
+  **The tape, not `get_trade_history/2`.** That returns the credential's own fills; this
+  returns everyone's executions, newest first as the venue sorts them.
+
+  `opts[:limit]` is the venue's `count` (default 30, max 1000). `opts[:sessions]` takes the
+  venue's own list — `PRE`, `RTH`, `ATH`, `OVN`, comma-joined — and defaults to `RTH`.
+  **The venue marks `trading_sessions` required**, so one is always sent; asking for regular
+  hours by default is a choice, and it is the one that matches what `get_price/3` returns.
+
+  ## `side` has five codes and this package knows two of them
+
+  The venue documents the field as *"Such as: B S G L N"* and defines none of them. `B` and
+  `S` are unambiguous; **`G`, `L` and `N` are not documented anywhere the vendor publishes**,
+  so they map to `nil` rather than being folded into the nearest of buy or sell.
+
+  A tick whose side is `nil` is a real trade with an unknown aggressor. Guessing would put
+  volume on the wrong side of a delta, which is the number a caller reads a tape for.
+
+  `broken` is `false` on every tick: this venue publishes no bust flag here, and a venue
+  with no concept of busts has nothing busted — which is the same answer.
+  """
+  @spec get_trades(String.t(), map(), keyword()) ::
+          {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
+  def get_trades(symbol, credentials, opts) do
+    category = Keyword.get(opts, :category, "US_STOCK")
+
+    with :ok <- book_category(category) do
+      params = %{
+        "symbol" => symbol,
+        "category" => category,
+        "count" => to_string(Keyword.get(opts, :limit, 30)),
+        # Required by the venue. `RTH` is the default because it is the session the rest of
+        # this package's price data comes from.
+        "trading_sessions" => sessions_param(Keyword.get(opts, :sessions, ["RTH"]))
+      }
+
+      with {:ok, body} <- get("/market-data/stocks/ticks/list", params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        decode_ticks(row, symbol)
+      end
+    end
+  end
+
+  defp sessions_param(sessions) when is_list(sessions), do: Enum.join(sessions, ",")
+  defp sessions_param(session), do: to_string(session)
+
+  defp decode_ticks(row, symbol) do
+    row
+    |> value(["result"])
+    |> List.wrap()
+    |> Enum.reduce_while({:ok, []}, fn tick, {:ok, acc} ->
+      case to_trade(tick, symbol) do
+        {:ok, trade} -> {:cont, {:ok, [trade | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, trades} -> {:ok, Enum.reverse(trades)}
+      error -> error
+    end
+  end
+
+  defp to_trade(tick, symbol) do
+    with {:ok, timestamp} <- venue_time(tick) do
+      {:ok,
+       %Trade{
+         # The venue publishes no per-tick id on this endpoint. `nil` says so.
+         id: nil,
+         symbol: symbol,
+         side: tick_side(value(tick, ["side"])),
+         price: decimal(value(tick, ["price"])),
+         quantity: decimal(value(tick, ["volume"])),
+         timestamp: timestamp,
+         # No bust flag on this endpoint; nothing was busted, which is the same answer.
+         broken: false,
+         provider: :webull
+       }}
+    end
+  end
+
+  # `B` and `S` are unambiguous. `G`, `L` and `N` appear in the venue's field description
+  # and are defined nowhere it publishes, so they are `nil` — a real trade with an unknown
+  # aggressor. Folding them into buy or sell would put volume on the wrong side of a delta.
+  defp tick_side("B"), do: :buy
+  defp tick_side("S"), do: :sell
+  defp tick_side(_undocumented), do: nil
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row

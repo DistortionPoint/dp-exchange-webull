@@ -21,6 +21,19 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+
+- **`get_trades/2` — tick-by-tick public trades**, `/market-data/stocks/ticks/list`.
+
+  **The venue documents `side` as "Such as: B S G L N" and defines none of them.** `B` and
+  `S` are unambiguous; `G`, `L` and `N` are documented nowhere the vendor publishes, so they
+  map to `nil` — a real trade with an unknown aggressor. Folding them into the nearer of buy
+  or sell would put volume on the wrong side of a delta, which is the number a caller reads
+  a tape for.
+
+  `trading_sessions` is required by the venue and defaults to `RTH` here, which is the
+  session the rest of this package's price data comes from. There is no per-tick id on this
+  endpoint and `nil` says so; `broken` is `false` because the venue publishes no bust flag.
+
 - **`get_volume_profile/3` — stock footprints**, `/market-data/stocks/footprints/list`.
   Traded volume split by price and by side within each interval.
 

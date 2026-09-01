@@ -275,4 +275,128 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert overnight_query =~ "overnight_required=true"
     end
   end
+
+  describe "the tape — five side codes and two known ones" do
+    defp tick_body(overrides \\ %{}) do
+      [
+        %{
+          "symbol" => "AAPL",
+          "instrument_id" => "913256409",
+          "result" => [
+            Map.merge(
+              %{"time" => 1_761_182_953_043, "price" => "48.07", "volume" => "1", "side" => "B"},
+              overrides
+            )
+          ]
+        }
+      ]
+    end
+
+    test "a tick comes back as a Trade" do
+      assert {:ok, [%Types.Trade{} = t]} =
+               Rest.get_trades("AAPL", @credentials,
+                 plug: responding(tick_body()),
+                 retry_attempts: 0
+               )
+
+      assert t.symbol == "AAPL"
+      assert Decimal.equal?(t.price, Decimal.new("48.07"))
+      assert Decimal.equal?(t.quantity, Decimal.new("1"))
+      assert t.side == :buy
+      assert t.provider == :webull
+    end
+
+    test "B and S map; G, L and N do NOT" do
+      # The venue documents the field as "Such as: B S G L N" and defines none of them. B
+      # and S are unambiguous; the other three are documented nowhere the vendor publishes.
+      # Folding them into buy or sell would put volume on the wrong side of a delta, which
+      # is the number a caller reads a tape for.
+      for {code, expected} <- [{"B", :buy}, {"S", :sell}, {"G", nil}, {"L", nil}, {"N", nil}] do
+        assert {:ok, [t]} =
+                 Rest.get_trades("AAPL", @credentials,
+                   plug: responding(tick_body(%{"side" => code})),
+                   retry_attempts: 0
+                 )
+
+        assert t.side == expected, "side #{code} mapped to #{inspect(t.side)}"
+      end
+    end
+
+    test "there is no per-tick id on this endpoint, and nil says so" do
+      assert {:ok, [t]} =
+               Rest.get_trades("AAPL", @credentials,
+                 plug: responding(tick_body()),
+                 retry_attempts: 0
+               )
+
+      assert t.id == nil
+    end
+
+    test "broken is false — this venue publishes no bust flag here" do
+      assert {:ok, [t]} =
+               Rest.get_trades("AAPL", @credentials,
+                 plug: responding(tick_body()),
+                 retry_attempts: 0
+               )
+
+      refute t.broken
+    end
+
+    test "an undated tick is refused, never stamped with the local clock" do
+      assert {:error, :missing_venue_timestamp} =
+               Rest.get_trades("AAPL", @credentials,
+                 plug: responding(tick_body(%{"time" => nil})),
+                 retry_attempts: 0
+               )
+    end
+
+    test "the session is always sent, and defaults to regular hours" do
+      # The venue marks trading_sessions required. RTH is the default because it is the
+      # session the rest of this package's price data comes from.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(tick_body()))
+      end
+
+      assert {:ok, [_t]} = Rest.get_trades("AAPL", @credentials, plug: plug, retry_attempts: 0)
+      assert_receive {:query, query}
+      assert query =~ "trading_sessions=RTH"
+      assert query =~ "count=30"
+
+      assert {:ok, [_multi]} =
+               Rest.get_trades("AAPL", @credentials,
+                 sessions: ["PRE", "RTH"],
+                 limit: 500,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, multi}
+      assert multi =~ "trading_sessions=PRE%2CRTH"
+      assert multi =~ "count=500"
+    end
+
+    test "US_OPTION is refused, as it is on the depth endpoint" do
+      exploding = fn _conn -> raise "must not ask the tick endpoint for options" end
+
+      assert {:error, {:unsupported_book_category, "US_OPTION"}} =
+               Rest.get_trades("AAPL", @credentials,
+                 category: "US_OPTION",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an empty tape is an empty list" do
+      body = [%{"symbol" => "AAPL", "result" => []}]
+
+      assert {:ok, []} =
+               Rest.get_trades("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
+    end
+  end
 end

@@ -162,6 +162,44 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
+  def get_trades(symbol, opts \\ []) do
+    # A crypto pair. This venue's tick endpoint is equities-only, and the fake refuses
+    # rather than inventing a tape.
+    if String.contains?(symbol, "-") do
+      {:error, {:unsupported_book_category, "US_CRYPTO"}}
+    else
+      with :ok <- authenticated(opts), do: {:ok, fake_ticks(symbol)}
+    end
+  end
+
+  defp fake_ticks(symbol) do
+    [
+      %Types.Trade{
+        id: nil,
+        symbol: symbol,
+        side: :buy,
+        price: Decimal.new("48.07"),
+        quantity: Decimal.new("1"),
+        timestamp: @at,
+        broken: false,
+        provider: :webull
+      },
+      # A tick whose side code the venue does not document. `nil` is the honest answer, and
+      # a fake without one would never exercise a consumer's handling.
+      %Types.Trade{
+        id: nil,
+        symbol: symbol,
+        side: nil,
+        price: Decimal.new("48.08"),
+        quantity: Decimal.new("3"),
+        timestamp: @at,
+        broken: false,
+        provider: :webull
+      }
+    ]
+  end
+
+  @impl true
   def get_volume_profile(symbol, timeframe, opts \\ []) do
     cond do
       timeframe not in ~w(5s 15s 1m 5m 30m) ->
