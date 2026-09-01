@@ -162,6 +162,75 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
+  def get_volume_profile(symbol, timeframe, opts \\ []) do
+    cond do
+      timeframe not in ~w(5s 15s 1m 5m 30m) ->
+        # Five widths, narrower than the bars endpoint. A caller asking for one this
+        # endpoint does not serve gets an error, not the nearest.
+        {:error, {:unsupported_timeframe, timeframe}}
+
+      Keyword.get(opts, :session) == "OVN" ->
+        {:error, {:unsupported_session, "OVN"}}
+
+      true ->
+        with :ok <- authenticated(opts) do
+          {:ok,
+           [
+             %Types.VolumeProfile{
+               symbol: symbol,
+               timeframe: timeframe,
+               opened_at: @at,
+               total_volume: Decimal.new("1000"),
+               # Deliberately NOT buy_volume - sell_volume. The venue's classifier leaves
+               # some prints unattributed, and a fake where the three always reconcile
+               # would teach a consumer they must.
+               delta: Decimal.new("150"),
+               buy_volume: Decimal.new("600"),
+               sell_volume: Decimal.new("400"),
+               buy_at_price: %{"24.20" => Decimal.new("100"), "24.21" => Decimal.new("500")},
+               sell_at_price: %{"24.20" => Decimal.new("350"), "24.21" => Decimal.new("50")},
+               session: :regular,
+               provider: :webull
+             }
+           ]}
+        end
+    end
+  end
+
+  @impl true
+  def get_auction_imbalance(symbol, opts \\ []) do
+    case Keyword.get(opts, :auction) do
+      auction when auction in [:opening, :closing] ->
+        with :ok <- authenticated(opts) do
+          {:ok,
+           %Types.AuctionImbalance{
+             symbol: symbol,
+             auction: auction,
+             paired_quantity: Decimal.new("701859"),
+             imbalance_quantity: Decimal.new("5715"),
+             # The venue's code, unmapped in the fake as in production.
+             side: "2",
+             reference_price: Decimal.new("253.83"),
+             near_price: Decimal.new("253.93"),
+             far_price: Decimal.new("253.98"),
+             # Deliberately earlier than observed_at: outside an auction window the venue
+             # returns the last imbalance, and a fake where the two agree would never
+             # exercise a consumer's staleness check.
+             venue_time: @at,
+             observed_at: DateTime.add(@at, 3600, :second),
+             provider: :webull
+           }}
+        end
+
+      nil ->
+        {:error, :auction_required}
+
+      other ->
+        {:error, {:unsupported_auction, other}}
+    end
+  end
+
+  @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()

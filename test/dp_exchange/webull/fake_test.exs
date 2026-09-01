@@ -273,4 +273,56 @@ defmodule DpExchange.Webull.FakeTest do
       assert Decimal.equal?(order.price, Decimal.new("41000"))
     end
   end
+
+  describe "the fake's microstructure surface" do
+    test "a footprint's delta does not reconcile with its totals, on purpose" do
+      # A fake where the three always agree would teach a consumer they must. The venue's
+      # classifier leaves some prints unattributed.
+      assert {:ok, [profile]} = Fake.get_volume_profile("AAPL", "5m", @opts)
+
+      refute Decimal.equal?(profile.delta, Decimal.sub(profile.buy_volume, profile.sell_volume))
+      assert Types.VolumeProfile.point_of_control(profile) == "24.21"
+    end
+
+    test "a width this endpoint does not serve is an error" do
+      assert {:error, {:unsupported_timeframe, "1h"}} =
+               Fake.get_volume_profile("AAPL", "1h", @opts)
+    end
+
+    test "the overnight session is refused" do
+      assert {:error, {:unsupported_session, "OVN"}} =
+               Fake.get_volume_profile("AAPL", "5m", [session: "OVN"] ++ @opts)
+    end
+
+    test "the imbalance's venue time is older than when it was observed" do
+      # Outside an auction window the venue returns the last imbalance. A fake where the
+      # two agree would never exercise a consumer's staleness check.
+      assert {:ok, imbalance} = Fake.get_auction_imbalance("AAPL", [auction: :closing] ++ @opts)
+
+      assert DateTime.compare(imbalance.observed_at, imbalance.venue_time) == :gt
+      assert imbalance.side == "2"
+    end
+
+    test "no auction is an error, as it is on the real venue" do
+      assert {:error, :auction_required} = Fake.get_auction_imbalance("AAPL", @opts)
+    end
+
+    test "an auction the venue does not have is an error" do
+      assert {:error, {:unsupported_auction, :midday}} =
+               Fake.get_auction_imbalance("AAPL", [auction: :midday] ++ @opts)
+    end
+
+    test "the book refuses a crypto pair, which this venue publishes no depth for" do
+      assert {:error, {:unsupported_book_category, _category}} =
+               Fake.get_order_book("BTC-USD", @opts)
+    end
+
+    test "an equity book has levels on both sides" do
+      assert {:ok, book} = Fake.get_order_book("F", @opts)
+
+      assert length(book.bids) == 2
+      assert length(book.asks) == 2
+      assert book.sequence == nil
+    end
+  end
 end

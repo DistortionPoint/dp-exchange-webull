@@ -21,6 +21,38 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`get_volume_profile/3` — stock footprints**, `/market-data/stocks/footprints/list`.
+  Traded volume split by price and by side within each interval.
+
+  **`delta` is the venue's own figure and is not recomputed from the totals.** A venue that
+  classifies some prints as neither aggressive buy nor aggressive sell reports numbers that
+  do not reconcile, and that gap is information about its classifier rather than a fault to
+  correct. The price maps keep the venue's own price strings — two strings that parse to
+  equal decimals are the same level, and re-keying would silently merge two of its rows.
+
+  **Five widths, where `get_historical_prices/4` serves more**: `5s`, `15s`, `1m`, `5m`,
+  `30m`. Anything else is `{:unsupported_timeframe, width}` rather than the nearest one this
+  endpoint happens to have. `OVN` is in the venue's session enum and its own note says it is
+  unsupported, so it is refused rather than sent. `real_time_required` is `false` —
+  completed intervals only, because an unfinished footprint's split still moves.
+
+  Requires a separate Webull subscription, which the vendor states on the endpoint.
+
+- **`get_auction_imbalance/2` — the NOII snapshot**,
+  `/market-data/stocks/noii-snapshots/list`. `opts[:auction]` is required: `:opening` and
+  `:closing` are different auctions with different windows.
+
+  **Outside the auction window the venue returns the last imbalance, not nothing** — its own
+  documentation says so. Both the venue's `imbalance_time` and this package's `observed_at`
+  are carried, because together they are the only way a caller tells a live imbalance from
+  this morning's. An undated one leaves `venue_time` `nil` rather than borrowing
+  `observed_at`, which would make a stale imbalance look fresh.
+
+  `side` is the venue's own code, carried as sent — it documents `imbalance_side` with the
+  example `"2"` and does not say what 2 means.
+
+  Requires a Nasdaq TotalView non-display subscription.
+
 - **`get_order_book/2` — stock and ETF depth**, `/market-data/stocks/depths/list`. The first
   endpoint of the equity market-data surface.
 

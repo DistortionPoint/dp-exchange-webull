@@ -267,6 +267,26 @@ defmodule DpExchange.Webull do
   def get_order_book(symbol, opts \\ []),
     do: Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
 
+  @doc """
+  Traded volume split by price and by side, for an equity.
+
+  See `DpExchange.Webull.Rest.get_volume_profile/4` — including the five widths this
+  endpoint serves and why `real_time_required` is sent as `false`.
+  """
+  @impl true
+  def get_volume_profile(symbol, timeframe, opts \\ []),
+    do: Rest.get_volume_profile(symbol, timeframe, credentials(opts), with_limiter(opts))
+
+  @doc """
+  The auction order imbalance. `opts[:auction]` is required — `:opening` or `:closing`.
+
+  See `DpExchange.Webull.Rest.get_auction_imbalance/3`, including why the venue's own time
+  matters as much as the numbers outside an auction window.
+  """
+  @impl true
+  def get_auction_imbalance(symbol, opts \\ []),
+    do: Rest.get_auction_imbalance(symbol, credentials(opts), with_limiter(opts))
+
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
 

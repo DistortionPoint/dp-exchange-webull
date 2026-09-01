@@ -37,7 +37,19 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Balance, Candle, Order, OrderBook, Position, Quote, TopOfBook}
+
+  alias DpExchange.Core.Types.{
+    AuctionImbalance,
+    Balance,
+    Candle,
+    Order,
+    OrderBook,
+    Position,
+    Quote,
+    TopOfBook,
+    VolumeProfile
+  }
+
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -741,6 +753,202 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp book_levels(_absent), do: []
+
+  # The venue's footprint granularities. **Deliberately narrower than `timeframes/0`** —
+  # the footprint endpoint serves five widths and the bars endpoint serves more, and a
+  # caller asking for a width this endpoint does not have gets an error rather than the
+  # nearest one.
+  @footprint_spans %{"5s" => "S5", "15s" => "S15", "1m" => "M1", "5m" => "M5", "30m" => "M30"}
+
+  @doc """
+  Traded volume split by price and by side — `/market-data/stocks/footprints/list`.
+
+  **Requires a separate Webull subscription**, which the vendor states on the endpoint. A
+  credential without it gets the venue's own refusal; this package does not pretend to know
+  in advance which credentials carry it.
+
+  Widths are `5s`, `15s`, `1m`, `5m` and `30m` — five, where `get_historical_prices/4`
+  serves more. A width outside them is `{:unsupported_timeframe, width}` rather than the
+  closest one this endpoint does have.
+
+  `opts[:count]` is the venue's bar count (default 200, max 1200); `opts[:session]` picks
+  `PRE`, `RTH` or `ATH` — **`OVN` is documented as not supported and is refused here**
+  rather than sent.
+
+  ## `real_time_required` is sent as `false`
+
+  The vendor marks it required and says it controls whether an unfinished bar is included.
+  `false` asks for completed intervals only: **an in-progress footprint has a boundary that
+  has not happened yet**, and its buy/sell split will change before the interval closes. The
+  same reasoning `get_historical_prices/4` uses for bars.
+
+  The price maps come back **keyed on the venue's own price strings**. See
+  `Core.Types.VolumeProfile` for why they are not re-keyed on `Decimal`.
+  """
+  @spec get_volume_profile(String.t(), String.t(), map(), keyword()) ::
+          {:ok, [VolumeProfile.t()]} | {:error, term()} | {:refused, term()}
+  def get_volume_profile(symbol, timeframe, credentials, opts) do
+    with {:ok, span} <- footprint_span(timeframe),
+         {:ok, session} <- footprint_session(Keyword.get(opts, :session)) do
+      params =
+        %{
+          "symbols" => symbol,
+          "category" => "US_STOCK",
+          "timespan" => span,
+          # Completed intervals only; an unfinished footprint's split still moves.
+          "real_time_required" => "false"
+        }
+        |> put_present("count", Keyword.get(opts, :count))
+        |> put_present("trading_sessions", session)
+
+      with {:ok, body} <- get("/market-data/stocks/footprints/list", params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        decode_profiles(row, symbol, timeframe)
+      end
+    end
+  end
+
+  defp footprint_span(timeframe) do
+    case Map.fetch(@footprint_spans, timeframe) do
+      {:ok, span} -> {:ok, span}
+      :error -> {:error, {:unsupported_timeframe, timeframe}}
+    end
+  end
+
+  # `OVN` is in the venue's enum and its own note says it is not supported. Sending it
+  # returns a business error the caller cannot distinguish from an empty session.
+  defp footprint_session(nil), do: {:ok, nil}
+  defp footprint_session("OVN"), do: {:error, {:unsupported_session, "OVN"}}
+  defp footprint_session(session) when session in ["PRE", "RTH", "ATH"], do: {:ok, session}
+  defp footprint_session(session), do: {:error, {:unsupported_session, session}}
+
+  defp decode_profiles(row, symbol, timeframe) do
+    row
+    |> value(["result"])
+    |> List.wrap()
+    |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
+      case to_profile(entry, symbol, timeframe) do
+        {:ok, profile} -> {:cont, {:ok, [profile | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, profiles} -> {:ok, Enum.reverse(profiles)}
+      error -> error
+    end
+  end
+
+  defp to_profile(entry, symbol, timeframe) do
+    with {:ok, opened_at} <- venue_time(entry) do
+      {:ok,
+       %VolumeProfile{
+         symbol: symbol,
+         timeframe: timeframe,
+         opened_at: opened_at,
+         total_volume: decimal(value(entry, ["total"])),
+         # The venue's own buy-minus-sell. Not recomputed from the totals — where they
+         # disagree, the gap is the venue's classifier and not an error to correct.
+         delta: decimal(value(entry, ["delta"])),
+         buy_volume: decimal(value(entry, ["buy_total", "buyTotal"])),
+         sell_volume: decimal(value(entry, ["sell_total", "sellTotal"])),
+         buy_at_price: price_map(value(entry, ["buy_detail", "buyDetail"])),
+         sell_at_price: price_map(value(entry, ["sell_detail", "sellDetail"])),
+         session: session_atom(value(entry, ["trading_session", "tradingSession"])),
+         provider: :webull
+       }}
+    end
+  end
+
+  defp price_map(%{} = detail),
+    do: Map.new(detail, fn {price, size} -> {price, decimal(size)} end)
+
+  defp price_map(_absent), do: nil
+
+  defp session_atom("PRE"), do: :pre_market
+  defp session_atom("RTH"), do: :regular
+  defp session_atom("ATH"), do: :after_hours
+  defp session_atom("OVN"), do: :overnight
+  defp session_atom(_other), do: nil
+
+  @doc """
+  The auction order imbalance — `/market-data/stocks/noii-snapshots/list`.
+
+  **Requires a Nasdaq TotalView non-display subscription**, which the vendor states on the
+  endpoint.
+
+  `opts[:auction]` is required and is `:opening` or `:closing`; the venue names them
+  `PRE_OPEN` and `PRE_CLOSE`. They are different auctions with different windows, and
+  choosing one for a caller who did not say would answer a question nobody asked.
+
+  ## Outside the auction window this returns the last one, not nothing
+
+  The vendor is explicit: published during ET 9:28–9:30 and 15:50–16:00, updating every 5
+  seconds, and **"outside these periods, historical data is returned"**. So the venue's own
+  `imbalance_time` is carried alongside `observed_at`, and the two together are the only way
+  a caller can tell a live imbalance from this morning's. A package returning only one of
+  them would make a stale auction indistinguishable from a running one.
+
+  `side` is the venue's own value, unmapped — see `Core.Types.AuctionImbalance` for why.
+  """
+  @spec get_auction_imbalance(String.t(), map(), keyword()) ::
+          {:ok, AuctionImbalance.t()} | {:error, term()} | {:refused, term()}
+  def get_auction_imbalance(symbol, credentials, opts) do
+    observed_at = DateTime.utc_now()
+
+    with {:ok, auction, action_type} <- auction_type(Keyword.get(opts, :auction)) do
+      params = %{
+        "symbol" => symbol,
+        "category" => "US_STOCK",
+        "imbalance_action_type" => action_type
+      }
+
+      with {:ok, body} <-
+             get("/market-data/stocks/noii-snapshots/list", params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        {:ok, to_imbalance(row, symbol, auction, observed_at)}
+      end
+    end
+  end
+
+  defp auction_type(:opening), do: {:ok, :opening, "PRE_OPEN"}
+  defp auction_type(:closing), do: {:ok, :closing, "PRE_CLOSE"}
+  defp auction_type(nil), do: {:error, :auction_required}
+  defp auction_type(other), do: {:error, {:unsupported_auction, other}}
+
+  defp to_imbalance(row, symbol, auction, observed_at) do
+    %AuctionImbalance{
+      symbol: symbol,
+      auction: auction,
+      paired_quantity: decimal(value(row, ["paired_shares", "pairedShares"])),
+      imbalance_quantity: decimal(value(row, ["imbalance_shares", "imbalanceShares"])),
+      # The venue's code, carried as sent. Its meaning is not documented.
+      side: to_string_or_nil(value(row, ["imbalance_side", "imbalanceSide"])),
+      reference_price: decimal(value(row, ["imbalance_ref_price", "imbalanceRefPrice"])),
+      near_price: decimal(value(row, ["imbalance_near_price", "imbalanceNearPrice"])),
+      far_price: decimal(value(row, ["imbalance_far_price", "imbalanceFarPrice"])),
+      # The venue's own time, or nil. Together with `observed_at` this is the only way to
+      # tell a live imbalance from one returned outside the auction window.
+      venue_time: imbalance_time(row),
+      observed_at: observed_at,
+      provider: :webull
+    }
+  end
+
+  defp imbalance_time(row) do
+    case value(row, ["imbalance_time", "imbalanceTime"]) do
+      nil ->
+        nil
+
+      raw ->
+        case parse_time(raw) do
+          {:ok, at} -> at
+          _unparsable -> nil
+        end
+    end
+  end
+
+  defp to_string_or_nil(nil), do: nil
+  defp to_string_or_nil(value), do: to_string(value)
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
