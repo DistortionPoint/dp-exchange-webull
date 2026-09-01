@@ -128,7 +128,39 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_order_book(_symbol, _opts), do: Venue.not_supported()
+  def get_order_book(symbol, opts \\ []) do
+    category = Keyword.get(opts, :category, "US_STOCK")
+
+    cond do
+      category not in ["US_STOCK", "US_ETF"] ->
+        {:error, {:unsupported_book_category, category}}
+
+      # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same
+      # way the real package does rather than inventing a book.
+      String.contains?(symbol, "-") ->
+        {:error, {:unsupported_book_category, category}}
+
+      true ->
+        with :ok <- authenticated(opts) do
+          {:ok,
+           %Types.OrderBook{
+             symbol: symbol,
+             bids: [
+               {Decimal.new("13.90"), Decimal.new("5")},
+               {Decimal.new("13.89"), Decimal.new("12")}
+             ],
+             asks: [
+               {Decimal.new("13.91"), Decimal.new("3")},
+               {Decimal.new("13.92"), Decimal.new("20")}
+             ],
+             timestamp: @at,
+             sequence: nil,
+             provider: :webull
+           }}
+        end
+    end
+  end
+
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
   @impl true

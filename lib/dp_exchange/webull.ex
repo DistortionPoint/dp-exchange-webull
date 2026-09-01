@@ -121,7 +121,6 @@ defmodule DpExchange.Webull do
     # position that moved leaves a residue — which is exactly what a venue-side close
     # avoids, and this venue does not offer.
     {:close_position, 3},
-    {:get_order_book, 2},
     {:get_market_overview, 1},
     {:list_instruments, 1},
     {:get_fees, 2},
@@ -259,7 +258,14 @@ defmodule DpExchange.Webull do
   def get_symbols(opts \\ []), do: Rest.get_symbols(credentials(opts), with_limiter(opts))
 
   @impl true
-  def get_order_book(_symbol, _opts), do: Venue.not_supported()
+  @doc """
+  The order book for an equity or ETF.
+
+  See `DpExchange.Webull.Rest.get_order_book/3` — including why a crypto symbol is refused
+  here, and what per-participant attribution this contract has no place for.
+  """
+  def get_order_book(symbol, opts \\ []),
+    do: Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
 
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()

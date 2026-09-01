@@ -21,6 +21,26 @@ acceptable changelog line.
 ## [Unreleased]
 
 ### Added
+- **`get_order_book/2` — stock and ETF depth**, `/market-data/stocks/depths/list`. The first
+  endpoint of the equity market-data surface.
+
+  **The book is equities-only on this venue.** The crypto snapshot publishes a top of book
+  and nothing beneath it, and the vendor states `US_OPTION` is not supported here — so the
+  category is checked before the request rather than after the venue's refusal.
+
+  **The attribution is dropped, and that is worth saying out loud.** Each level carries the
+  venue's `order` array of market-participant IDs with per-participant sizes, and `broker`
+  names beneath that. `Core.Types.OrderBook` levels are `{price, size}`, so on a lit book
+  this package discards who is quoting. The size that survives is the venue's own level
+  size, **not a sum over the participants** — attribution can be partial, and the level
+  size is the number the venue stands behind.
+
+  A book the venue did not stamp is refused; a depth snapshot wearing the local clock
+  cannot be told apart from a current one. `sequence` is `nil`, so a caller cannot use a
+  REST book to detect a gap in a stream. `overnight_required` is always sent because the
+  venue marks it required, and an omitted required parameter is a refusal a caller cannot
+  read.
+
 - **BREAKING: this package is no longer crypto-only. `asset_classes` is
   `[:crypto, :equity]`.**
 

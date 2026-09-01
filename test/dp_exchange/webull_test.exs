@@ -247,7 +247,9 @@ defmodule DpExchange.WebullTest do
     test "everything the real package does not implement says so here too" do
       # Less capable is allowed; differently capable is not. A fake that answered where the
       # real package refuses would let a consumer build on something that does not exist.
-      assert Fake.get_order_book("BTC-USD", []) == {:error, :not_supported}
+      # get_order_book/2 is implemented for equities now. A crypto pair is still refused —
+      # this venue publishes no crypto depth — which is a different answer from "not
+      # implemented" and is asserted in the order book tests.
       assert Fake.get_market_overview([]) == {:error, :not_supported}
       assert Fake.list_instruments([]) == {:error, :not_supported}
       # get_balances/2, get_accounts/2 and get_positions/1 are implemented now.

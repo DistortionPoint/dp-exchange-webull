@@ -37,7 +37,7 @@ defmodule DpExchange.Webull.Rest do
   """
 
   alias DpExchange.Core.HttpClient
-  alias DpExchange.Core.Types.{Balance, Candle, Order, Position, Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Balance, Candle, Order, OrderBook, Position, Quote, TopOfBook}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   # Canonical width => the venue's own timespan code.
@@ -662,6 +662,85 @@ defmodule DpExchange.Webull.Rest do
   defp present?(changes) when map_size(changes) == 0, do: {:error, :no_order_changes}
   defp present?(_changes), do: :ok
 
+  @doc """
+  The order book for an equity or ETF — `/market-data/stocks/depths/list`.
+
+  **This venue's book is equities-only.** The crypto snapshot endpoint publishes a top of
+  book and no depth, and the vendor states `US_OPTION` is not supported here. So a crypto
+  symbol is refused before the request rather than sent and rejected.
+
+  `opts[:category]` picks `US_STOCK` (the default) or `US_ETF`; `opts[:depth]` is the
+  venue's own level count — L1 is 1, L2 defaults to 10. `opts[:overnight]` includes
+  overnight trading data, and the venue **requires the parameter**, so `false` is sent
+  explicitly rather than omitted.
+
+  ## What is dropped, and why that is stated rather than silent
+
+  Each level carries the venue's `order` array — market participant IDs and per-participant
+  sizes — and `broker` names beneath that. `Core.Types.OrderBook` levels are
+  `{price, size}`, so **the attribution is discarded here**. That is a real loss: on a
+  lit book, who is quoting is information a caller may want, and this contract has no
+  place for it. The sizes that survive are the venue's own level sizes, not a sum this
+  package computed from the participants.
+
+  `timestamp` is the venue's `quote_time`. **A book the venue did not stamp is refused** —
+  a depth snapshot wearing the local clock cannot be told from a current one.
+  """
+  @spec get_order_book(String.t(), map(), keyword()) ::
+          {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
+  def get_order_book(symbol, credentials, opts) do
+    category = Keyword.get(opts, :category, "US_STOCK")
+
+    with :ok <- book_category(category) do
+      params = %{
+        "symbol" => symbol,
+        "category" => category,
+        "depth" => to_string(Keyword.get(opts, :depth, 10)),
+        # The venue marks this REQUIRED, so it is always sent — an omitted required
+        # parameter is a refusal the caller cannot read.
+        "overnight_required" => to_string(Keyword.get(opts, :overnight, false))
+      }
+
+      with {:ok, body} <- get("/market-data/stocks/depths/list", params, credentials, opts),
+           {:ok, row} <- first_row(body) do
+        to_order_book(row, symbol)
+      end
+    end
+  end
+
+  # The vendor's own enum. `US_OPTION` is listed as not supported here, and crypto has no
+  # depth endpoint at all — its snapshot publishes a top of book and nothing beneath it.
+  defp book_category(category) when category in ["US_STOCK", "US_ETF"], do: :ok
+  defp book_category(category), do: {:error, {:unsupported_book_category, category}}
+
+  defp to_order_book(row, symbol) do
+    # `venue_time/1` already reads `quote_time`, which is what this endpoint stamps.
+    with {:ok, timestamp} <- venue_time(row) do
+      {:ok,
+       %OrderBook{
+         symbol: symbol,
+         bids: book_levels(value(row, ["bids"])),
+         asks: book_levels(value(row, ["asks"])),
+         timestamp: timestamp,
+         # No sequence on this endpoint. `nil` means the venue did not say, so a caller
+         # cannot use this book to detect a gap in a stream.
+         sequence: nil,
+         provider: :webull
+       }}
+    end
+  end
+
+  # The level's own size, not a sum over its `order` array. Those are different numbers when
+  # the venue reports partial attribution, and the level size is the one it stands behind.
+  defp book_levels(rows) when is_list(rows) do
+    for row <- rows,
+        price = decimal(value(row, ["price"])),
+        size = decimal(value(row, ["size"])),
+        not is_nil(price),
+        do: {price, size}
+  end
+
+  defp book_levels(_absent), do: []
   # --- decoding -----------------------------------------------------------
 
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
