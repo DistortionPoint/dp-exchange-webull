@@ -63,6 +63,14 @@ acceptable changelog line.
   than as the encoding bug it is.
 
 ### Changed
+
+- **Corrected a false claim about the venue.** `@unsupported` said `preview_order/3` "has
+  no endpoint at all". `/trading/orders/preview` exists and is documented; what the vendor
+  says is *"For crypto trading, this feature is currently not supported"*, and the same
+  sentence appears on `/trading/orders/replace`. `/trading/orders/batch-place` is stocks
+  only and gated per client. The endpoints are unimplemented for the same reason as before,
+  but the reason is now the one the venue gives rather than one this package invented.
+
 - **BREAKING: `get_historical_prices/4` returns `Core.Types.Candle` structs, and the bar's
   time is `opened_at`.** It returned bare maps keyed on `:timestamp`.
 

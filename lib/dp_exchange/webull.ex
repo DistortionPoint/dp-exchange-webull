@@ -97,9 +97,23 @@ defmodule DpExchange.Webull do
     {:create_account, 1},
     {:rename_account, 3},
     {:get_roles, 1},
-    # Neither exists on this venue. `preview_order/3` has no endpoint at all;
-    # `replace_order/4` means a caller cancels and re-places, which is NOT equivalent —
-    # it opens a window in which no order is live.
+    # **Both endpoints exist. The venue excludes crypto from them, which this package only
+    # serves.** Read from the vendor's own reference pages on 2026-09-01:
+    #
+    #   /trading/orders/preview  — "For crypto trading, this feature is currently not
+    #                              supported."
+    #   /trading/orders/replace  — "Modifies equity, options and futures orders […] For
+    #                              crypto trading, this feature is currently not supported."
+    #
+    # The previous note here said preview "has no endpoint at all", which was false — a
+    # claim about the venue that the venue contradicts. What is true is narrower and worth
+    # stating exactly: the endpoints are documented, and they are documented as excluding
+    # the one asset class this package declares.
+    #
+    # So `replace_order/4` is not merely unimplemented; on crypto there is nothing to
+    # implement. A caller wanting a different order cancels and re-places, which is NOT
+    # equivalent — it opens a window in which no order is live — and that window is the
+    # venue's, not this package's.
     {:preview_order, 3},
     {:replace_order, 4},
     {:get_order_book, 2},
