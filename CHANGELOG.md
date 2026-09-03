@@ -22,6 +22,18 @@ acceptable changelog line.
 
 ### Documentation
 
+- **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 30 endpoints
+  that are Webull's own absence — staking, one-step convert, funding rails, greeks, bulk
+  cancel, position closing — each with the source and date behind it; 13 stay under
+  `@not_ported`, including `list_instruments/1`, which the instrument profile endpoints
+  already back through `get_symbols/1` but which this callback has not been built against.
+- **`README.md` states what the contract covers** — 44 of 87 callbacks `:experimental`
+  across five asset classes.
+- **`docs/reference/webull/endpoint-inventory.md`'s counts refreshed.** It read "5 of 85"
+  until this release, from the pre-Phase-8 capture.
+
+### Documentation
+
 - **Every negative this package makes is audited** —
   `docs/reference/webull/negative-claims.md`, fourteen claims with the source and date
   consulted for each. Eleven hold; **three were wrong, and all three were the same mistake**:

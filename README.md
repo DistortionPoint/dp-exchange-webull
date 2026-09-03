@@ -17,6 +17,14 @@
 Webull for the **DpExchange** family: market data, trading and streaming behind the
 same facade every venue in the family exposes.
 
+## What this package covers
+
+87 callbacks, of which **44 are declared `:experimental`** and 43 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
+
+Asset classes: **crypto, equity, option, future, event contract**. Streamed kinds: **quotes** — everything else pulls only.
+
+Of the 43 unsupported endpoints, **30 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/webull/negative-claims.md`, which records the source and date behind every one.
+
 ## Installation
 
 ```elixir

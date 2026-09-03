@@ -61,11 +61,12 @@ defmodule DpExchange.Webull do
   # Not implemented in this release. None of them is about authentication — the host
   # supplies credentials and these simply have not been ported yet, which is a different
   # claim from "the venue does not serve them" and is stated as such.
-  @unsupported [
-    # Core 0.1.16's wider facade — declared, not yet implemented. Each is a Phase 3–13
-    # item. `:unsupported` is about this package unless the note says otherwise.
-    {:get_funding, 2},
-    {:get_contract_stats, 2},
+  # The venue serves none of these. **That is a claim about Webull, not about how far this
+  # package got** — and the two are worth telling apart, because both answer a caller
+  # identically and only the second can ever change. Each entry below is evidenced, not
+  # assumed; the ones with no comment attached are `@not_ported`, further down, precisely
+  # because this package has not yet checked or built them.
+  @venue_does_not_serve [
     {:get_staking_rates, 1},
     {:get_staking_balances, 1},
     {:get_staking_rewards, 1},
@@ -82,7 +83,6 @@ defmodule DpExchange.Webull do
     {:quote_conversion, 4},
     {:commit_conversion, 2},
     {:get_conversion, 2},
-    {:list_portfolios, 1},
     {:get_deposit_address, 3},
     {:list_approved_addresses, 1},
     {:estimate_withdrawal_fee, 4},
@@ -113,9 +113,6 @@ defmodule DpExchange.Webull do
     # publish either, so every number would be this package's model presented as the
     # venue's. `get_option_chain/2` and `get_option_expirations/2` are live.
     {:get_option_greeks, 2},
-    {:create_account, 1},
-    {:rename_account, 3},
-    {:get_roles, 1},
     # **`preview_replace/4` has no endpoint here.** The venue previews an order that does
     # not exist yet (`/trading/orders/preview`) and amends one that does
     # (`/trading/orders/replace`); it does not price an amendment in advance. Read from the
@@ -133,8 +130,21 @@ defmodule DpExchange.Webull do
     # Reading a position and placing the opposite order sizes against the last read, and a
     # position that moved leaves a residue — which is exactly what a venue-side close
     # avoids, and this venue does not offer.
-    {:close_position, 3},
+    {:close_position, 3}
+  ]
+
+  # Not ported yet. **The venue serves these, or has not been checked closely enough to say
+  # it does not** — either way, unlike the list above, they are not evidenced absences.
+  @not_ported [
+    {:get_funding, 2},
+    {:get_contract_stats, 2},
+    {:list_portfolios, 1},
+    {:create_account, 1},
+    {:rename_account, 3},
+    {:get_roles, 1},
     {:get_market_overview, 1},
+    # `/trading/instruments/{crypto,stocks}/profiles/list` already back `get_symbols/1`;
+    # this callback's own shape has not been built against them.
     {:list_instruments, 1},
     {:get_fees, 2},
     {:get_trade_history, 2},
@@ -142,6 +152,8 @@ defmodule DpExchange.Webull do
     {:test_connection, 2},
     {:quantization, 1}
   ]
+
+  @unsupported @venue_does_not_serve ++ @not_ported
 
   # --- lifecycle ---------------------------------------------------------
 
@@ -160,6 +172,19 @@ defmodule DpExchange.Webull do
 
   @impl true
   def runtime_id, do: :webull
+
+  @doc """
+  Endpoints the **venue** does not serve, as distinct from ones this package has not ported.
+
+  Both answer `{:error, :not_supported}`, and a caller acts the same way on either — but
+  they mean different things to anyone deciding what to build next, so they are told apart
+  here rather than flattened into one list.
+
+  Every entry is recorded with its source and the date consulted in
+  `docs/reference/webull/negative-claims.md`.
+  """
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  def venue_does_not_serve, do: @venue_does_not_serve
 
   @doc """
   The asset classes this package serves.

@@ -8,15 +8,24 @@ offers.
 
 ## Counts
 
+**Re-checked 2026-09-03.** The table below read "5 of 85" until this release, from the
+2026-08-31 capture. The vendor count has not moved; this package's coverage of it has —
+this release added options, futures, event contracts, fundamentals, screeners, watchlists,
+batch orders and the token lifecycle.
+
+**Current, from `capabilities/0`, checked 2026-09-03**: 44 of 87 contract callbacks
+`:experimental`, 43 `:unsupported`, of which 30 are the venue's own absence — see
+`negative-claims.md` — and 13 remain not yet ported.
+
 | surface | endpoints | in this package |
 |---|---|---|
-| **Trading + Market Data API** | **85** | **5** |
+| **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
 | Broker API (`broker-fd-api`) | 78 | 0 |
 | Broker Market Data | 37 | 0 |
 | FD Events | 13 | 0 |
 | Custom | 12 | 0 |
-| Connect | 4 | 0 — **not a blanket skip**; see below |
-| **total documented** | **229** | **5** |
+| Connect | 4 | 3 — see below; only the consent redirect stays with the host |
+| **total documented** | **229** | **44 of 87 contract callbacks, per `capabilities/0`** |
 
 ### Connect is not all "auth", and only half of it is the host's
 
@@ -29,7 +38,7 @@ and only the browser grant stays with the host.
 | `connect-api/get-authorization-code` | **host** | consent redirect; needs a browser and a person |
 | `connect-api/connect` | **host** | same flow |
 | **`connect-api/create-and-refresh-token`** | **package** | credential *use* — §6.0 places "session refresh, token rotation" here |
-| **`/auth/tokens/create`**, **`/auth/tokens/check`** | **package** | same; both are already counted in the 85 above |
+| **`/auth/tokens/create`**, **`/auth/tokens/check`** | **package** | same; both are implemented — see `usage-rules/auth.md` |
 
 Sweeping all of it into "OAuth, skipped" would leave this venue unable to keep a session
 alive while another venue in the same family does exactly that in-package.
