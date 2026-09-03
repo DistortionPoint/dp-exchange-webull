@@ -20,6 +20,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`get_fees/2` and `quantization/1` are implemented.** Both had sat in `@not_ported`
+  since Phase 2 with no comment recording why — DpCryptoManagement's own filed questions
+  (issues #5, #6 against `dp_exchange_core`) were right that the classification did not
+  distinguish "checked and absent" from "never looked".
+
+  `quantization/1` reads the same `instruments/.../profiles/list` endpoint `get_symbols/1`
+  already calls. Checked the vendor's live schema before writing anything: **crypto and
+  stock rows are disjoint, not the same shape with some fields blank.** Crypto carries
+  `price_step`, `lot_size`, `min_trade_qty`, `max_trade_qty`, `min_trade_amt`,
+  `max_trade_amt` — all six. Stock/ETF carries `lot_size` alone; no price step, no per-unit
+  or per-cash min or max anywhere on the row. A stock symbol now answers with
+  `quantity_increment` and every other field `nil`, not the crypto shape reused because it
+  was already written.
+
+  `get_fees/2` required checking two different products before answering. Trading API — the
+  one this package speaks — has no fee-schedule endpoint anywhere in its surface, checked
+  across `Instruments`, `Accounts`, `Assets` and `Activities`. What carries the name "Fees
+  and Credits" lives entirely in **Broker API**, and is an administrative interface for a
+  broker crediting or debiting a sub-account — not a schedule a caller queries, and out of
+  reach on principle (D8) as well as on credentials. What the venue does publish, on
+  `webull.com/pricing`: a single flat **1.00% crypto spread, charged by Webull Pay/Bakkt**,
+  the same for every account. `get_fees/2` returns that captured, dated rate rather than a
+  live per-credential lookup, because there is no live lookup to make — the rate does not
+  vary by credential to look up.
+
 ### Fixed
 
 - **`Decimal.new/1` raised on a non-numeric price string — the exact crash filed as

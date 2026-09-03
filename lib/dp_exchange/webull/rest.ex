@@ -352,6 +352,40 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # A flat rate, published, not queried — see the moduledoc note on `get_fees/3`.
+  @crypto_spread_pct Decimal.new("1.00")
+  @crypto_spread_captured_at ~D[2026-09-03]
+
+  @doc """
+  Webull's crypto fee — captured from the venue's own published pricing, not from a live
+  per-account query.
+
+  **The Trading API this package speaks has no fee-schedule endpoint anywhere in its
+  surface** — checked across `Instruments`, `Accounts`, `Assets` and `Activities`, the
+  whole of the API's own navigation. What exists under that name lives in a different
+  product entirely: **Broker API**'s "Fees and Credits" is an *administrative* interface
+  — creating and reading fee deductions/credits a broker applies to a sub-account, not a
+  schedule a caller queries. This package does not operate a brokerage (D8), so that
+  surface is out of reach on principle as well as on credentials.
+
+  What Webull does publish, on `webull.com/pricing`, is a single flat crypto spread:
+  **1.00% per trade, charged by Webull Pay/Bakkt**, the same rate for every account —
+  not a tier a credential selects among. `credentials` is accepted, to match this
+  contract's shape, and is not otherwise used: there is nothing to look up that would
+  differ by account. Captured #{@crypto_spread_captured_at}; re-check the page before
+  trusting this figure if it is old by the time you read this.
+  """
+  @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def get_fees(_credentials, _opts) do
+    {:ok,
+     %{
+       crypto_spread_pct: @crypto_spread_pct,
+       charged_by: "Webull Pay/Bakkt",
+       source: :published_rate,
+       captured_at: @crypto_spread_captured_at
+     }}
+  end
+
   @doc """
   Every crypto symbol the venue lists, canonical.
 
@@ -407,6 +441,64 @@ defmodule DpExchange.Webull.Rest do
   # **Crypto and stock instruments are different endpoints**, and both paginate the same
   # way. The category picks; the default is crypto, which is what this package listed before
   # its asset classes widened.
+  @doc """
+  Rounds a price and quantity to what the venue will actually accept.
+
+  Reads the same `instruments/.../profiles/list` endpoint `get_symbols/1` already calls —
+  filtered to one symbol — rather than a separate lookup. **Crypto and stock instruments
+  publish disjoint fields**, verified against the vendor's own live schema, 2026-09-03:
+
+    * **crypto** (`V2CryptoInstrument`-shaped rows): `price_step`, `lot_size`,
+      `min_trade_qty`, `max_trade_qty`, `min_trade_amt`, `max_trade_amt` — all six present
+    * **stock/ETF**: only `lot_size`. No price step, no per-unit or per-cash min or max
+      anywhere on the row — margin ratios and share-class flags instead, none of them
+      quantization
+
+  A stock/ETF symbol therefore answers with `quantity_increment` alone and every other
+  field `nil` — not a guess at what the venue does not name, and not the crypto shape
+  reused because it was already written.
+
+  Category is read from the symbol's own shape (a canonical pair has a dash; a ticker does
+  not) rather than asked for, because `quantization/1`'s contract takes only a symbol.
+  """
+  @spec quantization(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def quantization(symbol, credentials, opts) do
+    category = if String.contains?(symbol, "-"), do: "US_CRYPTO", else: "US_STOCK"
+    native = if category == "US_CRYPTO", do: SymbolFormat.to_exchange_symbol(symbol), else: symbol
+
+    with {:ok, path} <- instruments_path(category),
+         params = %{"category" => category, "symbols" => native},
+         {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, row} <- first_row(body) do
+      {:ok, quantum_from_row(row, category)}
+    end
+  end
+
+  defp quantum_from_row(row, "US_CRYPTO") do
+    %{
+      price_increment: decimal(value(row, ["price_step"])),
+      quantity_increment: decimal(value(row, ["lot_size"])),
+      min_quantity: decimal(value(row, ["min_trade_qty"])),
+      max_quantity: decimal(value(row, ["max_trade_qty"])),
+      min_quote_size: decimal(value(row, ["min_trade_amt"])),
+      max_quote_size: decimal(value(row, ["max_trade_amt"])),
+      status: value(row, ["status"])
+    }
+  end
+
+  defp quantum_from_row(row, _stock_or_etf) do
+    %{
+      price_increment: nil,
+      quantity_increment: decimal(value(row, ["lot_size"])),
+      min_quantity: nil,
+      max_quantity: nil,
+      min_quote_size: nil,
+      max_quote_size: nil,
+      status: value(row, ["status"])
+    }
+  end
+
   defp instruments_path("US_CRYPTO"), do: {:ok, "/trading/instruments/crypto/profiles/list"}
 
   defp instruments_path(category) when category in ["US_STOCK", "US_ETF"],

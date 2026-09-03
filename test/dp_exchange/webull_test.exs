@@ -255,7 +255,6 @@ defmodule DpExchange.WebullTest do
       # get_balances/2, get_accounts/2 and get_positions/1 are implemented now.
       # get_balances and get_positions refuse without an `account_id`, which is the venue's
       # requirement rather than a missing implementation; get_accounts takes none.
-      assert Fake.get_fees(@credentials, []) == {:error, :not_supported}
       # get_transfers/2 is implemented now. It refuses without an account_id, which is the
       # venue's requirement rather than a missing implementation.
       # place_order is implemented now, so it no longer belongs in this sweep. It refuses
@@ -268,7 +267,6 @@ defmodule DpExchange.WebullTest do
       assert Fake.get_trade_history(@credentials, []) == {:error, :not_supported}
       assert Fake.test_connection(@credentials, []) == {:error, :not_supported}
       assert Fake.get_rate_limit_status(@credentials, []) == {:error, :not_supported}
-      assert Fake.quantization("BTC-USD") == {:error, :not_supported}
     end
 
     test "subscribing to only an unlisted symbol pushes nothing" do

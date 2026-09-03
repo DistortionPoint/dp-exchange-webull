@@ -146,11 +146,9 @@ defmodule DpExchange.Webull do
     # `/trading/instruments/{crypto,stocks}/profiles/list` already back `get_symbols/1`;
     # this callback's own shape has not been built against them.
     {:list_instruments, 1},
-    {:get_fees, 2},
     {:get_trade_history, 2},
     {:get_rate_limit_status, 2},
-    {:test_connection, 2},
-    {:quantization, 1}
+    {:test_connection, 2}
   ]
 
   @unsupported @venue_does_not_serve ++ @not_ported
@@ -370,8 +368,14 @@ defmodule DpExchange.Webull do
   this venue's breadth.
   """
   def get_accounts(credentials, opts), do: Rest.get_accounts(credentials, with_limiter(opts))
+
+  @doc """
+  Webull's crypto fee — see `DpExchange.Webull.Rest.get_fees/2` for the source and why
+  `credentials` is unused: the venue publishes one flat rate, not a tier a credential
+  selects among.
+  """
   @impl true
-  def get_fees(_credentials, _opts), do: Venue.not_supported()
+  def get_fees(credentials, opts), do: Rest.get_fees(credentials, with_limiter(opts))
   @impl true
   @doc """
   Money into and out of one account. Requires `opts[:account_id]`.
@@ -469,8 +473,20 @@ defmodule DpExchange.Webull do
   @impl true
   def market_status(_opts), do: {:ok, :open}
 
+  @doc """
+  Rounds a price and quantity to what the venue will actually accept.
+
+  See `DpExchange.Webull.Rest.quantization/3` for the source and the crypto/stock field
+  split. **This venue signs every request** (`credential_benefit: :required`), and
+  `quantization/1`'s contract carries no `opts` — there is nowhere to put a credential in
+  a call shaped that way. Accepting `opts` here, as `get_symbols/1` already does, is the
+  only way a caller on this venue can pass one; a caller that does not still gets the
+  arity the behaviour promises, and an honest signing failure rather than a blanket
+  refusal that would say this is unbuilt when it is not.
+  """
   @impl true
-  def quantization(_symbol), do: Venue.not_supported()
+  def quantization(symbol, opts \\ []),
+    do: Rest.quantization(symbol, credentials(opts), with_limiter(opts))
 
   # --- internals ---------------------------------------------------------
 

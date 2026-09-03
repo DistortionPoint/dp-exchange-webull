@@ -320,7 +320,16 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_fees(_credentials, _opts), do: Venue.not_supported()
+  def get_fees(_credentials, _opts) do
+    {:ok,
+     %{
+       crypto_spread_pct: Decimal.new("1.00"),
+       charged_by: "Webull Pay/Bakkt",
+       source: :published_rate,
+       captured_at: ~D[2026-09-03]
+     }}
+  end
+
   @impl true
   def get_transfers(_credentials, opts) do
     with :ok <- fake_account(opts) do
@@ -495,7 +504,31 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def quantization(_symbol), do: Venue.not_supported()
+  def quantization(symbol, _opts \\ []) do
+    if String.contains?(symbol, "-") do
+      {:ok,
+       %{
+         price_increment: Decimal.new("0.01"),
+         quantity_increment: Decimal.new("0.00000001"),
+         min_quantity: Decimal.new("0.0001"),
+         max_quantity: Decimal.new("1000"),
+         min_quote_size: Decimal.new("1.00"),
+         max_quote_size: Decimal.new("100000"),
+         status: "OC"
+       }}
+    else
+      {:ok,
+       %{
+         price_increment: nil,
+         quantity_increment: Decimal.new("1"),
+         min_quantity: nil,
+         max_quantity: nil,
+         min_quote_size: nil,
+         max_quote_size: nil,
+         status: "OC"
+       }}
+    end
+  end
 
   @impl true
   def market_status(_opts), do: {:ok, :open}

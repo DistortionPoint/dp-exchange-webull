@@ -337,4 +337,64 @@ defmodule DpExchange.Webull.RestTest do
                )
     end
   end
+
+  describe "get_fees/2" do
+    test "returns the published crypto spread, sourced and dated" do
+      assert {:ok, fees} = Rest.get_fees(@credentials, [])
+      assert Decimal.equal?(fees.crypto_spread_pct, Decimal.new("1.00"))
+      assert fees.charged_by == "Webull Pay/Bakkt"
+      assert fees.source == :published_rate
+      assert fees.captured_at == ~D[2026-09-03]
+    end
+  end
+
+  describe "quantization/3" do
+    @crypto_row %{
+      "symbol" => "BTCUSD",
+      "price_step" => "0.01",
+      "lot_size" => "0.00000001",
+      "min_trade_qty" => "0.0001",
+      "max_trade_qty" => "1000",
+      "min_trade_amt" => "1.00",
+      "max_trade_amt" => "100000",
+      "status" => "OC"
+    }
+
+    @stock_row %{
+      "symbol" => "AAPL",
+      "lot_size" => "1.0",
+      "status" => "OC"
+    }
+
+    test "a crypto pair (dash in the symbol) reads all six fields" do
+      assert {:ok, quantum} =
+               Rest.quantization("BTC-USD", @credentials,
+                 plug: responding(%{"data" => [@crypto_row]}),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quantum.price_increment, Decimal.new("0.01"))
+      assert Decimal.equal?(quantum.quantity_increment, Decimal.new("0.00000001"))
+      assert Decimal.equal?(quantum.min_quantity, Decimal.new("0.0001"))
+      assert Decimal.equal?(quantum.max_quantity, Decimal.new("1000"))
+      assert Decimal.equal?(quantum.min_quote_size, Decimal.new("1.00"))
+      assert Decimal.equal?(quantum.max_quote_size, Decimal.new("100000"))
+      assert quantum.status == "OC"
+    end
+
+    test "a stock ticker (no dash) reads only lot_size — the venue's schema has nothing else" do
+      assert {:ok, quantum} =
+               Rest.quantization("AAPL", @credentials,
+                 plug: responding(%{"data" => [@stock_row]}),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quantum.quantity_increment, Decimal.new("1.0"))
+      assert quantum.price_increment == nil
+      assert quantum.min_quantity == nil
+      assert quantum.max_quantity == nil
+      assert quantum.min_quote_size == nil
+      assert quantum.max_quote_size == nil
+    end
+  end
 end
