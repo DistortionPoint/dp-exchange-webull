@@ -100,6 +100,16 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
     end
 
+    test "a non-numeric price in a real frame does not crash the socket" do
+      # Decimal.new/1 used to raise on this exact shape, taking the whole connection down
+      # over one malformed field on one symbol.
+      frame = publish("snapshot", snapshot_payload("BTCUSD", "null"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+    end
+
     test "a book message delivers top-of-book, and never a price" do
       # This asserted the opposite until 2026-08-31: that `price` became the bid, with a
       # comment calling the bid "a real quoted number, labelled as the bid too". It is

@@ -20,6 +20,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Decimal.new/1` raised on a non-numeric price string — the exact crash filed as
+  DpCryptoManagement's issue #3.** Reproduced first: `Decimal.new("null")` raises, and a
+  delisted Webull crypto pair is a real, previously observed shape that returns exactly
+  that string for a price field. Fixed in both copies (`rest.ex`, `socket.ex`) with
+  `Decimal.parse/1`, requiring the whole string be consumed — the family's established
+  idiom, already used by `chain_strike/1` elsewhere in this package.
+
+  The lenient fix alone would have introduced a second, quieter defect: a malformed
+  required field silently becoming `nil` instead of raising, which `@enforce_keys` does
+  not catch. `get_price/3`, the socket's own `emit_decoded/2`, `to_trade/2` and
+  `decode_bar/3` now refuse the record instead (`{:error, {:invalid_decimal, field,
+  value}}` or `{:error, {:missing_required_field, field}}`), rather than delivering a
+  `Quote`, `Trade` or `Candle` with a fabricated-looking `nil` in a field the type
+  promises is real. One test fixture in `order_book_test.exs` had itself been supplying
+  an incomplete bar (missing `high`/`low`) that only worked because the old lenient
+  behaviour tolerated it; corrected to a complete bar rather than loosened back.
+
 ### Documentation
 
 - **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 30 endpoints

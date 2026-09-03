@@ -157,12 +157,13 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body),
-           {:ok, price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
+           {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
+           {:ok, price} <- required_decimal(raw_price, :price),
            {:ok, timestamp} <- venue_time(row) do
         {:ok,
          %Quote{
            symbol: snapshot_canonical(native, category),
-           price: decimal(price),
+           price: price,
            volume: snapshot_volume(row, category),
            timestamp: timestamp,
            provider: :webull
@@ -1326,15 +1327,17 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp to_trade(tick, symbol) do
-    with {:ok, timestamp} <- venue_time(tick) do
+    with {:ok, timestamp} <- venue_time(tick),
+         {:ok, price} <- required_decimal(value(tick, ["price"]), :price),
+         {:ok, quantity} <- required_decimal(value(tick, ["volume"]), :quantity) do
       {:ok,
        %Trade{
          # The venue publishes no per-tick id on this endpoint. `nil` says so.
          id: nil,
          symbol: symbol,
          side: tick_side(value(tick, ["side"])),
-         price: decimal(value(tick, ["price"])),
-         quantity: decimal(value(tick, ["volume"])),
+         price: price,
+         quantity: quantity,
          timestamp: timestamp,
          # No bust flag on this endpoint; nothing was busted, which is the same answer.
          broken: false,
@@ -2682,16 +2685,20 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp decode_bar(row, symbol, timeframe) do
-    with {:ok, timestamp} <- venue_time(row) do
+    with {:ok, timestamp} <- venue_time(row),
+         {:ok, open} <- required_decimal(value(row, ["open"]), :open),
+         {:ok, high} <- required_decimal(value(row, ["high"]), :high),
+         {:ok, low} <- required_decimal(value(row, ["low"]), :low),
+         {:ok, close} <- required_decimal(value(row, ["close"]), :close) do
       {:ok,
        %Candle{
          symbol: symbol,
          timeframe: timeframe,
          opened_at: timestamp,
-         open: decimal(value(row, ["open"])),
-         high: decimal(value(row, ["high"])),
-         low: decimal(value(row, ["low"])),
-         close: decimal(value(row, ["close"])),
+         open: open,
+         high: high,
+         low: low,
+         close: close,
          # No volume on this venue's crypto bars. `nil`, never `0`.
          volume: nil,
          provider: :webull
@@ -2820,9 +2827,34 @@ defmodule DpExchange.Webull.Rest do
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+
+  # `Decimal.new/1` raises on a string that is not a number — a real, previously observed
+  # response shape from a delisted Webull crypto pair, which returns the literal string
+  # "null" for a price field. `Decimal.parse/1`, requiring the whole string be consumed
+  # (`{d, ""}`), does not.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  # A garbage or missing value in a field this contract requires must not become a `nil`
+  # carried into `@enforce_keys` — a struct's field list does not check that a value is
+  # non-nil, only that the key was given, so `decimal/1`'s lenient `nil` would sail
+  # straight through to a subscriber as a `Quote` with no price. Refuse the record instead.
+  defp required_decimal(nil, field), do: {:error, {:missing_required_field, field}}
+
+  defp required_decimal(value, field) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, field, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 
   @doc """
   Places a crypto order.

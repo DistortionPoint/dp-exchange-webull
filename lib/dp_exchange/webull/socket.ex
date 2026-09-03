@@ -216,13 +216,14 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp emit_decoded(state, {:ok, decoded}) do
-    with {:ok, timestamp} <- venue_time(decoded) do
+    with {:ok, timestamp} <- venue_time(decoded),
+         {:ok, price} <- required_decimal(decoded[:price]) do
       send(
         state.subscriber,
         {:dp_exchange, :webull,
          %Quote{
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
-           price: decimal(decoded[:price]),
+           price: price,
            volume: nil,
            timestamp: timestamp,
            provider: :webull
@@ -250,5 +251,27 @@ defmodule DpExchange.Webull.Socket do
   defp notify(state, notice), do: send(state.subscriber, {:dp_exchange, :webull, notice})
 
   defp decimal(nil), do: nil
-  defp decimal(value) when is_binary(value), do: Decimal.new(value)
+
+  # `Decimal.new/1` raises on a string that is not a number — a real, previously observed
+  # response shape from a delisted Webull crypto pair, which returns "null" for a price
+  # field. `Decimal.parse/1`, requiring the whole string be consumed, does not.
+  defp decimal(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {parsed, ""} -> parsed
+      _unparsable -> nil
+    end
+  end
+
+  defp decimal(_other), do: nil
+
+  # `Quote.price` is required and a `nil` there is the same substitution a raise would
+  # have been, wearing a quieter shape — a struct's own field list does not check that a
+  # required value is non-nil, only that the key was given. Refuse the frame instead of
+  # delivering a Quote with no price.
+  defp required_decimal(value) do
+    case decimal(value) do
+      nil -> {:error, {:invalid_decimal, :price, value}}
+      parsed -> {:ok, parsed}
+    end
+  end
 end

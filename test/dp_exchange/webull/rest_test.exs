@@ -89,6 +89,24 @@ defmodule DpExchange.Webull.RestTest do
       end
     end
 
+    test "a non-numeric price string refuses the quote rather than raising or delivering price: nil" do
+      # Filed as a live bug: a delisted crypto pair returns the literal string "null" for
+      # a price field, and Decimal.new/1 raised. The fix must not trade that crash for a
+      # Quote whose required :price is silently nil, which is the same substitution
+      # wearing a quieter shape.
+      body = [%{"price" => "null", "time" => 1_787_936_147_000}]
+
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "an empty-string price refuses the quote" do
+      body = [%{"price" => "", "time" => 1_787_936_147_000}]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+    end
+
     test "a response with no venue timestamp FAILS rather than substituting now" do
       body = [%{"price" => "1"}]
 

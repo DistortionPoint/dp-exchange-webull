@@ -816,7 +816,17 @@ defmodule DpExchange.Webull.OrderBookTest do
         |> Plug.Conn.resp(
           200,
           Jason.encode!([
-            %{"result" => [%{"time" => 1_787_935_740_000, "open" => "1", "close" => "1"}]}
+            %{
+              "result" => [
+                %{
+                  "time" => 1_787_935_740_000,
+                  "open" => "1",
+                  "high" => "1",
+                  "low" => "1",
+                  "close" => "1"
+                }
+              ]
+            }
           ])
         )
       end
