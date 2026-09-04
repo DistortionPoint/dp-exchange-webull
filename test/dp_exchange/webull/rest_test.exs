@@ -107,6 +107,21 @@ defmodule DpExchange.Webull.RestTest do
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
     end
 
+    for nan_or_inf <- ["NaN", "Inf", "-Inf"] do
+      test "a #{nan_or_inf} price refuses the quote rather than admitting it as real" do
+        # Decimal.parse/1 alone was not a sufficient guard for the "null" fix above:
+        # #{unquote(nan_or_inf)} fully parses, and would have flowed through as a real
+        # Quote.price without the nan?/inf? check.
+        body = [%{"price" => unquote(nan_or_inf), "time" => 1_787_936_147_000}]
+
+        assert {:error, {:invalid_decimal, :price, unquote(nan_or_inf)}} =
+                 Rest.get_price("BTC-USD", @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "a response with no venue timestamp FAILS rather than substituting now" do
       body = [%{"price" => "1"}]
 

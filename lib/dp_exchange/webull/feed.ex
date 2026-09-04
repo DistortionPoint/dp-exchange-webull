@@ -36,6 +36,14 @@ defmodule DpExchange.Webull.Feed do
   message ceiling is a change to make when a measurement demands it, and it can never
   exceed five — a consumer cannot cause a sixth socket, because a consumer cannot ask for
   sockets at all.
+
+  ## A socket process is not a connected socket
+
+  `Socket.start_link/1` returns once the WebSocket is up; MQTT is not authenticated until
+  the venue answers the CONNECT with a CONNACK, which arrives later as a `:link_up`
+  notice. The first `subscribe/3` against a fresh socket does not call the HTTP endpoint
+  itself — it waits for that notice, exactly as a reconnect already did, so the session id
+  it names is one the venue has actually registered.
   """
 
   use GenServer
@@ -96,12 +104,23 @@ defmodule DpExchange.Webull.Feed do
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
-       delivering: %{}
+       delivering: %{},
+       # True only once the venue's CONNACK has arrived for the current socket. Reset to
+       # false on every `:link_down`, so a subscribe issued mid-reconnect waits again
+       # rather than racing the venue's auth handshake a second time.
+       #
+       # `:connected?` is an init option, not just internal state, for the same reason
+       # `:socket` already is one: a test standing up a pre-connected socket needs to say
+       # so without driving a real MQTT handshake to get there.
+       connected?: Keyword.get(opts, :connected?, false),
+       # Callers who called `subscribe/3` while a fresh socket was still connecting.
+       # Answered together, from `resubscribe/1`'s own result, once `:link_up` arrives.
+       pending: []
      }}
   end
 
   @impl true
-  def handle_call({:subscribe, symbols, subscriber, opts}, _from, state) do
+  def handle_call({:subscribe, symbols, subscriber, opts}, from, state) do
     environment = Environment.resolve(Keyword.merge(state.socket_opts, opts))
 
     if Environment.streaming?(environment) do
@@ -111,13 +130,25 @@ defmodule DpExchange.Webull.Feed do
           wanted: MapSet.union(state.wanted, MapSet.new(symbols))
       }
 
-      case ensure_socket(state, environment) do
-        {:ok, state} ->
+      case ensure_socket(state, environment, opts) do
+        {:ok, state, :ready} ->
           # Remember what a replay needs. Without this, a reconnect re-subscribes with no
           # credentials and fails — the venue restores nothing, so the promise that a
           # consumer never sees a reconnect would quietly stop being true.
           state = %{state | resubscribe_opts: replayable(opts, state)}
           {:reply, Subscription.subscribe(state.session_id, symbols, opts), state}
+
+        {:ok, state, :connecting} ->
+          # The socket just opened and has not seen a CONNACK yet. Subscribing over HTTP
+          # now would name a session id the venue has not registered — defer the reply and
+          # let the `:link_up` handler answer it, the same path a reconnect already uses.
+          state = %{
+            state
+            | resubscribe_opts: replayable(opts, state),
+              pending: [from | state.pending]
+          }
+
+          {:noreply, state}
 
         {:error, reason} ->
           {:reply, {:error, reason}, state}
@@ -162,10 +193,19 @@ defmodule DpExchange.Webull.Feed do
   @impl true
   def handle_info({:dp_exchange, :webull, %Notice{kind: :link_up}} = message, state) do
     # The venue restores nothing on reconnect, so a fresh link means replaying everything
-    # wanted. Doing it here is the whole reason a consumer never sees a reconnect.
-    resubscribe(state)
+    # wanted. Doing it here is the whole reason a consumer never sees a reconnect — and,
+    # for a socket that just opened for the first time, it is also the earliest point at
+    # which naming this session id over HTTP means anything to the venue.
+    state = %{state | connected?: true}
+    result = resubscribe(state)
+    Enum.each(state.pending, &GenServer.reply(&1, result))
     fan_out(state.notice_subscribers, message)
-    {:noreply, state}
+    {:noreply, %{state | pending: []}}
+  end
+
+  def handle_info({:dp_exchange, :webull, %Notice{kind: :link_down}} = message, state) do
+    fan_out(state.notice_subscribers, message)
+    {:noreply, %{state | connected?: false}}
   end
 
   def handle_info({:dp_exchange, :webull, %Notice{}} = message, state) do
@@ -192,22 +232,43 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  defp ensure_socket(%{socket: socket} = state, _environment) when is_pid(socket),
-    do: {:ok, state}
+  # Already connected: the common case, once a socket has seen its CONNACK.
+  defp ensure_socket(%{socket: socket, connected?: true} = state, _environment, _opts)
+       when is_pid(socket),
+       do: {:ok, state, :ready}
 
-  defp ensure_socket(state, environment) do
-    opts =
-      state.socket_opts
-      |> Keyword.put_new(:url, Environment.streaming_url(environment))
-      |> Keyword.merge(
-        subscriber: self(),
-        session_id: state.session_id,
-        app_key: Keyword.get(state.socket_opts, :app_key, "")
-      )
+  # A socket exists but has not (yet, or not again) seen a CONNACK — a caller arrived
+  # while the first connect, or a reconnect, is still in flight.
+  defp ensure_socket(%{socket: socket} = state, _environment, _opts) when is_pid(socket),
+    do: {:ok, state, :connecting}
 
-    case Socket.start_link(opts) do
-      {:ok, socket} -> {:ok, %{state | socket: socket}}
-      {:error, reason} -> {:error, reason}
+  defp ensure_socket(state, environment, opts) do
+    # Credentials arrive per call in this family, same as every other venue's facade —
+    # `app_key` is not read from init-time options because a consumer supervising this
+    # tree may never have had it to give then. A caller with none cannot open a socket:
+    # the venue accepts any password on CONNECT but authenticates by App Key, so an empty
+    # one would connect and then sit unauthenticated rather than fail visibly.
+    case app_key_from(opts) do
+      nil ->
+        {:error, {:missing_required_field, :app_key}}
+
+      app_key ->
+        socket_opts =
+          state.socket_opts
+          |> Keyword.put_new(:url, Environment.streaming_url(environment))
+          |> Keyword.merge(subscriber: self(), session_id: state.session_id, app_key: app_key)
+
+        case Socket.start_link(socket_opts) do
+          {:ok, socket} -> {:ok, %{state | socket: socket, connected?: false}, :connecting}
+          {:error, reason} -> {:error, reason}
+        end
+    end
+  end
+
+  defp app_key_from(opts) do
+    case Keyword.get(opts, :credentials) do
+      %{app_key: app_key} when is_binary(app_key) -> app_key
+      _no_usable_credentials -> nil
     end
   end
 

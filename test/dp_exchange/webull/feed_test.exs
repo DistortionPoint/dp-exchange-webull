@@ -48,9 +48,13 @@ defmodule DpExchange.Webull.FeedTest do
     )
   end
 
+  # `socket: self()` stands in for an already-open socket; `connected?: true` alongside it
+  # stands in for that socket having already seen its CONNACK, which is what every test
+  # below except the ones about the connecting window itself wants to assume.
   defp start_feed(opts \\ []) do
     name = :"feed_#{System.unique_integer([:positive])}"
-    {:ok, pid} = Feed.start_link(Keyword.merge([name: name, socket: self()], opts))
+    defaults = [name: name, socket: self(), connected?: true]
+    {:ok, pid} = Feed.start_link(Keyword.merge(defaults, opts))
     pid
   end
 
@@ -161,6 +165,87 @@ defmodule DpExchange.Webull.FeedTest do
       _refused = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, environment: :uat))
 
       assert Feed.coverage(feed) == %{}
+    end
+  end
+
+  describe "app_key must come from the caller's own credentials" do
+    test "a subscribe with no usable app_key is refused rather than opening a socket with an empty one",
+         %{limiter: limiter} do
+      # No pre-seeded socket here — this exercises the path that actually opens one, which
+      # needs a real app_key. Silently defaulting to "" would connect and then sit
+      # unauthenticated instead of failing where the caller can see it.
+      name = :"feed_#{System.unique_integer([:positive])}"
+      {:ok, feed} = Feed.start_link(name: name)
+
+      assert {:error, {:missing_required_field, :app_key}} =
+               Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, credentials: %{}))
+    end
+
+    test "a subscribe with a real app_key proceeds to actually open a socket", %{
+      limiter: limiter
+    } do
+      # An unreachable local address, so the refusal this asserts is unambiguously the
+      # connection failing rather than the app_key check — proving app_key was read from
+      # credentials and reached Socket.start_link rather than being refused up front.
+      name = :"feed_#{System.unique_integer([:positive])}"
+      {:ok, feed} = Feed.start_link(name: name, url: "ws://127.0.0.1:1/nowhere")
+
+      assert {:error, reason} = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+      refute reason == {:missing_required_field, :app_key}
+    end
+  end
+
+  describe "a subscribe against a freshly-opening socket waits for the CONNACK" do
+    test "the reply is deferred until :link_up, not sent the moment the socket exists",
+         %{limiter: limiter} do
+      # `connected?: false` alongside a pre-seeded socket models the window between the
+      # socket process starting and the venue's CONNACK arriving — the exact window the
+      # old code skipped past by treating "a socket pid exists" as "ready".
+      name = :"feed_#{System.unique_integer([:positive])}"
+      {:ok, feed} = Feed.start_link(name: name, socket: self(), connected?: false)
+
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:subscribed, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      task =
+        Task.async(fn ->
+          Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))
+        end)
+
+      refute_receive {:subscribed, _symbols}, 200
+      refute Task.yield(task, 0)
+
+      send(feed, {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
+
+      assert_receive {:subscribed, ["BTCUSD"]}
+      assert {:ok, :ok} = Task.yield(task, 1_000)
+    end
+
+    test "a link_down clears :connected?, so the next subscribe waits again", %{
+      limiter: limiter
+    } do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, Notice.new(:link_down, :webull)})
+      # Synchronise on the notice having been handled before subscribing again.
+      _settled = Feed.coverage(feed)
+
+      task =
+        Task.async(fn ->
+          Feed.subscribe(feed, ["ETH-USD"], subscribe_opts(limiter))
+        end)
+
+      refute Task.yield(task, 200)
+
+      send(feed, {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
+
+      assert {:ok, :ok} = Task.yield(task, 1_000)
     end
   end
 

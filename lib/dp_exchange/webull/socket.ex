@@ -255,10 +255,17 @@ defmodule DpExchange.Webull.Socket do
   # `Decimal.new/1` raises on a string that is not a number — a real, previously observed
   # response shape from a delisted Webull crypto pair, which returns "null" for a price
   # field. `Decimal.parse/1`, requiring the whole string be consumed, does not.
+  #
+  # `Decimal.parse/1` alone is not a sufficient guard, though: "NaN", "Inf" and "-Inf" all
+  # fully parse, and a NaN or Infinity flowing downstream as a real price is worse than the
+  # crash this replaced — it poisons a calculation silently instead of failing visibly.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} -> parsed
-      _unparsable -> nil
+      {parsed, ""} ->
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+
+      _unparsable ->
+        nil
     end
   end
 

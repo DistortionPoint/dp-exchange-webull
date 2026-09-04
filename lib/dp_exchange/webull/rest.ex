@@ -2926,10 +2926,18 @@ defmodule DpExchange.Webull.Rest do
   # response shape from a delisted Webull crypto pair, which returns the literal string
   # "null" for a price field. `Decimal.parse/1`, requiring the whole string be consumed
   # (`{d, ""}`), does not.
+  #
+  # `Decimal.parse/1` alone is not a sufficient guard, though: "NaN", "Inf" and "-Inf" all
+  # fully parse, and a NaN or Infinity flowing into downstream arithmetic as a real price
+  # is worse than the crash this replaced — it poisons a calculation silently instead of
+  # failing where it happened.
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
-      {parsed, ""} -> parsed
-      _unparsable -> nil
+      {parsed, ""} ->
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+
+      _unparsable ->
+        nil
     end
   end
 

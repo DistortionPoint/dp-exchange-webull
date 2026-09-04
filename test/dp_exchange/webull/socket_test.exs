@@ -110,6 +110,19 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
     end
 
+    for nan_or_inf <- ["NaN", "Inf", "-Inf"] do
+      test "a #{nan_or_inf} price is dropped rather than admitted as real" do
+        # Decimal.parse/1 alone was not a sufficient guard for the "null" fix above:
+        # #{unquote(nan_or_inf)} fully parses, and would have flowed through as a real
+        # Quote.price without the nan?/inf? check.
+        frame = publish("snapshot", snapshot_payload("BTCUSD", unquote(nan_or_inf)))
+
+        assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      end
+    end
+
     test "a book message delivers top-of-book, and never a price" do
       # This asserted the opposite until 2026-08-31: that `price` became the bid, with a
       # comment calling the bid "a real quoted number, labelled as the bid too". It is

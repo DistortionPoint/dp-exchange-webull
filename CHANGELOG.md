@@ -49,6 +49,31 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Feed` dropped `app_key` entirely, and never waited for the venue's CONNACK before
+  subscribing over HTTP — DpCryptoManagement's issues #8 and #9.**
+
+  `Feed.init/1` kept only `:url`/`:environment` from its own start opts, so `app_key`
+  never reached `ensure_socket/2` — which silently defaulted to `""` rather than refusing.
+  Credentials arrive per call in this family, same as every other venue, so the fix reads
+  `app_key` from the subscribe call's own `credentials`, and refuses
+  (`{:error, {:missing_required_field, :app_key}}`) rather than opening a socket that
+  would connect and then sit unauthenticated where nothing visible said why.
+
+  Separately, `ensure_socket/2` treated a live socket *process* as a ready socket — it
+  returned as soon as `Socket.start_link/1` did, which is once the WebSocket is up, not
+  once the venue's CONNACK has actually arrived. The HTTP subscribe that followed could
+  race the venue's own auth handshake and name a session id it had not yet registered. A
+  reconnect already waited for the `:link_up` notice before replaying; the first-ever
+  subscribe against a fresh socket now does too — the reply is deferred and answered from
+  the same `:link_up` handler, rather than fired inline.
+
+- **`decimal/1` (`rest.ex`, `socket.ex`) admitted `"NaN"`, `"Inf"` and `"-Inf"` as real
+  prices — DpCryptoManagement's issue #11.** The `Decimal.parse/1` fix for the `"null"`
+  crash below was not a sufficient guard on its own: all three fully parse, and a NaN or
+  Infinity flowing into downstream arithmetic as a real price is worse than the crash it
+  replaced, since it poisons a calculation silently instead of failing where it happened.
+  Both now also refuse via `Decimal.nan?/1` and `Decimal.inf?/1`.
+
 - **`Decimal.new/1` raised on a non-numeric price string — the exact crash filed as
   DpCryptoManagement's issue #3.** Reproduced first: `Decimal.new("null")` raises, and a
   delisted Webull crypto pair is a real, previously observed shape that returns exactly
