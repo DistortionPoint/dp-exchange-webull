@@ -22,6 +22,37 @@ acceptable changelog line.
 
 ### Added
 
+- **`Feed` shards across multiple MQTT sessions — DpCryptoManagement's issue #13.** A
+  single session caps out at the venue's own stated ceiling
+  (`"Maximum number of subscribe tickers:100"`); a consumer with more than 100 symbols on
+  this venue could not reach full coverage through one session no matter how the HTTP
+  calls were split, since the limit is per-session, not per-request. `Feed` now opens up
+  to five sessions (the venue's own per-App-Key ceiling) and partitions symbols across
+  them internally — the host still only ever calls `subscribe/3` with a symbol list and
+  never learns a shard, session id, or connection count exists.
+
+  Adapted from `dp-exchange-coinbase`'s own `Feed`, which shards for the identical
+  reason: recompute from the full wanted set on every call, touch only what changed, one
+  shard synchronous per call (its outcome is the reply) and the rest staggered. What
+  differs here is the leaf operation — this venue's shard identity is *also* its MQTT
+  session, so a brand-new shard waits for its own CONNACK (reusing the #9 fix, now
+  per-shard) before its first HTTP subscribe means anything to the venue.
+
+  **A shard that rejects a batch as oversubscribed is rebalanced internally, never
+  surfaced to the host as something to route around** — the affected symbols move to
+  another shard with room (opening one if needed) and the subscribe is retried. Per the
+  design doc §3.5, this was an explicit architectural requirement, not a nice-to-have:
+  the host must never be handed a shard index or session id to reason about. Only every
+  shard already full and the venue still refusing — a genuine capacity ceiling this
+  package cannot paper over — surfaces as a real `{:error, {:capacity_exceeded, symbols}}`.
+
+  `@pairs_per_socket` is exactly the venue's own stated **100**, not a guessed margin
+  below it — see the design doc §3.1 for why padding an already-stated number would be
+  the same unlabeled guess this family's conventions rule out elsewhere.
+
+  See `docs/design/2026-09-04_webull-sharding-and-fake-injection.md` in
+  `dp-exchange-core` for the full design.
+
 - **`get_fees/2` and `quantization/1` are implemented.** Both had sat in `@not_ported`
   since Phase 2 with no comment recording why — DpCryptoManagement's own filed questions
   (issues #5, #6 against `dp_exchange_core`) were right that the classification did not

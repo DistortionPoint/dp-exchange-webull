@@ -5,23 +5,24 @@ defmodule DpExchange.Webull.Feed do
 
   ## Subscribing here is two operations on two protocols
 
-  Market data arrives over **MQTT**; subscriptions are **HTTP** calls. They are joined by
-  one value: the `session_id` this feed generates, registers as the MQTT client id, and
-  then names in every HTTP subscribe.
+  Market data arrives over **MQTT**; subscriptions are **HTTP** calls. Each MQTT session
+  is joined to its own HTTP subscriptions by one value: the `session_id` a shard
+  generates, registers as its MQTT client id, and then names in every HTTP subscribe for
+  that shard.
 
   A consumer calls `subscribe/3` with symbols. It never learns that a socket was dialled,
-  that an HTTP call followed, or that the two had to agree on an identifier — which is the
-  facade doing precisely what D12 asks of it, on the venue where it costs the most to
-  deliver.
+  how many, that an HTTP call followed, or that transport and subscription had to agree on
+  an identifier — which is the facade doing precisely what D12 asks of it, on the venue
+  where it costs the most to deliver.
 
   ## Re-subscribing after a reconnect is this package's job
 
   > If the connection is dropped due to network issues, previous subscriptions are **not**
   > automatically restored. You must re-subscribe after reconnecting.
 
-  So a reconnect is followed by a replay of everything wanted. A consumer that had to
-  notice reconnects and replay its own subscriptions would be doing the venue's
-  bookkeeping through an interface designed to hide reconnects entirely.
+  So a reconnect is followed by a replay of everything wanted **on that shard**. A
+  consumer that had to notice reconnects and replay its own subscriptions would be doing
+  the venue's bookkeeping through an interface designed to hide reconnects entirely.
 
   ## Coverage is observed, never intended
 
@@ -29,21 +30,51 @@ defmodule DpExchange.Webull.Feed do
   subscribed, and not when the HTTP subscribe returns 200. On this venue those are three
   genuinely different moments, and only the last one means data.
 
-  ## One connection, because five is the ceiling and one is enough
+  ## Sharded — one session tops out at 100 symbols, this package's scope does not
 
-  The venue allows five concurrent connections per App Key and pushes at most three
-  messages per second per connection. This feed opens **one**. Sharding to raise the
-  message ceiling is a change to make when a measurement demands it, and it can never
-  exceed five — a consumer cannot cause a sixth socket, because a consumer cannot ask for
-  sockets at all.
+  A single MQTT session caps out at the venue's own stated ceiling —
+  `"Maximum number of subscribe tickers:100"`, confirmed against a real collection run
+  that hit it (`dp-exchange-core` issue #13). A consumer with more than 100 symbols on
+  this venue could not reach full coverage through one session no matter how the HTTP
+  calls were split, because the limit is per-session, not per-request.
+
+  This is not new ground for the family — `DpExchange.Coinbase.Feed` shards for the
+  identical reason, and its shape (recompute from the full wanted set, touch only what
+  changed, one shard synchronous per call and the rest staggered) is the template this
+  adapts. What differs is the leaf operation: Coinbase subscribes channels on an
+  always-usable socket; this venue's shard identity is *also* its MQTT session, so a
+  brand-new shard has to wait for its own CONNACK (see below) before its first HTTP
+  subscribe means anything to the venue.
+
+  `@pairs_per_socket` is exactly the venue's own stated **100** — not a guessed margin
+  below it. See `docs/design/2026-09-04_webull-sharding-and-fake-injection.md` §3.1 for
+  why padding a number the venue already stated would be exactly the unlabeled guess this
+  family's own conventions rule out.
+
+  **Five connections per App Key is the hard ceiling this can never exceed** — a consumer
+  cannot cause a sixth socket, because a consumer cannot ask for sockets at all. Five
+  shards of 100 is 500 symbols; a universe larger than that on this venue needs a second
+  App Key, not a bigger number here.
+
+  ## A shard that rejects a batch is this package's problem to solve, not the host's
+
+  If a shard's HTTP subscribe comes back `TOO_MANY_SYMBOLS_SUBSCRIPTION` despite this
+  package's own accounting — a bug, a race, or the venue's real ceiling turning out lower
+  in practice than its own stated one — the affected symbols are moved to another shard
+  with room (opening one if needed, within the five-connection ceiling) and retried
+  internally. The host is never handed a `session_id` or a shard index to reason about;
+  it only ever sees whether its symbols ended up covered. Only running out of shards
+  entirely — five sessions full and the venue still refuses — is a genuine capacity
+  ceiling this package cannot paper over, and that surfaces as a real refusal.
 
   ## A socket process is not a connected socket
 
   `Socket.start_link/1` returns once the WebSocket is up; MQTT is not authenticated until
   the venue answers the CONNECT with a CONNACK, which arrives later as a `:link_up`
-  notice. The first `subscribe/3` against a fresh socket does not call the HTTP endpoint
-  itself — it waits for that notice, exactly as a reconnect already did, so the session id
-  it names is one the venue has actually registered.
+  notice carrying the shard's `session_id`. The first subscribe against a fresh shard
+  does not call the HTTP endpoint itself — it waits for that notice, exactly as a
+  reconnect already did, so the session id it names is one the venue has actually
+  registered.
   """
 
   use GenServer
@@ -51,8 +82,23 @@ defmodule DpExchange.Webull.Feed do
   alias DpExchange.Core.Notice
   alias DpExchange.Webull.{Environment, Socket, Subscription}
 
+  require Logger
+
   @frame_window_ms 5_000
   @call_timeout @frame_window_ms * 3
+
+  # The venue's own stated ceiling. See the moduledoc and the design doc §3.1 — not a
+  # padded-down guess.
+  @pairs_per_socket 100
+
+  # "Each App Key supports a maximum of 5 concurrent connections" —
+  # docs/reference/webull/streaming-api.md.
+  @max_shards 5
+
+  # Between opening each shard's socket, when one call touches more than one newly-
+  # opening shard. A connect burst is answered with resets — same reasoning as
+  # Coinbase's Feed, not a Webull-specific measurement.
+  @shard_spacing_ms 5_000
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -89,95 +135,74 @@ defmodule DpExchange.Webull.Feed do
   def init(opts) do
     {:ok,
      %{
-       # Generated once and used as BOTH the MQTT client id and the HTTP subscribe's
-       # session id. The venue disconnects an older connection presenting the same id, so
-       # two instances sharing one would take turns killing each other, each looking
-       # healthy in isolation.
-       session_id: Keyword.get_lazy(opts, :session_id, &generate_session_id/0),
        socket_opts: Keyword.take(opts, [:url, :environment]),
-       # Retained so a reconnect can replay the subscription. The venue restores
-       # nothing, and a replay needs credentials — so a consumer that wants
-       # automatic recovery hands them to the tree at start, exactly as the other
-       # venues in this family do. Per-call options still override these.
+       # Retained so a reconnect (or a rebalance) can replay a shard's subscription. The
+       # venue restores nothing, and a replay needs credentials — so a consumer that
+       # wants automatic recovery hands them to the tree at start, exactly as the other
+       # venues in this family do. Per-call options still override these for calls made
+       # directly against a caller's own request.
        resubscribe_opts: Keyword.take(opts, [:credentials, :environment, :limiter, :plug]),
-       socket: Keyword.get(opts, :socket),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
        delivering: %{},
-       # True only once the venue's CONNACK has arrived for the current socket. Reset to
-       # false on every `:link_down`, so a subscribe issued mid-reconnect waits again
-       # rather than racing the venue's auth handshake a second time.
+       # index => %{session_id:, socket:, connected?:, symbols:, reply_to:}. `symbols` is
+       # what this shard is meant to carry as of the last reshard, independent of whether
+       # the HTTP call that asks the venue for it has actually gone out yet. `reply_to`
+       # is set only while this shard is the primary of a call still waiting on this
+       # shard's own CONNACK — see handle_call({:subscribe, ...}) and on_link_up/2.
        #
-       # `:connected?` is an init option, not just internal state, for the same reason
-       # `:socket` already is one: a test standing up a pre-connected socket needs to say
-       # so without driving a real MQTT handshake to get there.
-       connected?: Keyword.get(opts, :connected?, false),
-       # Callers who called `subscribe/3` while a fresh socket was still connecting.
-       # Answered together, from `resubscribe/1`'s own result, once `:link_up` arrives.
-       pending: []
+       # An init option, not just internal state, for the same reason Coinbase's Feed
+       # accepts an `injected_socket` — a test standing up an already-connected shard
+       # needs to say so without driving a real MQTT handshake to get there.
+       shards: Keyword.get(opts, :shards, %{}),
+       # index => capacity, present only once a shard has been measured (by the venue's
+       # own refusal) to hold fewer than @pairs_per_socket. Absent means the venue's
+       # stated ceiling applies unmodified. See handle_subscribe_result/3. Also an init
+       # option, so a test can exercise rebalancing without needing @pairs_per_socket
+       # real symbols to do it.
+       shard_capacity: Keyword.get(opts, :shard_capacity, %{})
      }}
   end
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber, opts}, from, state) do
-    environment = Environment.resolve(Keyword.merge(state.socket_opts, opts))
+    if Environment.streaming?(environment(state, opts)) do
+      wanted = MapSet.union(state.wanted, MapSet.new(symbols))
 
-    if Environment.streaming?(environment) do
       state = %{
         state
         | subscribers: MapSet.put(state.subscribers, subscriber),
-          wanted: MapSet.union(state.wanted, MapSet.new(symbols))
+          wanted: wanted,
+          resubscribe_opts: replayable(opts, state)
       }
 
-      case ensure_socket(state, environment, opts) do
-        {:ok, state, :ready} ->
-          # Remember what a replay needs. Without this, a reconnect re-subscribes with no
-          # credentials and fails — the venue restores nothing, so the promise that a
-          # consumer never sees a reconnect would quietly stop being true.
-          state = %{state | resubscribe_opts: replayable(opts, state)}
-          {:reply, Subscription.subscribe(state.session_id, symbols, opts), state}
-
-        {:ok, state, :connecting} ->
-          # The socket just opened and has not seen a CONNACK yet. Subscribing over HTTP
-          # now would name a session id the venue has not registered — defer the reply and
-          # let the `:link_up` handler answer it, the same path a reconnect already uses.
-          state = %{
-            state
-            | resubscribe_opts: replayable(opts, state),
-              pending: [from | state.pending]
-          }
-
-          {:noreply, state}
-
-        {:error, reason} ->
-          {:reply, {:error, reason}, state}
-      end
+      reshard(state, opts, from)
     else
       # UAT has REST but no broker — `mqtt-uat.webullbroker.com` is NXDOMAIN. Falling back
       # to the production stream would hand a consumer real market data while it believed
       # it was testing.
-      {:reply, {:error, {:streaming_unavailable, environment}}, state}
+      {:reply, {:error, {:streaming_unavailable, environment(state, opts)}}, state}
     end
   end
 
-  def handle_call({:unsubscribe, symbols, opts}, _from, state) do
-    {:reply, Subscription.unsubscribe(state.session_id, symbols, opts), drop(state, symbols)}
+  def handle_call({:unsubscribe, symbols, opts}, from, state) do
+    wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
+    state = %{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)}
+    reshard(state, opts, from)
   end
 
-  def handle_call({:update_symbols, symbols, opts}, _from, state) do
+  def handle_call({:update_symbols, symbols, opts}, from, state) do
     wanted = MapSet.new(symbols)
-    added = state.wanted |> then(&MapSet.difference(wanted, &1)) |> MapSet.to_list()
-    removed = wanted |> then(&MapSet.difference(state.wanted, &1)) |> MapSet.to_list()
 
-    state = %{state | wanted: wanted, delivering: Map.take(state.delivering, symbols)}
+    state = %{
+      state
+      | wanted: wanted,
+        delivering: Map.take(state.delivering, symbols),
+        resubscribe_opts: replayable(opts, state)
+    }
 
-    result =
-      with :ok <- Subscription.unsubscribe(state.session_id, removed, opts) do
-        Subscription.subscribe(state.session_id, added, opts)
-      end
-
-    {:reply, result, state}
+    reshard(state, opts, from)
   end
 
   def handle_call(:coverage, _from, state) do
@@ -191,21 +216,34 @@ defmodule DpExchange.Webull.Feed do
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
 
   @impl true
-  def handle_info({:dp_exchange, :webull, %Notice{kind: :link_up}} = message, state) do
-    # The venue restores nothing on reconnect, so a fresh link means replaying everything
-    # wanted. Doing it here is the whole reason a consumer never sees a reconnect — and,
-    # for a socket that just opened for the first time, it is also the earliest point at
-    # which naming this session id over HTTP means anything to the venue.
-    state = %{state | connected?: true}
-    result = resubscribe(state)
-    Enum.each(state.pending, &GenServer.reply(&1, result))
+  def handle_info(
+        {:dp_exchange, :webull, %Notice{kind: :link_up, details: %{session_id: session_id}}} =
+          message,
+        state
+      ) do
+    state =
+      case shard_index_for_session(state, session_id) do
+        nil -> state
+        index -> on_link_up(state, index)
+      end
+
     fan_out(state.notice_subscribers, message)
-    {:noreply, %{state | pending: []}}
+    {:noreply, state}
   end
 
-  def handle_info({:dp_exchange, :webull, %Notice{kind: :link_down}} = message, state) do
+  def handle_info(
+        {:dp_exchange, :webull, %Notice{kind: :link_down, details: %{session_id: session_id}}} =
+          message,
+        state
+      ) do
+    state =
+      case shard_index_for_session(state, session_id) do
+        nil -> state
+        index -> put_in(state.shards[index].connected?, false)
+      end
+
     fan_out(state.notice_subscribers, message)
-    {:noreply, %{state | connected?: false}}
+    {:noreply, state}
   end
 
   def handle_info({:dp_exchange, :webull, %Notice{}} = message, state) do
@@ -223,43 +261,241 @@ defmodule DpExchange.Webull.Feed do
      }}
   end
 
-  def handle_info(_other, state), do: {:noreply, state}
+  def handle_info({:open_shard, index, symbols, opts}, state) do
+    case Map.get(state.shards, index) do
+      nil ->
+        case open_socket(state, opts) do
+          {:ok, session_id, socket} ->
+            shard = %{
+              session_id: session_id,
+              socket: socket,
+              connected?: false,
+              symbols: symbols,
+              reply_to: nil
+            }
 
-  defp resubscribe(%{wanted: wanted} = state) do
-    case MapSet.to_list(wanted) do
-      [] -> :ok
-      symbols -> Subscription.subscribe(state.session_id, symbols, state.resubscribe_opts)
+            {:noreply, put_in(state.shards[index], shard)}
+
+          {:error, reason} ->
+            Logger.warning(
+              "[Webull Feed] shard #{index} did not open (#{inspect(reason)}) — its " <>
+                "#{length(symbols)} symbol(s) are not covered until a later reshard opens it"
+            )
+
+            {:noreply, state}
+        end
+
+      _already_open ->
+        # A reshard already handled this index by the time the stagger elapsed (a fast-
+        # follow call, or a rebalance) — nothing left to do.
+        {:noreply, state}
     end
   end
 
-  # Already connected: the common case, once a socket has seen its CONNACK.
-  defp ensure_socket(%{socket: socket, connected?: true} = state, _environment, _opts)
-       when is_pid(socket),
-       do: {:ok, state, :ready}
+  def handle_info({:reconcile_shard, index, session_id, added, removed, opts}, state) do
+    # `session_id` rides in the message rather than being looked up from
+    # `state.shards[index]` when this fires — it is what the operation actually needs,
+    # captured at the moment it was decided, the same reason Coinbase's own staggered
+    # messages carry a socket directly rather than re-deriving one from state later.
+    result = reconcile_by_session(session_id, added, removed, opts)
+    {state, rebalanced?} = handle_subscribe_result(state, index, result)
+    state = if rebalanced?, do: resync(state), else: state
+    {:noreply, state}
+  end
 
-  # A socket exists but has not (yet, or not again) seen a CONNACK — a caller arrived
-  # while the first connect, or a reconnect, is still in flight.
-  defp ensure_socket(%{socket: socket} = state, _environment, _opts) when is_pid(socket),
-    do: {:ok, state, :connecting}
+  def handle_info(_other, state), do: {:noreply, state}
 
-  defp ensure_socket(state, environment, opts) do
-    # Credentials arrive per call in this family, same as every other venue's facade —
-    # `app_key` is not read from init-time options because a consumer supervising this
-    # tree may never have had it to give then. A caller with none cannot open a socket:
-    # the venue accepts any password on CONNECT but authenticates by App Key, so an empty
-    # one would connect and then sit unauthenticated rather than fail visibly.
+  # --- resharding -----------------------------------------------------------
+
+  # The single entry point for every call that can change what is wanted. Recomputes
+  # shards from the full wanted set, touches only the shards whose symbol set actually
+  # changed, handles the first touched shard inline (its outcome is the call's reply,
+  # same as the single-connection design this replaces) and stages the rest — see the
+  # moduledoc and the design doc §3 for the full rationale.
+  defp reshard(state, opts, from), do: reshard(state, opts, from, @max_shards)
+
+  defp reshard(state, opts, from, retries_left) do
+    {touched, new_shards, overflow} = plan_reshard(state)
+
+    case touched do
+      [] ->
+        {:reply, combine_overflow(:ok, overflow), state}
+
+      [primary | rest] ->
+        {outcome, state} = touch_primary_shard(state, primary, new_shards, opts, from, overflow)
+
+        state =
+          Enum.reduce(rest, state, fn index, state ->
+            touch_background_shard(state, index, new_shards, opts)
+          end)
+
+        case outcome do
+          {:reply, {:error, :oversubscribed}} when retries_left > 0 ->
+            reshard(state, opts, from, retries_left - 1)
+
+          {:reply, result} ->
+            {:reply, result, state}
+
+          :deferred ->
+            {:noreply, state}
+        end
+    end
+  end
+
+  # Rebalance-triggered resync: nobody is waiting on a `GenServer.call` for this one, so
+  # every touched shard is background — there is no caller to hand a primary's outcome
+  # to. Uses `resubscribe_opts` for the same reason `on_link_up/2` does: this runs off a
+  # venue-pushed event, not a caller's own request.
+  defp resync(state) do
+    {touched, new_shards, _overflow} = plan_reshard(state)
+
+    Enum.reduce(touched, state, fn index, state ->
+      touch_background_shard(state, index, new_shards, state.resubscribe_opts)
+    end)
+  end
+
+  # Shared by reshard/4 and resync/1: which shards changed, and what each should now
+  # carry. Never drops a shard's bookkeeping for being momentarily unwanted — a shard
+  # not needed by *this* pass can still be needed moments later by a synchronous retry
+  # (reshard/4's own oversubscribed branch) or an asynchronous rebalance triggered by a
+  # DIFFERENT shard's later CONNACK (resync/1, from on_link_up/2), and neither can be
+  # predicted in advance. Capped at five shards regardless, keeping an idle one costs
+  # nothing worth trading away the correctness of not reopening a connection that never
+  # actually needed to close.
+  defp plan_reshard(state) do
+    {new_shards, overflow} = derive_shards(state.wanted, state.shard_capacity)
+    existing_indices = Map.keys(state.shards)
+    wanted_indices = Map.keys(new_shards)
+    new_indices = wanted_indices -- existing_indices
+    vanishing_indices = existing_indices -- wanted_indices
+    new_shards = Enum.reduce(vanishing_indices, new_shards, &Map.put(&2, &1, []))
+
+    touched =
+      (wanted_indices ++ vanishing_indices)
+      |> Enum.uniq()
+      |> Enum.filter(fn index ->
+        index in new_indices or shard_changed?(state, index, new_shards)
+      end)
+      |> Enum.sort()
+
+    {touched, new_shards, overflow}
+  end
+
+  defp touch_primary_shard(state, index, new_shards, opts, from, overflow) do
+    wanted_symbols = Map.fetch!(new_shards, index)
+
+    case Map.get(state.shards, index) do
+      nil ->
+        open_primary_shard(state, index, wanted_symbols, opts, from, overflow)
+
+      %{connected?: true} = shard ->
+        added = wanted_symbols -- shard.symbols
+        removed = shard.symbols -- wanted_symbols
+        result = reconcile_now(shard, added, removed, opts)
+        state = put_in(state.shards[index].symbols, wanted_symbols)
+        {state, _rebalanced?} = handle_subscribe_result(state, index, result)
+        {{:reply, combine_overflow(result, overflow)}, state}
+
+      _still_connecting ->
+        # A fresh open or a reconnect is already in flight for this index. Defer to
+        # on_link_up/2, exactly as the single-connection design did — see issue #9.
+        state = put_in(state.shards[index].symbols, wanted_symbols)
+        state = put_in(state.shards[index].reply_to, {from, overflow})
+        {:deferred, state}
+    end
+  end
+
+  defp open_primary_shard(state, index, symbols, opts, from, overflow) do
+    case open_socket(state, opts) do
+      {:ok, session_id, socket} ->
+        shard = %{
+          session_id: session_id,
+          socket: socket,
+          connected?: false,
+          symbols: symbols,
+          reply_to: {from, overflow}
+        }
+
+        {:deferred, put_in(state.shards[index], shard)}
+
+      {:error, reason} ->
+        {{:reply, combine_overflow({:error, reason}, overflow)}, state}
+    end
+  end
+
+  defp touch_background_shard(state, index, new_shards, opts) do
+    wanted_symbols = Map.fetch!(new_shards, index)
+
+    case Map.get(state.shards, index) do
+      nil ->
+        Process.send_after(self(), {:open_shard, index, wanted_symbols, opts}, @shard_spacing_ms)
+        state
+
+      shard ->
+        added = wanted_symbols -- shard.symbols
+        removed = shard.symbols -- wanted_symbols
+
+        Process.send_after(
+          self(),
+          {:reconcile_shard, index, shard.session_id, added, removed, opts},
+          0
+        )
+
+        put_in(state.shards[index].symbols, wanted_symbols)
+    end
+  end
+
+  defp on_link_up(state, index) do
+    shard = state.shards[index]
+    state = put_in(state.shards[index].connected?, true)
+
+    result =
+      case shard.symbols do
+        [] -> :ok
+        symbols -> Subscription.subscribe(shard.session_id, symbols, state.resubscribe_opts)
+      end
+
+    {state, rebalanced?} = handle_subscribe_result(state, index, result)
+    state = if rebalanced?, do: resync(state), else: state
+
+    case Map.get(state.shards, index) do
+      %{reply_to: nil} ->
+        state
+
+      %{reply_to: {from, overflow}} ->
+        GenServer.reply(from, combine_overflow(result, overflow))
+        put_in(state.shards[index].reply_to, nil)
+    end
+  end
+
+  defp reconcile_now(shard, added, removed, opts),
+    do: reconcile_by_session(shard.session_id, added, removed, opts)
+
+  defp reconcile_by_session(session_id, added, removed, opts) do
+    with :ok <- Subscription.unsubscribe(session_id, removed, opts) do
+      Subscription.subscribe(session_id, added, opts)
+    end
+  end
+
+  defp open_socket(state, opts) do
     case app_key_from(opts) do
       nil ->
+        # Credentials arrive per call in this family, same as every other venue's
+        # facade — a caller with none cannot open a shard. The venue accepts any
+        # password on CONNECT but authenticates by App Key, so an empty one would
+        # connect and then sit unauthenticated rather than fail visibly.
         {:error, {:missing_required_field, :app_key}}
 
       app_key ->
+        session_id = generate_session_id()
+
         socket_opts =
           state.socket_opts
-          |> Keyword.put_new(:url, Environment.streaming_url(environment))
-          |> Keyword.merge(subscriber: self(), session_id: state.session_id, app_key: app_key)
+          |> Keyword.put_new(:url, Environment.streaming_url(environment(state, opts)))
+          |> Keyword.merge(subscriber: self(), session_id: session_id, app_key: app_key)
 
         case Socket.start_link(socket_opts) do
-          {:ok, socket} -> {:ok, %{state | socket: socket, connected?: false}, :connecting}
+          {:ok, socket} -> {:ok, session_id, socket}
           {:error, reason} -> {:error, reason}
         end
     end
@@ -272,12 +508,77 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  defp drop(state, symbols) do
-    %{
-      state
-      | wanted: MapSet.difference(state.wanted, MapSet.new(symbols)),
-        delivering: Map.drop(state.delivering, symbols)
-    }
+  # A shard's HTTP subscribe rejected as oversubscribed measures, directly, that this
+  # shard can carry fewer symbols than assumed — not a guess, the venue's own answer.
+  # Capping it here and resyncing moves the overflow to another shard automatically; the
+  # design doc §3.5 is explicit that a host must never see this as something to route
+  # around itself.
+  defp handle_subscribe_result(state, _index, :ok), do: {state, false}
+
+  defp handle_subscribe_result(state, index, {:error, :oversubscribed}) do
+    current_size = length(Map.get(state.shards, index, %{symbols: []}).symbols)
+    new_capacity = max(current_size - 1, 0)
+
+    Logger.warning(
+      "[Webull Feed] shard #{index} rejected #{current_size} symbols as oversubscribed " <>
+        "(venue's own stated ceiling is #{@pairs_per_socket}); capping this shard at " <>
+        "#{new_capacity} and moving the rest to another shard"
+    )
+
+    {%{state | shard_capacity: Map.put(state.shard_capacity, index, new_capacity)}, true}
+  end
+
+  defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  # The only case §3.5 says cannot be absorbed internally: every shard already at
+  # capacity and there is nowhere left to put a symbol. Reported, never silently dropped
+  # or silently subscribed somewhere already full.
+  defp combine_overflow(:ok, []), do: :ok
+  defp combine_overflow(:ok, overflow), do: {:error, {:capacity_exceeded, overflow}}
+  defp combine_overflow({:error, reason}, []), do: {:error, reason}
+
+  defp combine_overflow({:error, reason}, overflow),
+    do: {:error, {:partial_failure, failed: reason, capacity_exceeded: overflow}}
+
+  # Splits the (sorted, so this is reproducible run to run) wanted set into one chunk per
+  # shard index, respecting any capacity a prior oversubscription measured for that
+  # index. A symbol that would land past the fifth shard is overflow — the venue's real
+  # ceiling for one App Key, reached.
+  defp derive_shards(wanted, shard_capacity) do
+    wanted
+    |> MapSet.to_list()
+    |> Enum.sort()
+    |> chunk_by_capacity(0, shard_capacity)
+  end
+
+  defp chunk_by_capacity(symbols, index, _capacity) when index >= @max_shards,
+    do: {%{}, symbols}
+
+  defp chunk_by_capacity([], _index, _capacity), do: {%{}, []}
+
+  defp chunk_by_capacity(symbols, index, capacity) do
+    size = max(Map.get(capacity, index, @pairs_per_socket), 0)
+    {chunk, rest} = Enum.split(symbols, size)
+    {rest_shards, overflow} = chunk_by_capacity(rest, index + 1, capacity)
+
+    if chunk == [] do
+      {rest_shards, overflow}
+    else
+      {Map.put(rest_shards, index, chunk), overflow}
+    end
+  end
+
+  defp shard_changed?(state, index, new_shards) do
+    case Map.get(state.shards, index) do
+      nil -> false
+      %{symbols: current} -> current != Map.get(new_shards, index, [])
+    end
+  end
+
+  defp shard_index_for_session(state, session_id) do
+    Enum.find_value(state.shards, fn {index, shard} ->
+      if shard.session_id == session_id, do: index
+    end)
   end
 
   # Only what a replay needs, and per-call values win over the ones the tree started
@@ -289,11 +590,13 @@ defmodule DpExchange.Webull.Feed do
     )
   end
 
+  defp environment(state, opts), do: Environment.resolve(Keyword.merge(state.socket_opts, opts))
+
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn pid -> if Process.alive?(pid), do: send(pid, message) end)
   end
 
-  # Unique per feed. The venue disconnects an older connection presenting the same id.
+  # Unique per shard. The venue disconnects an older connection presenting the same id.
   defp generate_session_id do
     16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
   end

@@ -285,7 +285,8 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "subscribe, unsubscribe, update and notices all route", %{limiter: limiter} do
       unique = System.unique_integer([:positive])
       name = :"route_feed_#{unique}"
-      {:ok, _feed} = Feed.start_link(name: name, socket: self(), connected?: true)
+      shard = %{session_id: "s", socket: self(), connected?: true, symbols: [], reply_to: nil}
+      {:ok, _feed} = Feed.start_link(name: name, shards: %{0 => shard})
 
       opts = [
         feed: name,

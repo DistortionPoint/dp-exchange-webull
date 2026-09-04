@@ -71,7 +71,15 @@ defmodule DpExchange.Webull.Socket do
 
   @impl true
   def handle_disconnect(%{reason: reason}, state) do
-    notify(state, Notice.new(:link_down, :webull, details: %{reason: inspect(reason)}))
+    # session_id rides along so a Feed managing several shards' sockets can tell which
+    # one just dropped — the message alone carries no sender identity otherwise.
+    notify(
+      state,
+      Notice.new(:link_down, :webull,
+        details: %{reason: inspect(reason), session_id: state.session_id}
+      )
+    )
+
     {:reconnect, %{state | buffer: <<>>, connected?: false}}
   end
 
@@ -117,7 +125,9 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp handle_packet(state, {:connack, 0}) do
-    notify(state, Notice.new(:link_up, :webull))
+    # session_id rides along so a Feed managing several shards' sockets can tell which
+    # one just came up — see the matching comment on handle_disconnect/2.
+    notify(state, Notice.new(:link_up, :webull, details: %{session_id: state.session_id}))
     %{state | connected?: true}
   end
 

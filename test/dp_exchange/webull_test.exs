@@ -237,7 +237,7 @@ defmodule DpExchange.WebullTest do
 
     test "coverage accepts a pid as well as a name" do
       unique = System.unique_integer([:positive])
-      {:ok, feed} = DpExchange.Webull.Feed.start_link(name: :"pid_feed_#{unique}", socket: self())
+      {:ok, feed} = DpExchange.Webull.Feed.start_link(name: :"pid_feed_#{unique}")
 
       assert Webull.coverage(feed: feed) == %{}
     end

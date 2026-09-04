@@ -72,6 +72,14 @@ defmodule DpExchange.Webull.Subscription do
         {:ok, %{status: status}} when status in 200..299 ->
           :ok
 
+        {:ok, %{status: 417, body: %{"error_code" => "TOO_MANY_SYMBOLS_SUBSCRIPTION"}}} ->
+          # Named separately from the generic exchange_error below: this is the venue's
+          # per-session subscription ceiling, a capacity answer this package's own Feed
+          # can act on (move the symbols to another shard), not a caller-visible failure
+          # in the making — collapsing it into an opaque string would leave the caller
+          # with nothing to pattern-match to recover automatically.
+          {:error, :oversubscribed}
+
         {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
           {:error, {:refused, status, response}}
 
