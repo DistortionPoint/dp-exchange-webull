@@ -567,4 +567,98 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["BBBUSD"]}
     end
   end
+
+  describe "the resubscribe timer — DpCryptoManagement issue #17" do
+    test "re-issues a connected shard's current subscription with no wanted-set change at all",
+         %{limiter: limiter} do
+      # The whole point: this venue can stop delivering to an already-subscribed,
+      # already-connected session with nothing wrong to react to, so the only recovery
+      # is a blind, unconditional re-assert — never gated on whether reshard/4 would see
+      # any diff (it would see none here).
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(test_pid, {:request, decoded["session_id"], decoded["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-0", ["BTCUSD"]}
+    end
+
+    test "a shard that has never linked up is skipped, not asked to subscribe before it can" do
+      plug = fn _conn -> flunk("a shard with no CONNACK yet must never be asked to subscribe") end
+
+      shard = %{
+        session_id: "shard-0",
+        socket: self(),
+        connected?: false,
+        symbols: ["BTC-USD"],
+        reply_to: nil
+      }
+
+      feed = start_feed(shards: %{0 => shard}, plug: plug)
+
+      send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+    end
+
+    test "a shard with nothing wanted is skipped, not asked to subscribe to an empty list" do
+      plug = fn _conn -> flunk("a shard with nothing wanted must never be asked to subscribe") end
+      feed = start_feed(shards: %{0 => connected_shard("shard-0")}, plug: plug)
+
+      send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+    end
+
+    test "reschedules itself, so the safety net keeps running rather than firing once",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+
+      send(feed, :resubscribe)
+      assert_receive {:request, ["BTCUSD"]}
+
+      send(feed, :resubscribe)
+      assert_receive {:request, ["BTCUSD"]}
+    end
+  end
 end

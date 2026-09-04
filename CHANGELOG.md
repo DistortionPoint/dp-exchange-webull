@@ -99,6 +99,19 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Feed` had no periodic resubscribe safety net, unlike the sibling `dp_exchange_coinbase`
+  package this one's sharding adapts from — DpCryptoManagement's issue #17.** This venue
+  can stop delivering to an already-subscribed, already-connected session on its own —
+  no error, no disconnect, no unsubscribe, nothing a health check can see.
+  `dp_crypto_management`'s own prior MQTT client found this empirically: a blind,
+  unconditional resubscribe on a timer, independent of whether the wanted set had
+  changed, took live coverage from 47 symbols back to ~240. `reshard/4` alone cannot
+  recover from this — it only touches a shard whose *wanted* symbol set changed, and
+  re-asking for exactly what is already wanted computes an empty diff. Every connected
+  shard's current subscription is now re-issued unconditionally every 60 seconds,
+  matching the shape Coinbase's `Feed` already carries for its own reconnect case,
+  applied here to a steady-state failure mode Coinbase does not have.
+
 - **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
   issue #15, same defect found on the sibling `dp_exchange_coinbase` package.**
   `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called

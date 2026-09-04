@@ -75,6 +75,22 @@ defmodule DpExchange.Webull.Feed do
   does not call the HTTP endpoint itself — it waits for that notice, exactly as a
   reconnect already did, so the session id it names is one the venue has actually
   registered.
+
+  ## A subscribed, connected session can still go quiet on its own
+
+  Not a reconnect, not an error, not an unsubscribe — the venue simply stops pushing to
+  an otherwise-healthy session shortly after each subscribe, with nothing on the wire to
+  say so. `dp_crypto_management`'s own pre-existing MQTT client found this the hard way,
+  empirically: a blind, unconditional resubscribe on a timer, independent of whether the
+  wanted set had changed, took its live coverage from 47 symbols back to ~240
+  (DpCryptoManagement's issue #17). `reshard/4` alone cannot recover from this — it only
+  touches a shard whose *wanted* symbol set changed, and re-asking for exactly what is
+  already wanted computes an empty diff and asserts nothing.
+
+  So every connected shard's current subscription is re-issued unconditionally every
+  `@resubscribe_interval_ms`, regardless of whether anything is believed to have
+  changed — the same shape Coinbase's `Feed` already carries for its own reconnect case,
+  applied here to a steady-state failure mode Coinbase does not have.
   """
 
   use GenServer
@@ -99,6 +115,12 @@ defmodule DpExchange.Webull.Feed do
   # opening shard. A connect burst is answered with resets — same reasoning as
   # Coinbase's Feed, not a Webull-specific measurement.
   @shard_spacing_ms 5_000
+
+  # Re-issue every connected shard's current subscriptions on this cadence,
+  # unconditionally — see the moduledoc. Same interval, same reasoning as Coinbase's
+  # Feed for the reconnect case; here it is load-bearing for a case Coinbase does not
+  # have — see DpCryptoManagement's issue #17.
+  @resubscribe_interval_ms 60_000
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -133,6 +155,8 @@ defmodule DpExchange.Webull.Feed do
 
   @impl true
   def init(opts) do
+    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+
     {:ok,
      %{
        socket_opts: Keyword.take(opts, [:url, :environment]),
@@ -303,7 +327,44 @@ defmodule DpExchange.Webull.Feed do
     {:noreply, state}
   end
 
+  # This venue keeps a session's MQTT connection alive and subscribed while quietly
+  # stopping publication to it — no error, no disconnect, no unsubscribe, nothing a
+  # health check can see. The only recovery ever found for it is re-issuing the
+  # subscription for symbols already believed subscribed, unconditionally, on a timer —
+  # see the moduledoc and DpCryptoManagement's issue #17. `reshard/4` alone cannot do
+  # this: it only touches a shard whose *wanted* symbol set changed, and re-asking for
+  # exactly what is already wanted computes an empty diff.
+  def handle_info(:resubscribe, state) do
+    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    {:noreply, Enum.reduce(state.shards, state, &resubscribe_shard/2)}
+  end
+
   def handle_info(_other, state), do: {:noreply, state}
+
+  # A shard that has never linked up has nothing subscribed yet — on_link_up/2's own
+  # unconditional replay covers it once it does. A shard with nothing wanted has nothing
+  # to re-assert.
+  defp resubscribe_shard({_index, %{connected?: false}}, state), do: state
+  defp resubscribe_shard({_index, %{symbols: []}}, state), do: state
+
+  defp resubscribe_shard({index, shard}, state) do
+    result = Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
+
+    case result do
+      {:error, reason} ->
+        Logger.warning(
+          "[Webull Feed] shard #{index} blind resubscribe failed: #{inspect(reason)} — " <>
+            "its #{length(shard.symbols)} symbol(s) stay on whatever they last delivered " <>
+            "until the next resubscribe tick"
+        )
+
+      :ok ->
+        :ok
+    end
+
+    {state, rebalanced?} = handle_subscribe_result(state, index, result)
+    if rebalanced?, do: resync(state), else: state
+  end
 
   # --- resharding -----------------------------------------------------------
 
