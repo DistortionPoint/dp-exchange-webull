@@ -99,6 +99,15 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Feed.fan_out/2` crashed on a subscriber registered by name — DpCryptoManagement's
+  issue #15, same defect found on the sibling `dp_exchange_coinbase` package.**
+  `subscribe/2`'s `to:` option accepts any value, and `fan_out/2` called
+  `Process.alive?/1` on it directly — which only accepts a pid and raises on anything
+  else. A consumer registering itself under a name (ordinary OTP practice) and handing
+  that name to `to:` crash-looped the whole `Feed` GenServer on every delivery. Fixed by
+  resolving a subscriber (pid or name) to a pid first, treating an unregistered name the
+  same as a dead pid: silently skipped, never a crash.
+
 - **`Feed` dropped `app_key` entirely, and never waited for the venue's CONNACK before
   subscribing over HTTP — DpCryptoManagement's issues #8 and #9.**
 
