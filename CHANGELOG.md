@@ -22,6 +22,25 @@ acceptable changelog line.
 
 ### Added
 
+- **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every
+  function with a real success path (not an unconditional `Venue.not_supported()`) now
+  checks a queued or always-set outcome first. Symbol-taking functions
+  (`get_price/2`, `get_top_of_book/2`, `get_historical_prices/4`, `get_order_book/2`,
+  `get_trades/2`, `get_volume_profile/3`, `get_auction_imbalance/2`, `quantization/2`,
+  `get_option_chain/2`, `get_option_expirations/2`, `get_financials/3`, `get_filings/2`)
+  support per-symbol targeting; the rest (`get_symbols/1`, `get_balances/2`,
+  `get_accounts/2`, `get_fees/2`, `get_transfers/2`, `get_transactions/2`,
+  `preview_order/3`, `replace_order/4`, `market_status/1`, `get_positions/1`, the
+  watchlist functions, `get_corporate_events/1`, `get_news/1`, `get_screener/2`,
+  `place_order/3`, `cancel_order/3`, `get_order/3`, `get_orders/2`) support whole-call
+  injection. `authenticated/1` also honours `FakeInjection.credentials_bypassed?/1` for
+  wiring-only tests, without changing the venue-faithful default for anyone who doesn't
+  opt in. `subscribe/2`, `unsubscribe/2`, `update_symbols/2` and `place_orders/3` are
+  deliberately not wired — each takes a list (symbols or orders) in one call, which
+  whole-call injection cannot express partial failure for. Follows the reference
+  implementation shipped in `dp-exchange-robinhood`; the shared mechanism itself lives in
+  `dp_exchange_core`.
+
 - **`Feed` shards across multiple MQTT sessions — DpCryptoManagement's issue #13.** A
   single session caps out at the venue's own stated ceiling
   (`"Maximum number of subscribe tickers:100"`); a consumer with more than 100 symbols on

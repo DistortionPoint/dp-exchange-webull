@@ -25,11 +25,26 @@ defmodule DpExchange.Webull.Fake do
     reports none. Returning `0` would look like a real measurement of no trading.
   - **UAT has no stream.** `subscribe/2` under `environment: :uat` refuses, exactly as the
     real feed does, rather than delivering fake production data.
+
+  ## Failure injection and anonymous mode
+
+  Every function below that has a real success path (not an unconditional
+  `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
+  first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
+  `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
+  `authenticated/1` also checks `FakeInjection.credentials_bypassed?/1` before its normal
+  `{:refused, :missing_credentials}` path. Neither changes anything for a test that never
+  calls `FakeInjection` — see that module for the full contract.
+
+  `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are NOT wired: each takes a list
+  of symbols in one call, and "this one symbol in the batch fails, the rest succeed" is a
+  case whole-call injection cannot express — see `FakeInjection`'s own moduledoc.
+  `place_orders/3` is the same shape for the same reason: one call, many orders.
   """
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Notice, Types, Venue}
+  alias DpExchange.Core.{FakeInjection, Notice, Types, Venue}
   alias DpExchange.Webull.{Environment, Rest}
 
   @symbols ~w(BTC-USD ETH-USD SOL-USD)
@@ -60,116 +75,128 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_price(symbol, opts \\ []) do
-    with :ok <- authenticated(opts) do
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.Quote{
-             symbol: symbol,
-             price: Decimal.new(price),
-             # This venue reports no volume anywhere. `nil`, never zero.
-             volume: nil,
-             timestamp: @at,
-             provider: :webull
-           }}
+    with_injection(symbol, fn ->
+      with :ok <- authenticated(opts) do
+        case Map.fetch(@price, symbol) do
+          {:ok, price} ->
+            {:ok,
+             %Types.Quote{
+               symbol: symbol,
+               price: Decimal.new(price),
+               # This venue reports no volume anywhere. `nil`, never zero.
+               volume: nil,
+               timestamp: @at,
+               provider: :webull
+             }}
 
-        :error ->
-          {:refused, :not_listed}
+          :error ->
+            {:refused, :not_listed}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
-    with :ok <- authenticated(opts) do
-      case Map.fetch(@price, symbol) do
-        {:ok, price} ->
-          {:ok,
-           %Types.TopOfBook{
-             symbol: symbol,
-             # A spread around the fake's price, with the bid deliberately not equal to it:
-             # a test that passes only when they coincide is not testing the split.
-             bid: Decimal.sub(Decimal.new(price), Decimal.new("0.25")),
-             ask: Decimal.add(Decimal.new(price), Decimal.new("0.50")),
-             bid_size: nil,
-             ask_size: nil,
-             venue_time: @at,
-             observed_at: @at,
-             provider: :webull
-           }}
+    with_injection(symbol, fn ->
+      with :ok <- authenticated(opts) do
+        case Map.fetch(@price, symbol) do
+          {:ok, price} ->
+            {:ok,
+             %Types.TopOfBook{
+               symbol: symbol,
+               # A spread around the fake's price, with the bid deliberately not equal to it:
+               # a test that passes only when they coincide is not testing the split.
+               bid: Decimal.sub(Decimal.new(price), Decimal.new("0.25")),
+               ask: Decimal.add(Decimal.new(price), Decimal.new("0.50")),
+               bid_size: nil,
+               ask_size: nil,
+               venue_time: @at,
+               observed_at: @at,
+               provider: :webull
+             }}
 
-        :error ->
-          {:refused, :not_listed}
+          :error ->
+            {:refused, :not_listed}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
-    with :ok <- authenticated(opts) do
-      cond do
-        symbol not in @symbols ->
-          {:refused, :not_listed}
+    with_injection(symbol, fn ->
+      with :ok <- authenticated(opts) do
+        cond do
+          symbol not in @symbols ->
+            {:refused, :not_listed}
 
-        timeframe not in Rest.timeframes() ->
-          # Includes `12h` and `1w`, which the shared vocabulary models and this venue
-          # does not serve — `1w` deliberately, since its boundary is unverifiable.
-          {:error, {:unsupported_timeframe, timeframe}}
+          timeframe not in Rest.timeframes() ->
+            # Includes `12h` and `1w`, which the shared vocabulary models and this venue
+            # does not serve — `1w` deliberately, since its boundary is unverifiable.
+            {:error, {:unsupported_timeframe, timeframe}}
 
-        true ->
-          {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
+          true ->
+            {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_symbols(opts \\ []) do
-    with :ok <- authenticated(opts), do: {:ok, @symbols}
+    with_injection(fn ->
+      with :ok <- authenticated(opts), do: {:ok, @symbols}
+    end)
   end
 
   @impl true
   def get_order_book(symbol, opts \\ []) do
-    category = Keyword.get(opts, :category, "US_STOCK")
+    with_injection(symbol, fn ->
+      category = Keyword.get(opts, :category, "US_STOCK")
 
-    cond do
-      category not in ["US_STOCK", "US_ETF"] ->
-        {:error, {:unsupported_book_category, category}}
+      cond do
+        category not in ["US_STOCK", "US_ETF"] ->
+          {:error, {:unsupported_book_category, category}}
 
-      # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same
-      # way the real package does rather than inventing a book.
-      String.contains?(symbol, "-") ->
-        {:error, {:unsupported_book_category, category}}
+        # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same
+        # way the real package does rather than inventing a book.
+        String.contains?(symbol, "-") ->
+          {:error, {:unsupported_book_category, category}}
 
-      true ->
-        with :ok <- authenticated(opts) do
-          {:ok,
-           %Types.OrderBook{
-             symbol: symbol,
-             bids: [
-               {Decimal.new("13.90"), Decimal.new("5")},
-               {Decimal.new("13.89"), Decimal.new("12")}
-             ],
-             asks: [
-               {Decimal.new("13.91"), Decimal.new("3")},
-               {Decimal.new("13.92"), Decimal.new("20")}
-             ],
-             timestamp: @at,
-             sequence: nil,
-             provider: :webull
-           }}
-        end
-    end
+        true ->
+          with :ok <- authenticated(opts) do
+            {:ok,
+             %Types.OrderBook{
+               symbol: symbol,
+               bids: [
+                 {Decimal.new("13.90"), Decimal.new("5")},
+                 {Decimal.new("13.89"), Decimal.new("12")}
+               ],
+               asks: [
+                 {Decimal.new("13.91"), Decimal.new("3")},
+                 {Decimal.new("13.92"), Decimal.new("20")}
+               ],
+               timestamp: @at,
+               sequence: nil,
+               provider: :webull
+             }}
+          end
+      end
+    end)
   end
 
   @impl true
   def get_trades(symbol, opts \\ []) do
-    # A crypto pair. This venue's tick endpoint is equities-only, and the fake refuses
-    # rather than inventing a tape.
-    if String.contains?(symbol, "-") do
-      {:error, {:unsupported_book_category, "US_CRYPTO"}}
-    else
-      with :ok <- authenticated(opts), do: {:ok, fake_ticks(symbol)}
-    end
+    with_injection(symbol, fn ->
+      # A crypto pair. This venue's tick endpoint is equities-only, and the fake refuses
+      # rather than inventing a tape.
+      if String.contains?(symbol, "-") do
+        {:error, {:unsupported_book_category, "US_CRYPTO"}}
+      else
+        with :ok <- authenticated(opts), do: {:ok, fake_ticks(symbol)}
+      end
+    end)
   end
 
   defp fake_ticks(symbol) do
@@ -201,54 +228,58 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_volume_profile(symbol, timeframe, opts \\ []) do
-    cond do
-      timeframe not in ~w(5s 15s 1m 5m 30m) ->
-        # Five widths, narrower than the bars endpoint. A caller asking for one this
-        # endpoint does not serve gets an error, not the nearest.
-        {:error, {:unsupported_timeframe, timeframe}}
+    with_injection(symbol, fn ->
+      cond do
+        timeframe not in ~w(5s 15s 1m 5m 30m) ->
+          # Five widths, narrower than the bars endpoint. A caller asking for one this
+          # endpoint does not serve gets an error, not the nearest.
+          {:error, {:unsupported_timeframe, timeframe}}
 
-      Keyword.get(opts, :session) == "OVN" ->
-        {:error, {:unsupported_session, "OVN"}}
+        Keyword.get(opts, :session) == "OVN" ->
+          {:error, {:unsupported_session, "OVN"}}
 
-      true ->
-        with :ok <- authenticated(opts) do
-          {:ok,
-           [
-             %Types.VolumeProfile{
-               symbol: symbol,
-               timeframe: timeframe,
-               opened_at: @at,
-               total_volume: Decimal.new("1000"),
-               # Deliberately NOT buy_volume - sell_volume. The venue's classifier leaves
-               # some prints unattributed, and a fake where the three always reconcile
-               # would teach a consumer they must.
-               delta: Decimal.new("150"),
-               buy_volume: Decimal.new("600"),
-               sell_volume: Decimal.new("400"),
-               buy_at_price: %{"24.20" => Decimal.new("100"), "24.21" => Decimal.new("500")},
-               sell_at_price: %{"24.20" => Decimal.new("350"), "24.21" => Decimal.new("50")},
-               session: :regular,
-               provider: :webull
-             }
-           ]}
-        end
-    end
+        true ->
+          with :ok <- authenticated(opts) do
+            {:ok,
+             [
+               %Types.VolumeProfile{
+                 symbol: symbol,
+                 timeframe: timeframe,
+                 opened_at: @at,
+                 total_volume: Decimal.new("1000"),
+                 # Deliberately NOT buy_volume - sell_volume. The venue's classifier leaves
+                 # some prints unattributed, and a fake where the three always reconcile
+                 # would teach a consumer they must.
+                 delta: Decimal.new("150"),
+                 buy_volume: Decimal.new("600"),
+                 sell_volume: Decimal.new("400"),
+                 buy_at_price: %{"24.20" => Decimal.new("100"), "24.21" => Decimal.new("500")},
+                 sell_at_price: %{"24.20" => Decimal.new("350"), "24.21" => Decimal.new("50")},
+                 session: :regular,
+                 provider: :webull
+               }
+             ]}
+          end
+      end
+    end)
   end
 
   @impl true
   def get_auction_imbalance(symbol, opts \\ []) do
-    case Keyword.get(opts, :auction) do
-      auction when auction in [:opening, :closing] ->
-        with :ok <- authenticated(opts) do
-          {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
-        end
+    with_injection(symbol, fn ->
+      case Keyword.get(opts, :auction) do
+        auction when auction in [:opening, :closing] ->
+          with :ok <- authenticated(opts) do
+            {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
+          end
 
-      nil ->
-        {:error, :auction_required}
+        nil ->
+          {:error, :auction_required}
 
-      other ->
-        {:error, {:unsupported_auction, other}}
-    end
+        other ->
+          {:error, {:unsupported_auction, other}}
+      end
+    end)
   end
 
   defp fake_imbalance(symbol, auction, history?) do
@@ -279,120 +310,130 @@ defmodule DpExchange.Webull.Fake do
   def list_instruments(_opts), do: Venue.not_supported()
   @impl true
   def get_balances(_credentials, opts) do
-    with :ok <- fake_account(opts) do
-      {:ok,
-       [
-         %Types.Balance{
-           currency: "USD",
-           balance: Decimal.new("485705.95"),
-           # `nil`, as in the real package: this venue publishes several disagreeing
-           # "available" figures and neither it nor this fake picks one.
-           available_balance: nil,
-           hold: Decimal.new("485705"),
-           timestamp: DateTime.utc_now(),
-           provider: :webull
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        {:ok,
+         [
+           %Types.Balance{
+             currency: "USD",
+             balance: Decimal.new("485705.95"),
+             # `nil`, as in the real package: this venue publishes several disagreeing
+             # "available" figures and neither it nor this fake picks one.
+             available_balance: nil,
+             hold: Decimal.new("485705"),
+             timestamp: DateTime.utc_now(),
+             provider: :webull
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
   def get_accounts(_credentials, _opts) do
-    # Two accounts of different classes, because that is the fact about this venue a
-    # consumer most needs to handle: one credential reaches crypto and cash alike.
-    {:ok,
-     [
-       %{
-         "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
-         "account_number" => "10010048",
-         "account_type" => "CASH",
-         "account_label" => "Crypto",
-         "account_class" => "CRYPTO"
-       },
-       %{
-         "account_id" => "LOJOQITOD49R6G9BPQM489CISA",
-         "account_number" => "10010049",
-         "account_type" => "MARGIN",
-         "account_label" => "Individual Margin",
-         "account_class" => "INDIVIDUAL_MARGIN"
-       }
-     ]}
+    with_injection(fn ->
+      # Two accounts of different classes, because that is the fact about this venue a
+      # consumer most needs to handle: one credential reaches crypto and cash alike.
+      {:ok,
+       [
+         %{
+           "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+           "account_number" => "10010048",
+           "account_type" => "CASH",
+           "account_label" => "Crypto",
+           "account_class" => "CRYPTO"
+         },
+         %{
+           "account_id" => "LOJOQITOD49R6G9BPQM489CISA",
+           "account_number" => "10010049",
+           "account_type" => "MARGIN",
+           "account_label" => "Individual Margin",
+           "account_class" => "INDIVIDUAL_MARGIN"
+         }
+       ]}
+    end)
   end
 
   @impl true
   def get_fees(_credentials, _opts) do
-    {:ok,
-     %{
-       crypto_spread_pct: Decimal.new("1.00"),
-       charged_by: "Webull Pay/Bakkt",
-       source: :published_rate,
-       captured_at: ~D[2026-09-03]
-     }}
+    with_injection(fn ->
+      {:ok,
+       %{
+         crypto_spread_pct: Decimal.new("1.00"),
+         charged_by: "Webull Pay/Bakkt",
+         source: :published_rate,
+         captured_at: ~D[2026-09-03]
+       }}
+    end)
   end
 
   @impl true
   def get_transfers(_credentials, opts) do
-    with :ok <- fake_account(opts) do
-      # A dividend alongside a deposit, because that is the distinction a consumer must
-      # handle: both credit cash and neither is the other. The fake filters the same way
-      # the real package does.
-      types = Keyword.get(opts, :activity_types, ~w(DEPOSIT WITHDRAW TRANSFER))
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        # A dividend alongside a deposit, because that is the distinction a consumer must
+        # handle: both credit cash and neither is the other. The fake filters the same way
+        # the real package does.
+        types = Keyword.get(opts, :activity_types, ~w(DEPOSIT WITHDRAW TRANSFER))
 
-      rows = [
-        %{
-          "id" => "a1b2c3",
-          "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
-          "activity_type" => "DEPOSIT",
-          "activity_sub_type" => "ACH",
-          "currency" => "USD",
-          "trade_date" => "2026-08-31",
-          "net_amount" => "1500.0",
-          "biz_time" => "2026-08-31T10:15:30.691Z"
-        },
-        %{
-          "id" => "d4e5f6",
-          "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
-          "activity_type" => "DIVIDENDS",
-          "activity_sub_type" => "INCOME",
-          "currency" => "USD",
-          "trade_date" => "2026-08-30",
-          "net_amount" => "12.40",
-          "biz_time" => "2026-08-30T10:15:30.691Z"
-        }
-      ]
+        rows = [
+          %{
+            "id" => "a1b2c3",
+            "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+            "activity_type" => "DEPOSIT",
+            "activity_sub_type" => "ACH",
+            "currency" => "USD",
+            "trade_date" => "2026-08-31",
+            "net_amount" => "1500.0",
+            "biz_time" => "2026-08-31T10:15:30.691Z"
+          },
+          %{
+            "id" => "d4e5f6",
+            "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+            "activity_type" => "DIVIDENDS",
+            "activity_sub_type" => "INCOME",
+            "currency" => "USD",
+            "trade_date" => "2026-08-30",
+            "net_amount" => "12.40",
+            "biz_time" => "2026-08-30T10:15:30.691Z"
+          }
+        ]
 
-      {:ok, Enum.filter(rows, &(&1["activity_type"] in types))}
-    end
+        {:ok, Enum.filter(rows, &(&1["activity_type"] in types))}
+      end
+    end)
   end
 
   @impl true
   def get_transactions(_credentials, opts) do
-    with :ok <- fake_account(opts) do
-      # Unfiltered by default: the dividend and the fee are here beside the deposit, which
-      # is the whole difference from `get_transfers/2`. A fake that returned only the three
-      # transfer kinds would make the two functions look interchangeable.
-      {:ok,
-       [
-         %{
-           "id" => "a1b2c3",
-           "activity_type" => "DEPOSIT",
-           "currency" => "USD",
-           "net_amount" => "1500.0"
-         },
-         %{
-           "id" => "d4e5f6",
-           "activity_type" => "DIVIDENDS",
-           "currency" => "USD",
-           "net_amount" => "12.40"
-         },
-         %{
-           "id" => "g7h8i9",
-           "activity_type" => "FEES",
-           "currency" => "USD",
-           "net_amount" => "-0.35"
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        # Unfiltered by default: the dividend and the fee are here beside the deposit, which
+        # is the whole difference from `get_transfers/2`. A fake that returned only the three
+        # transfer kinds would make the two functions look interchangeable.
+        {:ok,
+         [
+           %{
+             "id" => "a1b2c3",
+             "activity_type" => "DEPOSIT",
+             "currency" => "USD",
+             "net_amount" => "1500.0"
+           },
+           %{
+             "id" => "d4e5f6",
+             "activity_type" => "DIVIDENDS",
+             "currency" => "USD",
+             "net_amount" => "12.40"
+           },
+           %{
+             "id" => "g7h8i9",
+             "activity_type" => "FEES",
+             "currency" => "USD",
+             "net_amount" => "-0.35"
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
@@ -433,27 +474,33 @@ defmodule DpExchange.Webull.Fake do
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
   def preview_order(_credentials, request, opts \\ []) do
-    # Crypto is refused here as it is in production. A fake that priced a crypto order
-    # would let a consumer's suite go green on a call the venue rejects.
-    instrument = Map.get(request, :instrument_type, :crypto)
+    with_injection(fn ->
+      # Crypto is refused here as it is in production. A fake that priced a crypto order
+      # would let a consumer's suite go green on a call the venue rejects.
+      instrument = Map.get(request, :instrument_type, :crypto)
 
-    if instrument == :crypto do
-      {:error, {:preview_not_supported, :crypto}}
-    else
-      with :ok <- fake_account(opts),
-           :ok <- fake_combination(request) do
-        {:ok,
-         %{
-           instrument_type: instrument,
-           estimated_cost: Decimal.new("100"),
-           estimated_fee: Decimal.new("1")
-         }}
+      if instrument == :crypto do
+        {:error, {:preview_not_supported, :crypto}}
+      else
+        with :ok <- fake_account(opts),
+             :ok <- fake_combination(request) do
+          {:ok,
+           %{
+             instrument_type: instrument,
+             estimated_cost: Decimal.new("100"),
+             estimated_fee: Decimal.new("1")
+           }}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def replace_order(_credentials, client_order_id, changes, opts \\ []) do
+    with_injection(fn -> do_replace_order(client_order_id, changes, opts) end)
+  end
+
+  defp do_replace_order(client_order_id, changes, opts) do
     instrument = Keyword.get(opts, :instrument_type, :equity)
     order_type = Keyword.get(opts, :order_type, :limit)
 
@@ -505,33 +552,37 @@ defmodule DpExchange.Webull.Fake do
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
   @impl true
   def quantization(symbol, _opts \\ []) do
-    if String.contains?(symbol, "-") do
-      {:ok,
-       %{
-         price_increment: Decimal.new("0.01"),
-         quantity_increment: Decimal.new("0.00000001"),
-         min_quantity: Decimal.new("0.0001"),
-         max_quantity: Decimal.new("1000"),
-         min_quote_size: Decimal.new("1.00"),
-         max_quote_size: Decimal.new("100000"),
-         status: "OC"
-       }}
-    else
-      {:ok,
-       %{
-         price_increment: nil,
-         quantity_increment: Decimal.new("1"),
-         min_quantity: nil,
-         max_quantity: nil,
-         min_quote_size: nil,
-         max_quote_size: nil,
-         status: "OC"
-       }}
-    end
+    with_injection(symbol, fn ->
+      if String.contains?(symbol, "-") do
+        {:ok,
+         %{
+           price_increment: Decimal.new("0.01"),
+           quantity_increment: Decimal.new("0.00000001"),
+           min_quantity: Decimal.new("0.0001"),
+           max_quantity: Decimal.new("1000"),
+           min_quote_size: Decimal.new("1.00"),
+           max_quote_size: Decimal.new("100000"),
+           status: "OC"
+         }}
+      else
+        {:ok,
+         %{
+           price_increment: nil,
+           quantity_increment: Decimal.new("1"),
+           min_quantity: nil,
+           max_quantity: nil,
+           min_quote_size: nil,
+           max_quote_size: nil,
+           status: "OC"
+         }}
+      end
+    end)
   end
 
   @impl true
-  def market_status(_opts), do: {:ok, :open}
+  def market_status(_opts) do
+    with_injection(fn -> {:ok, :open} end)
+  end
 
   @impl true
   def subscribe(symbols, opts \\ []) do
@@ -580,9 +631,20 @@ defmodule DpExchange.Webull.Fake do
   # The real venue signs every call and has no anonymous endpoint, so a fake that answered
   # without credentials would let a consumer's test pass while the real call returns 401.
   defp authenticated(opts) do
-    case Keyword.get(opts, :credentials) do
-      %{app_key: _key, app_secret: _secret} -> :ok
-      _absent -> {:refused, :missing_credentials}
+    if FakeInjection.credentials_bypassed?(:webull) do
+      :ok
+    else
+      case Keyword.get(opts, :credentials) do
+        %{app_key: _key, app_secret: _secret} -> :ok
+        _absent -> {:refused, :missing_credentials}
+      end
+    end
+  end
+
+  defp with_injection(symbol \\ nil, fun) do
+    case FakeInjection.next_outcome(:webull, symbol) do
+      {:override, outcome} -> outcome
+      :none -> fun.()
     end
   end
 
@@ -626,28 +688,30 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_positions(opts \\ []) do
-    with :ok <- fake_account(opts) do
-      # A SHORT position, because that is the case a fake must carry: the venue states
-      # direction only in the sign of the quantity, and a package that assumed :long would
-      # be exactly backwards with every number still plausible.
-      {:ok,
-       [
-         %Types.Position{
-           symbol: "BTC-USD",
-           side: :short,
-           quantity: Decimal.new("0.4"),
-           instrument_type: :crypto,
-           average_cost: Decimal.new("41000"),
-           mark_price: Decimal.new("40000"),
-           unrealised_pnl: Decimal.new("400"),
-           # Not published on this endpoint. `nil` means the venue did not say, never
-           # "no liquidation risk".
-           liquidation_price: nil,
-           leverage: nil,
-           provider: :webull
-         }
-       ]}
-    end
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        # A SHORT position, because that is the case a fake must carry: the venue states
+        # direction only in the sign of the quantity, and a package that assumed :long would
+        # be exactly backwards with every number still plausible.
+        {:ok,
+         [
+           %Types.Position{
+             symbol: "BTC-USD",
+             side: :short,
+             quantity: Decimal.new("0.4"),
+             instrument_type: :crypto,
+             average_cost: Decimal.new("41000"),
+             mark_price: Decimal.new("40000"),
+             unrealised_pnl: Decimal.new("400"),
+             # Not published on this endpoint. `nil` means the venue did not say, never
+             # "no liquidation risk".
+             liquidation_price: nil,
+             leverage: nil,
+             provider: :webull
+           }
+         ]}
+      end
+    end)
   end
 
   @impl true
@@ -710,30 +774,33 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_option_chain(underlying, _opts \\ []) do
-    # A strike with only a call on it, because that is the case a consumer iterating strikes
-    # has to see. A fake whose grid was always complete would let one ship code that skips it.
-    call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
-    put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
-    lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
+    with_injection(underlying, fn ->
+      # A strike with only a call on it, because that is the case a consumer iterating strikes
+      # has to see. A fake whose grid was always complete would let one ship code that skips it.
+      call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
+      put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
+      lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
 
-    {:ok,
-     %Types.OptionChain{
-       underlying: underlying,
-       expiries: %{
-         ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
-         ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
-       },
-       # The contract list does not quote the underlying, and a fake that filled this in
-       # would teach a consumer to rely on a field that is nil in production.
-       underlying_price: nil,
-       venue_time: nil,
-       provider: :webull
-     }}
+      {:ok,
+       %Types.OptionChain{
+         underlying: underlying,
+         expiries: %{
+           ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
+           ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
+         },
+         # The contract list does not quote the underlying, and a fake that filled this in
+         # would teach a consumer to rely on a field that is nil in production.
+         underlying_price: nil,
+         venue_time: nil,
+         provider: :webull
+       }}
+    end)
   end
 
   @impl true
-  def get_option_expirations(_underlying, _opts \\ []),
-    do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+  def get_option_expirations(underlying, _opts \\ []) do
+    with_injection(underlying, fn -> {:ok, [~D[2026-03-20], ~D[2026-06-19]]} end)
+  end
 
   defp fake_contract(underlying, expiry, strike, right) do
     %Types.OptionContract{
@@ -758,176 +825,196 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def list_watchlists(_opts \\ []) do
-    # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
-    # membership, and a fake returning `[]` would teach a consumer that they are empty.
-    {:ok,
-     [
-       %Types.Watchlist{
-         id: "wl-1",
-         name: "My Tech Stocks",
-         symbols: nil,
-         venue_time: nil,
-         provider: :webull
-       }
-     ]}
-  end
-
-  @impl true
-  def get_watchlist(id, _opts \\ []) do
-    # And `name: nil` here, because the membership endpoint does not return it.
-    {:ok,
-     %Types.Watchlist{
-       id: id,
-       name: nil,
-       symbols: ["AAPL", "GOOG"],
-       venue_time: nil,
-       provider: :webull
-     }}
-  end
-
-  @impl true
-  def create_watchlist(name, symbols, _opts \\ []) do
-    {:ok,
-     %Types.Watchlist{
-       id: "wl-new",
-       name: name,
-       symbols: symbols,
-       venue_time: nil,
-       provider: :webull
-     }}
-  end
-
-  @impl true
-  def update_watchlist(id, opts \\ []) do
-    if Keyword.has_key?(opts, :symbols) do
-      # Refused rather than silently skipped, as in the package: this venue's update
-      # endpoint does not touch membership.
-      {:error, :membership_not_updatable_here}
-    else
-      {:ok,
-       %Types.Watchlist{
-         id: id,
-         name: Keyword.get(opts, :name),
-         symbols: nil,
-         venue_time: nil,
-         provider: :webull
-       }}
-    end
-  end
-
-  @impl true
-  def delete_watchlist(_id, _opts \\ []), do: {:ok, :ok}
-
-  @impl true
-  def get_financials(symbol, kind, _opts \\ []) do
-    {:ok,
-     [
-       %Types.FinancialStatement{
-         symbol: symbol,
-         kind: kind,
-         line_items: %{
-           "total_assets" => "379297000000",
-           "fiscal_year" => 2026,
-           "fiscal_period" => 0
-         },
-         period_end: ~D[2025-12-27],
-         # The venue's integer code, not a string. `0` is the full year.
-         fiscal_period: "FY",
-         currency: "USD",
-         venue_time: nil,
-         provider: :webull
-       }
-     ]}
-  end
-
-  @impl true
-  def get_corporate_events(opts \\ []) do
-    case Keyword.get(opts, :symbol) do
-      symbol when is_binary(symbol) ->
-        {:ok,
-         [
-           %Types.CorporateEvent{
-             symbol: symbol,
-             kind: :dividend,
-             ex_date: ~D[2026-08-10],
-             record_date: ~D[2026-08-11],
-             pay_date: ~D[2026-08-14],
-             announced_date: nil,
-             amount: Decimal.new("0.25"),
-             currency: "USD",
-             ratio: nil,
-             # The venue publishes no confirmed flag. `true` would claim an earnings date is
-             # final when one routinely is not.
-             confirmed: nil,
-             details: %{},
-             provider: :webull
-           }
-         ]}
-
-      _missing ->
-        {:error, :symbol_required}
-    end
-  end
-
-  @impl true
-  def get_filings(symbol, _opts \\ []) do
-    {:ok,
-     [
-       %Types.Filing{
-         symbol: symbol,
-         id: "f-1",
-         form_type: "10-Q",
-         title: "Quarterly report",
-         url: "https://example.invalid/f-1",
-         filed_at: nil,
-         period_end: ~D[2025-12-27],
-         provider: :webull
-       }
-     ]}
-  end
-
-  @impl true
-  def get_news(opts \\ []) do
-    case Keyword.get(opts, :symbols) do
-      [_first | _rest] = symbols ->
-        {:ok,
-         [
-           %Types.NewsItem{
-             id: "n-1",
-             headline: "Summary",
-             summary: "A model's paraphrase, not the publisher's text.",
-             url: nil,
-             # The venue generated it; naming a publisher would attribute a paraphrase.
-             source: "webull",
-             symbols: symbols,
-             published_at: nil,
-             provider: :webull
-           }
-         ]}
-
-      _missing ->
-        {:error, :symbols_required}
-    end
-  end
-
-  @impl true
-  def get_screener(name, _opts \\ []) do
-    if name in Rest.screeners() do
+    with_injection(fn ->
+      # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
+      # membership, and a fake returning `[]` would teach a consumer that they are empty.
       {:ok,
        [
-         %Types.ScreenerResult{
-           symbol: "AAPL",
-           screener: name,
-           # The venue's returned order, not a metric this package ranked on.
-           rank: 1,
-           metrics: %{"change_ratio" => "0.031"},
+         %Types.Watchlist{
+           id: "wl-1",
+           name: "My Tech Stocks",
+           symbols: nil,
            venue_time: nil,
            provider: :webull
          }
        ]}
-    else
-      {:error, {:unknown_screener, name}}
-    end
+    end)
+  end
+
+  @impl true
+  def get_watchlist(id, _opts \\ []) do
+    with_injection(fn ->
+      # And `name: nil` here, because the membership endpoint does not return it.
+      {:ok,
+       %Types.Watchlist{
+         id: id,
+         name: nil,
+         symbols: ["AAPL", "GOOG"],
+         venue_time: nil,
+         provider: :webull
+       }}
+    end)
+  end
+
+  @impl true
+  def create_watchlist(name, symbols, _opts \\ []) do
+    with_injection(fn ->
+      {:ok,
+       %Types.Watchlist{
+         id: "wl-new",
+         name: name,
+         symbols: symbols,
+         venue_time: nil,
+         provider: :webull
+       }}
+    end)
+  end
+
+  @impl true
+  def update_watchlist(id, opts \\ []) do
+    with_injection(fn ->
+      if Keyword.has_key?(opts, :symbols) do
+        # Refused rather than silently skipped, as in the package: this venue's update
+        # endpoint does not touch membership.
+        {:error, :membership_not_updatable_here}
+      else
+        {:ok,
+         %Types.Watchlist{
+           id: id,
+           name: Keyword.get(opts, :name),
+           symbols: nil,
+           venue_time: nil,
+           provider: :webull
+         }}
+      end
+    end)
+  end
+
+  @impl true
+  def delete_watchlist(_id, _opts \\ []) do
+    with_injection(fn -> {:ok, :ok} end)
+  end
+
+  @impl true
+  def get_financials(symbol, kind, _opts \\ []) do
+    with_injection(symbol, fn ->
+      {:ok,
+       [
+         %Types.FinancialStatement{
+           symbol: symbol,
+           kind: kind,
+           line_items: %{
+             "total_assets" => "379297000000",
+             "fiscal_year" => 2026,
+             "fiscal_period" => 0
+           },
+           period_end: ~D[2025-12-27],
+           # The venue's integer code, not a string. `0` is the full year.
+           fiscal_period: "FY",
+           currency: "USD",
+           venue_time: nil,
+           provider: :webull
+         }
+       ]}
+    end)
+  end
+
+  @impl true
+  def get_corporate_events(opts \\ []) do
+    with_injection(fn ->
+      case Keyword.get(opts, :symbol) do
+        symbol when is_binary(symbol) ->
+          {:ok,
+           [
+             %Types.CorporateEvent{
+               symbol: symbol,
+               kind: :dividend,
+               ex_date: ~D[2026-08-10],
+               record_date: ~D[2026-08-11],
+               pay_date: ~D[2026-08-14],
+               announced_date: nil,
+               amount: Decimal.new("0.25"),
+               currency: "USD",
+               ratio: nil,
+               # The venue publishes no confirmed flag. `true` would claim an earnings date is
+               # final when one routinely is not.
+               confirmed: nil,
+               details: %{},
+               provider: :webull
+             }
+           ]}
+
+        _missing ->
+          {:error, :symbol_required}
+      end
+    end)
+  end
+
+  @impl true
+  def get_filings(symbol, _opts \\ []) do
+    with_injection(symbol, fn ->
+      {:ok,
+       [
+         %Types.Filing{
+           symbol: symbol,
+           id: "f-1",
+           form_type: "10-Q",
+           title: "Quarterly report",
+           url: "https://example.invalid/f-1",
+           filed_at: nil,
+           period_end: ~D[2025-12-27],
+           provider: :webull
+         }
+       ]}
+    end)
+  end
+
+  @impl true
+  def get_news(opts \\ []) do
+    with_injection(fn ->
+      case Keyword.get(opts, :symbols) do
+        [_first | _rest] = symbols ->
+          {:ok,
+           [
+             %Types.NewsItem{
+               id: "n-1",
+               headline: "Summary",
+               summary: "A model's paraphrase, not the publisher's text.",
+               url: nil,
+               # The venue generated it; naming a publisher would attribute a paraphrase.
+               source: "webull",
+               symbols: symbols,
+               published_at: nil,
+               provider: :webull
+             }
+           ]}
+
+        _missing ->
+          {:error, :symbols_required}
+      end
+    end)
+  end
+
+  @impl true
+  def get_screener(name, _opts \\ []) do
+    with_injection(fn ->
+      if name in Rest.screeners() do
+        {:ok,
+         [
+           %Types.ScreenerResult{
+             symbol: "AAPL",
+             screener: name,
+             # The venue's returned order, not a metric this package ranked on.
+             rank: 1,
+             metrics: %{"change_ratio" => "0.031"},
+             venue_time: nil,
+             provider: :webull
+           }
+         ]}
+      else
+        {:error, {:unknown_screener, name}}
+      end
+    end)
   end
 
   @impl true
@@ -941,23 +1028,25 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def place_order(_credentials, request, opts \\ []) do
-    # The fake enforces the venue's crypto matrix and its account requirement, so a
-    # consumer's suite cannot go green on an order this venue would reject.
-    with :ok <- fake_account(opts),
-         :ok <- fake_combination(request) do
-      {:ok,
-       %Types.Order{
-         id: "fake-webull-order-1",
-         symbol: Map.fetch!(request, :symbol),
-         side: Map.fetch!(request, :side),
-         order_type: Map.get(request, :order_type, :limit),
-         time_in_force: Map.get(request, :time_in_force, :gtc),
-         quantity: Map.get(request, :quantity),
-         price: Map.get(request, :price),
-         status: :pending,
-         provider: :webull
-       }}
-    end
+    with_injection(fn ->
+      # The fake enforces the venue's crypto matrix and its account requirement, so a
+      # consumer's suite cannot go green on an order this venue would reject.
+      with :ok <- fake_account(opts),
+           :ok <- fake_combination(request) do
+        {:ok,
+         %Types.Order{
+           id: "fake-webull-order-1",
+           symbol: Map.fetch!(request, :symbol),
+           side: Map.fetch!(request, :side),
+           order_type: Map.get(request, :order_type, :limit),
+           time_in_force: Map.get(request, :time_in_force, :gtc),
+           quantity: Map.get(request, :quantity),
+           price: Map.get(request, :price),
+           status: :pending,
+           provider: :webull
+         }}
+      end
+    end)
   end
 
   @impl true
@@ -1018,34 +1107,40 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def cancel_order(_credentials, client_order_id, opts \\ []) do
-    with :ok <- fake_account(opts) do
-      case client_order_id do
-        "fake-webull-order-1" -> {:ok, :cancelled}
-        _unknown -> {:refused, :not_found}
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        case client_order_id do
+          "fake-webull-order-1" -> {:ok, :cancelled}
+          _unknown -> {:refused, :not_found}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_order(_credentials, client_order_id, opts \\ []) do
-    with :ok <- fake_account(opts) do
-      case client_order_id do
-        "fake-webull-order-1" -> {:ok, fake_order()}
-        _unknown -> {:refused, :not_found}
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        case client_order_id do
+          "fake-webull-order-1" -> {:ok, fake_order()}
+          _unknown -> {:refused, :not_found}
+        end
       end
-    end
+    end)
   end
 
   @impl true
   def get_orders(_credentials, opts \\ []) do
-    with :ok <- fake_account(opts) do
-      # Open by default, history when asked — the venue has two endpoints, not a filter.
-      if Keyword.get(opts, :history, false) do
-        {:ok, [%{fake_order() | status: :filled}]}
-      else
-        {:ok, [fake_order()]}
+    with_injection(fn ->
+      with :ok <- fake_account(opts) do
+        # Open by default, history when asked — the venue has two endpoints, not a filter.
+        if Keyword.get(opts, :history, false) do
+          {:ok, [%{fake_order() | status: :filled}]}
+        else
+          {:ok, [fake_order()]}
+        end
       end
-    end
+    end)
   end
 
   defp fake_order do
