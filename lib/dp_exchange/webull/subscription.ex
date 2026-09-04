@@ -18,6 +18,14 @@ defmodule DpExchange.Webull.Subscription do
     only defence.
 
   Every call is signed — this venue has no anonymous endpoints.
+
+  **`sub_types` is uppercase (`SNAPSHOT`, `QUOTE`) and is not the MQTT topic namespace.**
+  The subscribe request body's subtype field and the MQTT topics a connected session
+  receives on (`quote`, `snapshot` — lowercase, see `streaming-api.md`) look like the same
+  vocabulary and are not: they are two different fields on two different protocols. Sending
+  the lowercase topic names here got every subscribe rejected `HTTP 417
+  UNSUPPORTED_SUB_TYPE` — DpCryptoManagement's issue #19, filed right after #18 unblocked
+  the request enough to reach this validation for the first time.
   """
 
   alias DpExchange.Core.HttpClient
@@ -52,8 +60,12 @@ defmodule DpExchange.Webull.Subscription do
         "session_id" => session_id,
         "category" => "US_CRYPTO",
         "symbols" => Enum.map(symbols, &SymbolFormat.to_exchange_symbol/1),
-        # The venue's own topic names. `quote` is the book, `snapshot` the last price.
-        "sub_types" => Keyword.get(opts, :sub_types, ["snapshot", "quote"])
+        # Uppercase, and NOT the same strings as the MQTT topic names (`quote`,
+        # `snapshot` — see streaming-api.md). Confirmed live by DpCryptoManagement's
+        # issue #19: lowercase values here get every subscribe rejected `HTTP 417
+        # UNSUPPORTED_SUB_TYPE`, while `["SNAPSHOT", "QUOTE"]` is what the venue actually
+        # accepted for months from the prior in-repo client.
+        "sub_types" => Keyword.get(opts, :sub_types, ["SNAPSHOT", "QUOTE"])
       })
 
     request = %{

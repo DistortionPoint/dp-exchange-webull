@@ -99,6 +99,20 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`sub_types` was sent lowercase, and every subscribe was rejected `HTTP 417
+  UNSUPPORTED_SUB_TYPE "Subtype not supported:quotesnapshot"` — DpCryptoManagement's
+  issue #19, filed immediately after issue #18's fix unblocked the request enough to
+  reach this validation for the first time.** `Subscription.post/4` defaulted
+  `"sub_types"` to `["snapshot", "quote"]`, a comment mislabelling them as "the venue's
+  own topic names" — they are not: `quote`/`snapshot` lowercase is the MQTT topic
+  namespace a connected session receives on, a different field on a different protocol
+  from the REST subscribe body's `sub_types`. The reporter's own retired in-repo client
+  proved the working values: `["SNAPSHOT", "QUOTE"]` uppercase, sent against this same
+  endpoint for months. The venue's own error text is the two rejected values joined with
+  no separator — `"quote"` + `"snapshot"` — which is what made the fix legible rather
+  than a guess. Default changed to uppercase; nothing else about the request shape
+  changed, since it was already sending a proper array, never a joined string.
+
 - **Every signed request went out with no `Content-Type` at all, and the venue's
   streaming-subscribe endpoint rejected every one with `HTTP 415 "Request media type
   not support"` — DpCryptoManagement's issue #18. Streaming never delivered a tick.**

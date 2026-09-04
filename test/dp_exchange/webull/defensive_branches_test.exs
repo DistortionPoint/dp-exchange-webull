@@ -258,7 +258,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                )
     end
 
-    test "the venue's own topic names are sent", %{limiter: limiter} do
+    test "the venue's documented subtype names are sent, uppercase", %{limiter: limiter} do
       test_pid = self()
 
       plug = fn conn ->
@@ -276,7 +276,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
         )
 
       assert_receive {:body, body}
-      assert body["sub_types"] == ["snapshot", "quote"]
+      assert body["sub_types"] == ["SNAPSHOT", "QUOTE"]
       assert body["category"] == "US_CRYPTO"
     end
   end
