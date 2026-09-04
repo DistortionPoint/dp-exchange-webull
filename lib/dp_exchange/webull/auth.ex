@@ -22,6 +22,15 @@ defmodule DpExchange.Webull.Auth do
       x-version:              v2
       host:                   <api hostname, no scheme>
       x-access-token:         <token>   # only when the account has 2FA enabled
+      Content-Type:           application/json   # only when there is a body to declare
+
+  **`Content-Type` was missing entirely until DpCryptoManagement's issue #18**: every
+  signed request with a body — `subscribe/3`, `unsubscribe/3`, `place_order` and every
+  other JSON-bodied POST this package signs — went out with no declared media type at
+  all, and the venue's streaming-subscribe endpoint answered every one of them `HTTP 415
+  "Request media type not support"`. Streaming never delivered a tick as a result. It is
+  not one of the six signed header pairs below, so adding it cannot desync a request from
+  what was actually signed.
 
   ## The signature, step by step
 
@@ -104,6 +113,12 @@ defmodule DpExchange.Webull.Auth do
       {"x-version", "v2"},
       {"host", host}
     ]
+
+    # Every request body this package signs is JSON — `Content-Type` does not
+    # participate in the signature (it is not one of the six signed header pairs above),
+    # so adding it here cannot desync from what was actually signed. A GET's `body` is
+    # `""`, which carries nothing to declare a type for.
+    base = if body == "", do: base, else: [{"Content-Type", "application/json"} | base]
 
     {:ok, with_access_token(base, Map.get(credentials, :access_token))}
   end

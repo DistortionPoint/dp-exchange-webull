@@ -99,6 +99,18 @@ acceptable changelog line.
 
 ### Fixed
 
+- **Every signed request went out with no `Content-Type` at all, and the venue's
+  streaming-subscribe endpoint rejected every one with `HTTP 415 "Request media type
+  not support"` — DpCryptoManagement's issue #18. Streaming never delivered a tick.**
+  `Auth.headers/2` never declared a media type for any request, signed or not. The
+  reported symptom was specifically the streaming subscribe/unsubscribe calls, but the
+  same gap reached every JSON-bodied signed POST this package makes, `place_order`
+  included — found while reading `Auth.headers/2` directly rather than patching only the
+  reported call site. Fixed at the source: `Content-Type: application/json` is added
+  whenever a signed request carries a body; a GET's body is `""` and stays bare, correctly.
+  Not one of the six header pairs the signature itself covers, so this cannot desync a
+  request from what was actually signed.
+
 - **`Feed` had no periodic resubscribe safety net, unlike the sibling `dp_exchange_coinbase`
   package this one's sharding adapts from — DpCryptoManagement's issue #17.** This venue
   can stop delivering to an already-subscribed, already-connected session on its own —

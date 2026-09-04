@@ -130,11 +130,12 @@ defmodule DpExchange.Webull.AuthTest do
   end
 
   describe "headers/2" do
-    test "carries the eight fixed headers" do
+    test "carries the eight fixed headers, plus Content-Type when there is a body" do
       assert {:ok, headers} = Auth.headers(request(), @credentials)
       names = headers |> Enum.map(&elem(&1, 0)) |> Enum.sort()
 
       assert names == [
+               "Content-Type",
                "host",
                "x-app-key",
                "x-signature",
@@ -144,6 +145,19 @@ defmodule DpExchange.Webull.AuthTest do
                "x-timestamp",
                "x-version"
              ]
+
+      assert {"Content-Type", "application/json"} in headers
+    end
+
+    test "no Content-Type when there is no body — a GET names nothing to declare" do
+      # Filed as a live bug: every signed request went out with no declared media type at
+      # all, and the venue's streaming-subscribe endpoint (a POST, a real body) answered
+      # every one with HTTP 415 "Request media type not support" — DpCryptoManagement's
+      # issue #18. A GET's body is "", which is the one case that must stay bare.
+      assert {:ok, headers} = Auth.headers(request(%{body: ""}), @credentials)
+      names = headers |> Enum.map(&elem(&1, 0))
+
+      refute "Content-Type" in names
     end
 
     test "x-access-token appears only when the account has one" do
