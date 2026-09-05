@@ -592,9 +592,22 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # `:rate_limit_blocking` was absent from this allowlist entirely — the same
+  # family-wide gap traced and fixed on `Subscription`'s copy of this function while
+  # investigating DpCryptoManagement's issue #23 (see `Feed`'s moduledoc). Forwarded,
+  # not defaulted: a direct call through this module is a one-off, and fail-fast may be
+  # exactly what that caller wants — matching `dp_exchange_robinhood`'s `Rest`.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :webull, raw_status: true)
   end
 

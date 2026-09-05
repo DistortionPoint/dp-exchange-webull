@@ -123,6 +123,49 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The blind resubscribe timer's own rate-limit retry could never actually reach
+  `Core.HttpClient` — DpCryptoManagement's issue #23.** Live evidence, from a node
+  restart: all 4 MQTT shards linked up cleanly, then **58 consecutive blind-resubscribe
+  failures across 13 minutes**, every one the identical refusal —
+  `{:exchange_error, :webull, "Throttled by our own rate limiter (not the venue) — retry
+  after 1s; callers that can wait should set rate_limit_blocking: true"}`. The refusal
+  asks for a one-second wait; `@resubscribe_interval_ms` is 60,000 — so fail-fast
+  (`check/3`) on this timer meant every tick was dropped for a full minute to avoid
+  waiting a second. Measured consumer impact: **0 of 342 pairs streaming**, all of them
+  falling back to REST polling. It also made the venue's own transient, ordinarily
+  self-healing `INVALID_SYMBOL` rejections on an initial subscribe permanent, because
+  recovery from those runs through this same blind resubscribe.
+
+  `:rate_limit_blocking` — the option `Core.HttpClient.check_rate_limits/1` reads to
+  choose `acquire/3` over `check/3` — was missing from every allowlist on the path a
+  blind resubscribe actually takes: `Feed`'s own `resubscribe_opts` (built once in
+  `init/1`), `replayable/2` (what carries it forward across every later subscribe), and
+  `Subscription.request_opts/1` (the last allowlist before `Core.HttpClient` itself).
+  **Fixing only the two in `Feed` — what the filed issue suggested — would have shipped a
+  change that reads as a fix and does nothing**: the option would still be silently
+  stripped one layer down, by `Subscription.request_opts/1`, before `Core.HttpClient`
+  ever saw it. All three now forward it. Only `Feed`'s own opts default it to `true` —
+  the resubscribe timer runs off a 60-second clock with nothing waiting on its result, so
+  blocking for a second is free — following `dp_exchange_robinhood`'s `Feed` precedent
+  for the identical shape (its own issue #16) exactly: `Subscription.request_opts/1`
+  forwards the option without defaulting it, since a caller invoking `Subscription`
+  directly, one-off, may legitimately want fail-fast, and this module must not decide
+  that for it. An explicit caller-supplied `rate_limit_blocking: false` still wins over
+  the default, at both `init/1` and every later `replayable/2` call.
+
+  Proven end to end with a real, pre-exhausted `Core.DefaultRateLimiter` (named, passed
+  via `:limiter` — a `Config.put_override` in the test process is not visible inside the
+  separately-started `Feed` GenServer): the resubscribe's HTTP call reaches the stubbed
+  venue in blocking mode by default, an explicit `rate_limit_blocking: false` at start
+  keeps it fail-fast, and a later `subscribe/3` call's own explicit `false` overrides the
+  default on the very next resubscribe tick via `replayable/2`.
+
+  **Additional gap found while tracing this, and fixed for consistency**:
+  `Webull.Rest.request_opts/1` (the allowlist for every other REST call this package
+  makes — accounts, orders, market data) had the identical missing-allowlist gap, for the
+  same reason a one-off `Subscription.subscribe/3` call must not have blocking imposed on
+  it: not defaulted, forwarded only, matching `dp_exchange_robinhood`'s `Rest`.
+
 - **The socket's connect budget was inherited by accident, not chosen — family-wide defect
   sweep, W6.** `Socket.start_link/1` passed no options to `WebSockex.start_link/4`, so it
   silently accepted the dependency's general-purpose defaults: `socket_connect_timeout:

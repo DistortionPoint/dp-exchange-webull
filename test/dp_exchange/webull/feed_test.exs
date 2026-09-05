@@ -662,6 +662,126 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  describe "rate_limit_blocking — DpCryptoManagement issue #23" do
+    # A limiter with a single, already-spent allowance: `record/3` commits usage the way
+    # `acquire/3` does, without `acquire/3`'s own wait — so the bucket starts genuinely
+    # empty and the next request against it has to wait out one whole emission interval
+    # (~300ms) regardless of which mode reaches it. That wait is the one observable
+    # difference between blocking (`acquire/3`, which waits it out and then succeeds) and
+    # fail-fast (`check/3`, which refuses immediately and never retries before the next
+    # 60-second resubscribe tick) — proving `rate_limit_blocking` actually reaches
+    # `Core.HttpClient` through every allowlist between `Feed` and there (`resubscribe_opts`,
+    # `replayable/2`, `Subscription.request_opts/1`), not just one of them. A partial fix
+    # that stopped at `Feed` would still fail this test, because `Subscription.request_opts/1`
+    # would silently strip the option one layer down.
+    defp exhausted_limiter do
+      name = :"limiter_#{System.unique_integer([:positive])}"
+
+      {:ok, _pid} =
+        DefaultRateLimiter.start_link(
+          name: name,
+          limits: %{default: %{limit: 1, per_ms: 300, burst: 0}}
+        )
+
+      :ok = DefaultRateLimiter.record(:webull, 1, limiter: name)
+      name
+    end
+
+    test "the blind resubscribe defaults to blocking, matching the moduledoc's documented design: a slow tick, not a permanent failure" do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: exhausted_limiter(),
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      send(feed, :resubscribe)
+
+      # check/3 would refuse immediately and never retry inside this window (the next
+      # tick is 60s away) — only acquire/3 (the default) delivers here at all.
+      assert_receive {:request, ["BTCUSD"]}, 1_000
+    end
+
+    test "a caller can still opt into fail-fast explicitly, and it costs the resubscribe cycle" do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: exhausted_limiter(),
+          plug: plug,
+          retry_attempts: 0,
+          rate_limit_blocking: false
+        )
+
+      send(feed, :resubscribe)
+
+      refute_receive {:request, ["BTCUSD"]}, 1_000
+      assert Process.alive?(feed)
+    end
+
+    test "a later subscribe's explicit rate_limit_blocking: false overrides the default on the next resubscribe" do
+      # Proves replayable/2 — not just init/1's own default — carries an explicit
+      # per-call override forward into the next blind resubscribe.
+      test_pid = self()
+      # Canonical form, matching `wanted` below exactly — unlike the issue #17 tests
+      # above, this test also runs `Feed.subscribe/3` (to reach `replayable/2`), and a
+      # format mismatch here would make `reshard/4` see a diff that is not really one,
+      # triggering a real (unstubbed) HTTP call from inside `Feed.subscribe/3` itself.
+      shard = %{connected_shard("shard-0") | symbols: ["BTC-USD"]}
+      limiter = exhausted_limiter()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      # Zero-diff subscribe: the shard already carries exactly this symbol, so reshard/4
+      # touches nothing and no HTTP call is made here — only `resubscribe_opts` changes,
+      # via `replayable/2`.
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+
+      :ok =
+        Feed.subscribe(feed, ["BTC-USD"], credentials: @credentials, rate_limit_blocking: false)
+
+      send(feed, :resubscribe)
+
+      refute_receive {:request, ["BTCUSD"]}, 1_000
+      assert Process.alive?(feed)
+    end
+  end
+
   describe "a shard socket crash is isolated to its own shard — W2" do
     test "an abnormal exit from one shard's socket does not take down the feed or other shards" do
       # A real link, the same relationship `Socket.start_link/1` -> `WebSockex.start_link/4`

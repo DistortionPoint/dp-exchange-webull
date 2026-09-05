@@ -92,6 +92,49 @@ defmodule DpExchange.Webull.Feed do
   changed — the same shape Coinbase's `Feed` already carries for its own reconnect case,
   applied here to a steady-state failure mode Coinbase does not have.
 
+  ## The resubscribe timer must never fail-fast
+
+  A moduledoc worth carrying from `dp_exchange_robinhood`'s `Feed`, which named this
+  exact shape first (`acquire`, not `check` — DpCryptoManagement's issue #16). This
+  package reproduced it independently, live, at a worse scale: DpCryptoManagement's
+  issue #23 — a node restart, all 4 MQTT shards linking up cleanly, then **58
+  consecutive blind-resubscribe failures across 13 minutes**, every one the identical
+  refusal:
+
+      {:exchange_error, :webull, "Throttled by our own rate limiter (not the venue) —
+       retry after 1s; callers that can wait should set rate_limit_blocking: true"}
+
+  `Core.HttpClient`'s own message names the fix. The refusal asks for a **one-second**
+  wait; `@resubscribe_interval_ms` is 60,000. Fail-fast (`check/3`) on this timer means
+  the request is dropped for a whole minute to avoid waiting a second — a self-inflicted
+  outage the venue never asked for. Measured consumer impact: 0 of 342 pairs streaming,
+  every one of them falling back to REST polling, for as long as the rate limiter stayed
+  contended.
+
+  It compounds with the venue's own transient `INVALID_SYMBOL` rejections on an initial
+  subscribe (ordinarily self-healing, since the very next resubscribe tick re-asks for
+  the same symbol) — because recovery from *that* runs through this same blind
+  resubscribe, a recoverable error became permanent for exactly as long as the timer
+  could never issue a request at all.
+
+  **Documenting that design was not the same as wiring it — again.** `:rate_limit_blocking`
+  — the option `Core.HttpClient.check_rate_limits/1` reads to choose `acquire/3` over
+  `check/3` — was missing from every allowlist on the path a blind resubscribe actually
+  takes: this module's own `resubscribe_opts` (built once in `init/1`), `replayable/2`
+  (what carries it forward across every later subscribe), and `Subscription.request_opts/1`
+  (the last allowlist before `Core.HttpClient` itself). Fixing only the two in this module
+  and leaving `Subscription`'s allowlist untouched would have shipped a change that reads
+  as a fix and does nothing: the option would still be stripped one layer down, silently,
+  with every test that stops at "the keyword list contains `:rate_limit_blocking`" passing
+  regardless.
+
+  All three now forward it. Only `Feed`'s own opts — `resubscribe_opts` at `init/1`, and
+  `replayable/2` on every call after — default it to `true`: the resubscribe timer runs
+  off a 60-second clock with no caller waiting on its result, so blocking for as long as a
+  second is free. `Subscription.request_opts/1` forwards the option without defaulting
+  it, on purpose — a caller invoking `Subscription.subscribe/3` directly, one-off, may
+  legitimately want fail-fast, and this module must not decide that for it.
+
   ## A shard's socket crash is contained to that shard
 
   `Socket.start_link/1` links to `Feed` — ordinary `WebSockex.start_link/4` behaviour — so
@@ -221,7 +264,15 @@ defmodule DpExchange.Webull.Feed do
        # wants automatic recovery hands them to the tree at start, exactly as the other
        # venues in this family do. Per-call options still override these for calls made
        # directly against a caller's own request.
-       resubscribe_opts: Keyword.take(opts, [:credentials, :environment, :limiter, :plug]),
+       #
+       # `:rate_limit_blocking` is forwarded and defaulted to `true` here — see the
+       # moduledoc's "The resubscribe timer must never fail-fast" and
+       # DpCryptoManagement's issue #23. `replayable/2` carries this default forward on
+       # every later subscribe/update_symbols unless a caller's own opts override it.
+       resubscribe_opts:
+         opts
+         |> Keyword.take([:credentials, :environment, :limiter, :plug, :rate_limit_blocking])
+         |> Keyword.put_new(:rate_limit_blocking, true),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
@@ -833,10 +884,20 @@ defmodule DpExchange.Webull.Feed do
 
   # Only what a replay needs, and per-call values win over the ones the tree started
   # with — a caller that named credentials for one subscribe meant them for its replay.
+  # `:rate_limit_blocking` rides along here too: an explicit `false` from a caller's own
+  # opts overrides `state.resubscribe_opts`' defaulted `true` (Keyword.merge/2 keeps the
+  # right-hand value), and a caller with no opinion leaves the default in place.
   defp replayable(opts, state) do
     Keyword.merge(
       state.resubscribe_opts,
-      Keyword.take(opts, [:credentials, :environment, :limiter, :plug, :req_adapter])
+      Keyword.take(opts, [
+        :credentials,
+        :environment,
+        :limiter,
+        :plug,
+        :req_adapter,
+        :rate_limit_blocking
+      ])
     )
   end
 

@@ -104,9 +104,21 @@ defmodule DpExchange.Webull.Subscription do
     end
   end
 
+  # `:rate_limit_blocking` is forwarded, never defaulted, here — see `Feed`'s moduledoc
+  # ("The resubscribe timer must never fail-fast", DpCryptoManagement's issue #23). This
+  # module has no opinion on whether a caller can afford to wait; `Feed` is the one
+  # caller that both knows it can (the resubscribe timer) and says so explicitly.
   defp request_opts(opts) do
     opts
-    |> Keyword.take([:limiter, :timeout, :retry_attempts, :log_requests, :plug, :req_adapter])
+    |> Keyword.take([
+      :limiter,
+      :timeout,
+      :retry_attempts,
+      :log_requests,
+      :plug,
+      :req_adapter,
+      :rate_limit_blocking
+    ])
     |> Keyword.merge(provider: :webull, raw_status: true)
   end
 end
