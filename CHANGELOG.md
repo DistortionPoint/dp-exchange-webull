@@ -20,6 +20,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`README.md` and `docs/reference/webull/endpoint-inventory.md` both stated stale
+  endpoint counts — "44 of 87 `:experimental`, 43 `:unsupported`" — a snapshot from
+  db17ff3 (2026-09-03 09:33) that went stale that same afternoon when `2f6c65b`
+  (2026-09-03 13:43) moved `get_fees/2` and `quantization/1` out of `@not_ported`, and
+  neither document was told. Verified by calling `capabilities/0` directly rather than
+  reading `@unsupported`/`@not_ported` by eye: `mix run -e` against
+  `DpExchange.Webull.capabilities().endpoints` on 2026-09-05 counts 46 `:experimental` and
+  41 `:unsupported` (87 total, unchanged), of which `venue_does_not_serve/0` still names
+  30 as the venue's own absence and 11 remain not yet ported (was 13). Both documents
+  corrected to 46/41/11; `endpoint-inventory.md` also now records the correction with its
+  own evidence rather than silently overwriting the old figure.
+
+  Audited against this release's other claim under the same suspicion — that
+  `order_type`/`time_in_force` round-trip for all five declared values each, per the W1 fix
+  below — by actually running the encode/decode round trip in code for every declared
+  value of both, rather than trusting the fix's own description: all five order types
+  (`market`, `limit`, `stop`, `stop_limit`, `trailing_stop`) and all five time-in-force
+  values (`ioc`, `day`, `gtc`, `gtd`, `fok`) decode back to the atom that encoded them.
+  Neither `usage-rules.md` nor `README.md` made a claim about this narrower than what
+  `capabilities/0` already declares, so there was no stale warning to remove — this is
+  recorded here as the evidence that the audit looked, not as a document fix.
+
 ### Added
 
 - **`Fake` wired to `Core.FakeInjection` — DpCryptoManagement's issue #14.** Every

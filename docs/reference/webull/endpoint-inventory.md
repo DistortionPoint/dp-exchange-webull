@@ -13,9 +13,14 @@ offers.
 this release added options, futures, event contracts, fundamentals, screeners, watchlists,
 batch orders and the token lifecycle.
 
-**Current, from `capabilities/0`, checked 2026-09-03**: 44 of 87 contract callbacks
-`:experimental`, 43 `:unsupported`, of which 30 are the venue's own absence — see
-`negative-claims.md` — and 13 remain not yet ported.
+**Re-checked 2026-09-05.** The 2026-09-03 count read "44 of 87 `:experimental`, 43
+`:unsupported`, ... 13 remain not yet ported" — accurate the morning it was written, and
+stale by that same afternoon, when `get_fees/2` and `quantization/1` shipped out of
+`@not_ported` without this file being told.
+
+**Current, from `capabilities/0`, checked 2026-09-05**: 46 of 87 contract callbacks
+`:experimental`, 41 `:unsupported`, of which 30 are the venue's own absence — see
+`negative-claims.md` — and 11 remain not yet ported.
 
 | surface | endpoints | in this package |
 |---|---|---|
@@ -25,7 +30,7 @@ batch orders and the token lifecycle.
 | FD Events | 13 | 0 |
 | Custom | 12 | 0 |
 | Connect | 4 | 3 — see below; only the consent redirect stays with the host |
-| **total documented** | **229** | **44 of 87 contract callbacks, per `capabilities/0`** |
+| **total documented** | **229** | **46 of 87 contract callbacks, per `capabilities/0`** |
 
 ### Connect is not all "auth", and only half of it is the host's
 
