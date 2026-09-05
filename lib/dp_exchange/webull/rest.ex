@@ -3113,8 +3113,26 @@ defmodule DpExchange.Webull.Rest do
 
   @tif_names %{day: "DAY", gtc: "GTC", ioc: "IOC", gtd: "GTD", fok: "FOK"}
 
-  defp tif_name(nil), do: nil
-  defp tif_name(tif), do: Map.get(@tif_names, tif)
+  @doc """
+  The venue's wire name for an `order_type` atom this package encodes, or `nil` for an
+  atom this package does not send.
+
+  Exposed so the fake can round-trip a placed order through the same encode/decode this
+  package uses on a real order, rather than echoing the caller's atom back unchanged.
+  """
+  @spec order_type_name(atom() | nil) :: String.t() | nil
+  def order_type_name(nil), do: nil
+  def order_type_name(order_type), do: Map.get(@order_type_names, order_type)
+
+  @doc """
+  The venue's wire name for a `time_in_force` atom this package encodes, or `nil` for an
+  atom this package does not send.
+
+  Exposed for the same reason as `order_type_name/1`.
+  """
+  @spec tif_name(atom() | nil) :: String.t() | nil
+  def tif_name(nil), do: nil
+  def tif_name(tif), do: Map.get(@tif_names, tif)
 
   @equity_types [:market, :limit, :stop, :stop_limit, :trailing_stop]
   @option_types [:market, :limit, :stop, :stop_limit]
@@ -3313,16 +3331,35 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp order_type_atom("MARKET"), do: :market
-  defp order_type_atom(nil), do: nil
-  defp order_type_atom("LIMIT"), do: :limit
-  defp order_type_atom("STOP_LOSS_LIMIT"), do: :stop_limit
-  defp order_type_atom(_other), do: nil
+  # Reverse of @order_type_names, derived from it rather than hand-duplicated so the two
+  # can never drift apart again. Every value this package itself encodes (all five
+  # declared order types) now decodes back; a value outside that set — genuinely unknown
+  # to this package — still falls through to `nil` rather than a guessed atom.
+  @order_type_atoms Map.new(@order_type_names, fn {atom, name} -> {name, atom} end)
 
-  defp tif_atom("IOC"), do: :ioc
-  defp tif_atom("DAY"), do: :day
-  defp tif_atom("GTC"), do: :gtc
-  defp tif_atom(_other), do: nil
+  @doc """
+  The `order_type` atom for a venue wire name this package decodes, or `nil` for a value
+  this package does not recognise.
+
+  Built from `@order_type_names` so every type this package's own `order_type_name/1` can
+  produce decodes back to the same atom — a caller placing a stop or trailing-stop order,
+  or reading one back, must not silently lose it to `nil`. A genuinely unknown venue value
+  still yields `nil`; that is a table lookup missing, not a guess.
+  """
+  @spec order_type_atom(String.t() | nil) :: atom() | nil
+  def order_type_atom(nil), do: nil
+  def order_type_atom(name), do: Map.get(@order_type_atoms, name)
+
+  # Reverse of @tif_names, same reasoning as @order_type_atoms above.
+  @tif_atoms Map.new(@tif_names, fn {atom, name} -> {name, atom} end)
+
+  @doc """
+  The `time_in_force` atom for a venue wire name this package decodes, or `nil` for a
+  value this package does not recognise. Same reasoning as `order_type_atom/1`.
+  """
+  @spec tif_atom(String.t() | nil) :: atom() | nil
+  def tif_atom(nil), do: nil
+  def tif_atom(name), do: Map.get(@tif_atoms, name)
 
   @doc """
   Cancels an order by its **client order id**.

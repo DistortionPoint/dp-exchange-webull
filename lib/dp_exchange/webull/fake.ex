@@ -1033,13 +1033,20 @@ defmodule DpExchange.Webull.Fake do
       # consumer's suite cannot go green on an order this venue would reject.
       with :ok <- fake_account(opts),
            :ok <- fake_combination(request) do
+        # Round-tripped through the real module's own encode then decode — not the
+        # caller's atom echoed back — so a fake-based suite exercises the same wire
+        # names the real venue would see, and would catch a decoder gap the way the
+        # real path does.
+        order_type = Map.get(request, :order_type, :limit)
+        tif = Map.get(request, :time_in_force, :gtc)
+
         {:ok,
          %Types.Order{
            id: "fake-webull-order-1",
            symbol: Map.fetch!(request, :symbol),
            side: Map.fetch!(request, :side),
-           order_type: Map.get(request, :order_type, :limit),
-           time_in_force: Map.get(request, :time_in_force, :gtc),
+           order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),
+           time_in_force: tif |> Rest.tif_name() |> Rest.tif_atom(),
            quantity: Map.get(request, :quantity),
            price: Map.get(request, :price),
            status: :pending,

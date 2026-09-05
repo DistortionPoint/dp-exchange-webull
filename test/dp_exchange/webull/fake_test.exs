@@ -123,6 +123,33 @@ defmodule DpExchange.Webull.FakeTest do
       assert {:error, :account_id_required} =
                Fake.place_order(@credentials, request(%{}), credentials: @credentials)
     end
+
+    # W1: the fake used to hand the caller's `order_type`/`time_in_force` atom straight
+    # back, which cannot catch a decoder gap because it never goes through the real
+    # module's string encode/decode at all. It now round-trips through
+    # `Rest.order_type_name/1` -> `Rest.order_type_atom/1` (and the TIF equivalents) the
+    # same as a real order — these combinations are equity-only and were the ones the
+    # real decoder used to silently drop to `nil`.
+    for {type, tif} <- [
+          {:stop, :day},
+          {:trailing_stop, :gtc}
+        ] do
+      test "equity #{type}/#{tif} round-trips through the fake without losing either field" do
+        assert {:ok, order} =
+                 Fake.place_order(
+                   @credentials,
+                   request(%{
+                     instrument_type: :equity,
+                     order_type: unquote(type),
+                     time_in_force: unquote(tif)
+                   }),
+                   @order_opts
+                 )
+
+        assert order.order_type == unquote(type)
+        assert order.time_in_force == unquote(tif)
+      end
+    end
   end
 
   describe "the order lifecycle round-trips on the id place_order returned" do

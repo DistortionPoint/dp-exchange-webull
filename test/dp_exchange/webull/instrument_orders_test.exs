@@ -87,7 +87,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       # option would be refused by the venue after the request went out.
       me = self()
 
-      assert {:ok, _order} =
+      assert {:ok, order} =
                Rest.place_order(
                  @credentials,
                  equity_request(%{order_type: :trailing_stop, time_in_force: :gtc}),
@@ -96,7 +96,18 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:sent, _body, _path}
+      # W1: the venue sends "TRAILING_STOP_LOSS"/"GTC" on the wire (asserted below via
+      # `body`) and this package's own decoder used to answer only 3 of its 5 declared
+      # order types and TIFs — a trailing-stop order round-tripped to `nil` on both
+      # fields despite `capabilities/0` declaring it supported. Assert the decoded
+      # struct, not just that a request went out.
+      assert order.order_type == :trailing_stop
+      assert order.time_in_force == :gtc
+
+      assert_receive {:sent, body, _path}
+      leaf = body["new_orders"] |> List.first()
+      assert leaf["order_type"] == "TRAILING_STOP_LOSS"
+      assert leaf["time_in_force"] == "GTC"
 
       exploding = fn _conn -> raise "must not send a trailing stop on an option" end
 

@@ -83,10 +83,16 @@ defmodule DpExchange.Webull.OrderMappingTest do
       assert fetch(%{"side" => "SIDEWAYS"}).side == nil
     end
 
+    # W1: all five order types this package's own `@order_type_names` forward-encodes,
+    # and that `capabilities/0` declares supported, must decode back. Before the fix,
+    # `STOP_LOSS` and `TRAILING_STOP_LOSS` silently answered `nil` here despite being
+    # genuinely real values this package itself sends on `place_order/3`.
     for {venue, expected} <- [
           {"MARKET", :market},
           {"LIMIT", :limit},
-          {"STOP_LOSS_LIMIT", :stop_limit}
+          {"STOP_LOSS", :stop},
+          {"STOP_LOSS_LIMIT", :stop_limit},
+          {"TRAILING_STOP_LOSS", :trailing_stop}
         ] do
       test "order type #{venue} is #{expected}" do
         assert fetch(%{"order_type" => unquote(venue)}).order_type == unquote(expected)
@@ -94,6 +100,8 @@ defmodule DpExchange.Webull.OrderMappingTest do
     end
 
     test "an order type this package does not know is nil" do
+      # "TRAILING_STOP" (no _LOSS) is not a real Webull value — the real one is
+      # TRAILING_STOP_LOSS, covered above. This exercises the genuine unknown-value path.
       assert fetch(%{"order_type" => "TRAILING_STOP"}).order_type == nil
     end
 
@@ -101,14 +109,25 @@ defmodule DpExchange.Webull.OrderMappingTest do
       assert fetch(%{"order_type" => nil}).order_type == nil
     end
 
-    for {venue, expected} <- [{"IOC", :ioc}, {"DAY", :day}, {"GTC", :gtc}] do
+    # W1: all five TIFs this package's own `@tif_names` forward-encodes, and that
+    # `capabilities/0` declares supported, must decode back. Before the fix, `GTD` and
+    # `FOK` silently answered `nil` here.
+    for {venue, expected} <- [
+          {"IOC", :ioc},
+          {"DAY", :day},
+          {"GTC", :gtc},
+          {"GTD", :gtd},
+          {"FOK", :fok}
+        ] do
       test "time in force #{venue} is #{expected}" do
         assert fetch(%{"time_in_force" => unquote(venue)}).time_in_force == unquote(expected)
       end
     end
 
     test "a time in force this package does not know is nil" do
-      assert fetch(%{"time_in_force" => "FOK"}).time_in_force == nil
+      # "GFD" is a real Robinhood value, not one Webull publishes — genuine unknown-value
+      # path, not one of the five this package encodes.
+      assert fetch(%{"time_in_force" => "GFD"}).time_in_force == nil
     end
 
     for {venue, expected} <- [

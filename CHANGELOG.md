@@ -99,6 +99,56 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`order_type`/`time_in_force` silently lost 2 of 5 declared values each on
+  round-trip — family-wide defect sweep, W1.** `order_type_atom/1` and `tif_atom/1`
+  hand-listed only 3 of the 5 values their own forward encoders (`@order_type_names`,
+  `@tif_names`) produce; `capabilities/0` declares all five of each supported. A caller
+  placing or reading back a `:stop`, `:trailing_stop`, `:gtd` or `:fok` order — every one
+  a genuinely real order this package itself sent — got `nil` on that field, not an
+  error. Fixed by deriving the reverse lookup maps from the same source maps the forward
+  encoders use, so the two vocabularies cannot drift apart again; a value this package
+  truly does not recognise still decodes to `nil`, unchanged. `Fake.place_order/3` was
+  also changed to round-trip an order's type and TIF through the real encode/decode
+  functions (now exposed publicly for this reason) instead of handing the caller's atom
+  straight back — the previous shape could not have caught this class of bug at all.
+
+- **A shard's socket crash took down the whole `Feed`, not just that shard —
+  family-wide defect sweep, W2.** `Socket.start_link/1` links to `Feed` (ordinary
+  `WebSockex.start_link/4` behaviour), and `Feed` never trapped exits, so any abnormal
+  socket exit — an uncaught exception in a callback, an internal `websockex`/`gun`
+  failure — killed every shard's connection and every symbol's coverage, not just the one
+  that failed. The opposite of the isolation `reshard/4`, `resync/1` and the resubscribe
+  timer all otherwise provide. `Feed` now traps exits; a crashed shard is logged, reported
+  as a `:link_down` notice, any caller with a reply pending on it answered
+  `{:error, {:shard_crashed, reason}}` rather than left to time out, and the shard is
+  reopened at the same index with the same wanted symbols — the ordinary
+  CONNACK-then-resubscribe path brings it back exactly as a first open would. Every other
+  shard is untouched throughout.
+
+- **The unconditional 60s resubscribe (and every other control-plane HTTP call) ran
+  inline inside `Feed`'s own `handle_call`/`handle_info`, blocking the same mailbox that
+  carries ticks — family-wide defect sweep, W3.** Worst case, up to five shards' blocking
+  `Subscription.subscribe` round-trips (measured ~118ms each) ran sequentially inside one
+  `handle_info`, once a minute, stalling delivery for every shard — including shards the
+  resubscribe was not even touching — for the whole duration, by design. Every such call
+  now runs in its own task under a `Task.Supervisor` `Feed` owns; a caller's `subscribe/3`
+  still does not receive its reply until the real HTTP round trip finishes (unchanged
+  observable contract, via a deferred `GenServer.reply/2`), but the mailbox stays free to
+  keep draining ticks from every shard while that round trip is in flight. The
+  oversubscribed-retry behaviour and the capacity-aware rebalance are unchanged.
+
+- **Shard assignment was recomputed from scratch on every call, so one newly-added
+  symbol could touch every shard — family-wide defect sweep, W4.** `derive_shards/2`
+  sorted the *entire* wanted set and cut it into fixed-size chunks; a symbol that
+  happened to sort early shifted every symbol after it across every shard boundary,
+  unsubscribing and resubscribing symbols that had nothing to do with the change —
+  contradicting the moduledoc's own "touch only what changed" design claim and spending
+  calls from the tightest budget in the family. `derive_shards/3` now takes the existing
+  shard assignment and is sticky: a symbol already assigned keeps its shard for as long
+  as it is still wanted and still fits that shard's measured capacity; only genuinely new
+  symbols, and anything just evicted by a capacity reduction, get placed into whichever
+  shard (in index order) still has room.
+
 - **`sub_types` was sent lowercase, and every subscribe was rejected `HTTP 417
   UNSUPPORTED_SUB_TYPE "Subtype not supported:quotesnapshot"` — DpCryptoManagement's
   issue #19, filed immediately after issue #18's fix unblocked the request enough to
@@ -190,6 +240,18 @@ acceptable changelog line.
   behaviour tolerated it; corrected to a complete bar rather than loosened back.
 
 ### Documentation
+
+- **`docs/reference/webull/endpoint-inventory.md`'s open question on the old
+  `/openapi/...` paths is answered — family-wide defect sweep, W5.** It previously said
+  "whether the old paths still resolve is not established here." Live-probed
+  unauthenticated against `api.webull.com`, 2026-09-05: the current paths answer from
+  `server: WEBULL OPENAPI` with a `400` naming a missing signing header (reaches the real
+  backend); the old `/openapi/...` paths answer from `server: APISIX` with a `404 Route
+  Not Found` (never leave the gateway in front of it). The old paths do not still
+  resolve — the vendor retired the routes, not just their documentation — and this
+  package no longer calls any of them (`documented_paths_test.exs` already guards that).
+  No code change; the doc now records the answer with its evidence and date rather than
+  leaving the question open.
 
 - **The `:unsupported` list is now split.** `venue_does_not_serve/0` names the 30 endpoints
   that are Webull's own absence — staking, one-step convert, funding rails, greeks, bulk

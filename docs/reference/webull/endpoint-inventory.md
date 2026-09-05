@@ -46,12 +46,13 @@ alive while another venue in the same family does exactly that in-package.
 The sitemap lists 247 reference pages; 18 of them are category index pages rather than
 endpoints, which is why the Trading + Market Data count is 85 and not 103.
 
-## The paths this package calls are not the paths the vendor documents
+## This package once called paths the vendor no longer documents — resolved
 
-**This is the most important thing in this file.** Every endpoint this package implements
-uses a path that does not appear in the current documentation:
+**Historical, and settled — read the two paragraphs below before the table.** Before the
+D6 migration, every endpoint this package implemented used a path that did not appear in
+the vendor's current documentation:
 
-| this package calls | nearest documented endpoint |
+| this package used to call | migrated to |
 |---|---|
 | `/openapi/instrument/crypto/list` | `/trading/instruments/crypto/profiles/list` |
 | `/openapi/market-data/crypto/bars` | `/market-data/crypto/bars/list` |
@@ -59,16 +60,38 @@ uses a path that does not appear in the current documentation:
 | `/openapi/market-data/streaming/subscribe` | `/market-data/streaming/subscribe` |
 | `/openapi/market-data/streaming/unsubscribe` | `/market-data/streaming/unsubscribe` |
 
-Only the two streaming paths survive unchanged, and even those lose the `/openapi` prefix.
+Only the two streaming paths survived unchanged, and even those lost the `/openapi`
+prefix. **This package no longer calls any left-hand path above.** The D6 migration moved
+every call onto the right-hand, currently-documented path, and
+`test/dp_exchange/webull/documented_paths_test.exs` fails the build if a source file
+(outside a comment or heredoc) names an old one again. The left-hand column is historical
+record now, not a live route this package depends on.
 
 These paths were inherited from the host adapter, which read Webull's documentation at
-some earlier date. **Whether the old paths still resolve is not established here** — it
-needs a live probe, and this repository holds no credential. Either the vendor kept them
-working, or this package has been calling endpoints that no longer exist. Both are worth
-knowing and neither is currently known.
+some earlier date. This file used to say "whether the old paths still resolve is not
+established here — it needs a live probe, and this repository holds no credential." That
+question has since been answered.
+
+**Live-probed unauthenticated against `api.webull.com`, 2026-09-05** (the sweep recorded
+in `docs/design/2026-09-05_family-wide-defect-sweep.md` §2, W5) — subscribe shown, and
+unsubscribe probed identically with the same result on both sides:
+
+| path | response |
+|---|---|
+| `POST /market-data/streaming/subscribe` (current) | `server: WEBULL OPENAPI`; `400 {"error_code":"ILLEAGAL_PARAMETER","message":"property \"x-signature-algorithm\" is required"}` — reaches the real trading backend, which validates this package's signing headers before anything else |
+| `POST /openapi/market-data/streaming/subscribe` (old) | `server: APISIX`; `404 {"error_msg":"404 Route Not Found"}` — the API gateway in front of the backend has no route registered for this path at all |
+
+The `server` header alone tells the two apart: the current paths are answered by the
+backend itself (`WEBULL OPENAPI`); the old ones never get past the gateway (`APISIX`) that
+sits in front of it. **The old paths do not still resolve** — the vendor retired the
+routes, not just the documentation for them. Had this package still been calling them (it
+is not, as of the D6 migration above), every request would have failed at the gateway
+before reaching Webull's own validation — a meaningfully worse failure than "the venue
+refused a malformed request": it means there was never a request to refuse.
 
 This is the same shape as Gemini's replaced WebSocket API: an adapter built from a reading
-of documentation that has since moved, with nothing watching the documentation.
+of documentation that has since moved, with nothing watching the documentation. The
+difference here is that the move has now been confirmed live rather than left open.
 
 ## Endpoints
 

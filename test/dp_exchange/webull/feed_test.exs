@@ -661,4 +661,180 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:request, ["BTCUSD"]}
     end
   end
+
+  describe "a shard socket crash is isolated to its own shard — W2" do
+    test "an abnormal exit from one shard's socket does not take down the feed or other shards" do
+      # A real link, the same relationship `Socket.start_link/1` -> `WebSockex.start_link/4`
+      # creates for real. Before W2, `Feed` did not trap exits, so this killed the whole
+      # GenServer — every shard, every symbol's coverage, not just this one's.
+      crash_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      shard0 = %{connected_shard("shard-0") | socket: crash_pid, symbols: ["BTC-USD"]}
+      shard1 = %{connected_shard("shard-1") | symbols: ["ETH-USD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard0, 1 => shard1},
+          credentials: @credentials,
+          # Unreachable but fails fast — the reopen attempt this triggers must not hang
+          # the test or reach a real network.
+          url: "ws://127.0.0.1:1/nowhere"
+        )
+
+      # `:sys.replace_state/2` runs its function *inside* the target process, so
+      # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
+      :sys.replace_state(feed, fn state ->
+        Process.link(crash_pid)
+        state
+      end)
+
+      Process.exit(crash_pid, :kill)
+      Process.sleep(100)
+
+      assert Process.alive?(feed)
+
+      state = :sys.get_state(feed)
+
+      # Shard 1's own bookkeeping is untouched by shard 0's crash.
+      assert state.shards[1].session_id == "shard-1"
+      assert state.shards[1].symbols == ["ETH-USD"]
+
+      # Shard 0 was dropped — not left on record pointing at a dead pid.
+      refute match?(%{socket: ^crash_pid}, Map.get(state.shards, 0))
+
+      # The feed's own mailbox is still healthy for everything else.
+      send(feed, {:dp_exchange, :webull, quote_for("ETH-USD")})
+      assert Feed.coverage(feed) == %{"ETH-USD" => :stream}
+    end
+
+    test "a caller waiting on the crashed shard is answered rather than left to time out",
+         %{limiter: limiter} do
+      crash_pid = spawn(fn -> Process.sleep(:infinity) end)
+
+      shard0 = %{
+        session_id: "shard-0",
+        socket: crash_pid,
+        connected?: false,
+        symbols: [],
+        reply_to: nil
+      }
+
+      feed = start_feed(shards: %{0 => shard0})
+
+      :sys.replace_state(feed, fn state ->
+        Process.link(crash_pid)
+        state
+      end)
+
+      task =
+        Task.async(fn ->
+          Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+        end)
+
+      # `connected?: false` means the subscribe above is deferred, waiting on this
+      # shard's own CONNACK — exactly the window a crash can land in.
+      refute Task.yield(task, 100)
+
+      Process.exit(crash_pid, :kill)
+
+      assert {:ok, {:error, {:shard_crashed, _reason}}} = Task.yield(task, 1_000)
+    end
+  end
+
+  describe "control-plane HTTP never blocks the data-plane mailbox — W3" do
+    test "a tick is delivered and coverage still answers while a resubscribe's HTTP call is in flight",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:blocked, self()})
+        # Held open until the test explicitly releases it, so the assertions below run
+        # while this HTTP call is genuinely, deterministically still in flight.
+        receive do
+          :release -> :ok
+        end
+
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+
+      send(feed, :resubscribe)
+      assert_receive {:blocked, blocked_pid}
+      on_exit(fn -> if Process.alive?(blocked_pid), do: send(blocked_pid, :release) end)
+
+      # A different symbol's tick, while shard 0's resubscribe HTTP call is still
+      # blocked above. Before W3, `Subscription.subscribe` ran inline inside
+      # `handle_info(:resubscribe, ...)`, so the feed's single mailbox could not take
+      # this — or answer the coverage call below — until that call finished.
+      send(feed, {:dp_exchange, :webull, quote_for("ETH-USD")})
+
+      coverage_task = Task.async(fn -> Feed.coverage(feed) end)
+      assert {:ok, coverage} = Task.yield(coverage_task, 300)
+      assert coverage == %{"ETH-USD" => :stream}
+
+      send(blocked_pid, :release)
+    end
+  end
+
+  describe "shard assignment is stable under insertion — W4" do
+    test "a new symbol that sorts before everything else does not touch already-full, healthy shards",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        # The original chunk-the-whole-set algorithm would re-sort ["AAA-USD" | ...] and
+        # shift every symbol after it across shard boundaries — unsubscribing and
+        # resubscribing BBB/CCC/DDD/EEE despite none of them changing. Stable assignment
+        # must leave both existing shards alone.
+        if decoded["session_id"] in ["shard-0", "shard-1"] do
+          flunk(
+            "shard #{decoded["session_id"]} was touched by an unrelated insertion: " <>
+              inspect(decoded["symbols"])
+          )
+        end
+
+        send(test_pid, {:request, decoded["session_id"], decoded["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      # Both existing shards start full, and a third is already open with room — so the
+      # only possible destination for the new symbol is shard 2, and opening a fresh
+      # socket (with everything that would entail) is not part of what this test needs
+      # to prove.
+      shard0 = %{connected_shard("shard-0") | symbols: ["BBB-USD", "CCC-USD"]}
+      shard1 = %{connected_shard("shard-1") | symbols: ["DDD-USD", "EEE-USD"]}
+      shard2 = connected_shard("shard-2")
+
+      feed =
+        start_feed(
+          shards: %{0 => shard0, 1 => shard1, 2 => shard2},
+          shard_capacity: %{0 => 2, 1 => 2}
+        )
+
+      :sys.replace_state(
+        feed,
+        &%{&1 | wanted: MapSet.new(["BBB-USD", "CCC-USD", "DDD-USD", "EEE-USD"])}
+      )
+
+      assert :ok = Feed.subscribe(feed, ["AAA-USD"], subscribe_opts(limiter, plug: plug))
+
+      assert_receive {:request, session_id, ["AAAUSD"]}
+      assert session_id not in ["shard-0", "shard-1"]
+    end
+  end
 end
