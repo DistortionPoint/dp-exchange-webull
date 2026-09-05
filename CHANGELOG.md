@@ -99,6 +99,23 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The socket's connect budget was inherited by accident, not chosen — family-wide defect
+  sweep, W6.** `Socket.start_link/1` passed no options to `WebSockex.start_link/4`, so it
+  silently accepted the dependency's general-purpose defaults: `socket_connect_timeout:
+  6_000` and `socket_recv_timeout: 5_000` (measured in
+  `deps/websockex/lib/websockex/conn.ex:10-11`). That is 11 seconds of `Feed`'s own 15-second
+  `@call_timeout` spent on TCP and the HTTP upgrade *before* this venue's CONNACK is even
+  awaited — and a shard is not usable until the broker accepts its session id, so the
+  CONNACK wait and the HTTP subscribe both have to fit in the same call too. `Feed` is a
+  named, shared process, so an unreachable venue made every other consumer's queued
+  `subscribe`/`unsubscribe`/`coverage` wait out that window as well.
+
+  Now set deliberately to 3s and 2s, chosen against that budget and documented with the
+  arithmetic, both overridable and forwarded from `Feed.start_link/1`. This changes no
+  failure semantics — `start_link/1` still returns `{:error, reason}` synchronously exactly
+  as before. The regression test asserts the values reach `WebSockex` and that overrides
+  win, so a later refactor cannot quietly fall back to the dependency's defaults.
+
 - **`order_type`/`time_in_force` silently lost 2 of 5 declared values each on
   round-trip — family-wide defect sweep, W1.** `order_type_atom/1` and `tif_atom/1`
   hand-listed only 3 of the 5 values their own forward encoders (`@order_type_names`,

@@ -206,7 +206,16 @@ defmodule DpExchange.Webull.Feed do
     {:ok,
      %{
        task_supervisor: task_supervisor,
-       socket_opts: Keyword.take(opts, [:url, :environment]),
+       socket_opts:
+         Keyword.take(opts, [
+           :url,
+           :environment,
+           # Forwarded so a consumer can tune the connect budget. `Socket` chooses
+           # deliberate defaults rather than inheriting websockex's, which do not fit
+           # inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
+           :socket_connect_timeout,
+           :socket_recv_timeout
+         ]),
        # Retained so a reconnect (or a rebalance) can replay a shard's subscription. The
        # venue restores nothing, and a replay needs credentials — so a consumer that
        # wants automatic recovery hands them to the tree at start, exactly as the other
