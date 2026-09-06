@@ -11,8 +11,10 @@ Stated here rather than only per-release, because a reader arriving at a specifi
 needs it as much as one reading the top.
 
 This package has not run in production. While it is `0.x` the API may change without a
-major version. Coverage is uneven by design: fakes and live public endpoints are well
-covered, order placement and authenticated flows are not.
+major version. Coverage is uneven by design: the fake and the stubbed HTTP transport are
+well covered, order placement and authenticated flows are not. Nothing here runs against
+the live venue — every Webull call is signed, so there is no public endpoint a
+credential-less repository could test against.
 
 **Whenever an endpoint moves to `:proven`, the entry that does it states the evidence** —
 what was run against the live venue, and when. "Marked proven" with no evidence is not an

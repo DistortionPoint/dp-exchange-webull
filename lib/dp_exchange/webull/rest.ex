@@ -3322,7 +3322,9 @@ defmodule DpExchange.Webull.Rest do
   defp stop_for(_request, _order_type), do: nil
 
   # **Never sent at all before this fix.** `TRAILING_STOP_LOSS` is a real, `@combinations`-
-  # listed order type for equity, option and futures instruments, and the venue's own
+  # listed order type for **equity** instruments — the venue's own matrix excludes it from
+  # option and futures orders ("Options not supported"), which is why `@option_types` above
+  # stops at `STOP_LOSS_LIMIT` — and the venue's own
   # `replace_order/4` field table (and `@amendable` below) names `trailing_stop_step` as the
   # one field that type takes. `order_leaf/3` built every other field for it — instrument,
   # side, sizing, time in force — and never this one, so every trailing-stop order this

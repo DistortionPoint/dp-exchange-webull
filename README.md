@@ -5,11 +5,12 @@
 > This package has **never run in production.** It is published early and openly so it
 > can be used and reported on, not because it is finished.
 >
-> - **The API may change without a major version.** Pin three-part (`~> 0.1.0`).
+> - **The API may change without a major version.** Pin three-part (`~> 0.2.0`).
 > - **Verification is uneven, and the gaps are on the expensive side.** The conformance
->   suite passes against a fake, and against Webull's live public endpoints.
->   **Order placement and authenticated flows are thinly covered.** No test in this repo
->   spends money.
+>   suite passes against a fake and against a stubbed HTTP transport — **no test here has
+>   ever run against Webull itself**, because this venue signs every call, including the
+>   ones that look public, and this repo holds no credential. **Order placement and
+>   authenticated flows are thinly covered.** No test in this repo spends money.
 > - **Maturity is declared per endpoint.** Read `capabilities/0`, not this banner.
 >
 > [Report a divergence](https://github.com/DistortionPoint/dp-exchange-webull/issues).
@@ -30,7 +31,7 @@ Of the 41 unsupported endpoints, **30 are the venue's own absence**, not this pa
 ```elixir
 def deps do
   [
-    {:dp_exchange_webull, "~> 0.1.0"}
+    {:dp_exchange_webull, "~> 0.2.0"}
   ]
 end
 ```

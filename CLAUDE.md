@@ -75,12 +75,17 @@ supervisor pids.
 mix deps.get
 mix compile
 mix test                            # tier 1 — in-process fakes, every CI run
-mix test --include tier2            # tier 2 — LIVE public endpoints, BY HAND ONLY
+mix test --include tier2            # tier 2 — LIVE endpoints, BY HAND ONLY
 mix test --cover                    # threshold 90
 mix quality                         # format + credo --strict + dialyzer + sobelow
 ```
 
-**Never run tier-2 tests on a schedule.** They hit Webull's live public API, and a
+**This repo currently has no tier-2 tests**, and that is structural rather than a backlog
+item: Webull signs every OpenAPI call, so there is no anonymous endpoint a repository
+holding no credential can probe. The `:tier2` exclusion in `test_helper.exs` stands for
+the day one is written.
+
+**Never run tier-2 tests on a schedule.** They would hit Webull's live API, and a
 venue that sees a package polling it on a timer will rate-limit or block.
 
 ## Documentation is the source, not the host adapter
@@ -99,7 +104,8 @@ which host state was read, including that the working tree was dirty.
 Four tiers; only the first two ever run unattended:
 
 1. **In-process fakes** — every CI run. The default.
-2. **Live public endpoints** — by hand, tagged `:tier2`, excluded from CI.
+2. **Live public endpoints** — by hand, tagged `:tier2`, excluded from CI. **None exist
+   here**: this venue signs every call, so there is nothing to reach without a credential.
 3. **Authenticated, read-only** — needs credentials this repo must never hold.
 4. **Money-moving** — never a test. Answered in production, which is what moves an
    endpoint to `:proven`.

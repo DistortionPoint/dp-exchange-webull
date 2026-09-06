@@ -19,9 +19,10 @@ Gemini does not:
 })
 ```
 
-`capabilities/0` declares `credential_benefit: :required` — the only venue in the family
-that does. Branch on that rather than assuming market data is free; the alternative is
-finding out from a 401.
+`capabilities/0` declares `credential_benefit: :required` — the first venue in the family
+to, and not the only one (`dp_exchange_robinhood` and `dp_exchange_schwab` declare it too).
+Branch on that rather than assuming market data is free; the alternative is finding out
+from a 401.
 
 You keep the credentials. This package signs one request with them and holds nothing.
 
@@ -86,13 +87,17 @@ On this venue there are three different moments: you asked, the HTTP subscribe r
 200, and data is arriving. `coverage/1` reports only the third. A 200 on the subscribe does
 not mean the stream is flowing.
 
-`coverage/1` folds both kinds above into one `:stream` per symbol. `coverage_by_kind/1`
-splits them apart — a symbol can show `:quotes` healthy while `:top_of_book` has gone dark
-for it, or the reverse, and `coverage/1` alone cannot tell you which:
+`coverage/1` folds all three kinds above into one `:stream` per symbol. `coverage_by_kind/1`
+splits them apart — a symbol can show `:quotes` healthy while `:top_of_book` or `:trades`
+has gone dark for it, or the reverse, and `coverage/1` alone cannot tell you which:
 
 ```elixir
 DpExchange.Webull.coverage_by_kind(credentials: creds)
-#=> %{quotes: %{"BTC-USD" => :stream}, top_of_book: %{"BTC-USD" => :stream}}
+#=> %{
+#=>   quotes: %{"BTC-USD" => :stream},
+#=>   top_of_book: %{"BTC-USD" => :stream},
+#=>   trades: %{"BTC-USD" => :stream}
+#=> }
 ```
 
 ## The venue's connection budget shapes what you can ask for
@@ -103,13 +108,16 @@ DpExchange.Webull.coverage_by_kind(credentials: creds)
 | Server-side session retention after disconnect | **~1 minute** |
 | Push rate per connection | **3 messages/second** |
 
-This package opens **one** connection and never exposes sockets, so you cannot cause a
-sixth. The one-minute retention is why reconnect backoff matters: reconnecting immediately
-after hitting the limit fails until the venue ages the old sessions out.
+This package shards across **at most five** connections — the venue's own ceiling — because
+a single MQTT session caps at 100 subscribed tickers. It never exposes sockets, so you
+cannot cause a sixth: five shards of 100 is 500 symbols, and a larger universe on this venue
+needs a second App Key rather than a bigger number here. The one-minute retention is why
+reconnect backoff matters: reconnecting immediately after hitting the limit fails until the
+venue ages the old sessions out.
 
 If two instances ever shared a session id, the venue would disconnect whichever connected
-first — each instance looking healthy in isolation. The id is generated per feed, so this
-cannot happen unless you pass one explicitly.
+first — each instance looking healthy in isolation. The id is generated per shard, inside
+this package, so this cannot happen.
 
 ## UAT has REST but no stream
 
@@ -150,27 +158,40 @@ if DpExchange.Webull.live?(opts) do
 end
 ```
 
-## There is no *aggregate* trade volume, anywhere
+## There is no *aggregate* trade volume on crypto
 
-Not on the bars, not on the snapshot's `Quote.volume`. That field is `nil`, never `0` —
-zero would look like a real measurement of no trading. `capabilities/0` says
-`reports_trade_volume: false`, so route volume-dependent work to another venue rather than
-reading a column of nils.
+Not on the bars, not on the crypto snapshot's `Quote.volume`. On a crypto symbol that field
+is `nil`, never `0` — zero would look like a real measurement of no trading.
+`capabilities/0` says `reports_trade_volume: false`, so route volume-dependent crypto work
+to another venue rather than reading a column of nils.
+
+**The stock snapshot is different**: `get_price/2` with `category: "US_STOCK"` carries a
+real `volume`, and it is the day's aggregate rather than the last trade's size. Bars carry
+no volume on any category, and `get_volume_profile/3` is the equity endpoint that splits
+traded volume by price and side.
 
 That is a different claim from `Trade.quantity` — the streamed tape and `get_trades/2`
 both report **one print's own size**, which the venue does publish. This package does not
 sum sizes into an aggregate figure of its own; that would be this package's arithmetic
 wearing the venue's name.
 
-## Eight candle widths, and `1w` is deliberately not one
+## Eight declared candle widths, and `1w` is deliberately not one
 
-`1m 5m 15m 30m 1h 2h 4h 1d`.
+`1m 5m 15m 30m 1h 2h 4h 1d` — what `capabilities/0`'s `historical_timeframes` declares, and
+exactly what the crypto and event-contract bar endpoints serve.
 
-The venue does serve a weekly bar. It is excluded because a weekly boundary depends on
-which weekday the venue starts its week, `Core.Timeframe` models no alignment rule for it,
-and a bar whose boundary cannot be verified is a bar that should not be stored.
+The venue does serve a weekly bar. It is left out of the declaration because a weekly
+boundary depends on which weekday the venue starts its week, `Core.Timeframe` models no
+alignment rule for it, and a bar whose boundary cannot be verified is a bar that should not
+be stored.
 
-Asking for a width outside that list is an error, never the nearest one.
+The equity, option and futures bar endpoints take three widths beyond the declared eight —
+`1w`, `1M` and `1y` — because that is the `timespan` vocabulary those endpoints publish.
+They are reachable, and they are **not** in `capabilities/0`; branch on the declaration, not
+on this paragraph.
+
+Asking for a width the endpoint you reached does not serve is an error, never the nearest
+one.
 
 ### Equity/ETF bars are adjusted at daily and above, not below
 
@@ -194,9 +215,11 @@ indistinguishable from a real one, which is how a gap becomes invisible.
 ## What this package does not do yet
 
 **Read `capabilities/0`, not this paragraph.** As of 2026-09-01 the order path, balances,
-accounts, transfers, trade history, order book and market overview are all implemented, along
-with options, futures, event contracts, fundamentals, screeners, news and watchlists. What
-remains `:unsupported` is listed there and per endpoint.
+accounts, transfers and order book are all implemented, along with options, futures, event
+contracts, fundamentals, screeners, news and watchlists. `get_trade_history/2` and
+`get_market_overview/1` are **not** — both still answer `{:error, :not_supported}`, as
+not-yet-ported rather than as an absence at the venue. What remains `:unsupported` is listed
+there and per endpoint.
 
 The **money-movement** callbacks are the ones that will not arrive: Webull's published API
 moves no money. There is no payment-method endpoint at either scope, no bank registration,
@@ -214,8 +237,12 @@ take no `real_time_required` and no time range; the futures tape and depth take 
 filter; the option snapshot takes no extended-hours block. **A parameter an endpoint does not
 know is at best ignored and at worst a refusal, and neither tells you which happened.**
 
-The default is still `US_CRYPTO`, which is what this package served before it widened.
-Changing that default would silently re-route existing callers onto a different market.
+**The default depends on which endpoint you called.** `get_price/2`, `get_top_of_book/2`,
+`get_historical_prices/4` and `get_symbols/1` default to `US_CRYPTO`, which is what this
+package served before it widened. `get_order_book/2`, `get_trades/2`, `get_volume_profile/3`
+and `get_fundamental/3` default to `US_STOCK`, because this venue publishes no crypto depth,
+tape or footprint endpoint for them to have defaulted to. Changing either default would
+silently re-route existing callers onto a different market.
 
 ## Event contracts have two prices and four books
 
@@ -315,7 +342,7 @@ on a stop or stop-limit order, `nil` on anything else.
 **Which pairs of `:order_type` and `:time_in_force` this venue actually accepts differs by
 instrument** — crypto's list is five pairs (`MARKET`/IOC, `LIMIT` and `STOP_LOSS_LIMIT` at
 DAY or GTC — no plain `STOP_LOSS`, no `TRAILING_STOP_LOSS`); equity, option and futures
-orders add `STOP_LOSS` and (equity/option only) `TRAILING_STOP_LOSS`; an event contract
+orders add `STOP_LOSS` and (equity only) `TRAILING_STOP_LOSS`; an event contract
 takes `LIMIT` only, at any of five time-in-force values. A pair outside the matrix is
 refused before the request is sent, naming both halves of what was wrong, rather than being
 sent and rejected by the venue.

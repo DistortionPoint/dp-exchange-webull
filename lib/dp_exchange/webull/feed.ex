@@ -61,8 +61,9 @@ defmodule DpExchange.Webull.Feed do
   subscribe means anything to the venue.
 
   `@pairs_per_socket` is exactly the venue's own stated **100** — not a guessed margin
-  below it. See `docs/design/2026-09-04_webull-sharding-and-fake-injection.md` §3.1 for
-  why padding a number the venue already stated would be exactly the unlabeled guess this
+  below it. See `dp_exchange_core`'s
+  `docs/design/closed/2026-09-04_webull-sharding-and-fake-injection.md` §3.1 for why
+  padding a number the venue already stated would be exactly the unlabeled guess this
   family's own conventions rule out.
 
   **Five connections per App Key is the hard ceiling this can never exceed** — a consumer

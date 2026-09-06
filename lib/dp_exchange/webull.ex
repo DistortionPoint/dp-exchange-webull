@@ -553,17 +553,18 @@ defmodule DpExchange.Webull do
   its two streamed kinds had gone dark for nearly all of them — the discrepancy hid behind
   the single boolean across two issues before anyone noticed.
 
-  This venue genuinely has two independent kinds, not one adopted only for cross-venue
-  uniformity: every subscribe asks the venue for both `SNAPSHOT` and `QUOTE`, and this
-  package's socket decodes them on separate topics into two different structs — a
+  This venue genuinely has three independent kinds, not one adopted only for cross-venue
+  uniformity: every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK`, and this
+  package's socket decodes them on separate topics into three different structs — a
   snapshot becomes `DpExchange.Core.Types.Quote` (kind `:quotes`, a traded price), a quote
-  becomes `DpExchange.Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask) — and either
-  topic can go quiet without the other doing the same. So the same failure this callback
-  exists to catch on Coinbase can genuinely happen here too: a symbol present under
-  `:quotes` while absent under `:top_of_book`, or the reverse.
+  becomes `DpExchange.Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask), a tick becomes
+  `DpExchange.Core.Types.Trade` (kind `:trades`, one print) — and any one topic can go
+  quiet without the others doing the same. So the same failure this callback exists to
+  catch on Coinbase can genuinely happen here too: a symbol present under `:quotes` while
+  absent under `:top_of_book`, or any other combination.
 
   The kind reported is derived from the struct type that actually arrived, never assumed
-  from `capabilities/0`'s own `streamable` list — so a third kind reaching the feed
+  from `capabilities/0`'s own `streamable` list — so a further kind reaching the feed
   without this function being updated for it is caught rather than silently folded into
   an existing kind.
   """

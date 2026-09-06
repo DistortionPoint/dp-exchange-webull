@@ -140,8 +140,12 @@ field, so a package must not treat an empty password as a misconfiguration.
 | NOTICE | `notice` | **JSON** |
 | ECHO | `echo` | null (heartbeat) |
 
-Event contracts use `event-quote` / `event-snapshot` / `event-tick`, which this package
-does not consume — it declares `supported_instrument_types: [:spot]`.
+Event contracts use `event-quote` / `event-snapshot` / `event-tick`. **This package does not
+consume those topics** — `Socket` decodes `quote`, `snapshot` and `tick` and nothing else,
+and `Subscription` subscribes with `category: "US_CRYPTO"`. Event contracts are reachable
+over REST only (`get_event_trades/2`, `get_event_order_book/2` and the instrument
+hierarchy), which is why `capabilities/0` declares `:event_contract` in
+`supported_instrument_types` while `streamable` says nothing about it.
 
 **Mixed encodings on one connection.** Three topics are protobuf, one is JSON, one is
 empty. A handler that assumes a single encoding drops four fifths of the traffic — which is

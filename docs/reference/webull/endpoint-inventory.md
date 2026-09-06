@@ -51,7 +51,7 @@ and only the browser grant stays with the host.
 | `connect-api/get-authorization-code` | **host** | consent redirect; needs a browser and a person |
 | `connect-api/connect` | **host** | same flow |
 | **`connect-api/create-and-refresh-token`** | **package** | credential *use* — §6.0 places "session refresh, token rotation" here |
-| **`/auth/tokens/create`**, **`/auth/tokens/check`** | **package** | same; both are implemented — see `usage-rules/auth.md` |
+| **`/auth/tokens/create`**, **`/auth/tokens/check`** | **package** | same; both are implemented — see `dp_exchange_core`'s `usage-rules/auth.md` |
 
 Sweeping all of it into "OAuth, skipped" would leave this venue unable to keep a session
 alive while another venue in the same family does exactly that in-package.
@@ -86,7 +86,8 @@ established here — it needs a live probe, and this repository holds no credent
 question has since been answered.
 
 **Live-probed unauthenticated against `api.webull.com`, 2026-09-05** (the sweep recorded
-in `docs/design/2026-09-05_family-wide-defect-sweep.md` §2, W5) — subscribe shown, and
+in `dp_exchange_core`'s `docs/design/2026-09-05_family-wide-defect-sweep.md` §2, W5) —
+subscribe shown, and
 unsubscribe probed identically with the same result on both sides:
 
 | path | response |

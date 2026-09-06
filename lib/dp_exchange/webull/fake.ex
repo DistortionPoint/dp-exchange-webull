@@ -1058,7 +1058,8 @@ defmodule DpExchange.Webull.Fake do
            quantity: Map.get(request, :quantity),
            price: Map.get(request, :price),
            # Mirrors the real `Rest.place_order/3`'s own echo — see its comment. The fake
-           # must never be differently capable than the real path (usage-rules/testing.md),
+           # must never be differently capable than the real path (`dp_exchange_core`'s
+           # `usage-rules/testing.md`),
            # and a consumer's suite asserting on a placed stop order's `stop_price` would
            # have gone green against the fake while the real path returned `nil`.
            stop_price: Map.get(request, :stop_price),
