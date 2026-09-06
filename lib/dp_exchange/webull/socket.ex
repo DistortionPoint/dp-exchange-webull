@@ -31,13 +31,32 @@ defmodule DpExchange.Webull.Socket do
   It does not subscribe. Subscriptions on this venue are **HTTP calls**, made by `Feed`
   with the same `session_id` this connection registered as its MQTT client id. The socket's
   only job is to connect, stay connected, and turn payloads into `Core.Types.Quote` (the
-  `snapshot` topic) or `Core.Types.TopOfBook` (the `quote` topic) — see `emit/3` below.
+  `snapshot` topic), `Core.Types.TopOfBook` (the `quote` topic) or `Core.Types.Trade` (the
+  `tick` topic) — see `emit/3` below.
+
+  ## `tick` carries no trade id, and `Trade.id` is `nil` rather than invented
+
+  The venue's `Tick` message (`docs/reference/webull/streaming-api.md`) is `Basic`, `time`,
+  `price`, `volume`, `side` — nothing identifies one print from the next. `Core.Types.Trade`
+  requires `:id`, so this builds the struct literally (`%Trade{id: nil, ...}`) rather than
+  through `Trade.new/1`, the same way `Rest.get_trades/3`'s `to_trade/2` already does for
+  this venue's REST tape, which has the identical gap and says so in its own comment.
+  `Trade.new/1`'s validation exists to catch an accidentally-absent required field; this
+  absence is not accidental, so going around it here is not going around the check — it is
+  the one place a real, checked absence is allowed to be `nil` instead of failing closed.
+
+  ## Ending a session cleanly
+
+  It does not close itself, either — `Feed` decides when a shard's session ends, and
+  `disconnect/2` is how it says so on the wire before that shard's process goes down. See
+  `MqttPacket.disconnect/0` for why a clean `DISCONNECT` matters and `Feed`'s own
+  `terminate/2` for where this is actually called.
   """
 
   use WebSockex
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{MqttPacket, QuoteProto, SymbolFormat}
 
   require Logger
@@ -88,6 +107,48 @@ defmodule DpExchange.Webull.Socket do
     |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
+  end
+
+  # Bounded well under `Feed`'s default `GenServer` shutdown timeout (5s, unset by
+  # `Supervisor`) — `terminate/2` calls this once per connected shard and a slow or wedged
+  # socket must not eat another shard's share of that budget.
+  @disconnect_timeout_ms 500
+
+  @doc """
+  Sends a clean MQTT `DISCONNECT` on an already-open socket, synchronously.
+
+  `WebSockex.send_frame/3` is a `:gen.call` against the socket process itself — the only
+  way to put a frame on an already-running `Socket` from outside its own callbacks, since
+  `MqttPacket`'s framing stays private to this module (`Feed` must not learn it — see the
+  moduledoc's boundary). Called by `Feed`'s own `terminate/2`, once per shard still
+  connected when this package is shutting down cleanly.
+
+  Best-effort and never raises: a shard whose socket has already gone — crashed, already
+  reconnecting, already torn down by the time shutdown reaches it — must not block or
+  crash the shutdown asking for this. `{:error, reason}` says so; there is nothing a
+  caller mid-shutdown can usefully do with it beyond logging, which `Feed` does.
+
+  The `pid == self()` guard exists because this runs from inside `Feed`'s own
+  `terminate/2`: a call this deep can legitimately end up with `pid` being the calling
+  process itself only through a test fixture, never in production (a shard's socket is
+  always a distinct `Socket.start_link/1` process) — but `WebSockex.send_frame/3` answers
+  that specific case by *raising* `WebSockex.CallingSelfError` rather than returning an
+  error, which the `catch` below alone would not stop. Checked first so this function's
+  own "never raises" holds regardless.
+  """
+  @spec disconnect(pid(), timeout()) :: :ok | {:error, term()}
+  def disconnect(pid, timeout \\ @disconnect_timeout_ms)
+
+  def disconnect(pid, _timeout) when pid == self(), do: {:error, :calling_self}
+
+  def disconnect(pid, timeout) do
+    if Process.alive?(pid) do
+      WebSockex.send_frame(pid, {:binary, MqttPacket.disconnect()}, timeout)
+    else
+      {:error, :not_alive}
+    end
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   # --- callbacks ----------------------------------------------------------
@@ -222,6 +283,14 @@ defmodule DpExchange.Webull.Socket do
     end
   end
 
+  # A `tick` message is one print — the tape. Unlike `snapshot` and `quote`, this topic is
+  # not requested by default everywhere in the family; on this venue it is, though (see
+  # `Subscription`'s default `sub_types`), so a subscriber gets `Core.Types.Trade` on this
+  # topic the same way it gets `Quote` and `TopOfBook` on the other two, with no extra
+  # option to ask for it — the facade hides the venue's `sub_types` vocabulary the same way
+  # it hides everything else about how this venue is reached.
+  defp emit(state, "tick", payload), do: emit_trade(state, QuoteProto.decode_tick(payload))
+
   defp emit(state, "notice", payload) do
     case Jason.decode(payload) do
       {:ok, %{} = body} ->
@@ -259,7 +328,7 @@ defmodule DpExchange.Webull.Socket do
 
   defp emit_decoded(state, {:ok, decoded}) do
     with {:ok, timestamp} <- venue_time(decoded),
-         {:ok, price} <- required_decimal(decoded[:price]) do
+         {:ok, price} <- required_decimal(decoded[:price], :price) do
       send(
         state.subscriber,
         {:dp_exchange, :webull,
@@ -277,6 +346,43 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp emit_decoded(_state, :error), do: :ok
+
+  # `id: nil` — see the moduledoc's "`tick` carries no trade id". `Trade.new/1` is
+  # deliberately not used here: it would raise on the very absence this comment and the
+  # moduledoc both document as real rather than accidental.
+  defp emit_trade(state, {:ok, decoded}) do
+    with {:ok, timestamp} <- venue_time(decoded),
+         {:ok, price} <- required_decimal(decoded[:price], :price),
+         {:ok, quantity} <- required_decimal(decoded[:volume], :quantity) do
+      send(
+        state.subscriber,
+        {:dp_exchange, :webull,
+         %Trade{
+           id: nil,
+           symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
+           side: tick_side(decoded[:side]),
+           price: price,
+           quantity: quantity,
+           timestamp: timestamp,
+           broken: false,
+           provider: :webull
+         }}
+      )
+    end
+
+    :ok
+  end
+
+  defp emit_trade(_state, :error), do: :ok
+
+  # Undocumented on the streaming schema (`docs/reference/webull/streaming-api.md` gives
+  # the field no value list) — matched against the same `"B"`/`"S"` the venue's REST tape
+  # documents and this package already relies on in `Rest`'s own `tick_side/1`. Anything
+  # else is `nil`, a real trade with an unknown aggressor, rather than a guess that would
+  # put volume on the wrong side of a delta.
+  defp tick_side("B"), do: :buy
+  defp tick_side("S"), do: :sell
+  defp tick_side(_undocumented), do: nil
 
   # Absent, and nothing is emitted. On a stream, refusing to substitute means dropping the
   # frame rather than stamping it with our own clock.
@@ -313,13 +419,13 @@ defmodule DpExchange.Webull.Socket do
 
   defp decimal(_other), do: nil
 
-  # `Quote.price` is required and a `nil` there is the same substitution a raise would
-  # have been, wearing a quieter shape — a struct's own field list does not check that a
-  # required value is non-nil, only that the key was given. Refuse the frame instead of
-  # delivering a Quote with no price.
-  defp required_decimal(value) do
+  # `Quote.price`, `Trade.price` and `Trade.quantity` are all required, and a `nil` there
+  # is the same substitution a raise would have been, wearing a quieter shape — a struct's
+  # own field list does not check that a required value is non-nil, only that the key was
+  # given. `field` names which one failed, since `emit_trade/2` checks two.
+  defp required_decimal(value, field) do
     case decimal(value) do
-      nil -> {:error, {:invalid_decimal, :price, value}}
+      nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
     end
   end

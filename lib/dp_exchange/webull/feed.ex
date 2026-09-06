@@ -30,18 +30,19 @@ defmodule DpExchange.Webull.Feed do
   subscribed, and not when the HTTP subscribe returns 200. On this venue those are three
   genuinely different moments, and only the last one means data.
 
-  ## Coverage by kind, because this venue's two streamed kinds really are independent
+  ## Coverage by kind, because this venue's streamed kinds really are independent
 
-  Every subscribe asks the venue for both `SNAPSHOT` and `QUOTE` (see `Subscription`),
-  and the two arrive on separate MQTT topics decoded by `Socket` into two different
+  Every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK` (see `Subscription`),
+  and the three arrive on separate MQTT topics decoded by `Socket` into three different
   structs: `snapshot` becomes `Core.Types.Quote` (kind `:quotes`, a traded price), `quote`
-  becomes `Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask). `coverage/1` folds both
-  into one `:stream` per symbol, so a symbol whose `snapshot` topic goes dark while its
-  `quote` topic keeps arriving — or the reverse — is invisible there; `coverage_by_kind/1`
-  exists to split exactly that apart, one kind map per struct type actually observed.
-  `kind_for/1` derives the kind from the struct that arrived rather than assuming it, so a
-  future third kind reaching this clause without a matching case here is caught (logged,
-  loudly) instead of silently folded into an existing kind.
+  becomes `Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask), `tick` becomes
+  `Core.Types.Trade` (kind `:trades`, one print). `coverage/1` folds all three into one
+  `:stream` per symbol, so a symbol whose `snapshot` topic goes dark while its `quote`
+  topic keeps arriving — or any other combination — is invisible there;
+  `coverage_by_kind/1` exists to split exactly that apart, one kind map per struct type
+  actually observed. `kind_for/1` derives the kind from the struct that arrived rather
+  than assuming it, so a future new kind reaching this clause without a matching case
+  here is caught (logged, loudly) instead of silently folded into an existing kind.
 
   ## Sharded — one session tops out at 100 symbols, this package's scope does not
 
@@ -270,7 +271,7 @@ defmodule DpExchange.Webull.Feed do
   use GenServer
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{Environment, Socket, Subscription}
 
   require Logger
@@ -709,6 +710,48 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_info(_other, state), do: {:noreply, state}
+
+  # Runs only for the ordinary shutdown reasons GenServer treats as "normal termination"
+  # — see its own `c:terminate/2` docs. `init/1` already traps exits, which is what makes
+  # this actually run rather than being skipped the way it is by default: a `GenServer`
+  # that traps exits and receives one from its own parent (the process that called
+  # `start_link/1` — here, `DpExchange.Webull.Supervisor`) invokes `terminate/2` before
+  # exiting, without needing a `handle_info({:EXIT, ...})` clause of its own for that case.
+  #
+  # A crash reason is deliberately excluded: sending `DISCONNECT` on every shard's socket
+  # is real network I/O, on connections that may themselves be why this process is
+  # crashing, and slowing a supervisor's restart down to attempt it is the wrong trade —
+  # "let it crash" means the reconnect-and-resubscribe path this module already has
+  # handles recovery, not that shutdown must also clean up the wire.
+  @impl true
+  def terminate(:normal, state), do: disconnect_connected_shards(state)
+  def terminate(:shutdown, state), do: disconnect_connected_shards(state)
+  def terminate({:shutdown, _reason}, state), do: disconnect_connected_shards(state)
+  def terminate(_crash_reason, _state), do: :ok
+
+  # Best-effort, one MQTT `DISCONNECT` per shard still connected — see `Socket.disconnect/2`
+  # and `MqttPacket.disconnect/0` for what this sends and why. A shard that never linked up
+  # has no session to close cleanly; `resubscribe_shard/2`'s own `connected?: false` clause
+  # makes the same distinction for the same reason.
+  defp disconnect_connected_shards(state) do
+    state.shards
+    |> Enum.filter(fn {_index, shard} -> shard.connected? end)
+    |> Enum.each(fn {index, shard} ->
+      case Socket.disconnect(shard.socket) do
+        :ok ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "[Webull Feed] shard #{index} DISCONNECT on shutdown failed: " <>
+              "#{inspect(reason)} — the venue will see an abrupt disconnect instead of a " <>
+              "clean one"
+          )
+      end
+    end)
+
+    :ok
+  end
 
   # A shard that has never linked up has nothing subscribed yet — on_link_up/2's own
   # unconditional replay covers it once it does. A shard with nothing wanted has nothing
@@ -1245,10 +1288,12 @@ defmodule DpExchange.Webull.Feed do
   # The struct that actually arrived names its own kind — never assumed from
   # `capabilities().streamable` or from how many kinds this venue is believed to stream.
   # See `Socket`'s `emit/3` clauses: `snapshot` decodes to `Quote`, `quote` decodes to
-  # `TopOfBook`. A struct with no clause here falls to `:error` rather than picking the
-  # nearest match, so a future third kind is caught rather than silently absorbed.
+  # `TopOfBook`, `tick` decodes to `Trade`. A struct with no clause here falls to `:error`
+  # rather than picking the nearest match, so a future new kind is caught rather than
+  # silently absorbed.
   defp kind_for(%Quote{}), do: {:ok, :quotes}
   defp kind_for(%TopOfBook{}), do: {:ok, :top_of_book}
+  defp kind_for(%Trade{}), do: {:ok, :trades}
   defp kind_for(_other), do: :error
 
   defp drop_symbols_by_kind(delivering_by_kind, symbols) do

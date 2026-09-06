@@ -33,25 +33,11 @@ defmodule DpExchange.Webull.MqttPacketTest do
     end
   end
 
-  describe "SUBSCRIBE" do
-    test "sets the reserved flags, which a broker may disconnect over" do
-      # MQTT requires 0b0010 in the fixed header for SUBSCRIBE. Anything else entitles the
-      # broker to close the connection.
-      assert <<8::4, 0b0010::4, _rest::binary>> = MqttPacket.subscribe(["quote"], 1)
-    end
-
-    test "carries the packet id and each topic at QoS 0" do
-      assert <<8::4, _flags::4, _length, packet_id::16, payload::binary>> =
-               MqttPacket.subscribe(["quote", "tick"], 42)
-
-      assert packet_id == 42
-      assert <<5::16, "quote", 0, 4::16, "tick", 0>> = payload
-    end
-
-    test "rejects packet id zero, which MQTT reserves" do
-      assert_raise FunctionClauseError, fn -> MqttPacket.subscribe(["quote"], 0) end
-    end
-  end
+  # SUBSCRIBE and SUBACK used to be here. Deleted, not merely unused: this venue's own
+  # documentation states subscriptions are HTTP calls, not MQTT ones (see
+  # `DpExchange.Webull.Subscription` and `MqttPacket`'s own moduledoc), and nothing in
+  # `lib/` ever sent one — every test that exercised a live-feeling socket, including
+  # `SocketTest`'s and `Feed`'s, did so without a `SUBSCRIBE` going out.
 
   describe "PINGREQ and DISCONNECT" do
     test "are two bytes with a zero remaining length" do
@@ -67,14 +53,6 @@ defmodule DpExchange.Webull.MqttPacketTest do
       for code <- [0, 1, 2, 3, 4, 5] do
         assert {:ok, {:connack, ^code}, ""} = MqttPacket.decode(<<2::4, 0::4, 2, 0, code>>)
       end
-    end
-  end
-
-  describe "decode/1 — SUBACK" do
-    test "returns the packet id and the per-topic return codes" do
-      packet = <<9::4, 0::4, 4, 42::16, 0, 0x80>>
-
-      assert {:ok, {:suback, 42, [0, 0x80]}, ""} = MqttPacket.decode(packet)
     end
   end
 
@@ -133,15 +111,18 @@ defmodule DpExchange.Webull.MqttPacketTest do
 
   describe "remaining length" do
     test "round-trips a multi-byte length" do
-      # 300 bytes needs two length bytes; the boundary at 128 is where naive encoders break.
-      payload = :binary.copy(<<0xAB>>, 300)
-      packet = MqttPacket.subscribe([String.duplicate("t", 297)], 1)
+      # 300 bytes needs two length bytes; the boundary at 128 is where naive encoders
+      # break. `connect/4` is the real encoder path: a client id long enough pushes the
+      # encoded packet's remaining length past the one-byte boundary. CONNECT decodes to
+      # `:unhandled` (this module never needs to decode one — it only ever sends them),
+      # which is fine here: the point is that the fixed header, the multi-byte length
+      # and the body all round-trip intact.
+      long_client_id = String.duplicate("t", 300)
+      packet = MqttPacket.connect(long_client_id, "app-key", "pw")
 
-      assert {:ok, {:suback, _id, _codes}, ""} =
-               MqttPacket.decode(<<9::4, 0::4, 3, 1::16, 0>>)
-
-      assert byte_size(packet) > 300
-      assert byte_size(payload) == 300
+      assert {:ok, {:unhandled, 1, body}, ""} = MqttPacket.decode(packet)
+      assert byte_size(body) > 300
+      assert body =~ long_client_id
     end
 
     test "a FIFTH continuation byte is malformed, not incomplete" do

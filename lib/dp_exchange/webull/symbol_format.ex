@@ -16,6 +16,12 @@ defmodule DpExchange.Webull.SymbolFormat do
   found `build_order_body` sending the **canonical** symbol to the venue un-converted, so
   reads worked and writes silently did not. Running every path — read and write — through
   one mapping is the fix, and it only works if there is exactly one mapping.
+
+  That is also why `to_canonical_symbol/1` and `to_exchange_symbol/1` read the mapping
+  through `mapping/0` rather than the private `@mapping` attribute directly: a second,
+  attribute-shaped copy of "the mapping" sitting beside the function of the same name is
+  the exact drift this module exists to rule out, even though today the two happen to
+  hold the same value.
   """
 
   @behaviour DpExchange.Core.SymbolNormalizer
@@ -26,21 +32,23 @@ defmodule DpExchange.Webull.SymbolFormat do
   # stablecoin pairs depend on.
   @mapping %{sep: "", quotes: ~w(USDT USDC USD BTC ETH)}
 
-  @doc "The mapping, exposed so the conformance suite can drive `CanonicalPair` with it."
+  @doc """
+  The mapping — the single source both directions and the conformance suite read from.
+  """
   @spec mapping() :: CanonicalPair.mapping()
   def mapping, do: @mapping
 
   @doc "The quote currencies this venue settles in."
   @spec quotes() :: [String.t()]
-  def quotes, do: @mapping.quotes
+  def quotes, do: mapping().quotes
 
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
-    do: CanonicalPair.to_canonical(@mapping, native)
+    do: CanonicalPair.to_canonical(mapping(), native)
 
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()
   def to_exchange_symbol(canonical) when is_binary(canonical),
-    do: CanonicalPair.to_exchange(@mapping, canonical)
+    do: CanonicalPair.to_exchange(mapping(), canonical)
 end

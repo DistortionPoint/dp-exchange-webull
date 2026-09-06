@@ -296,4 +296,46 @@ defmodule DpExchange.Webull.SocketTest do
       assert Enum.sort(Keyword.keys(opts)) == [:socket_connect_timeout, :socket_recv_timeout]
     end
   end
+
+  describe "disconnect/2" do
+    # `Feed`'s own `terminate/2` calls this on every shard it believes is still
+    # connected while it shuts down — a belief that can be stale (the socket already
+    # crashed, already reconnecting, already gone by the time shutdown reaches it). It
+    # must answer with an error rather than raise or hang past its own timeout, because
+    # nothing calling it from inside a `terminate/2` can afford either.
+    test "a dead pid is reported, not raised" do
+      pid = spawn(fn -> :ok end)
+      # Give the ephemeral process a moment to actually finish and exit. The reason is
+      # deliberately not pinned to `:normal`: the process can finish and exit before
+      # `Process.monitor/1` below even runs, in which case the monitor never observed it
+      # alive and reports `:noproc` instead — a real race under load, not a hypothetical
+      # one, and either reason means the same thing this test cares about: dead.
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+
+      assert Socket.disconnect(pid) == {:error, :not_alive}
+    end
+
+    test "an alive process that never answers times out as an error, not a hang" do
+      # Real, live, ordinary process — not a `Socket`, so it never replies to the
+      # `WebSockex.send_frame/3` call underneath `disconnect/2`. A short explicit
+      # timeout keeps this test fast while still proving the call returns rather than
+      # blocking its caller indefinitely.
+      unresponsive = spawn(fn -> Process.sleep(:infinity) end)
+
+      assert {:error, _reason} = Socket.disconnect(unresponsive, 50)
+
+      Process.exit(unresponsive, :kill)
+    end
+
+    test "calling on the caller's own pid is reported, not raised" do
+      # `WebSockex.send_frame/3` answers `client == self()` by *raising*
+      # `WebSockex.CallingSelfError`, not by returning an error — found live in this
+      # package's own test suite, where `:sys.replace_state/2` running inside `Feed`
+      # meant `self()` in a fixture resolved to `Feed`'s own pid, and `Feed`'s later
+      # `terminate/2` then called `disconnect/2` on itself. A crash here is a crash
+      # inside `terminate/2`, which is exactly what this function promises not to do.
+      assert Socket.disconnect(self()) == {:error, :calling_self}
+    end
+  end
 end

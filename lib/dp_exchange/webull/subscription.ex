@@ -19,13 +19,23 @@ defmodule DpExchange.Webull.Subscription do
 
   Every call is signed — this venue has no anonymous endpoints.
 
-  **`sub_types` is uppercase (`SNAPSHOT`, `QUOTE`) and is not the MQTT topic namespace.**
-  The subscribe request body's subtype field and the MQTT topics a connected session
-  receives on (`quote`, `snapshot` — lowercase, see `streaming-api.md`) look like the same
-  vocabulary and are not: they are two different fields on two different protocols. Sending
-  the lowercase topic names here got every subscribe rejected `HTTP 417
-  UNSUPPORTED_SUB_TYPE` — DpCryptoManagement's issue #19, filed right after #18 unblocked
-  the request enough to reach this validation for the first time.
+  **`sub_types` is uppercase (`SNAPSHOT`, `QUOTE`, `TICK`) and is not the MQTT topic
+  namespace.** The subscribe request body's subtype field and the MQTT topics a connected
+  session receives on (`quote`, `snapshot`, `tick` — lowercase, see `streaming-api.md`)
+  look like the same vocabulary and are not: they are two different fields on two
+  different protocols. Sending the lowercase topic names here got every subscribe
+  rejected `HTTP 417 UNSUPPORTED_SUB_TYPE` — DpCryptoManagement's issue #19, filed right
+  after #18 unblocked the request enough to reach this validation for the first time.
+
+  `["SNAPSHOT", "QUOTE"]` is **confirmed live** — the same pair the prior in-repo client
+  accepted for months and issue #19 measured directly. `TICK` joined the default so a
+  plain `subscribe/2` delivers `Core.Types.Trade` the same way it already delivers
+  `Quote` and `TopOfBook`, with no venue-shaped option a consumer has to learn — but
+  its inclusion here is **read from `streaming-api.md`'s topic table, not yet measured
+  against the live venue** the way the other two were. If the venue answers `TICK`
+  differently from what the table promises, that will surface as `Feed`'s existing
+  generic-subscribe-failure handling — see its moduledoc — the same as any other
+  refusal this module hands back.
 
   ## `INVALID_SYMBOL` names the offending symbols, and this module hands them back
 
@@ -85,11 +95,13 @@ defmodule DpExchange.Webull.Subscription do
         "category" => "US_CRYPTO",
         "symbols" => Enum.map(symbols, &SymbolFormat.to_exchange_symbol/1),
         # Uppercase, and NOT the same strings as the MQTT topic names (`quote`,
-        # `snapshot` — see streaming-api.md). Confirmed live by DpCryptoManagement's
-        # issue #19: lowercase values here get every subscribe rejected `HTTP 417
-        # UNSUPPORTED_SUB_TYPE`, while `["SNAPSHOT", "QUOTE"]` is what the venue actually
-        # accepted for months from the prior in-repo client.
-        "sub_types" => Keyword.get(opts, :sub_types, ["SNAPSHOT", "QUOTE"])
+        # `snapshot`, `tick` — see streaming-api.md). Confirmed live by
+        # DpCryptoManagement's issue #19: lowercase values here get every subscribe
+        # rejected `HTTP 417 UNSUPPORTED_SUB_TYPE`. `SNAPSHOT` and `QUOTE` are what the
+        # venue actually accepted for months from the prior in-repo client; `TICK` is
+        # read from the vendor's own topic table and not yet measured live — see the
+        # moduledoc.
+        "sub_types" => Keyword.get(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
       })
 
     request = %{

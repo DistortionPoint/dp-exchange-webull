@@ -53,22 +53,32 @@ by a session identifier this package generates and gives to both.
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
 the credentials you supplied — at start, or on the subscribe call.
 
-### Two kinds arrive on the same subscription, not one
+### Three kinds arrive on the same subscription, not one
 
-A subscribe asks the venue for both its `SNAPSHOT` and `QUOTE` topics, and both are
-forwarded to you: `%DpExchange.Core.Types.Quote{}` (a traded price) and
-`%DpExchange.Core.Types.TopOfBook{}` (bid/ask). Match on the struct, not on having
-subscribed once — a handler that only matches `%Quote{}` silently drops every top-of-book
-message rather than erroring.
+A subscribe asks the venue for its `SNAPSHOT`, `QUOTE` and `TICK` topics, and all three
+are forwarded to you: `%DpExchange.Core.Types.Quote{}` (a traded price),
+`%DpExchange.Core.Types.TopOfBook{}` (bid/ask) and `%DpExchange.Core.Types.Trade{}` (one
+print — the tape). Match on the struct, not on having subscribed once — a handler that
+only matches `%Quote{}` silently drops every top-of-book message and every trade rather
+than erroring.
 
 ```elixir
 receive do
   {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{} = q} -> handle_price(q)
   {:dp_exchange, :webull, %DpExchange.Core.Types.TopOfBook{} = t} -> handle_book(t)
+  {:dp_exchange, :webull, %DpExchange.Core.Types.Trade{} = t} -> handle_trade(t)
 end
 ```
 
-`capabilities/0` declares `streamable: [:quotes, :top_of_book]` for exactly this reason.
+`capabilities/0` declares `streamable: [:quotes, :top_of_book, :trades]` for exactly this
+reason. **`Trade.id` is always `nil` on this venue** — the streamed tape carries no
+per-print identifier, on this topic or on `get_trades/2`'s REST tape, and `nil` says that
+truthfully rather than inventing one.
+
+Unlike `SNAPSHOT`/`QUOTE`, `TICK`'s presence in the default subscribe is read from the
+venue's own documentation and has not been confirmed against the live venue — see
+`capabilities/0`'s `measured_against`. If the venue answers `TICK` differently than
+documented, that surfaces the same way any other subscribe refusal does.
 
 ### Coverage means delivering, not accepted
 
@@ -131,12 +141,26 @@ from the environment, so the two neither collide nor share a rate-limit bucket.
 `ArgumentError`, not a quiet fallback: meaning UAT and getting production sends a real
 order to a real broker.
 
-## There is no trade volume, anywhere
+`live?/1` answers the money question directly, resolving `opts` the same way every call
+here does, so a caller can confirm before a money-moving call rather than trust a default:
 
-Not on the bars, not on the snapshot, not on the stream. `volume` is `nil`, never `0` —
+```elixir
+if DpExchange.Webull.live?(opts) do
+  # confirm with a human before place_order/3 goes out
+end
+```
+
+## There is no *aggregate* trade volume, anywhere
+
+Not on the bars, not on the snapshot's `Quote.volume`. That field is `nil`, never `0` —
 zero would look like a real measurement of no trading. `capabilities/0` says
 `reports_trade_volume: false`, so route volume-dependent work to another venue rather than
 reading a column of nils.
+
+That is a different claim from `Trade.quantity` — the streamed tape and `get_trades/2`
+both report **one print's own size**, which the venue does publish. This package does not
+sum sizes into an aggregate figure of its own; that would be this package's arithmetic
+wearing the venue's name.
 
 ## Eight candle widths, and `1w` is deliberately not one
 
@@ -147,6 +171,19 @@ which weekday the venue starts its week, `Core.Timeframe` models no alignment ru
 and a bar whose boundary cannot be verified is a bar that should not be stored.
 
 Asking for a width outside that list is an error, never the nearest one.
+
+### Equity/ETF bars are adjusted at daily and above, not below
+
+`get_historical_prices/4` against `US_STOCK`/`US_ETF`: daily and longer widths are
+forward-adjusted for splits, minute widths are not — the vendor's own rule, and these are
+two different series, not the same one at two resolutions. `adjusted?/1` answers it for a
+width before you fetch it, so stitching a daily series onto a minute one across a split
+does not join an adjusted half to an unadjusted one silently:
+
+```elixir
+DpExchange.Webull.adjusted?("1d")  #=> true
+DpExchange.Webull.adjusted?("1m")  #=> false
+```
 
 ## Timestamps come from the venue, or the call fails
 

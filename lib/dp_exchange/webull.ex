@@ -41,10 +41,15 @@ defmodule DpExchange.Webull do
 
   ## No trade volume, anywhere
 
-  Webull's crypto OpenAPI reports no volume: not on bars, not on the snapshot, not on the
-  stream. `volume` is `nil`, never `0`, and `capabilities/0` says
+  Webull's crypto OpenAPI reports no **aggregate** volume: not on bars, not on the
+  snapshot's `Quote.volume`. That field is `nil`, never `0`, and `capabilities/0` says
   `reports_trade_volume: false` so volume-dependent work can be routed elsewhere rather
   than reading a column of zeroes.
+
+  This is a different claim from a `Trade.quantity` — the streamed tape (`subscribe/2`)
+  and `get_trades/2` both report **one print's own size**, which the venue does publish.
+  A sum of individual sizes is not the same statement as the venue's own aggregate
+  figure, and this package does not compute one from the other.
 
   ## Supervision
 
@@ -228,11 +233,10 @@ defmodule DpExchange.Webull do
       # retaken — it needs a credential this repository does not hold. Treat 342 as the
       # last observed figure, not a current one.
       supported_quotes: ["USD"],
-      # Five, because the order builder builds five. `Rest.order_instrument_types/0` is the
-      # same list, so this cannot drift from what can actually be sent.
-      # A share bought outright is `:spot` — the vocabulary has no separate `:equity`, and
-      # does not need one: the distinction that matters is settled vs derivative.
-      supported_instrument_types: [:spot, :option, :future, :event_contract],
+      # Derived from `Rest.order_instrument_types/0`, not hand-copied, so this cannot
+      # disagree with what the order builder can actually send — see
+      # `supported_instrument_types/0` below.
+      supported_instrument_types: supported_instrument_types(),
 
       # The venue's documented crypto matrix: MARKET takes IOC only; LIMIT and
       # STOP_LOSS_LIMIT take DAY or GTC. There is no market GTC and no limit IOC, and
@@ -257,8 +261,16 @@ defmodule DpExchange.Webull do
       # (a real quoted number is not a traded price). Both kinds have therefore always
       # reached a subscriber; this list just never caught up, so a consumer reading
       # `streamable: [:quotes]` had no reason to expect a `%TopOfBook{}` on its mailbox at
-      # all. See `measured_against` below for how this was established.
-      streamable: [:quotes, :top_of_book],
+      # all.
+      #
+      # `:trades` added 2026-09-06 — this one IS new: `QuoteProto.decode_tick/1` decoded
+      # the venue's `Tick` message and nothing ever called it, `Subscription`'s default
+      # `sub_types` never asked the venue for `TICK`, and `Socket` had no `tick`-topic
+      # clause to route a payload to if one had arrived — three layers of a real,
+      # documented venue capability that was built and never wired end to end. All three
+      # are fixed now (`Subscription`, `Socket`, `Feed.kind_for/1`). See `measured_against`
+      # below for what is and is not confirmed live about it.
+      streamable: [:quotes, :top_of_book, :trades],
       historical_timeframes: Rest.timeframes(),
 
       # Bounded by request parameters rather than a stated page size. `nil` until it is
@@ -284,7 +296,13 @@ defmodule DpExchange.Webull do
           "here, since the catalogue endpoint requires credentials this repo does not hold; " <>
           "streamable's :top_of_book entry (2026-09-05) is not a fresh venue probe — it is " <>
           "read from this package's own delivery path, `Subscription`'s default sub_types " <>
-          "and `Socket`'s `quote`-topic decode clause, both already live"
+          "and `Socket`'s `quote`-topic decode clause, both already live; streamable's " <>
+          "SNAPSHOT and QUOTE default sub_types are likewise confirmed live " <>
+          "(DpCryptoManagement issue #19); its :trades entry (2026-09-06) is NOT confirmed " <>
+          "live — TICK's inclusion in the default sub_types is read from " <>
+          "streaming-api.md's topic table only, and a live probe of this venue's crypto " <>
+          "sockets has not been retaken to confirm the venue answers a TICK subscribe the " <>
+          "way the table says it should"
     )
   end
 
@@ -296,6 +314,32 @@ defmodule DpExchange.Webull do
           do: {{name, arity}, :experimental}
 
     Enum.reduce(@unsupported, active, &Map.put(&2, &1, :unsupported))
+  end
+
+  # `Rest.order_instrument_types/0` names five order-builder instrument types; Core's
+  # asset-class vocabulary has four, because it has no separate `:equity` — a share bought
+  # outright is `:spot`, the same settlement as crypto, and does not need its own name. So
+  # `:crypto` and `:equity` both collapse to `:spot` here and `Enum.uniq/1` folds the
+  # resulting duplicate away.
+  #
+  # This exists so the declaration below is derived, not hand-copied: the comment that used
+  # to sit on the literal list ("Five, because the order builder builds five... so this
+  # cannot drift") asserted exactly this equivalence without anything checking it — the
+  # order builder could have grown a sixth instrument type and `capabilities/0` would have
+  # gone on claiming five, silently. Deriving it here is what makes the claim true rather
+  # than merely stated.
+  @order_instrument_to_asset_class %{
+    crypto: :spot,
+    equity: :spot,
+    option: :option,
+    futures: :future,
+    event: :event_contract
+  }
+
+  defp supported_instrument_types do
+    Rest.order_instrument_types()
+    |> Enum.map(&Map.fetch!(@order_instrument_to_asset_class, &1))
+    |> Enum.uniq()
   end
 
   # --- market data -------------------------------------------------------
@@ -312,6 +356,22 @@ defmodule DpExchange.Webull do
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []),
     do:
       Rest.get_historical_prices(symbol, timeframe, range, credentials(opts), with_limiter(opts))
+
+  @doc """
+  Whether bars of `timeframe`, on the equity/ETF tape, are forward-adjusted.
+
+  See `DpExchange.Webull.Rest.adjusted?/1` for the venue's rule: daily and above are
+  forward-adjusted, minute bars are not. Exposed here because that answer is for a
+  **caller** of `get_historical_prices/4`, not for anything inside this package — nothing
+  here stitches two widths together, and `Core.Types.Candle` has no field to carry the
+  answer on the bar itself. A caller doing that stitching across a split needs to know the
+  two widths are not the same series before it joins them, not after.
+
+      DpExchange.Webull.adjusted?("1d")  #=> true
+      DpExchange.Webull.adjusted?("1m")  #=> false
+  """
+  @spec adjusted?(String.t()) :: boolean() | nil
+  def adjusted?(timeframe), do: Rest.adjusted?(timeframe)
 
   @impl true
   def get_symbols(opts \\ []), do: Rest.get_symbols(credentials(opts), with_limiter(opts))
@@ -572,6 +632,24 @@ defmodule DpExchange.Webull do
   """
   @spec streaming?(keyword()) :: boolean()
   def streaming?(opts \\ []), do: opts |> Environment.resolve() |> Environment.streaming?()
+
+  @doc """
+  Whether the environment `opts` resolves to moves real money.
+
+  Resolves `opts[:environment]` through the same precedence as every call this package
+  makes — an explicit option, then `DpExchange.Core.Config`, then `:production` — and
+  answers with `DpExchange.Webull.Environment.live?/1`. Meant as a check a caller makes of
+  itself before a money-moving call such as `place_order/3`, in the same spirit as
+  `capabilities/0`'s own declaration: the default is production and that is the direction
+  where a wrong guess costs money, so a caller that wants to be certain asks rather than
+  assumes.
+
+      if DpExchange.Webull.live?(opts) do
+        # confirm with the human before placing this order
+      end
+  """
+  @spec live?(keyword()) :: boolean()
+  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
 
   @doc "The quote currencies this venue settles in."
   @spec quotes() :: [String.t()]

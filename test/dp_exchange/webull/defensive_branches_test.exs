@@ -276,7 +276,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
         )
 
       assert_receive {:body, body}
-      assert body["sub_types"] == ["SNAPSHOT", "QUOTE"]
+      assert body["sub_types"] == ["SNAPSHOT", "QUOTE", "TICK"]
       assert body["category"] == "US_CRYPTO"
     end
   end

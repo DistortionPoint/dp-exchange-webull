@@ -107,12 +107,14 @@ defmodule DpExchange.WebullTest do
       assert Webull.coverage_by_kind(feed: :no_such_feed_process) == %{}
     end
 
-    test "declares :top_of_book alongside :quotes, correcting the prior stale declaration" do
+    test "declares :top_of_book and :trades alongside :quotes" do
       # `Socket`'s `quote`-topic clause has decoded to `Core.Types.TopOfBook` since the
       # bid/ask-as-price fix, and `Subscription`'s default `sub_types` has always asked
       # for both `SNAPSHOT` and `QUOTE` — both kinds have always reached a subscriber.
-      # `streamable` simply never caught up until now.
-      assert Webull.capabilities().streamable == [:quotes, :top_of_book]
+      # `:trades` is newer: `Subscription`'s default now asks for `TICK` too and
+      # `Socket`'s `tick`-topic clause decodes it to `Core.Types.Trade` — see both
+      # modules' moduledocs.
+      assert Webull.capabilities().streamable == [:quotes, :top_of_book, :trades]
     end
   end
 

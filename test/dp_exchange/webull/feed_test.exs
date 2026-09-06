@@ -61,6 +61,20 @@ defmodule DpExchange.Webull.FeedTest do
     }
   end
 
+  # A real pid, guaranteed dead by the time it is used — `Socket.disconnect/2` must
+  # answer with `{:error, :not_alive}` for one rather than raise, and asserting on that
+  # from here doubles as an observable signal that `terminate/2` actually attempted the
+  # shard: a shard it skips never calls `disconnect/2` at all, so it never logs.
+  defp dead_pid do
+    pid = spawn(fn -> :ok end)
+    # Not pinned to `:normal` — the process can finish and exit before `Process.monitor/1`
+    # runs, in which case the monitor reports `:noproc` instead. Either way it is dead,
+    # which is all this helper promises. See `SocketTest`'s matching helper.
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    pid
+  end
+
   defp start_feed(opts \\ []) do
     name = :"feed_#{System.unique_integer([:positive])}"
     defaults = [name: name, shards: %{0 => connected_shard()}]
@@ -1421,6 +1435,87 @@ defmodule DpExchange.Webull.FeedTest do
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, {:invalid_symbols, ["AAA-USD"]}}})
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+    end
+  end
+
+  describe "terminate/2" do
+    # A clean shutdown attempts `DISCONNECT` on every shard `terminate/2` believes is
+    # connected — see `Socket.disconnect/2` and `MqttPacket.disconnect/0`. Driven
+    # directly against `terminate/2`, the same way `SocketTest` drives frame handlers
+    # directly: no process lifecycle is needed to exercise a plain function of state.
+    #
+    # `dead_pid/0` doubles as the observable here — `Socket.disconnect/2` logs a warning
+    # for a dead pid it was asked to send to, so a warning naming a shard's index is
+    # proof `terminate/2` attempted that shard, and its absence is proof it did not.
+    test "attempts every connected shard, for an ordinary shutdown" do
+      shards = %{
+        0 => %{connected_shard("s0") | socket: dead_pid()},
+        1 => %{connected_shard("s1") | socket: dead_pid()}
+      }
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Feed.terminate(:normal, %{shards: shards}) == :ok
+        end)
+
+      assert log =~ "shard 0 DISCONNECT on shutdown failed"
+      assert log =~ "shard 1 DISCONNECT on shutdown failed"
+    end
+
+    test "skips a shard that never connected — it has no session to close" do
+      shards = %{0 => %{connected_shard("s0") | socket: dead_pid(), connected?: false}}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Feed.terminate(:shutdown, %{shards: shards}) == :ok
+        end)
+
+      refute log =~ "DISCONNECT"
+    end
+
+    test "runs for every reason GenServer treats as normal termination" do
+      for reason <- [:normal, :shutdown, {:shutdown, :some_reason}] do
+        shards = %{0 => %{connected_shard("s0") | socket: dead_pid()}}
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            assert Feed.terminate(reason, %{shards: shards}) == :ok
+          end)
+
+        assert log =~ "shard 0 DISCONNECT on shutdown failed"
+      end
+    end
+
+    test "a crash reason skips the sweep — extra socket I/O is the wrong thing mid-crash" do
+      shards = %{0 => %{connected_shard("s0") | socket: dead_pid()}}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Feed.terminate({:some_crash, :reason}, %{shards: shards}) == :ok
+        end)
+
+      refute log =~ "DISCONNECT"
+    end
+
+    test "no shards at all is a no-op" do
+      assert Feed.terminate(:normal, %{shards: %{}}) == :ok
+    end
+
+    test "a shard whose socket happens to be the caller's own pid does not crash" do
+      # Found live: `:sys.replace_state/2` runs its function inside the target process,
+      # so a fixture built that way with `socket: self()` (as one test elsewhere in this
+      # file, and one in `WebullTest`, both do) captures `Feed`'s own pid, not a
+      # distinct fake. `terminate/2` calling `disconnect/2` on itself must not crash the
+      # shutdown that is already in progress — see `SocketTest`'s matching case for why
+      # `WebSockex.send_frame/3` makes this a real, not hypothetical, risk.
+      shards = %{0 => %{connected_shard("s0") | socket: self()}}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Feed.terminate(:normal, %{shards: shards}) == :ok
+        end)
+
+      assert log =~ "shard 0 DISCONNECT on shutdown failed"
     end
   end
 end

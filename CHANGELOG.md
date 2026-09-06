@@ -20,7 +20,100 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Removed — breaking
+
+- **`MqttPacket.subscribe/2` deleted.** Found by `dp_exchange_core`'s new "16. internal
+  wiring" conformance assertion: nothing in this package's `lib/` ever called it. Traced
+  rather than assumed dead — this venue's own documentation
+  (`docs/reference/webull/streaming-api.md`) states plainly that "subscriptions are not
+  managed over MQTT" and are HTTP calls instead (`DpExchange.Webull.Subscription`), so an
+  MQTT `SUBSCRIBE` packet was never the mechanism this venue uses. `SUBACK` decoding
+  (private, unreachable without a `SUBSCRIBE` ever going out) is removed with it. Anyone
+  who called `MqttPacket.subscribe/2` directly — an internal module, not part of the
+  facade, but a public function until now — has it removed under them; the real
+  subscription surface is unchanged: the facade's own `subscribe/2`.
+
+### Added
+
+- **The MQTT `tick` topic is now streamed as `DpExchange.Core.Types.Trade` — the third
+  kind `subscribe/2` delivers, alongside `Quote` and `TopOfBook`.** Found by the same
+  conformance assertion as above: `QuoteProto.decode_tick/1` fully decoded the venue's
+  documented `Tick` message and nothing ever called it — `Subscription`'s default
+  `sub_types` never asked the venue for `TICK`, and `Socket` had no `tick`-topic clause to
+  route a payload to if one had arrived. A genuine venue capability, built and never wired
+  end to end. Fixed in all three places it broke: `Subscription`'s default `sub_types` now
+  includes `"TICK"` (was `["SNAPSHOT", "QUOTE"]`, now `["SNAPSHOT", "QUOTE", "TICK"]`);
+  `Socket` decodes the `tick` topic to `%DpExchange.Core.Types.Trade{}`; `Feed.kind_for/1`
+  recognises it for `coverage_by_kind/1`. `capabilities/0`'s `streamable` now includes
+  `:trades`. `Trade.id` is always `nil` on this venue — the streamed tape carries no
+  per-print identifier, matching `get_trades/2`'s REST tape, which has the identical gap
+  and already says so.
+
+  **`TICK`'s inclusion in the default `sub_types` is read from
+  `streaming-api.md`'s topic table, not yet confirmed against the live venue** — unlike
+  `SNAPSHOT`/`QUOTE`, which are confirmed live (DpCryptoManagement's issue #19).
+  `capabilities/0`'s `measured_against` says so explicitly. If the venue answers `TICK`
+  differently than documented, that surfaces through `Feed`'s existing generic-subscribe-
+  failure handling, the same as any other refusal `Subscription` hands back.
+
+- **`DpExchange.Webull.live?/1`** — whether the environment `opts` resolves to moves real
+  money, resolved through the same precedence every call on this venue uses. Same shape
+  and same reasoning as `DpExchange.Gemini.live?/1`. Found unwired: `Environment.live?/1`
+  existed and nothing in `lib/` called it — a safety check built and never given a way for
+  a consumer to reach it, since only the facade is public API on this venue.
+
+- **`DpExchange.Webull.adjusted?/1`** — whether bars of a timeframe on the equity/ETF tape
+  are forward-adjusted. `Rest.adjusted?/1` was already fully built and documented for
+  exactly this question ("a caller stitching two widths together needs to know") but had
+  no facade entry point to be called through; `Core.Types.Candle` has no field to carry
+  the answer on the bar itself, so this was always meant to be asked of the package
+  directly, not read off a returned candle.
+
 ### Fixed
+
+- **A clean shutdown now sends MQTT `DISCONNECT` on every still-connected shard.**
+  `MqttPacket.disconnect/0` built the packet and nothing ever sent it — found by the same
+  conformance assertion, and the one violation worth reasoning through rather than just
+  wiring: MQTT 3.1.1 §3.14 makes `DISCONNECT` the protocol's normal-close signal, and its
+  absence is what makes a broker treat a closed connection as abnormal. That is a protocol
+  fact, not a venue-specific one, and this venue's documentation is silent on whether it
+  changes the ~1-minute session-retention window either way — nothing here claims it does.
+  `Socket.disconnect/2` sends the packet via `WebSockex.send_frame/3`, the only way to put
+  a frame on an already-running `Socket` from outside its own callbacks; `Feed.terminate/2`
+  calls it once per connected shard, and only for the reasons `GenServer` treats as normal
+  termination (`:normal`, `:shutdown`, `{:shutdown, _}`) — never for a crash, where extra
+  socket I/O on a connection that may be the reason for the crash is the wrong trade
+  against a fast supervisor restart. `Feed.init/1` already traps exits (for shard-crash
+  isolation), which is what makes `terminate/2` actually run on an ordinary supervised
+  shutdown, without needing its own `handle_info({:EXIT, ...})` clause for that case.
+
+  Found and fixed live during this work: `WebSockex.send_frame/3` answers `client ==
+  self()` by *raising* `WebSockex.CallingSelfError` rather than returning an error, which
+  a bare `catch :exit` does not stop. `Socket.disconnect/2` now guards `pid == self()`
+  explicitly and its `catch` clause is broadened to any exception kind, so it holds its
+  own "never raises" contract regardless of how `send_frame` fails underneath it.
+
+- **`capabilities/0`'s `supported_instrument_types` no longer hand-copies
+  `Rest.order_instrument_types/0`'s list — it derives from it.** The prior comment
+  ("Five, because the order builder builds five... so this cannot drift") asserted the
+  equivalence without anything checking it; `order_instrument_types/0` was itself unwired
+  — nothing in `lib/` called it, the declaration it was "exposed because" of read a
+  separate literal instead. A private `supported_instrument_types/0` now maps the
+  order builder's five instrument types (`:crypto`, `:equity`, `:option`, `:futures`,
+  `:event`) onto Core's four asset classes (`:crypto`/`:equity` both collapse to `:spot`)
+  and the declaration is now the mapping, not a second list that could silently disagree
+  with it.
+
+- **`Environment.validate!/1` now checks membership in `known/0` instead of carrying its
+  own separate, literal `[:production, :uat]` guard** — the same fix, same reasoning, as
+  `DpExchange.Gemini.Environment`. `known/0` existed and nothing in `lib/` called it.
+
+- **`SymbolFormat.to_canonical_symbol/1` and `to_exchange_symbol/1` now read the mapping
+  through `mapping/0` instead of the private `@mapping` attribute directly** — the module's
+  own moduledoc has always argued both directions must run through one mapping so they
+  cannot drift; the accessor sitting unused beside the attribute it exposes was exactly
+  that risk, even though the two held the same value today. `mapping/0` existed only as a
+  conformance-suite seam and nothing in this package's own `lib/` called it.
 
 - **Documented usage — `children = [{DpExchange.Webull, []}]`, no `:limiter` anywhere —
   made every streaming HTTP call fail closed with "Rate limiter unavailable", silently,

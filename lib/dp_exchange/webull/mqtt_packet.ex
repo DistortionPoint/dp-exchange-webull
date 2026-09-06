@@ -9,20 +9,38 @@ defmodule DpExchange.Webull.MqttPacket do
   is sixteen callbacks modelling an **active-mode byte stream**: `setopts`,
   `controlling_process`, `{:tcp, socket, data}` messages to an owner process. Shimming a
   frame-oriented WebSocket into that faithfully is more moving parts, and more ways to be
-  subtly wrong, than encoding the eight packet types actually used here.
+  subtly wrong, than encoding the six packet types actually used here.
 
   The connection lifecycle is already solved by `websockex`, which this family runs for
   several venues. Only the framing was missing.
 
   ## Packets implemented
 
-  Outbound: `CONNECT` (1), `SUBSCRIBE` (8), `PINGREQ` (12), `DISCONNECT` (14).
-  Inbound: `CONNACK` (2), `SUBACK` (9), `PUBLISH` (3), `PINGRESP` (13).
+  Outbound: `CONNECT` (1), `PINGREQ` (12), `DISCONNECT` (14).
+  Inbound: `CONNACK` (2), `PUBLISH` (3), `PINGRESP` (13).
 
   **QoS 0 throughout**, which is why `PUBACK`/`PUBREC`/`PUBREL`/`PUBCOMP` are absent: a
   dropped price tick is replaced by the next one. Higher QoS would buy redelivery of stale
   prices at the cost of broker-side queueing — the wrong trade for a feed where only the
   newest value matters.
+
+  ## No `SUBSCRIBE`, and this was checked rather than assumed
+
+  An earlier version of this module encoded `SUBSCRIBE` (8) and decoded `SUBACK` (9),
+  because a hand-rolled MQTT client reaches for them by reflex — that is how the protocol
+  is usually used. **This venue's own documentation says otherwise**:
+  `docs/reference/webull/streaming-api.md` states plainly that "subscriptions are not
+  managed over MQTT" and are HTTP calls instead — see `DpExchange.Webull.Subscription`.
+  Confirmed by tracing every call site: nothing in this package ever sent a `SUBSCRIBE`,
+  the venue delivers on `Socket`'s connection regardless, and the socket carries live
+  quotes in the fake and in every test that exercises it without one ever going out.
+
+  So the encoder was dead code for a mechanism this venue does not use, not a mechanism
+  this package forgot to call — deleting it removes nothing a consumer could reach, and
+  keeping it would have kept inviting a future reader to wire it in by reflex, against a
+  venue that would answer a `SUBSCRIBE` with nothing at all (this venue publishes no
+  documented `SUBACK` failure mode for it either, because the endpoint that matters here
+  is the HTTP one).
 
   ## Frame boundaries are not packet boundaries
 
@@ -44,8 +62,6 @@ defmodule DpExchange.Webull.MqttPacket do
   @connect 1
   @connack 2
   @publish 3
-  @subscribe 8
-  @suback 9
   @pingreq 12
   @pingresp 13
   @disconnect 14
@@ -80,27 +96,22 @@ defmodule DpExchange.Webull.MqttPacket do
       variable_header <> payload
   end
 
-  @doc """
-  `SUBSCRIBE` to `topics` at QoS 0.
-
-  `packet_id` must be non-zero — MQTT reserves 0 — and is echoed in the `SUBACK` so a
-  caller can match them.
-  """
-  @spec subscribe([String.t()], 1..65_535) :: binary()
-  def subscribe(topics, packet_id) when is_list(topics) and packet_id > 0 do
-    payload = Enum.map_join(topics, fn topic -> encode_string(topic) <> <<0>> end)
-    variable_header = <<packet_id::16>>
-
-    # SUBSCRIBE requires the reserved flags 0b0010; a broker is entitled to close the
-    # connection outright if they are anything else.
-    fixed_header(@subscribe, 0b0010) <>
-      encode_remaining_length(byte_size(variable_header <> payload)) <>
-      variable_header <> payload
-  end
-
   @spec pingreq() :: binary()
   def pingreq, do: fixed_header(@pingreq, 0) <> <<0>>
 
+  @doc """
+  `DISCONNECT` — a clean, client-initiated end to the session.
+
+  Sent by `DpExchange.Webull.Socket.disconnect/2`, which `Feed` calls on every connected
+  shard while it is shutting down cleanly (see `Feed`'s own `terminate/2`). MQTT 3.1.1
+  §3.14 makes `DISCONNECT` the protocol's normal-close signal: a client that sends it and
+  then closes the network connection told the broker this was intentional; a client that
+  just drops the TCP connection did not, and a compliant broker treats the two
+  differently. Whichever timing rule this venue applies to the ~1-minute session
+  retention it documents is not stated for either case, so nothing here claims the
+  retention window is shorter for one than the other — the reason to send `DISCONNECT` is
+  that it is what a clean shutdown means on the wire, not a measured venue effect.
+  """
   @spec disconnect() :: binary()
   def disconnect, do: fixed_header(@disconnect, 0) <> <<0>>
 
@@ -145,10 +156,6 @@ defmodule DpExchange.Webull.MqttPacket do
   # version" demand completely different fixes.
   defp decode_body(@connack, _flags, <<_session_present, return_code, _rest::binary>>) do
     {:connack, return_code}
-  end
-
-  defp decode_body(@suback, _flags, <<packet_id::16, codes::binary>>) do
-    {:suback, packet_id, :binary.bin_to_list(codes)}
   end
 
   # PUBLISH carries a packet identifier after the topic **only at QoS 1 or 2**, and the QoS
