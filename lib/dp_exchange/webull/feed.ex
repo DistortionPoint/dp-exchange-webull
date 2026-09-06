@@ -148,6 +148,38 @@ defmodule DpExchange.Webull.Feed do
   it, on purpose — a caller invoking `Subscription.subscribe/3` directly, one-off, may
   legitimately want fail-fast, and this module must not decide that for it.
 
+  ## A generic resubscribe failure is reported too, latched per shard
+
+  The blind resubscribe timer already had two callers-visible outcomes when the venue's
+  answer was structured: `:oversubscribed` rebalances silently (see
+  `handle_subscribe_result/3` — it is a capacity measurement, not a failure), and
+  `{:error, {:invalid_symbols, symbols}}` gets its own `:refusal` notice (see "A
+  venue-rejected symbol is excluded, timed, and reported" above). Everything else an
+  `{:error, reason}` could be — the rate-limiter throttling of DpCryptoManagement's issue
+  #23, an HTTP 5xx, a transport error — fell through `handle_subscribe_result/3`'s
+  catch-all clause to a `Logger.warning` and nothing else: a real, ongoing failure with no
+  facade-level signal a consumer could act on.
+
+  Issue #23 is the concrete incident this closes visibility on: a node restart, all 4
+  shards linking up cleanly, then 58 consecutive blind-resubscribe failures across 13
+  minutes, every one the identical rate-limiter refusal — discovered only by grepping this
+  module's own log for the sentence it had been repeating the whole time. `PollingFeed`'s
+  own `:on_notice` (DpCryptoManagement's issue #21, the poll-feed sibling of this same
+  gap) is the pattern this follows: a `Core.Notice{kind: :coverage_change}` fires the
+  instant a shard's blind resubscribe crosses INTO this generic failure, `severity: :info`
+  fires the instant it crosses back OUT, and neither fires again while the shard's own
+  state stays put.
+
+  Latched **per shard**, not globally — `state.resubscribe_failed`, a `MapSet` of shard
+  indices currently in this state — because each shard is its own independent MQTT
+  session with its own independent failure and recovery schedule. A global latch would
+  either swallow a second shard's own transition while the first stayed latched, or
+  (unlatched entirely) fire a fresh notice from up to five shards every single
+  `@resubscribe_interval_ms` during a widespread outage — a notice storm being its own
+  defect, exactly as issue #21's design established. The existing `Logger.warning` above
+  keeps firing every tick regardless, unchanged — this notice is additive, not a
+  replacement for it.
+
   ## A shard's socket crash is contained to that shard
 
   `Socket.start_link/1` links to `Feed` — ordinary `WebSockex.start_link/4` behaviour — so
@@ -377,7 +409,14 @@ defmodule DpExchange.Webull.Feed do
        # venue-rejected symbol is excluded, timed, and reported". Never removed from
        # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
        rejected: %{},
-       rejected_symbol_ttl_ms: Keyword.get(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms)
+       rejected_symbol_ttl_ms:
+         Keyword.get(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms),
+       # Shard indices currently latched into a generic blind-resubscribe failure — see the
+       # moduledoc's "A generic resubscribe failure is reported too, latched per shard".
+       # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
+       # deletes and rebuilds a shard's entry wholesale on a crash, and this latch's own
+       # lifecycle is deliberately independent of that — see the comment there.
+       resubscribe_failed: MapSet.new()
      }}
   end
 
@@ -643,19 +682,26 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_info({:reconcile_done, {:resubscribe, index}, result}, state) do
-    case result do
-      {:error, reason} ->
-        symbols = state.shards |> Map.get(index, %{symbols: []}) |> Map.fetch!(:symbols)
+    state =
+      case result do
+        {:error, reason} ->
+          symbols = state.shards |> Map.get(index, %{symbols: []}) |> Map.fetch!(:symbols)
 
-        Logger.warning(
-          "[Webull Feed] shard #{index} blind resubscribe failed: #{inspect(reason)} — " <>
-            "its #{length(symbols)} symbol(s) stay on whatever they last delivered " <>
-            "until the next resubscribe tick"
-        )
+          Logger.warning(
+            "[Webull Feed] shard #{index} blind resubscribe failed: #{inspect(reason)} — " <>
+              "its #{length(symbols)} symbol(s) stay on whatever they last delivered " <>
+              "until the next resubscribe tick"
+          )
 
-      :ok ->
-        :ok
-    end
+          if generic_resubscribe_error?(reason) do
+            latch_resubscribe_failure(state, index, symbols, reason)
+          else
+            state
+          end
+
+        :ok ->
+          clear_resubscribe_failure(state, index)
+      end
 
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state
@@ -902,7 +948,20 @@ defmodule DpExchange.Webull.Feed do
         GenServer.reply(from, combine_overflow({:error, {:shard_crashed, reason}}, overflow))
     end
 
-    state = %{state | shards: Map.delete(state.shards, index)}
+    # A crash tears this index's shard identity down wholesale and rebuilds it as a fresh
+    # open below — the same treatment a brand-new shard gets. Any resubscribe-failure latch
+    # is cleared with it: it was tracking THIS connection's own generic failures, and a
+    # freshly reopened shard has never failed a resubscribe yet. Left uncleared, a shard
+    # that crashed while latched would fire a misleading "recovered" notice the moment its
+    # fresh session's first resubscribe merely succeeded, for a failure the new connection
+    # never actually had — the crash itself is already reported separately, via the
+    # `:link_down` notice just above and whatever `:link_up`/`:link_down` pair follows.
+    state = %{
+      state
+      | shards: Map.delete(state.shards, index),
+        resubscribe_failed: MapSet.delete(state.resubscribe_failed, index)
+    }
+
     send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
     state
   end
@@ -990,6 +1049,70 @@ defmodule DpExchange.Webull.Feed do
   end
 
   defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  # Mirrors, on purpose, the exact classification `handle_subscribe_result/3` just applied
+  # above: `:oversubscribed` self-heals silently (a capacity measurement, not a failure to
+  # report) and `{:invalid_symbols, _}` already gets its own `:refusal` notice. Both are
+  # excluded here rather than re-derived some other way, so this clause's own notice never
+  # drifts out of step with what the two clauses above actually handle. Everything else —
+  # the rate-limiter throttling of DpCryptoManagement's issue #23, an HTTP 5xx, a transport
+  # error — is the generic shape this module's own `:coverage_change` notice exists for.
+  defp generic_resubscribe_error?(:oversubscribed), do: false
+  defp generic_resubscribe_error?({:invalid_symbols, _symbols}), do: false
+  defp generic_resubscribe_error?(_other), do: true
+
+  # Fires once per transition into a shard's blind-resubscribe failing generically — see
+  # the moduledoc's "A generic resubscribe failure is reported too, latched per shard" and
+  # DpCryptoManagement's issue #23 (58 consecutive failures across 13 minutes, all of it
+  # invisible outside a log grep). Latched per shard, not globally: each shard is its own
+  # MQTT session with its own independent failure and recovery schedule, and a global latch
+  # would either miss a second shard's own transition or fire on every tick once ANY shard
+  # is already latched. A latched shard's every later tick re-enters this same branch (the
+  # `Logger.warning` above keeps firing with it, unchanged, by design) but short-circuits
+  # here rather than notifying again — a notice per tick on a sustained outage is still a
+  # storm, just a slower one.
+  defp latch_resubscribe_failure(state, index, symbols, reason) do
+    if MapSet.member?(state.resubscribe_failed, index) do
+      state
+    else
+      notice =
+        Notice.new(:coverage_change, :webull,
+          severity: :warning,
+          message:
+            "shard #{index} resubscribe has failed (#{inspect(reason)}) — " <>
+              "#{length(symbols)} symbol(s) stay on whatever they last delivered " <>
+              "until it recovers",
+          details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
+        )
+
+      fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
+      %{state | resubscribe_failed: MapSet.put(state.resubscribe_failed, index)}
+    end
+  end
+
+  # The other half of the transition above: a shard latched into failure whose blind
+  # resubscribe just succeeded again. A consumer that learned a shard's resubscribe broke
+  # and never learned it recovered is only half-served — the same reasoning
+  # `Core.PollingFeed`'s own `record_success/2` applies to its sibling case.
+  defp clear_resubscribe_failure(state, index) do
+    if MapSet.member?(state.resubscribe_failed, index) do
+      symbols = state.shards |> Map.get(index, %{symbols: []}) |> Map.fetch!(:symbols)
+
+      notice =
+        Notice.new(:coverage_change, :webull,
+          severity: :info,
+          message:
+            "shard #{index} resubscribe recovered — #{length(symbols)} symbol(s) are " <>
+              "being reasserted normally again",
+          details: %{shard: index, symbol_count: length(symbols)}
+        )
+
+      fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
+      %{state | resubscribe_failed: MapSet.delete(state.resubscribe_failed, index)}
+    else
+      state
+    end
+  end
 
   # Unexpired entries in `state.rejected` — the symbols `plan_reshard/1` must exclude from
   # this pass's effective wanted set. An expired entry is treated as no longer rejected

@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **A shard's blind resubscribe failing for a generic reason now surfaces as a
+  `Core.Notice` too, latched per shard — DpCryptoManagement's issue #23.** The 60-second
+  blind resubscribe timer (see the moduledoc's "The resubscribe timer must never
+  fail-fast") already had two structured, caller-visible outcomes for a shard's HTTP
+  subscribe failing: `:oversubscribed` rebalances silently, and `{:invalid_symbols,
+  symbols}` gets its own `:refusal` notice (issue #24, above). Everything else an
+  `{:error, reason}` could be — the rate-limiter throttling that issue #23 itself is
+  ("Throttled by our own rate limiter (not the venue)"), an HTTP 5xx, a transport error —
+  fell through `handle_subscribe_result/3`'s catch-all clause to a `Logger.warning` and
+  nothing else. Issue #23's own numbers are the cost of that gap: a node restart, all 4
+  shards linking up cleanly, then 58 consecutive blind-resubscribe failures across 13
+  minutes, every one the identical refusal, found only because a human went grepping this
+  module's own log for the sentence it had been repeating the whole time.
+
+  `Core.PollingFeed`'s own `:on_notice` — added per DpCryptoManagement's issue #21, the
+  poll-feed sibling of this same gap ("a feed that knows it has delivered nothing now
+  says so on a channel a consumer can act on, not only in a log line") — is the pattern
+  this follows, applied to a shard's resubscribe rather than a whole feed's fetch cycle:
+  a `%Core.Notice{kind: :coverage_change}` fires the instant a shard's blind resubscribe
+  crosses INTO this generic failure, and a `severity: :info` recovery notice fires the
+  instant it crosses back OUT. `:coverage_change` is reused rather than inventing a new
+  kind, for the same reason issue #21's own entry gives: "subscribed intent not becoming
+  delivery is exactly what a feed delivering nothing is," and a shard whose resubscribe
+  keeps failing is exactly that, one shard at a time.
+
+  Latched **per shard** (`state.resubscribe_failed`, a `MapSet` of currently-failing
+  shard indices) rather than globally, because each of this venue's up to 5 shards is its
+  own independent MQTT session with its own independent failure and recovery schedule —
+  a global latch would either swallow a second shard's own transition while the first
+  stayed latched, or, left unlatched altogether, fire a fresh notice from every still-
+  failing shard on every single 60-second tick during a widespread outage. A notice storm
+  is its own defect, exactly as issue #21's design already established. The existing
+  `Logger.warning` keeps firing every tick regardless, unchanged — this notice is
+  additive, not a replacement. The latch for a crashed shard's index is cleared the
+  moment `isolate_crashed_shard/3` tears that shard down for reopening: the freshly
+  reopened connection has never itself failed a resubscribe, and firing a "recovered"
+  notice for it the moment its first resubscribe merely succeeds would be reporting a
+  recovery from a failure the new connection never had — the crash itself is already
+  reported separately, via the existing `:link_down` notice.
+
 ### Fixed
 
 - **17 venue-rejected symbols were blocking all 342 of a consumer's pairs from streaming,

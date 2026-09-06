@@ -1275,4 +1275,132 @@ defmodule DpExchange.Webull.FeedTest do
       assert "BADUSD" in (symbols_a ++ symbols_b)
     end
   end
+
+  describe "a generic resubscribe failure is reported too, latched per shard — DpCryptoManagement's issue #23" do
+    # Driven by sending `:reconcile_done` straight to the feed, the same way `:resubscribe`
+    # itself is driven elsewhere in this file — the deterministic way to exercise a specific
+    # shard's tick outcome without waiting a real 60 seconds or standing up a fake HTTP layer
+    # for the rate-limiter-throttle shape this reason stands in for.
+    test "a shard's blind resubscribe failing generically emits a :coverage_change warning naming it",
+         %{limiter: limiter} do
+      shard = %{connected_shard("shard-0") | symbols: ["AAA-USD", "BBB-USD"]}
+      feed = start_feed(shards: %{0 => shard}, credentials: @credentials, limiter: limiter)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      reason = {:exchange_error, :webull, "Throttled by our own rate limiter (not the venue)"}
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, reason}})
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, severity: :warning, details: details}}
+
+      assert details.shard == 0
+      assert details.symbol_count == 2
+    end
+
+    test "does not fire a second notice for the same shard while it stays failed",
+         %{limiter: limiter} do
+      shard = %{connected_shard("shard-0") | symbols: ["AAA-USD"]}
+      feed = start_feed(shards: %{0 => shard}, credentials: @credentials, limiter: limiter)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      reason = {:error, :timeout}
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, reason}})
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change, severity: :warning}}
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, reason}})
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+    end
+
+    test "the shard's next successful resubscribe emits a severity: :info recovery notice",
+         %{limiter: limiter} do
+      shard = %{connected_shard("shard-0") | symbols: ["AAA-USD"]}
+      feed = start_feed(shards: %{0 => shard}, credentials: @credentials, limiter: limiter)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :timeout}})
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change, severity: :warning}}
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, severity: :info, details: details}}
+
+      assert details.shard == 0
+    end
+
+    test "an :ok tick on a shard that was never latched emits no recovery notice",
+         %{limiter: limiter} do
+      shard = %{connected_shard("shard-0") | symbols: ["AAA-USD"]}
+      feed = start_feed(shards: %{0 => shard}, credentials: @credentials, limiter: limiter)
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+    end
+
+    test "two shards' failure and recovery latches stay independent of each other",
+         %{limiter: limiter} do
+      shard0 = %{connected_shard("shard-0") | symbols: ["AAA-USD"]}
+      shard1 = %{connected_shard("shard-1") | symbols: ["BBB-USD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard0, 1 => shard1},
+          credentials: @credentials,
+          limiter: limiter
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      # Shard 0 fails; shard 1 stays healthy and must not be warned about.
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :timeout}})
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, severity: :warning, details: %{shard: 0}}}
+
+      send(feed, {:reconcile_done, {:resubscribe, 1}, :ok})
+
+      refute_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, details: %{shard: 1}}},
+                     200
+
+      # Shard 1 now fails independently — shard 0 stays latched and silent this tick.
+      send(feed, {:reconcile_done, {:resubscribe, 1}, {:error, :timeout}})
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, severity: :warning, details: %{shard: 1}}}
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :timeout}})
+
+      refute_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, details: %{shard: 0}}},
+                     200
+
+      # Shard 0 recovers; shard 1 stays latched.
+      send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :coverage_change, severity: :info, details: %{shard: 0}}}
+    end
+
+    test "the two specifically-handled shapes do not also trigger this generic latch",
+         %{limiter: limiter} do
+      # Both branches below run a real `handle_subscribe_result/3` clause that recomputes
+      # and resyncs shard composition in the background — a plug is required so that
+      # in-flight HTTP call resolves against a fake rather than reaching the network.
+      plug = fn conn -> Req.Test.json(conn, %{"code" => "200"}) end
+      shard = %{connected_shard("shard-0") | symbols: ["AAA-USD"]}
+
+      feed =
+        start_feed(shards: %{0 => shard}, credentials: @credentials, limiter: limiter, plug: plug)
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :oversubscribed}})
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, {:invalid_symbols, ["AAA-USD"]}}})
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+    end
+  end
 end
