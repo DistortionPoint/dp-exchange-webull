@@ -30,7 +30,8 @@ defmodule DpExchange.Webull.Socket do
 
   It does not subscribe. Subscriptions on this venue are **HTTP calls**, made by `Feed`
   with the same `session_id` this connection registered as its MQTT client id. The socket's
-  only job is to connect, stay connected, and turn payloads into `Core.Types.Quote`.
+  only job is to connect, stay connected, and turn payloads into `Core.Types.Quote` (the
+  `snapshot` topic) or `Core.Types.TopOfBook` (the `quote` topic) — see `emit/3` below.
   """
 
   use WebSockex

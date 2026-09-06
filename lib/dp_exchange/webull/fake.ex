@@ -620,6 +620,14 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
 
+  # This fake's `subscribe/2` only ever sends `Types.Quote` (built from `get_price/2`,
+  # above) — never a `Types.TopOfBook` — so, unlike the real venue, it has exactly one
+  # kind to report here. That is honest for what the fake actually delivers, not a
+  # simplification: "less capable is allowed, differently capable is not" means the fake
+  # must never *claim* a second kind it cannot produce.
+  @impl true
+  def coverage_by_kind(opts \\ []), do: %{quotes: coverage(opts)}
+
   @impl true
   def subscribe_notices(opts \\ []) do
     send(Keyword.get(opts, :to, self()), {:dp_exchange, :webull, Notice.new(:link_up, :webull)})

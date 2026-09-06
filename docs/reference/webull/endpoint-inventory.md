@@ -22,6 +22,14 @@ stale by that same afternoon, when `get_fees/2` and `quantization/1` shipped out
 `:experimental`, 41 `:unsupported`, of which 30 are the venue's own absence — see
 `negative-claims.md` — and 11 remain not yet ported.
 
+**Re-checked 2026-09-05, later the same day.** `dp_exchange_core` 0.1.48 added one new
+optional contract callback, `coverage_by_kind/1`, and this package implemented it in the
+same release — moving the total from 87 to 88 contract callbacks (47 `:experimental`, 41
+`:unsupported`, unchanged) with nothing about the venue's own endpoint surface having
+moved at all. Recorded as its own note rather than silently editing the count above, for
+the same reason the 2026-09-03 correction got its own paragraph: the change was in this
+package's contract, not in what was re-checked against the venue.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
@@ -30,7 +38,7 @@ stale by that same afternoon, when `get_fees/2` and `quantization/1` shipped out
 | FD Events | 13 | 0 |
 | Custom | 12 | 0 |
 | Connect | 4 | 3 — see below; only the consent redirect stays with the host |
-| **total documented** | **229** | **46 of 87 contract callbacks, per `capabilities/0`** |
+| **total documented** | **229** | **47 of 88 contract callbacks, per `capabilities/0`** |
 
 ### Connect is not all "auth", and only half of it is the host's
 

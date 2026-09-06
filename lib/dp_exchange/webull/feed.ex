@@ -30,6 +30,19 @@ defmodule DpExchange.Webull.Feed do
   subscribed, and not when the HTTP subscribe returns 200. On this venue those are three
   genuinely different moments, and only the last one means data.
 
+  ## Coverage by kind, because this venue's two streamed kinds really are independent
+
+  Every subscribe asks the venue for both `SNAPSHOT` and `QUOTE` (see `Subscription`),
+  and the two arrive on separate MQTT topics decoded by `Socket` into two different
+  structs: `snapshot` becomes `Core.Types.Quote` (kind `:quotes`, a traded price), `quote`
+  becomes `Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask). `coverage/1` folds both
+  into one `:stream` per symbol, so a symbol whose `snapshot` topic goes dark while its
+  `quote` topic keeps arriving — or the reverse — is invisible there; `coverage_by_kind/1`
+  exists to split exactly that apart, one kind map per struct type actually observed.
+  `kind_for/1` derives the kind from the struct that arrived rather than assuming it, so a
+  future third kind reaching this clause without a matching case here is caught (logged,
+  loudly) instead of silently folded into an existing kind.
+
   ## Sharded — one session tops out at 100 symbols, this package's scope does not
 
   A single MQTT session caps out at the venue's own stated ceiling —
@@ -178,6 +191,7 @@ defmodule DpExchange.Webull.Feed do
   use GenServer
 
   alias DpExchange.Core.Notice
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull.{Environment, Socket, Subscription}
 
   require Logger
@@ -229,6 +243,13 @@ defmodule DpExchange.Webull.Feed do
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed), do: GenServer.call(feed, :coverage)
 
+  @spec coverage_by_kind(GenServer.server()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{
+            String.t() => :stream | :internal_poll | :not_covered
+          }
+        }
+  def coverage_by_kind(feed), do: GenServer.call(feed, :coverage_by_kind)
+
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())})
@@ -277,6 +298,10 @@ defmodule DpExchange.Webull.Feed do
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
        delivering: %{},
+       # kind() => %{symbol => timestamp}, built alongside `delivering` above from the
+       # same arriving payloads — never from `wanted` or from what was subscribed. See
+       # the moduledoc's "Coverage by kind" and `kind_for/1`.
+       delivering_by_kind: %{},
        # index => %{session_id:, socket:, connected?:, symbols:, reply_to:}. `symbols` is
        # what this shard is meant to carry as of the last reshard, independent of whether
        # the HTTP call that asks the venue for it has actually gone out yet. `reply_to`
@@ -319,7 +344,14 @@ defmodule DpExchange.Webull.Feed do
 
   def handle_call({:unsubscribe, symbols, opts}, from, state) do
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
-    state = %{state | wanted: wanted, delivering: Map.drop(state.delivering, symbols)}
+
+    state = %{
+      state
+      | wanted: wanted,
+        delivering: Map.drop(state.delivering, symbols),
+        delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, symbols)
+    }
+
     reshard(state, opts, from)
   end
 
@@ -330,6 +362,7 @@ defmodule DpExchange.Webull.Feed do
       state
       | wanted: wanted,
         delivering: Map.take(state.delivering, symbols),
+        delivering_by_kind: take_symbols_by_kind(state.delivering_by_kind, symbols),
         resubscribe_opts: replayable(opts, state)
     }
 
@@ -338,6 +371,15 @@ defmodule DpExchange.Webull.Feed do
 
   def handle_call(:coverage, _from, state) do
     {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+  end
+
+  def handle_call(:coverage_by_kind, _from, state) do
+    by_kind =
+      Map.new(state.delivering_by_kind, fn {kind, per_symbol} ->
+        {kind, Map.new(per_symbol, fn {symbol, _at} -> {symbol, :stream} end)}
+      end)
+
+    {:reply, by_kind, state}
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
@@ -385,11 +427,31 @@ defmodule DpExchange.Webull.Feed do
   def handle_info({:dp_exchange, :webull, quote_struct} = message, state) do
     fan_out(state.subscribers, message)
 
-    {:noreply,
-     %{
-       state
-       | delivering: Map.put(state.delivering, quote_struct.symbol, :os.system_time(:millisecond))
-     }}
+    now = :os.system_time(:millisecond)
+    symbol = quote_struct.symbol
+    delivering = Map.put(state.delivering, symbol, now)
+
+    delivering_by_kind =
+      case kind_for(quote_struct) do
+        {:ok, kind} ->
+          Map.update(state.delivering_by_kind, kind, %{symbol => now}, &Map.put(&1, symbol, now))
+
+        :error ->
+          # `coverage/1` above still counts this arrival — it is truthful about *any*
+          # payload. This struct just cannot be named as one of `Capabilities.data_kind()`,
+          # which means `coverage_by_kind/1` cannot report it under any kind without
+          # guessing one. Logged loudly rather than silently dropped or folded into an
+          # existing kind — see the moduledoc's "Coverage by kind".
+          Logger.warning(
+            "DpExchange.Webull.Feed: #{inspect(quote_struct.__struct__)} for #{symbol} " <>
+              "has no known data_kind mapping in kind_for/1 — coverage/1 counts it, " <>
+              "coverage_by_kind/1 cannot"
+          )
+
+          state.delivering_by_kind
+      end
+
+    {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
   end
 
   def handle_info({:open_shard, index, symbols, opts}, state) do
@@ -929,5 +991,22 @@ defmodule DpExchange.Webull.Feed do
   # Unique per shard. The venue disconnects an older connection presenting the same id.
   defp generate_session_id do
     16 |> :crypto.strong_rand_bytes() |> Base.encode16(case: :lower)
+  end
+
+  # The struct that actually arrived names its own kind — never assumed from
+  # `capabilities().streamable` or from how many kinds this venue is believed to stream.
+  # See `Socket`'s `emit/3` clauses: `snapshot` decodes to `Quote`, `quote` decodes to
+  # `TopOfBook`. A struct with no clause here falls to `:error` rather than picking the
+  # nearest match, so a future third kind is caught rather than silently absorbed.
+  defp kind_for(%Quote{}), do: {:ok, :quotes}
+  defp kind_for(%TopOfBook{}), do: {:ok, :top_of_book}
+  defp kind_for(_other), do: :error
+
+  defp drop_symbols_by_kind(delivering_by_kind, symbols) do
+    Map.new(delivering_by_kind, fn {kind, per_symbol} -> {kind, Map.drop(per_symbol, symbols)} end)
+  end
+
+  defp take_symbols_by_kind(delivering_by_kind, symbols) do
+    Map.new(delivering_by_kind, fn {kind, per_symbol} -> {kind, Map.take(per_symbol, symbols)} end)
   end
 end

@@ -20,6 +20,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`coverage_by_kind/1`, `dp_exchange_core`'s new optional contract callback (`~> 0.1.48`,
+  bumped from `~> 0.1.36`).** `coverage/1` reports one `:stream`/`:not_covered` boolean per
+  symbol, folding every streamed kind into it — which is exactly how a Coinbase venue in
+  this family once reported full coverage for hundreds of symbols while one of its two
+  streamed kinds had gone dark for nearly all of them, the discrepancy hidden behind the
+  single boolean across two issues. This venue genuinely has the same shape to protect
+  against, not a formality adopted only for cross-venue uniformity: every subscribe asks
+  for both `SNAPSHOT` and `QUOTE`, and `Socket` decodes them on separate topics into two
+  different structs that can go dark independently — `snapshot` into `Core.Types.Quote`
+  (kind `:quotes`), `quote` into `Core.Types.TopOfBook` (kind `:top_of_book`). `Feed` now
+  tracks arrivals per kind (`delivering_by_kind`, alongside the existing `delivering`) and
+  derives the kind from the struct type that actually arrived (`kind_for/1`) rather than
+  assuming it from `capabilities/0` — so a third kind reaching the feed without a matching
+  case here is logged loudly instead of silently folded into an existing one. Verified
+  against Core's own conformance suite, assertion group 15, which asserts
+  `coverage_by_kind/1`'s symbol union equals `coverage/1`'s keys exactly and that every kind
+  key it reports is one `capabilities().streamable` declares — both now run against this
+  venue for the first time (previously skipped: the callback did not exist) and both pass.
+  `Fake.coverage_by_kind/1` reports a single `:quotes` key, honestly: the fake's
+  `subscribe/2` only ever builds a `Types.Quote`, never a `Types.TopOfBook`, and "less
+  capable is allowed, differently capable is not" means it must not claim a second kind it
+  cannot produce.
+
+### Fixed
+
+- **`capabilities().streamable` said `[:quotes]`; this venue has always also streamed
+  `:top_of_book`.** Found while implementing `coverage_by_kind/1` above, which requires
+  naming a kind for every struct actually delivered — deriving one honestly for
+  `Core.Types.TopOfBook` and then declaring it undeclared would have been exactly the kind
+  of self-contradiction Core's own conformance suite checks for. Not a new venue capability:
+  `Subscription`'s default `sub_types` has always requested both `SNAPSHOT` and `QUOTE`,
+  and `Socket`'s `quote`-topic clause has decoded to `Core.Types.TopOfBook` since the
+  bid/ask-as-price fix recorded in its own comment (a real quoted number is not a traded
+  price — a bid is a resting order, a price is an execution). Both kinds have therefore
+  always reached a subscriber; `streamable` simply never caught up when the `TopOfBook` fix
+  landed. A consumer reading `streamable: [:quotes]` had no reason to expect a
+  `%DpExchange.Core.Types.TopOfBook{}` on its subscriber's mailbox at all, and may not even
+  have pattern-matched on one. `usage-rules.md` and `README.md` are corrected alongside —
+  both are shipped in the Hex tarball and both previously implied a single streamed kind.
+
 ### Documentation
 
 - **`README.md` and `docs/reference/webull/endpoint-inventory.md` both stated stale

@@ -2,7 +2,7 @@ defmodule DpExchange.Webull.FeedTest do
   use ExUnit.Case, async: true
 
   alias DpExchange.Core.{Config, DefaultRateLimiter, Notice}
-  alias DpExchange.Core.Types.Quote
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull.Feed
 
   @moduletag :capture_log
@@ -77,6 +77,19 @@ defmodule DpExchange.Webull.FeedTest do
     }
   end
 
+  defp top_of_book_for(symbol) do
+    %TopOfBook{
+      symbol: symbol,
+      bid: Decimal.new("1"),
+      ask: Decimal.new("2"),
+      bid_size: nil,
+      ask_size: nil,
+      venue_time: ~U[2026-08-28 12:00:00Z],
+      observed_at: ~U[2026-08-28 12:00:00Z],
+      provider: :webull
+    }
+  end
+
   defp link_up(session_id), do: Notice.new(:link_up, :webull, details: %{session_id: session_id})
 
   defp link_down(session_id),
@@ -122,6 +135,94 @@ defmodule DpExchange.Webull.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+  end
+
+  describe "coverage by kind — this venue's two streamed kinds are independent" do
+    test "a symbol delivering a snapshot appears under :quotes", %{limiter: limiter} do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{"BTC-USD" => :stream}}
+    end
+
+    test "a symbol delivering a book message appears under :top_of_book", %{limiter: limiter} do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, top_of_book_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert Feed.coverage_by_kind(feed) == %{top_of_book: %{"BTC-USD" => :stream}}
+    end
+
+    test "the two kinds are genuinely isolated: one symbol's snapshot topic can be dark " <>
+           "while its book topic stays healthy, and the reverse",
+         %{limiter: limiter} do
+      # Nothing in `Socket` or `Feed` requires both topics to arrive for the same symbol —
+      # each is decoded and forwarded independently. This is reachable on the real
+      # delivery path, not a manufactured case: a venue can genuinely stop publishing one
+      # topic for a symbol while the other keeps arriving.
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], subscribe_opts(limiter))
+
+      # BTC-USD: snapshot only. ETH-USD: book only.
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :webull, top_of_book_for("ETH-USD")})
+      _settled = Feed.coverage(feed)
+
+      by_kind = Feed.coverage_by_kind(feed)
+
+      assert by_kind[:quotes] == %{"BTC-USD" => :stream}
+      assert by_kind[:top_of_book] == %{"ETH-USD" => :stream}
+      refute Map.has_key?(by_kind[:quotes], "ETH-USD")
+      refute Map.has_key?(by_kind[:top_of_book], "BTC-USD")
+    end
+
+    test "a symbol delivering both kinds appears under both, and the union matches coverage/1",
+         %{limiter: limiter} do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :webull, top_of_book_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      by_kind = Feed.coverage_by_kind(feed)
+      union = by_kind |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.uniq() |> Enum.sort()
+
+      assert union == Feed.coverage(feed) |> Map.keys() |> Enum.sort()
+    end
+
+    test "unsubscribing a symbol drops it from every kind it appeared under", %{limiter: limiter} do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :webull, top_of_book_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      :ok = Feed.unsubscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      assert Feed.coverage_by_kind(feed) == %{quotes: %{}, top_of_book: %{}}
+    end
+
+    test "every kind key this venue reports is one its own capabilities declare streamable",
+         %{limiter: limiter} do
+      feed = start_feed()
+      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :webull, top_of_book_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      reported = Feed.coverage_by_kind(feed) |> Map.keys() |> MapSet.new()
+      declared = MapSet.new(DpExchange.Webull.capabilities().streamable)
+
+      assert MapSet.subset?(reported, declared)
     end
   end
 

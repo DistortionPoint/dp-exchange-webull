@@ -249,7 +249,16 @@ defmodule DpExchange.Webull do
       supports_order_preview: true,
       supports_order_replace: true,
       supports_short_selling: false,
-      streamable: [:quotes],
+
+      # `:top_of_book` added 2026-09-05 — a stale declaration corrected, not a new venue
+      # capability. `Subscription`'s default `sub_types` has always asked for both
+      # `SNAPSHOT` and `QUOTE`, and `Socket`'s `quote`-topic clause has decoded to
+      # `Core.Types.TopOfBook` since the bid/ask-as-price fix recorded in its own comment
+      # (a real quoted number is not a traded price). Both kinds have therefore always
+      # reached a subscriber; this list just never caught up, so a consumer reading
+      # `streamable: [:quotes]` had no reason to expect a `%TopOfBook{}` on its mailbox at
+      # all. See `measured_against` below for how this was established.
+      streamable: [:quotes, :top_of_book],
       historical_timeframes: Rest.timeframes(),
 
       # Bounded by request parameters rather than a stated page size. `nil` until it is
@@ -272,7 +281,10 @@ defmodule DpExchange.Webull do
           "developer.webull.com and verified live (1883 answers a TLS close_notify to a " <>
           "plaintext CONNECT; 8883/mqtt answers 101); symbol count and USD-only quoting " <>
           "inherited from the prior adapter's 2026-08-05 measurement and NOT re-measured " <>
-          "here, since the catalogue endpoint requires credentials this repo does not hold"
+          "here, since the catalogue endpoint requires credentials this repo does not hold; " <>
+          "streamable's :top_of_book entry (2026-09-05) is not a fresh venue probe — it is " <>
+          "read from this package's own delivery path, `Subscription`'s default sub_types " <>
+          "and `Socket`'s `quote`-topic decode clause, both already live"
     )
   end
 
@@ -457,6 +469,43 @@ defmodule DpExchange.Webull do
   def coverage(opts \\ []) do
     feed = feed(opts)
     if alive?(feed), do: Feed.coverage(feed), else: %{}
+  end
+
+  @doc """
+  What is arriving, per symbol, split by **which kind** of data it is.
+
+  `coverage/1` answers "is anything arriving for this symbol" with one boolean per
+  symbol — truthful, but it folds every kind of payload into that single answer. A venue
+  streaming more than one kind can have one kind healthy and another dark for the same
+  symbol, and `coverage/1` alone cannot say which: it marks a symbol `:stream` the moment
+  *any* payload for it arrives, regardless of what kind that payload was. A Coinbase venue
+  in this family once reported full coverage for hundreds of symbols this way while one of
+  its two streamed kinds had gone dark for nearly all of them — the discrepancy hid behind
+  the single boolean across two issues before anyone noticed.
+
+  This venue genuinely has two independent kinds, not one adopted only for cross-venue
+  uniformity: every subscribe asks the venue for both `SNAPSHOT` and `QUOTE`, and this
+  package's socket decodes them on separate topics into two different structs — a
+  snapshot becomes `DpExchange.Core.Types.Quote` (kind `:quotes`, a traded price), a quote
+  becomes `DpExchange.Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask) — and either
+  topic can go quiet without the other doing the same. So the same failure this callback
+  exists to catch on Coinbase can genuinely happen here too: a symbol present under
+  `:quotes` while absent under `:top_of_book`, or the reverse.
+
+  The kind reported is derived from the struct type that actually arrived, never assumed
+  from `capabilities/0`'s own `streamable` list — so a third kind reaching the feed
+  without this function being updated for it is caught rather than silently folded into
+  an existing kind.
+  """
+  @impl true
+  @spec coverage_by_kind(keyword()) :: %{
+          DpExchange.Core.Capabilities.data_kind() => %{
+            DpExchange.Core.Venue.symbol() => DpExchange.Core.Venue.route()
+          }
+        }
+  def coverage_by_kind(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
   end
 
   @impl true

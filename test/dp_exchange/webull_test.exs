@@ -102,6 +102,20 @@ defmodule DpExchange.WebullTest do
     end
   end
 
+  describe "coverage_by_kind/1" do
+    test "an unstarted feed reports an empty map, not a crash" do
+      assert Webull.coverage_by_kind(feed: :no_such_feed_process) == %{}
+    end
+
+    test "declares :top_of_book alongside :quotes, correcting the prior stale declaration" do
+      # `Socket`'s `quote`-topic clause has decoded to `Core.Types.TopOfBook` since the
+      # bid/ask-as-price fix, and `Subscription`'s default `sub_types` has always asked
+      # for both `SNAPSHOT` and `QUOTE` — both kinds have always reached a subscriber.
+      # `streamable` simply never caught up until now.
+      assert Webull.capabilities().streamable == [:quotes, :top_of_book]
+    end
+  end
+
   describe "the supervision tree" do
     test "starts a limiter and a feed, and no socket" do
       unique = System.unique_integer([:positive])
@@ -112,6 +126,7 @@ defmodule DpExchange.WebullTest do
 
       assert length(Elixir.Supervisor.which_children(pid)) == 2
       assert Webull.coverage(feed: opts[:feed]) == %{}
+      assert Webull.coverage_by_kind(feed: opts[:feed]) == %{}
     end
 
     test "production and UAT derive different names, so both can run at once" do
@@ -189,6 +204,23 @@ defmodule DpExchange.WebullTest do
 
       assert :ok = Fake.unsubscribe(["BTC-USD"])
       assert Fake.coverage() == %{}
+    end
+
+    test "coverage_by_kind/1 reports the same symbol under :quotes, and only :quotes" do
+      # The fake's `subscribe/2` only ever builds a `Types.Quote` (from `get_price/2`) —
+      # never a `Types.TopOfBook` — so a single-key map here is the honest shape for what
+      # the fake actually delivers, not an oversight. The real venue genuinely streams a
+      # second kind (`:top_of_book`); the fake is allowed to be less capable, just never
+      # differently capable — see `coverage/1` above.
+      assert :ok = Fake.subscribe(["BTC-USD"], to: self())
+      assert_receive {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{symbol: "BTC-USD"}}
+
+      by_kind = Fake.coverage_by_kind()
+      assert by_kind == %{quotes: %{"BTC-USD" => :stream}}
+      assert map_size(by_kind) == 1
+
+      union = by_kind |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.uniq()
+      assert Enum.sort(union) == Fake.coverage() |> Map.keys() |> Enum.sort()
     end
 
     test "update_symbols narrows coverage, and notices reach a subscriber" do

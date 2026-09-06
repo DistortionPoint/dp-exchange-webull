@@ -47,11 +47,37 @@ by a session identifier this package generates and gives to both.
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
 the credentials you supplied — at start, or on the subscribe call.
 
+### Two kinds arrive on the same subscription, not one
+
+A subscribe asks the venue for both its `SNAPSHOT` and `QUOTE` topics, and both are
+forwarded to you: `%DpExchange.Core.Types.Quote{}` (a traded price) and
+`%DpExchange.Core.Types.TopOfBook{}` (bid/ask). Match on the struct, not on having
+subscribed once — a handler that only matches `%Quote{}` silently drops every top-of-book
+message rather than erroring.
+
+```elixir
+receive do
+  {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{} = q} -> handle_price(q)
+  {:dp_exchange, :webull, %DpExchange.Core.Types.TopOfBook{} = t} -> handle_book(t)
+end
+```
+
+`capabilities/0` declares `streamable: [:quotes, :top_of_book]` for exactly this reason.
+
 ### Coverage means delivering, not accepted
 
 On this venue there are three different moments: you asked, the HTTP subscribe returned
 200, and data is arriving. `coverage/1` reports only the third. A 200 on the subscribe does
 not mean the stream is flowing.
+
+`coverage/1` folds both kinds above into one `:stream` per symbol. `coverage_by_kind/1`
+splits them apart — a symbol can show `:quotes` healthy while `:top_of_book` has gone dark
+for it, or the reverse, and `coverage/1` alone cannot tell you which:
+
+```elixir
+DpExchange.Webull.coverage_by_kind(credentials: creds)
+#=> %{quotes: %{"BTC-USD" => :stream}, top_of_book: %{"BTC-USD" => :stream}}
+```
 
 ## The venue's connection budget shapes what you can ask for
 
