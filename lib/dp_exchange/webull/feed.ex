@@ -173,6 +173,53 @@ defmodule DpExchange.Webull.Feed do
   this, a single blind resubscribe tick chained up to five sequential ~118ms HTTP calls
   inside one message, stalling delivery for every shard, every 60 seconds, by design.
 
+  ## A venue-rejected symbol is excluded, timed, and reported — DpCryptoManagement's issue #24
+
+  `Subscription`'s `INVALID_SYMBOL` handling (see its own moduledoc) hands this module
+  `{:error, {:invalid_symbols, [canonical_symbol, ...]}}` instead of an opaque string. The
+  reason this module, not `Subscription`, has to be the one to act on it: rejection here is
+  per-**request**, so one symbol the venue's streaming category does not carry fails the
+  *entire* shard's batch — measured live as 17 of one consumer's 342 symbols, named
+  byte-for-byte identically every 60-second resubscribe tick, taking `stream_covered` to
+  0/342 and every pair to REST polling (the sustained 429 storm DpCryptoManagement's issue
+  #23 first surfaced).
+
+  Handled the same way `:oversubscribed` already is — see `handle_subscribe_result/3` and
+  the retry branch in `reshard_step/4` — because the shape is the same: a structured venue
+  answer this package can act on automatically rather than a caller-visible failure. The
+  named symbols are recorded in `state.rejected` with an expiry and excluded from
+  `plan_reshard/1`'s effective wanted set (`active_rejections/1`), so the *next* chunk built
+  for that shard carries only the symbols the venue actually accepts, and every other shard
+  is untouched.
+
+  **`state.wanted` is never pruned.** Only what `plan_reshard/1` treats as *wantable right
+  now* shrinks — a rejected symbol stays in `wanted` for exactly the reason `coverage/1` is
+  observed rather than intended: the host asked for it, and whether the venue currently
+  carries it is a separate, time-bound fact. `active_rejections/1` returning it to eligibility
+  the moment its entry expires is what lets it flow straight back into a shard on the very
+  next reshard-triggering event — the same 60-second resubscribe tick that discovered the
+  rejection, once `resync/1` runs off it again — with nobody calling `update_symbols/2`.
+
+  **`@rejected_symbol_ttl_ms` defaults to 24 hours, deliberately matching
+  `DpCryptoManagement.Data.Collection.VenueRefusals`' own TTL for exactly this shape of
+  fact**: a venue's streaming catalogue is true at a point in time, not permanently, and a
+  symbol it refuses today can be listed later. Picked to be the same order of magnitude as
+  that consumer-side cache rather than independently guessed — two different TTLs for the
+  same underlying fact would mean the two layers disagree about how stale a "the venue
+  refuses this" belief is allowed to get. Overridable per call via `opts[:rejected_symbol_ttl_ms]`
+  for a consumer with a documented reason to want a different number.
+
+  **Reported, not just filtered.** A filtered symbol that only ever disappears from shard
+  composition is coverage silently shrinking — this module's data stream never reports it
+  either way (see "Coverage is observed, never intended" above: it was never delivering, so
+  it was never in `coverage/1` to begin with), so the *only* way a consumer learns 17 of its
+  342 symbols stopped being tried is a `Core.Notice`. Emitted as `:refusal` — Core's own
+  documented kind for exactly this ("a symbol the venue will not carry"), not a
+  package-invented one — naming the rejected symbols in canonical form, the same reason
+  `Subscription` converts them before this module ever sees them: a notice is public, gets
+  pasted into issues, and must never carry a venue-native string a consumer has no mapping
+  for.
+
   ## Shard assignment is sticky, not recomputed from scratch
 
   A symbol already assigned to a shard keeps that shard for as long as it stays wanted,
@@ -217,6 +264,13 @@ defmodule DpExchange.Webull.Feed do
   # Feed for the reconnect case; here it is load-bearing for a case Coinbase does not
   # have — see DpCryptoManagement's issue #17.
   @resubscribe_interval_ms 60_000
+
+  # See the moduledoc's "A venue-rejected symbol is excluded, timed, and reported" —
+  # deliberately the same order of magnitude as
+  # `DpCryptoManagement.Data.Collection.VenueRefusals`' own 24h TTL for exactly this shape
+  # of fact (a venue catalogue is true at a point in time, not permanently). Overridable via
+  # `opts[:rejected_symbol_ttl_ms]`.
+  @rejected_symbol_ttl_ms 24 * 60 * 60 * 1000
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -317,7 +371,13 @@ defmodule DpExchange.Webull.Feed do
        # stated ceiling applies unmodified. See handle_subscribe_result/3. Also an init
        # option, so a test can exercise rebalancing without needing @pairs_per_socket
        # real symbols to do it.
-       shard_capacity: Keyword.get(opts, :shard_capacity, %{})
+       shard_capacity: Keyword.get(opts, :shard_capacity, %{}),
+       # symbol => expiry (`:os.system_time(:millisecond)`). Excluded from
+       # `plan_reshard/1`'s effective wanted set while unexpired — see the moduledoc's "A
+       # venue-rejected symbol is excluded, timed, and reported". Never removed from
+       # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
+       rejected: %{},
+       rejected_symbol_ttl_ms: Keyword.get(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms)
      }}
   end
 
@@ -510,7 +570,20 @@ defmodule DpExchange.Webull.Feed do
   # exactly what is already wanted computes an empty diff.
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
-    {:noreply, Enum.reduce(state.shards, state, &resubscribe_shard/2)}
+    state = Enum.reduce(state.shards, state, &resubscribe_shard/2)
+
+    # A TTL-expired rejection (see the moduledoc's "A venue-rejected symbol is excluded,
+    # timed, and reported") only ever returns to a shard's own symbol list through
+    # `plan_reshard/1` — this ordinary blind reassert above sends exactly what a shard
+    # already remembers, which no longer includes a symbol trimmed off it after a
+    # rejection. Guarded on `state.rejected` being non-empty rather than run
+    # unconditionally: an always-on `resync/1` here would recompute composition against
+    # `state.wanted` for every shard on every tick regardless of whether this package has
+    # ever recorded a rejection, which is a real behaviour change this fix has no reason
+    # to make.
+    state = if state.rejected == %{}, do: state, else: resync(state)
+
+    {:noreply, state}
   end
 
   # A shard's socket links here (`Socket.start_link/1` -> `WebSockex.start_link/4`), and
@@ -541,6 +614,16 @@ defmodule DpExchange.Webull.Feed do
 
     case result do
       {:error, :oversubscribed} when retries_left > 0 ->
+        {:noreply, reshard_step(state, opts, from, retries_left - 1)}
+
+      {:error, {:invalid_symbols, _symbols}} when retries_left > 0 ->
+        # Same reasoning as :oversubscribed above: the batch this shard just tried included
+        # a symbol the venue refuses, which failed the WHOLE request — retrying immediately
+        # with `plan_reshard/1` now excluding it (via `handle_subscribe_result/3` just above,
+        # which recorded the rejection before this case runs) is what lets the caller's own
+        # reply be a clean `:ok` for the rest despite this shard's first attempt being
+        # refused. See the moduledoc's "A venue-rejected symbol is excluded, timed, and
+        # reported".
         {:noreply, reshard_step(state, opts, from, retries_left - 1)}
 
       _settled ->
@@ -642,7 +725,8 @@ defmodule DpExchange.Webull.Feed do
   # nothing worth trading away the correctness of not reopening a connection that never
   # actually needed to close.
   defp plan_reshard(state) do
-    {new_shards, overflow} = derive_shards(state.wanted, state.shard_capacity, state.shards)
+    effective_wanted = MapSet.difference(state.wanted, active_rejections(state))
+    {new_shards, overflow} = derive_shards(effective_wanted, state.shard_capacity, state.shards)
     existing_indices = Map.keys(state.shards)
     wanted_indices = Map.keys(new_shards)
     new_indices = wanted_indices -- existing_indices
@@ -874,7 +958,49 @@ defmodule DpExchange.Webull.Feed do
     {%{state | shard_capacity: Map.put(state.shard_capacity, index, new_capacity)}, true}
   end
 
+  # `symbols` arrives already canonical — `Subscription`'s own job, see its moduledoc — so
+  # nothing venue-shaped reaches `state.rejected` or the `Notice` below. See the moduledoc's
+  # "A venue-rejected symbol is excluded, timed, and reported" (DpCryptoManagement's issue
+  # #24): recorded with an expiry so `plan_reshard/1` excludes them from this shard's next
+  # chunk (`true` below runs `resync/1` on every caller of this function except the
+  # synchronous primary retry, which instead loops back through `reshard_step/4` itself),
+  # and surfaced as a `:refusal` notice — Core's own documented kind for this — because a
+  # symbol that only ever disappears from shard composition is coverage silently shrinking
+  # with no way for a consumer to learn why.
+  defp handle_subscribe_result(state, index, {:error, {:invalid_symbols, symbols}}) do
+    expires_at = :os.system_time(:millisecond) + state.rejected_symbol_ttl_ms
+    rejected = Enum.reduce(symbols, state.rejected, &Map.put(&2, &1, expires_at))
+
+    Logger.warning(
+      "[Webull Feed] shard #{index} rejected #{length(symbols)} symbol(s) as " <>
+        "INVALID_SYMBOL (#{inspect(symbols)}) — excluded from shard composition for " <>
+        "#{div(state.rejected_symbol_ttl_ms, 3_600_000)}h or until the venue relists them"
+    )
+
+    fan_out(
+      state.notice_subscribers,
+      {:dp_exchange, :webull,
+       Notice.new(:refusal, :webull,
+         message: "webull refuses #{length(symbols)} symbol(s): #{Enum.join(symbols, ", ")}",
+         details: %{symbols: symbols}
+       )}
+    )
+
+    {%{state | rejected: rejected}, true}
+  end
+
   defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  # Unexpired entries in `state.rejected` — the symbols `plan_reshard/1` must exclude from
+  # this pass's effective wanted set. An expired entry is treated as no longer rejected
+  # without needing to be actively pruned from the map first; see the moduledoc.
+  defp active_rejections(state) do
+    now = :os.system_time(:millisecond)
+
+    state.rejected
+    |> Enum.filter(fn {_symbol, expires_at} -> expires_at > now end)
+    |> MapSet.new(fn {symbol, _expires_at} -> symbol end)
+  end
 
   # The only case §3.5 says cannot be absorbed internally: every shard already at
   # capacity and there is nowhere left to put a symbol. Reported, never silently dropped

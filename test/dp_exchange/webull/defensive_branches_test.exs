@@ -281,6 +281,100 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     end
   end
 
+  describe "INVALID_SYMBOL names the offending symbols — DpCryptoManagement's issue #24" do
+    # The real shape, measured against the venue and confirmed by
+    # `dp_crypto_management`'s own `VenueRefusalsTest` fixture for a single symbol:
+    # `"The symbols does not exist in the category. [BNBUSD]"`.
+    test "a single named symbol becomes a structured, canonical error", %{limiter: limiter} do
+      body = %{
+        "error_code" => "INVALID_SYMBOL",
+        "message" => "The symbols does not exist in the category. [BNBUSD]"
+      }
+
+      assert {:error, {:invalid_symbols, ["BNB-USD"]}} =
+               Subscription.subscribe("session-1", ["BNB-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug: responding(body, 417),
+                 retry_attempts: 0
+               )
+    end
+
+    # The reporter's own shape: several bad symbols named in one shard's rejection,
+    # comma-separated inside the same brackets.
+    test "several named symbols all come back canonical", %{limiter: limiter} do
+      body = %{
+        "error_code" => "INVALID_SYMBOL",
+        "message" =>
+          "The symbols does not exist in the category. " <>
+            "[GYENUSD, GALAUSD, LUNAUSD, FXUSD, LUNCUSD, MOBILEUSD, MPLUSD, GUSDUSD]"
+      }
+
+      assert {:error, {:invalid_symbols, symbols}} =
+               Subscription.subscribe(
+                 "session-1",
+                 [
+                   "GYEN-USD",
+                   "GALA-USD",
+                   "LUNA-USD",
+                   "FX-USD",
+                   "LUNC-USD",
+                   "MOBILE-USD",
+                   "MPL-USD",
+                   "GUSD-USD"
+                 ],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug: responding(body, 417),
+                 retry_attempts: 0
+               )
+
+      assert symbols == [
+               "GYEN-USD",
+               "GALA-USD",
+               "LUNA-USD",
+               "FX-USD",
+               "LUNC-USD",
+               "MOBILE-USD",
+               "MPL-USD",
+               "GUSD-USD"
+             ]
+    end
+
+    test "a message naming no symbols falls through to the opaque error, never an empty list",
+         %{limiter: limiter} do
+      body = %{
+        "error_code" => "INVALID_SYMBOL",
+        "message" => "The symbols does not exist in the category."
+      }
+
+      assert {:error, {:exchange_error, :webull, message}} =
+               Subscription.subscribe("session-1", ["BTC-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug: responding(body, 417),
+                 retry_attempts: 0
+               )
+
+      assert message =~ "INVALID_SYMBOL"
+    end
+
+    test "an empty bracket is also not read as naming zero symbols", %{limiter: limiter} do
+      body = %{
+        "error_code" => "INVALID_SYMBOL",
+        "message" => "The symbols does not exist in the category. []"
+      }
+
+      assert {:error, {:exchange_error, :webull, _message}} =
+               Subscription.subscribe("session-1", ["BTC-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug: responding(body, 417),
+                 retry_attempts: 0
+               )
+    end
+  end
+
   describe "the facade's streaming callbacks reach the feed" do
     test "subscribe, unsubscribe, update and notices all route", %{limiter: limiter} do
       unique = System.unique_integer([:positive])

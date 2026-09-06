@@ -26,6 +26,30 @@ defmodule DpExchange.Webull.Subscription do
   the lowercase topic names here got every subscribe rejected `HTTP 417
   UNSUPPORTED_SUB_TYPE` — DpCryptoManagement's issue #19, filed right after #18 unblocked
   the request enough to reach this validation for the first time.
+
+  ## `INVALID_SYMBOL` names the offending symbols, and this module hands them back
+
+  Rejection here is per-**request**, not per-symbol: one symbol the venue's streaming
+  category does not carry fails the *entire* batch, and the venue answers with
+  `{"error_code" => "INVALID_SYMBOL", "message" => "The symbols does not exist in the
+  category. [SYM1, SYM2, ...]"}` — measured from `Feed`'s own resubscribe logs
+  (DpCryptoManagement's issue #24): 17 of one consumer's 342 symbols named this way, every
+  60-second resubscribe tick, forever, because nothing downstream could act on the answer.
+  Before this, that whole response collapsed into the generic `{:exchange_error, :webull,
+  "HTTP 417: ..."}` string below — a caller could log it, and could not pattern-match a
+  single symbol out of it.
+
+  `invalid_symbols/1` parses the bracketed list out of `message` and this function converts
+  every entry back to CANONICAL form before it returns — no venue-shaped symbol string is
+  allowed to escape this module. `Feed` (not this module) decides what happens to a rejected
+  symbol; this module's only job, same as `:oversubscribed` below, is to make the venue's
+  answer something a caller can act on rather than only read.
+
+  **A message the parser cannot attribute to any symbol is not treated as naming zero
+  symbols.** It falls through to the same opaque `{:exchange_error, ...}` shape a 417 with
+  no recognisable list already produced — inventing an empty exclusion list from a
+  rejection nobody could attribute would look like "nothing was rejected" to `Feed`, which
+  is the one interpretation this response never supports.
   """
 
   alias DpExchange.Core.HttpClient
@@ -92,6 +116,18 @@ defmodule DpExchange.Webull.Subscription do
           # with nothing to pattern-match to recover automatically.
           {:error, :oversubscribed}
 
+        {:ok, %{status: 417, body: %{"error_code" => "INVALID_SYMBOL"} = response_body}} ->
+          # See the moduledoc's "`INVALID_SYMBOL` names the offending symbols" —
+          # DpCryptoManagement's issue #24.
+          case invalid_symbols(response_body) do
+            {:ok, native_symbols} ->
+              {:error,
+               {:invalid_symbols, Enum.map(native_symbols, &SymbolFormat.to_canonical_symbol/1)}}
+
+            :error ->
+              {:error, {:exchange_error, :webull, "HTTP 417: #{inspect(response_body)}"}}
+          end
+
         {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
           {:error, {:refused, status, response}}
 
@@ -103,6 +139,36 @@ defmodule DpExchange.Webull.Subscription do
       end
     end
   end
+
+  # Pulls the bracketed, comma-separated symbol list out of an `INVALID_SYMBOL` body's
+  # `message` — `"The symbols does not exist in the category. [BNBUSD]"` for one symbol,
+  # `"... [GYENUSD, GALAUSD, ...]"` for several — measured against the real venue response
+  # (DpCryptoManagement's issue #24). Every symbol named here is still venue-shaped
+  # (native); the caller above converts to canonical before this module returns anything.
+  #
+  # `:error` — never `{:ok, []}` — for anything the regex cannot find a bracketed,
+  # non-empty list in. See the moduledoc: a rejection this module cannot attribute to a
+  # symbol must fall through to the opaque `exchange_error` shape, not be reported as
+  # zero rejected symbols.
+  @invalid_symbol_list ~r/\[([^\]]+)\]/
+
+  defp invalid_symbols(%{"message" => message}) when is_binary(message) do
+    case Regex.run(@invalid_symbol_list, message) do
+      [_match, listed] ->
+        case listed
+             |> String.split(",")
+             |> Enum.map(&String.trim/1)
+             |> Enum.reject(&(&1 == "")) do
+          [] -> :error
+          symbols -> {:ok, symbols}
+        end
+
+      nil ->
+        :error
+    end
+  end
+
+  defp invalid_symbols(_other), do: :error
 
   # `:rate_limit_blocking` is forwarded, never defaulted, here — see `Feed`'s moduledoc
   # ("The resubscribe timer must never fail-fast", DpCryptoManagement's issue #23). This

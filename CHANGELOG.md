@@ -20,6 +20,53 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **17 venue-rejected symbols were blocking all 342 of a consumer's pairs from streaming,
+  permanently — DpCryptoManagement's issue #24.** Webull's subscribe is rejected
+  **per request, not per symbol**: one symbol its streaming category does not carry fails
+  the entire shard's batch. The venue answers `HTTP 417 INVALID_SYMBOL` and names the
+  offending symbols in `message` (`"The symbols does not exist in the category.
+  [BNBUSD]"` for one, a comma-separated bracketed list for several — confirmed against the
+  real response shape and against `DpCryptoManagement.Data.Collection.VenueRefusalsTest`'s
+  own fixture), byte-for-byte identical every 60-second resubscribe tick, forever — because
+  nothing downstream could act on it. `Subscription.subscribe/3` collapsed the whole
+  response into an opaque `{:exchange_error, :webull, "HTTP 417: ..."}` string, the
+  treatment its sibling `TOO_MANY_SYMBOLS_SUBSCRIPTION` was deliberately spared (see that
+  clause's own comment). Measured consumer impact: `stream_covered` 0/342, every pair
+  falling back to REST polling, which is where the sustained HTTP 429 storm from issue #23
+  came from.
+
+  `Subscription` now matches `INVALID_SYMBOL` specifically, parses the venue's own named
+  symbols out of `message`, and converts them back to canonical form
+  (`SymbolFormat.to_canonical_symbol/1`) before returning `{:error, {:invalid_symbols,
+  [canonical_symbol, ...]}}` — mirroring `:oversubscribed`'s existing structured shape. A
+  message the parser cannot attribute to any symbol falls through to the previous opaque
+  error rather than inventing an empty exclusion list — a rejection nobody can attribute is
+  not one `Feed` can act on.
+
+  `Feed` records each rejected symbol with a 24-hour expiry (`state.rejected`, overridable
+  via `opts[:rejected_symbol_ttl_ms]` — deliberately the same order of magnitude as
+  `DpCryptoManagement.Data.Collection.VenueRefusals`' own TTL for exactly this shape of
+  fact: a venue's streaming catalogue is true at a point in time, not permanently) and
+  excludes unexpired entries from `plan_reshard/1`'s effective wanted set, so the next
+  chunk built for an affected shard carries only symbols the venue actually accepts. A
+  rejection is retried immediately within the same call via the existing
+  `reshard_step/4` retry (same mechanism as `:oversubscribed`), so a caller's own
+  `subscribe/3` still returns a clean `:ok` for the good symbols despite the shard's first
+  attempt being refused. `state.wanted` is never pruned — only what's currently eligible for
+  shard composition shrinks — so a symbol's exclusion lapses on its own once the TTL expires
+  and the next resubscribe tick's `resync/1` (now also run whenever `state.rejected` is
+  non-empty) places it back into a shard, with nobody calling `update_symbols/2`.
+
+  Also emitted as a `Core.Notice` — `:refusal`, Core's own documented kind for "a symbol
+  the venue will not carry" — naming the rejected symbols in canonical form, since a symbol
+  excluded from shard composition never appears (or fails to appear) in `coverage/1` either
+  way, and a notice is the only way a consumer learns why 17 of its 342 symbols stopped
+  being tried. This is what lets a consumer's own venue-refusal cache (e.g.
+  `DpCryptoManagement.Data.Collection.VenueRefusals`) populate for this venue for the first
+  time.
+
 ### Added
 
 - **`coverage_by_kind/1`, `dp_exchange_core`'s new optional contract callback (`~> 0.1.48`,

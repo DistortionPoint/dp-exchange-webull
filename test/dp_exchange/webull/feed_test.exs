@@ -1058,4 +1058,221 @@ defmodule DpExchange.Webull.FeedTest do
       assert session_id not in ["shard-0", "shard-1"]
     end
   end
+
+  describe "a venue-rejected symbol is excluded, timed, and reported — DpCryptoManagement's issue #24" do
+    # The reporter's own shape: 17 bad symbols among 342, spread across four shards, each
+    # shard's WHOLE batch rejected because one (or several) of its symbols are unrecognised.
+    # This proves the blast radius is actually gone: the good symbols on both shards end up
+    # subscribed, not just the ones on an untouched shard.
+    test "several bad symbols across shards are excluded while every good symbol keeps subscribing",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        session_id = decoded["session_id"]
+        symbols = decoded["symbols"]
+        send(test_pid, {:request, conn.request_path, session_id, symbols})
+
+        cond do
+          session_id == "shard-0" and conn.request_path == "/market-data/streaming/subscribe" and
+              "BADONEUSD" in symbols ->
+            conn
+            |> Plug.Conn.put_status(417)
+            |> Req.Test.json(%{
+              "error_code" => "INVALID_SYMBOL",
+              "message" => "The symbols does not exist in the category. [BADONEUSD]"
+            })
+
+          session_id == "shard-1" and conn.request_path == "/market-data/streaming/subscribe" and
+              Enum.any?(symbols, &(&1 in ["BADTWOUSD", "BADTHREEUSD"])) ->
+            conn
+            |> Plug.Conn.put_status(417)
+            |> Req.Test.json(%{
+              "error_code" => "INVALID_SYMBOL",
+              "message" => "The symbols does not exist in the category. [BADTWOUSD, BADTHREEUSD]"
+            })
+
+          true ->
+            Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      shard0 = %{connected_shard("shard-0") | symbols: ["AAA-USD", "BADONE-USD", "CCC-USD"]}
+
+      shard1 = %{
+        connected_shard("shard-1")
+        | symbols: ["DDD-USD", "BADTWO-USD", "BADTHREE-USD"]
+      }
+
+      feed =
+        start_feed(
+          shards: %{0 => shard0, 1 => shard1},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      :sys.replace_state(
+        feed,
+        &%{
+          &1
+          | wanted:
+              MapSet.new([
+                "AAA-USD",
+                "BADONE-USD",
+                "CCC-USD",
+                "DDD-USD",
+                "BADTWO-USD",
+                "BADTHREE-USD"
+              ])
+        }
+      )
+
+      send(feed, :resubscribe)
+
+      # Both shards' first attempt, rejected whole — one bad symbol failed each shard's
+      # entire batch, exactly the blast radius the issue reports.
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-0",
+                      ["AAAUSD", "BADONEUSD", "CCCUSD"]}
+
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-1",
+                      ["DDDUSD", "BADTWOUSD", "BADTHREEUSD"]}
+
+      # The rejection triggers a background trim on each shard, dropping only the symbols
+      # the venue actually named.
+      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BADONEUSD"]}
+
+      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-1", removed1}
+      assert Enum.sort(removed1) == Enum.sort(["BADTWOUSD", "BADTHREEUSD"])
+
+      # The next tick reasserts each shard with only the good symbols — and it succeeds.
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-0", good0}
+      assert Enum.sort(good0) == Enum.sort(["AAAUSD", "CCCUSD"])
+
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["DDDUSD"]}
+    end
+
+    test "a subscribe naming bad symbols excludes them and still returns :ok for the rest, in the same call",
+         %{limiter: limiter} do
+      # Mirrors the existing oversubscribed synchronous-retry test: the retry inside
+      # reshard_step/4 is what makes the caller's own reply a clean :ok despite the venue
+      # having refused the first attempt.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(test_pid, {:request, conn.request_path, decoded["symbols"]})
+
+        if conn.request_path == "/market-data/streaming/subscribe" and
+             "BADUSD" in decoded["symbols"] do
+          conn
+          |> Plug.Conn.put_status(417)
+          |> Req.Test.json(%{
+            "error_code" => "INVALID_SYMBOL",
+            "message" => "The symbols does not exist in the category. [BADUSD]"
+          })
+        else
+          Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      feed = start_feed(shards: %{0 => connected_shard("shard-0")})
+
+      assert :ok =
+               Feed.subscribe(feed, ["GOOD-USD", "BAD-USD"], subscribe_opts(limiter, plug: plug))
+
+      assert_receive {:request, "/market-data/streaming/subscribe", ["BADUSD", "GOODUSD"]}
+      assert_receive {:request, "/market-data/streaming/unsubscribe", ["BADUSD"]}
+    end
+
+    test "a :refusal notice names the rejected symbols in canonical form", %{limiter: limiter} do
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        if conn.request_path == "/market-data/streaming/subscribe" and
+             "BADUSD" in decoded["symbols"] do
+          conn
+          |> Plug.Conn.put_status(417)
+          |> Req.Test.json(%{
+            "error_code" => "INVALID_SYMBOL",
+            "message" => "The symbols does not exist in the category. [BADUSD]"
+          })
+        else
+          Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      feed = start_feed(shards: %{0 => connected_shard("shard-0")})
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      assert :ok =
+               Feed.subscribe(feed, ["GOOD-USD", "BAD-USD"], subscribe_opts(limiter, plug: plug))
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :refusal, details: details}}
+      assert details.symbols == ["BAD-USD"]
+    end
+
+    test "a rejection's TTL expiring returns the symbol to shard composition automatically",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(test_pid, {:request, conn.request_path, decoded["symbols"]})
+
+        if conn.request_path == "/market-data/streaming/subscribe" and
+             "BADUSD" in decoded["symbols"] do
+          conn
+          |> Plug.Conn.put_status(417)
+          |> Req.Test.json(%{
+            "error_code" => "INVALID_SYMBOL",
+            "message" => "The symbols does not exist in the category. [BADUSD]"
+          })
+        else
+          Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["GOOD-USD", "BAD-USD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0,
+          rejected_symbol_ttl_ms: 20
+        )
+
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["GOOD-USD", "BAD-USD"])})
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD", "BADUSD"]}
+      # This trim only completes (updating the shard's own remembered symbol list) once
+      # this unsubscribe fires — a reliable barrier for the next tick to observe it.
+      assert_receive {:request, "/market-data/streaming/unsubscribe", ["BADUSD"]}
+
+      # Well inside the TTL: BAD-USD stays excluded.
+      send(feed, :resubscribe)
+      assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD"]}
+
+      # Past the TTL: the same tick's own resync picks BAD-USD back up as eligible.
+      Process.sleep(30)
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "/market-data/streaming/subscribe", symbols_a}
+      assert_receive {:request, "/market-data/streaming/subscribe", symbols_b}
+      assert "BADUSD" in (symbols_a ++ symbols_b)
+    end
+  end
 end
