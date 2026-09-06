@@ -35,7 +35,7 @@ defmodule DpExchange.Webull.DelegationTest do
   @credentials %{app_key: "key", app_secret: "secret"}
   @account "93IUJ28O9VO2KBGHDHR4H9"
 
-  defp base(extra \\ []) do
+  defp base(extra) do
     Keyword.merge([credentials: @credentials, retry_attempts: 0], extra)
   end
 

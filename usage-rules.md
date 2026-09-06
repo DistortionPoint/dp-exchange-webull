@@ -34,6 +34,12 @@ children = [{DpExchange.Webull, credentials: my_credentials()}]
 Passing credentials at start is what lets the package **replay your subscriptions after a
 reconnect** — see below. Without them, a reconnect cannot re-subscribe.
 
+**You never need to pass `:limiter` yourself.** The supervision tree above starts and names
+its own rate limiter, and every call this package makes on your behalf — the reconnect
+replay, the 60-second blind resubscribe, and `subscribe/2`/`unsubscribe/2`/`update_symbols/2`
+called with no `:limiter` in `opts` — is wired to it automatically. If you do pass one
+explicitly, it wins.
+
 ## Subscribing is two protocols, and you see neither
 
 Market data arrives over MQTT on a WebSocket. Subscriptions are HTTP calls. They are joined
@@ -249,6 +255,33 @@ is a 200 that did nothing — reported here as `{:refused, :watchlist_write_reje
 **Creating with members is two requests.** Where the add fails, the watchlist exists and is
 empty: `{:error, {:watchlist_created_without_members, id, reason}}` carries its id so you can
 deal with it.
+
+## A stop order needs `:stop_price`; a trailing stop needs `:trailing_stop_step`
+
+`place_order/3`'s `request` map takes the same field names for every instrument type, and
+which ones matter depends on `:order_type`:
+
+| `:order_type` | fields it needs |
+|---|---|
+| `:market` | `:quantity` or `:amount` |
+| `:limit` | the above, plus `:price` |
+| `:stop` | the sizing field, plus `:stop_price` — **no `:price`**, this order type has no limit leg |
+| `:stop_limit` | the sizing field, plus `:price` and `:stop_price` |
+| `:trailing_stop` | the sizing field, plus `:trailing_stop_step` |
+
+A field a given order type does not use is dropped rather than sent — a `:stop` request
+built from a `:limit` template (with `:price` left over) will not carry a stray
+`limit_price` the venue's schema for `STOP_LOSS` does not have. Read the fields back the
+same way: `get_order/2` and the struct `place_order/3` hands back both carry `:stop_price`
+on a stop or stop-limit order, `nil` on anything else.
+
+**Which pairs of `:order_type` and `:time_in_force` this venue actually accepts differs by
+instrument** — crypto's list is five pairs (`MARKET`/IOC, `LIMIT` and `STOP_LOSS_LIMIT` at
+DAY or GTC — no plain `STOP_LOSS`, no `TRAILING_STOP_LOSS`); equity, option and futures
+orders add `STOP_LOSS` and (equity/option only) `TRAILING_STOP_LOSS`; an event contract
+takes `LIMIT` only, at any of five time-in-force values. A pair outside the matrix is
+refused before the request is sent, naming both halves of what was wrong, rather than being
+sent and rejected by the venue.
 
 ## Batch orders: fifty, equities, and one request
 

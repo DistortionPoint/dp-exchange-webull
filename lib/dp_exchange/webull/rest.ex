@@ -3240,6 +3240,7 @@ defmodule DpExchange.Webull.Rest do
         |> Map.merge(sizing)
         |> put_present("limit_price", price_for(request, order_type))
         |> put_present("stop_price", stop_for(request, order_type))
+        |> put_present("trailing_stop_step", trailing_stop_step_for(request, order_type))
         |> put_present("expire_date", expire_date(request, tif))
         |> put_present("event_outcome", Map.get(request, :event_outcome))
 
@@ -3300,11 +3301,37 @@ defmodule DpExchange.Webull.Rest do
   defp amount_entrust(_order_type, _instrument, amount),
     do: {:ok, "AMOUNT", %{"amount" => to_string(amount)}}
 
-  defp price_for(_request, "MARKET"), do: nil
-  defp price_for(request, _order_type), do: Map.get(request, :price)
+  # Only the two order types the venue documents `limit_price` for actually take it — see
+  # the field table on `replace_order/4`'s own moduledoc, read from the same vendor
+  # reference: `LIMIT` and `STOP_LOSS_LIMIT`. A plain `STOP_LOSS` has no limit leg at all,
+  # only a trigger, and sending one anyway would assert a field the venue's schema for that
+  # order type does not have — a caller building a stop request from a limit-order template
+  # (leaving `:price` set) must not have it silently escape onto the wire on the wrong order
+  # type.
+  defp price_for(request, "LIMIT"), do: Map.get(request, :price)
+  defp price_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :price)
+  defp price_for(_request, _order_type), do: nil
 
+  # **`STOP_LOSS` needs its trigger exactly as much as `STOP_LOSS_LIMIT` does** — the field
+  # table on `replace_order/4`'s own moduledoc names `stop_price` for both. Sending only the
+  # limit-leg variant meant every plain stop-loss order this package built — a real,
+  # `@combinations`-listed pair for equity, option and futures instruments — went out with
+  # no trigger price at all: the single field that makes it a stop order.
+  defp stop_for(request, "STOP_LOSS"), do: Map.get(request, :stop_price)
   defp stop_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :stop_price)
   defp stop_for(_request, _order_type), do: nil
+
+  # **Never sent at all before this fix.** `TRAILING_STOP_LOSS` is a real, `@combinations`-
+  # listed order type for equity, option and futures instruments, and the venue's own
+  # `replace_order/4` field table (and `@amendable` below) names `trailing_stop_step` as the
+  # one field that type takes. `order_leaf/3` built every other field for it — instrument,
+  # side, sizing, time in force — and never this one, so every trailing-stop order this
+  # package placed reached the venue with no trail distance configured at all. A caller who
+  # supplied `:trailing_stop_step` had it silently discarded rather than reaching the wire.
+  defp trailing_stop_step_for(request, "TRAILING_STOP_LOSS"),
+    do: Map.get(request, :trailing_stop_step)
+
+  defp trailing_stop_step_for(_request, _order_type), do: nil
 
   # 32 characters maximum, unique per account, and the venue's own reference for the order.
   defp client_order_id(request) do
@@ -3335,6 +3362,13 @@ defmodule DpExchange.Webull.Rest do
            time_in_force: tif_atom(tif),
            quantity: Map.get(request, :quantity),
            price: Map.get(request, :price),
+           # Echoed from the caller's own request, the same as `price` and `quantity`
+           # above — the venue's `/orders/place` response carries only the accepted
+           # `client_order_id` and nothing else to build an `Order` from. Missing before
+           # this fix, the same gap `stop_for/2` had on the request side: a caller placing
+           # a STOP_LOSS or STOP_LOSS_LIMIT order got `stop_price: nil` back from the very
+           # call that set it.
+           stop_price: Map.get(request, :stop_price),
            status: :pending,
            provider: :webull
          }}
@@ -3442,6 +3476,15 @@ defmodule DpExchange.Webull.Rest do
 
   # The venue's own order row. Anything it names that this package does not recognise
   # becomes `nil` rather than the nearest atom.
+  #
+  # `stop_price`/`stopPrice` follows the exact dual-naming convention already proven
+  # correct for every other field on this same row (`limit_price`/`limitPrice`,
+  # `avg_filled_price`/`avgFilledPrice`, …) — it was missing entirely before this fix, so a
+  # caller reading back their own STOP_LOSS or STOP_LOSS_LIMIT order via `get_order/3` or
+  # `get_orders/2` got `stop_price: nil` regardless of what the venue actually reported,
+  # even though `Core.Types.Order` carries the field for exactly this purpose. Not
+  # independently re-verified against a rendered schema capture the way `replace_order/4`'s
+  # own field table was — flagged here rather than presented as measured.
   defp to_order(row) do
     %Order{
       id: value(row, ["client_order_id", "clientOrderId"]),
@@ -3452,6 +3495,7 @@ defmodule DpExchange.Webull.Rest do
       quantity: decimal(value(row, ["qty", "quantity"])),
       filled_quantity: decimal(value(row, ["filled_qty", "filledQty"])),
       price: decimal(value(row, ["limit_price", "limitPrice"])),
+      stop_price: decimal(value(row, ["stop_price", "stopPrice"])),
       average_price: decimal(value(row, ["avg_filled_price", "avgFilledPrice"])),
       status: row |> value(["order_status", "status"]) |> status_atom(),
       provider: :webull

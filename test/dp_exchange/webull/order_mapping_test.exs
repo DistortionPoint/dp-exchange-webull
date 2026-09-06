@@ -148,6 +148,24 @@ defmodule DpExchange.Webull.OrderMappingTest do
     test "a missing symbol leaves the symbol nil rather than crashing" do
       assert fetch(%{"symbol" => nil}).symbol == nil
     end
+
+    # `stop_price` was missing from `to_order/1` entirely: `Core.Types.Order` carries the
+    # field, and this package's own `place_order/3`/`replace_order/4` both send it for a
+    # STOP_LOSS or STOP_LOSS_LIMIT order, but reading one back always answered `nil`
+    # regardless of what the venue reported.
+    test "a stop order's trigger price round-trips through get_order" do
+      assert fetch(%{"order_type" => "STOP_LOSS", "stop_price" => "175.00"}).stop_price ==
+               Decimal.new("175.00")
+    end
+
+    test "the camelCase form decodes too, matching every other field on this row" do
+      assert fetch(%{"order_type" => "STOP_LOSS", "stopPrice" => "175.00"}).stop_price ==
+               Decimal.new("175.00")
+    end
+
+    test "an order with no stop leaves stop_price nil rather than 0" do
+      assert fetch(%{"order_type" => "LIMIT"}).stop_price == nil
+    end
   end
 
   describe "what the venue said when it said no" do

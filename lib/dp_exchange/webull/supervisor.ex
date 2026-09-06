@@ -35,9 +35,27 @@ defmodule DpExchange.Webull.Supervisor do
 
   @impl true
   def init(opts) do
+    # `Feed` never guesses a limiter name for itself — it only ever forwards whatever
+    # `:limiter` its own opts carry (into `resubscribe_opts`, and from there into every
+    # blind resubscribe and reconnect replay). Starting it with the bare `opts` this tree
+    # was given, the way `feed_name`/`name` above are threaded, silently left `:limiter`
+    # absent whenever a consumer followed the documented `children = [{DpExchange.Webull,
+    # []}]` form: `Core.HttpClient` then resolved the limiter by its bare module name
+    # (`DpExchange.Core.DefaultRateLimiter`), which nothing in this tree starts under that
+    # name — only under `limiter_name(opts)`, registered just above — so every HTTP call
+    # `Subscription` makes on `Feed`'s behalf failed closed with "Rate limiter
+    # unavailable", every time, for any consumer who did not separately pass `:limiter`
+    # explicitly on every single call. `with_limiter/1` on the facade already defaults it
+    # for every REST-backed function; this is the same default, made explicit here so
+    # `Feed`'s own `resubscribe_opts` — built once at `init/1` and replayed on every
+    # reconnect and blind resubscribe thereafter — actually names the limiter this
+    # Supervisor just started, not the one nobody starts.
     children = [
       {DefaultRateLimiter, name: limiter_name(opts), limits: limits()},
-      {Feed, Keyword.put(opts, :name, feed_name(opts))}
+      {Feed,
+       opts
+       |> Keyword.put_new(:limiter, limiter_name(opts))
+       |> Keyword.put(:name, feed_name(opts))}
     ]
 
     # `:one_for_one` — the feed losing its socket is not a reason to reset the limiter,

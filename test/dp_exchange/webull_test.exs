@@ -129,6 +129,70 @@ defmodule DpExchange.WebullTest do
       assert Webull.coverage_by_kind(feed: opts[:feed]) == %{}
     end
 
+    test "a consumer who names no :limiter still gets Feed wired to the limiter this tree started" do
+      # The documented usage is `children = [{DpExchange.Webull, []}]` — no `:limiter`
+      # anywhere. Before this test existed, `init/1` started `Feed` with the bare `opts`
+      # this tree was given, so `Feed`'s own `resubscribe_opts` (built once here and
+      # replayed on every reconnect and blind resubscribe) carried no `:limiter` at all.
+      # `Core.HttpClient` then resolved the limiter by its bare module name
+      # (`DpExchange.Core.DefaultRateLimiter`), which nothing in this tree starts under
+      # that name — only under `Supervisor.limiter_name/1`, registered a line above — and
+      # every HTTP call `Subscription` made on `Feed`'s behalf failed closed with "Rate
+      # limiter unavailable", proven live: `Feed.subscribe/3` against a connected shard
+      # with no `:limiter` in its call opts returned exactly that error.
+      unique = System.unique_integer([:positive])
+      opts = [name: :"sup_nolim_#{unique}", feed: :"feed_nolim_#{unique}"]
+
+      assert {:ok, pid} = Webull.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      resubscribe_opts = :sys.get_state(opts[:feed]).resubscribe_opts
+      assert resubscribe_opts[:limiter] == Supervisor.limiter_name(opts)
+    end
+
+    test "subscribe/2 reaches the venue with the default limiter, without the caller naming one" do
+      # The other half of the same gap: `Feed.touch_primary_shard/7` reconciles an
+      # already-connected shard synchronously using the CALLER's own opts, not
+      # `resubscribe_opts` — so a facade function that forwarded `opts` unchanged left this
+      # path with no default limiter either, even once `Supervisor.init/1` (tested above)
+      # supplied one for the reconnect/resubscribe paths. `with_limiter/1` on `subscribe/2`,
+      # `unsubscribe/2` and `update_symbols/2` is what closes this half.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["symbols"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      unique = System.unique_integer([:positive])
+      opts = [name: :"sup_sub_#{unique}", feed: :"feed_sub_#{unique}"]
+      assert {:ok, pid} = Webull.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      :sys.replace_state(opts[:feed], fn state ->
+        shard = %{
+          session_id: "s-nolim",
+          socket: self(),
+          connected?: true,
+          symbols: [],
+          reply_to: nil
+        }
+
+        put_in(state.shards[0], shard)
+      end)
+
+      assert :ok =
+               Webull.subscribe(["BTC-USD"],
+                 feed: opts[:feed],
+                 credentials: @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, ["BTCUSD"]}
+    end
+
     test "production and UAT derive different names, so both can run at once" do
       # And more importantly they do not share a rate-limit bucket: UAT traffic metering
       # against the production budget would throttle a real order with nothing pointing

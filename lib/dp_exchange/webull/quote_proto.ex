@@ -215,7 +215,21 @@ defmodule DpExchange.Webull.QuoteProto do
   end
 
   defp decode_nested(binary) when is_binary(binary), do: decode_message(binary)
-  defp decode_nested([first | _rest]) when is_binary(first), do: decode_message(first)
+
+  # `Basic basic = 1` is singular in the schema, so a wire walk seeing it more than once
+  # is the same legal-but-unusual case `scalar/1` documents for a scalar field: the LAST
+  # occurrence is proto3's rule, not the first. Matching `scalar/1`'s own rule here rather
+  # than picking the first keeps the two consistent — the bug this module's moduledoc
+  # records ("keep the LAST occurrence... but the code produced a list... rejected") was
+  # about a top-level scalar; this is the same rule applied to the one nested field this
+  # schema has.
+  defp decode_nested(list) when is_list(list) do
+    case Enum.filter(list, &is_binary/1) do
+      [] -> %{}
+      binaries -> binaries |> List.last() |> decode_message()
+    end
+  end
+
   defp decode_nested(_absent), do: %{}
 
   defp first_repeated(fields, field_number) do

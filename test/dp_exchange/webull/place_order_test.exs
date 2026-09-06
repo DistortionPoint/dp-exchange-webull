@@ -292,6 +292,19 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert {:error, :unexpected_response_shape} =
                place(limit_request(), plug: responding([]), account_id: @account)
     end
+
+    test "a stop order's trigger price is on the order it hands back, not just the wire body" do
+      # `/orders/place` answers with only the accepted client_order_id, so `to_placed_order/4`
+      # echoes `stop_price` from the caller's own request — the same way it already echoed
+      # `price` and `quantity`. Missing before this fix: a caller placing a stop-limit order
+      # got `stop_price: nil` back from the very call that set it.
+      request = limit_request(%{order_type: :stop_limit, stop_price: Decimal.new("39000")})
+
+      assert {:ok, order} =
+               place(request, plug: responding(accepted()), account_id: @account)
+
+      assert order.stop_price == Decimal.new("39000")
+    end
   end
 
   describe "the order id this venue actually uses" do

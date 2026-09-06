@@ -456,14 +456,24 @@ defmodule DpExchange.Webull do
 
   # --- streaming ---------------------------------------------------------
 
+  # `with_limiter/1` here for the same reason every REST-backed function below calls it —
+  # see the comment there. Its absence on these three was a real, load-bearing gap: a
+  # shard already connected reconciles its diff synchronously, in the calling `opts`
+  # rather than `Feed`'s own `resubscribe_opts` (see `Feed.touch_primary_shard/7`), so a
+  # caller of `subscribe/2` who never names `:limiter` reached `Core.HttpClient` with none
+  # — which resolves to the bare `DpExchange.Core.DefaultRateLimiter` module name that
+  # nothing in this venue's tree starts under, and fails closed with "Rate limiter
+  # unavailable" on every call. Measured: `DpExchange.Webull.Feed.subscribe/3` called with
+  # no `:limiter` against a connected shard returned exactly that error.
   @impl true
-  def subscribe(symbols, opts), do: Feed.subscribe(feed(opts), symbols, opts)
+  def subscribe(symbols, opts), do: Feed.subscribe(feed(opts), symbols, with_limiter(opts))
 
   @impl true
-  def unsubscribe(symbols, opts), do: Feed.unsubscribe(feed(opts), symbols, opts)
+  def unsubscribe(symbols, opts), do: Feed.unsubscribe(feed(opts), symbols, with_limiter(opts))
 
   @impl true
-  def update_symbols(symbols, opts), do: Feed.update_symbols(feed(opts), symbols, opts)
+  def update_symbols(symbols, opts),
+    do: Feed.update_symbols(feed(opts), symbols, with_limiter(opts))
 
   @impl true
   def coverage(opts \\ []) do

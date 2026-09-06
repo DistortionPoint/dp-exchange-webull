@@ -439,7 +439,10 @@ defmodule DpExchange.Webull.FeedTest do
 
       :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, to: name))
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
-      Process.sleep(20)
+      # A GenServer.call queues behind the earlier `send` in the mailbox, so its answer
+      # is proof the fan_out/2 for the send above already ran — not a fixed sleep that
+      # may or may not outlast it on a loaded runner.
+      _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
     end
@@ -812,7 +815,16 @@ defmodule DpExchange.Webull.FeedTest do
 
       # check/3 would refuse immediately and never retry inside this window (the next
       # tick is 60s away) — only acquire/3 (the default) delivers here at all.
-      assert_receive {:request, ["BTCUSD"]}, 1_000
+      #
+      # `exhausted_limiter/0`'s own bucket forces a real ~300ms wait inside `acquire/3`
+      # before this request is even sent, on top of the process-hop latency
+      # `test_helper.exs`'s `assert_receive_timeout: 1_000` already exists to absorb —
+      # so the global default is not enough headroom here specifically. Measured flaky
+      # under full-suite load (700 async tests contending for schedulers): failed against
+      # the global 1_000ms default while passing in isolation every time. 5_000ms is
+      # margin over the ~300ms wait, not a weakened assertion — the test still fails if
+      # the message never arrives at all.
+      assert_receive {:request, ["BTCUSD"]}, 5_000
     end
 
     test "a caller can still opt into fail-fast explicitly, and it costs the resubscribe cycle" do
@@ -909,8 +921,16 @@ defmodule DpExchange.Webull.FeedTest do
         state
       end)
 
+      :ok = Feed.subscribe_notices(feed, to: self())
+
       Process.exit(crash_pid, :kill)
-      Process.sleep(100)
+
+      # `isolate_crashed_shard/3` fans this notice out synchronously, inside the same
+      # handler that rebuilds `state.shards` — receiving it is a reliable barrier before
+      # asserting on `:sys.get_state/1` below. `:sys.get_state/1` answers via OTP's system
+      # message channel and is not guaranteed ordered after a regular mailbox message, so
+      # a fixed sleep here would still be a race, just a usually-winning one.
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
 
       assert Process.alive?(feed)
 

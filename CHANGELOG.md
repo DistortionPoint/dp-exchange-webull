@@ -20,6 +20,118 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Documented usage — `children = [{DpExchange.Webull, []}]`, no `:limiter` anywhere —
+  made every streaming HTTP call fail closed with "Rate limiter unavailable", silently,
+  for the whole tree's lifetime.** `Supervisor`'s own `init/1` started `Feed`
+  with the bare `opts` the tree was given, so `Feed`'s own `resubscribe_opts` — built once
+  there and replayed on every reconnect and every 60-second blind resubscribe thereafter —
+  carried no `:limiter`. `Core.HttpClient.check_rate_limits/1` then resolved the limiter by
+  `Config.opt(opts, :limiter, DpExchange.Core.DefaultRateLimiter)` — the bare module name —
+  and nothing in this venue's supervision tree starts a rate limiter under that name, only
+  under `Supervisor.limiter_name(opts)`, registered one line above the broken `Feed` child
+  spec. `GenServer.whereis/1` on the bare name returns `nil`, and every subscribe,
+  unsubscribe and blind resubscribe this package ever issued under the documented
+  supervision form failed with `{:error, "Rate limiter unavailable"}` — proven live against
+  a connected shard. `Feed.subscribe/3`'s own synchronous path for an already-connected
+  shard (`touch_primary_shard/7`, via `reconcile_now/4`) has the identical gap one layer up:
+  it reconciles using the **caller's** own `opts`, not `resubscribe_opts`, so the facade's
+  `subscribe/2`, `unsubscribe/2` and `update_symbols/2` needed the same default a caller who
+  never names `:limiter` was always going to hit. Fixed in both places —
+  `Supervisor`'s own `init/1` now defaults `Feed`'s child spec `:limiter` the same way
+  `with_limiter/1` already does for every REST-backed facade function, and `subscribe/2`,
+  `unsubscribe/2` and `update_symbols/2` now call `with_limiter/1` too, where before they
+  forwarded `opts` unchanged. Tests added in `test/dp_exchange/webull_test.exs` prove both
+  halves: that a tree started the documented way wires `Feed`'s own `resubscribe_opts` to
+  the limiter it actually started, and that `subscribe/2` reaches the venue without the
+  caller naming one.
+
+- **The protobuf decoder's one nested field (`Basic basic = 1`) kept the FIRST occurrence
+  on a repeated wire encoding instead of the LAST, inconsistent with `scalar/1`'s own
+  documented proto3 rule for a repeated scalar** — the exact bug class this module's own
+  moduledoc already records an incident for, now found in the one place that rule was not
+  actually applied. `decode_nested/1`'s list clause now filters to the binary occurrences
+  and decodes the last one, matching `scalar/1`.
+
+- **A plain `STOP_LOSS` order built by `place_order/3` carried no trigger price at all, and
+  a `TRAILING_STOP_LOSS` order carried no trail distance — an architect-directed audit
+  finding.** `replace_order/4`'s own field table (read from the vendor's reference) names
+  `stop_price` for **both** `STOP_LOSS` and `STOP_LOSS_LIMIT`, and `trailing_stop_step` for
+  `TRAILING_STOP_LOSS` — all three are real, `@combinations`-listed order types for equity,
+  option and futures instruments. `order_leaf/3`'s `stop_for/2` only attached `stop_price`
+  when the venue's wire name was `"STOP_LOSS_LIMIT"`, and never attached
+  `trailing_stop_step` for any order type at all. A caller placing a genuine stop-loss or
+  trailing-stop order therefore had the one field that makes it that order type silently
+  discarded before the request ever reached the venue — the single most expensive shape of
+  substitution this family names, because the order still looks well-formed and the venue
+  either rejects it for a reason the caller cannot connect back to a missing field, or
+  (worse) accepts it with no trigger configured at all. No test exercised a plain `:stop`
+  order's body at all, and the one existing `:trailing_stop` test asserted only
+  `order_type`/`time_in_force` on the wire, never `trailing_stop_step` — the exact "test
+  proves the wrapper, not the wire" seam this family has shipped bugs through before.
+
+  `price_for/2` was tightened the same pass: it used to attach `limit_price` for any
+  non-`MARKET` order type, so a `STOP_LOSS` request built from a limit-order template (with
+  `:price` still set) would have sent a `limit_price` the venue's schema for that order type
+  does not have. It now attaches `limit_price` only for `LIMIT` and `STOP_LOSS_LIMIT`, the
+  two types the vendor's own table lists it for.
+
+  Fixed in `lib/dp_exchange/webull/rest.ex`'s `order_leaf/3`, `price_for/2`, `stop_for/2`
+  and a new `trailing_stop_step_for/2`. Tests added in
+  `test/dp_exchange/webull/instrument_orders_test.exs` assert the actual wire body for a
+  plain `STOP_LOSS` (carries `stop_price`, no `limit_price`), a `STOP_LOSS_LIMIT` (carries
+  both), and a `TRAILING_STOP_LOSS` (carries `trailing_stop_step`).
+
+- **The same audit found the read side of the same field missing too: `stop_price` never
+  came back on an `Order`, anywhere.** `Core.Types.Order` carries `:stop_price` for exactly
+  this purpose, and this package sends it on `place_order/3` and `replace_order/4` (once
+  the fix above landed), but:
+    - `to_placed_order/4` — the struct `place_order/3` hands back immediately — never
+      echoed it from the request, unlike `price` and `quantity`, which it already did.
+    - `to_order/1` — the real decode path behind `get_order/3` and `get_orders/2` — never
+      read it from the venue's row at all, under either of the venue's usual
+      `stop_price`/`stopPrice` names (the same dual-naming convention already proven
+      correct for `limit_price`/`limitPrice` on the same row).
+    - `Fake.place_order/3` had the identical gap as `to_placed_order/4`, which would have
+      let a consumer's suite go green against the fake while the real path answered `nil`
+      — a `usage-rules/testing.md` violation ("never differently capable") this audit also
+      checked for and found here.
+
+  A caller placing a stop-loss or stop-limit order and then reading it back — by any of
+  the three paths this package offers — got `stop_price: nil` regardless of what was sent
+  or what the venue reported. Fixed in all three; tests added in
+  `test/dp_exchange/webull/order_mapping_test.exs` (both wire-name forms, and that an
+  ordinary order still carries `nil` rather than picking up a stray value),
+  `place_order_test.exs`, and `fake_test.exs`.
+
+- **Two `feed_test.exs` tests synchronised on async work with a fixed `Process.sleep/1`
+  instead of an event — flaky under load, and exactly the anti-pattern this family has
+  shipped CI-only failures through before.** One slept 20ms hoping a `send/2`'s
+  `handle_info` had already run before asserting `Process.alive?/1`; fixed by replacing the
+  sleep with a `Feed.coverage/1` call, which — being a `GenServer.call` — queues behind the
+  earlier `send` in the mailbox and so cannot return before it was processed, the same
+  pattern already used elsewhere in this file. The other slept 100ms hoping
+  `isolate_crashed_shard/3` had already rebuilt `state.shards` before asserting on
+  `:sys.get_state/1` — `:sys.get_state/1` answers over OTP's system-message channel and is
+  not guaranteed ordered after a regular mailbox message, so the sleep was load-bearing
+  and still a race even with it; fixed by subscribing to notices first and asserting
+  `assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}`, which
+  `isolate_crashed_shard/3` fans out synchronously inside the same handler that rebuilds
+  the shard map.
+
+- **A third `feed_test.exs` test — the `rate_limit_blocking` regression test itself —
+  flaked under full-suite load with a too-tight `assert_receive` window, not a
+  `Process.sleep/1` this time.** "the blind resubscribe defaults to blocking" forces a
+  real ~300ms wait inside `acquire/3` (via `exhausted_limiter/0`'s spent single-token
+  bucket) before its stubbed HTTP call is even sent, on top of the process-hop latency
+  `test_helper.exs`'s own `assert_receive_timeout: 1_000` exists to absorb — so the global
+  1_000ms default was not enough headroom for this test specifically, on top of that. It
+  reproduced under a full 700-test async run (`mix test --seed 849478`) while passing in
+  isolation every time. Given its own explicit `assert_receive/2` timeout, widened to
+  `5_000` — margin over the ~300ms wait, not a weakened assertion, since the test still
+  fails if the message never arrives at all.
+
 ### Added
 
 - **A shard's blind resubscribe failing for a generic reason now surfaces as a

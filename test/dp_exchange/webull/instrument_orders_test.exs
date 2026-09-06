@@ -90,7 +90,11 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert {:ok, order} =
                Rest.place_order(
                  @credentials,
-                 equity_request(%{order_type: :trailing_stop, time_in_force: :gtc}),
+                 equity_request(%{
+                   order_type: :trailing_stop,
+                   time_in_force: :gtc,
+                   trailing_stop_step: Decimal.new("1.50")
+                 }),
                  plug: capturing([%{"client_order_id" => "c1"}], me),
                  account_id: @account,
                  retry_attempts: 0
@@ -108,6 +112,12 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       leaf = body["new_orders"] |> List.first()
       assert leaf["order_type"] == "TRAILING_STOP_LOSS"
       assert leaf["time_in_force"] == "GTC"
+
+      # `order_leaf/3` used to build every other field for a trailing stop — instrument,
+      # side, sizing, time in force — and never this one, so every trailing-stop order this
+      # package placed reached the venue with no trail distance configured at all. See the
+      # comment on `trailing_stop_step_for/2`.
+      assert leaf["trailing_stop_step"] == "1.50"
 
       exploding = fn _conn -> raise "must not send a trailing stop on an option" end
 
@@ -201,6 +211,65 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
 
       assert_receive {:sent, body, _path}
       assert body["new_orders"] |> List.first() |> Map.get("instrument_type") == "CRYPTO"
+    end
+  end
+
+  describe "a stop order carries its own trigger, not the limit order's field" do
+    # `replace_order/4`'s own field table (read from the vendor's reference) names
+    # `stop_price` for BOTH `STOP_LOSS` and `STOP_LOSS_LIMIT` — only the limit leg differs
+    # between them. `price_for/2`/`stop_for/2` used to attach `stop_price` for
+    # `STOP_LOSS_LIMIT` only, so every plain `STOP_LOSS` order this package built — a real,
+    # `@combinations`-listed pair for equity, option and futures — went out with no trigger
+    # price at all: the one field that makes it a stop order.
+    test "a plain STOP_LOSS carries stop_price and no limit_price" do
+      me = self()
+
+      request =
+        equity_request(%{
+          order_type: :stop,
+          time_in_force: :gtc,
+          stop_price: Decimal.new("175.00")
+        })
+
+      assert {:ok, _order} =
+               Rest.place_order(@credentials, request,
+                 plug: capturing([%{"client_order_id" => "c1"}], me),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, body, _path}
+      leaf = body["new_orders"] |> List.first()
+      assert leaf["order_type"] == "STOP_LOSS"
+      assert leaf["stop_price"] == "175.00"
+      # `equity_request/1` sets `:price` for its default LIMIT shape; a plain STOP_LOSS has
+      # no limit leg on this venue and must not carry one just because the request map
+      # happened to still have `:price` set from a template.
+      refute Map.has_key?(leaf, "limit_price")
+    end
+
+    test "a STOP_LOSS_LIMIT still carries both prices" do
+      me = self()
+
+      request =
+        equity_request(%{
+          order_type: :stop_limit,
+          time_in_force: :gtc,
+          stop_price: Decimal.new("174.50")
+        })
+
+      assert {:ok, _order} =
+               Rest.place_order(@credentials, request,
+                 plug: capturing([%{"client_order_id" => "c1"}], me),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, body, _path}
+      leaf = body["new_orders"] |> List.first()
+      assert leaf["order_type"] == "STOP_LOSS_LIMIT"
+      assert leaf["stop_price"] == "174.50"
+      assert leaf["limit_price"] == "190.50"
     end
   end
 

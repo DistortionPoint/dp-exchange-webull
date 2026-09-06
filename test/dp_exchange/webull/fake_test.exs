@@ -150,6 +150,20 @@ defmodule DpExchange.Webull.FakeTest do
         assert order.time_in_force == unquote(tif)
       end
     end
+
+    test "a stop order's trigger price comes back on the fake's order too" do
+      # The fake must never be differently capable than the real path — see
+      # usage-rules/testing.md. A consumer's suite asserting on a placed stop order's
+      # `stop_price` must go green (or red) the same way against both.
+      assert {:ok, order} =
+               Fake.place_order(
+                 @credentials,
+                 request(%{order_type: :stop_limit, stop_price: Decimal.new("39000")}),
+                 @order_opts
+               )
+
+      assert order.stop_price == Decimal.new("39000")
+    end
   end
 
   describe "the order lifecycle round-trips on the id place_order returned" do
