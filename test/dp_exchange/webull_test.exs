@@ -67,15 +67,29 @@ defmodule DpExchange.WebullTest do
           do: refute(absent in Webull.capabilities().historical_timeframes)
     end
 
-    test "1y is reachable on the venue but Core cannot name it, so it is NOT declared" do
-      # `Rest.get_stock_bars/5` serves `1y` (tested in `order_book_test.exs`) and
-      # `Rest.wide_timeframes/0` names it as a fact about the venue, but
-      # `dp_exchange_core` 0.1.48's `Timeframe.nameable/0` has no entry for it —
-      # `Capabilities.new/1` would raise if this declaration included it. Declaring it
-      # anyway would need a `dp_exchange_core` change, which is out of scope here; the
-      # absence is a Core vocabulary gap, not this package forgetting a width twice.
-      refute "1y" in Webull.capabilities().historical_timeframes
+    test "1y is declared now that Core names it, and matches what Rest serves" do
+      # `Rest.get_stock_bars/5` serves `1y` and `Rest.wide_timeframes/0` names it as a
+      # fact about the venue. It was withheld from this declaration while
+      # `dp_exchange_core` 0.1.48's `Timeframe.nameable/0` had no entry for it —
+      # `Capabilities.new/1` raised on it — and the workaround outlived the gap by three
+      # Core releases: 0.1.57's `@unbucketable` is `~w(1w 1M 1y)`. Nothing failed while it
+      # was stale, which is the whole hazard of a documented workaround, so this asserts
+      # the declaration tracks `Rest` rather than a hand-maintained subtraction.
+      assert "1y" in Webull.capabilities().historical_timeframes
       assert "1y" in DpExchange.Webull.Rest.wide_timeframes()
+
+      assert Enum.sort(Webull.capabilities().historical_timeframes) ==
+               Enum.sort(DpExchange.Webull.Rest.wide_timeframes())
+    end
+
+    test "every streamed kind needs a credential, because every call here is signed" do
+      caps = Webull.capabilities()
+
+      # The subset direction `Capabilities.new/1` enforces: a kind needing a credential
+      # must first be a kind the venue streams. On this venue that subset is the whole
+      # list — there is no anonymous path to any of them.
+      assert caps.authenticated_streamable == caps.streamable
+      assert caps.credential_benefit == :required
     end
 
     test "provenance separates what was measured here from what was inherited" do

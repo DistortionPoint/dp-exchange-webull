@@ -86,18 +86,6 @@ defmodule DpExchange.Webull do
   alias DpExchange.Core.{Capabilities, Venue}
   alias DpExchange.Webull.{Environment, Feed, Rest, SymbolFormat}
 
-  # `1y` only, as of `dp_exchange_core` 0.1.48. `Timeframe.nameable/0` is `known/0` (no
-  # `1w`, `1M` or `1y`) plus an `@unbucketable` list that is exactly `~w(1w 1M)` — `1y` is
-  # a real width `Rest.get_stock_bars/5` serves and this package's own tests exercise, and
-  # it belongs in `historical_timeframes` beside `1w` and `1M`, but `Capabilities.new/1`
-  # raises if it is declared: Core's own vocabulary check has no entry for it. This is not
-  # this package under-declaring — it is `dp_exchange_core` not yet naming a width a real
-  # venue serves, the identical gap `nameable/0`'s own moduledoc describes for `1w`/`1M`,
-  # one width short of covering this venue too. See `capabilities/0`'s
-  # `historical_timeframes` for where this is subtracted, and its comment for the full
-  # account. Drop this list (and the subtraction using it) the day `nameable/0` adds `1y`.
-  @core_unnameable_widths ~w(1y)
-
   # Not implemented in this release. None of them is about authentication — the host
   # supplies credentials and these simply have not been ported yet, which is a different
   # claim from "the venue does not serve them" and is stated as such.
@@ -307,6 +295,19 @@ defmodule DpExchange.Webull do
       # below for what is and is not confirmed live about it.
       streamable: [:quotes, :top_of_book, :trades],
 
+      # **Every streamed kind needs a credential here, so this is the whole of
+      # `streamable`.** `authenticated_streamable` is the subset of `streamable` that
+      # requires one — `Capabilities.new/1` enforces exactly that direction, raising if a
+      # kind appears here and not there. It was `[]` until 2026-09-07, which reads as "none
+      # of the streamed kinds needs a credential" on a venue where `Subscription` builds
+      # the MQTT token from `Auth.headers/2` and the broker answers CONNACK `103`/`104` to
+      # anything unsigned. A host asking whether it needed a credential to stream was told
+      # no, on the one venue in this family where the answer is unambiguously yes for
+      # every kind. Found by a cross-package audit; `dp_exchange_robinhood` had the
+      # identical `[]` on the same reasoning, and `dp_exchange_coinbase` had it for
+      # `:order_book` alone.
+      authenticated_streamable: [:quotes, :top_of_book, :trades],
+
       # **Ten widths, not eight — `1y` is a real, served, twelfth width this package
       # cannot declare.** `Rest.timeframes/0`'s eight are the crypto and event-contract
       # default; the equity, option and futures bars additionally serve `1w`, `1M` and
@@ -319,22 +320,27 @@ defmodule DpExchange.Webull do
       # `Rest.get_stock_bars/5`'s own moduledoc already stated the eleven-width truth —
       # the code, not the docs, was wrong).
       #
-      # `1y` is the exception `@core_unnameable_widths` below carries: `dp_exchange_core`
-      # 0.1.48's `Timeframe.nameable/0` is `known/0` (no `1w`, `1M` or `1y`) plus an
-      # `@unbucketable` list of exactly `~w(1w 1M)` — `1y` is in neither, so
-      # `Capabilities.new/1` raises `historical_timeframes ["1y"] are outside the
-      # timeframe vocabulary` if this package declares it. That is not this package
-      # under-declaring; it is Core's nameable vocabulary being one width narrower than
-      # what a real venue serves, the same gap `nameable/0`'s own moduledoc names for
-      # `1w`/`1M` and has not yet been widened to also cover a yearly bar. Reported
+      # **`1y` is declared again as of 2026-09-07, and the record of why it was not is
+      # worth keeping.** Under `dp_exchange_core` 0.1.48, `Timeframe.nameable/0` was
+      # `known/0` (no `1w`, `1M` or `1y`) plus an `@unbucketable` list of exactly
+      # `~w(1w 1M)`. `1y` was in neither, so `Capabilities.new/1` raised
+      # `historical_timeframes ["1y"] are outside the timeframe vocabulary` if this
+      # package declared the width its own `Rest.get_stock_bars/5` serves and its own
+      # tests exercise. That was never this package under-declaring — it was Core's
+      # vocabulary being one width narrower than a real venue, and it was reported
       # upstream rather than worked around: no invented boundary rule, no silent
-      # substitution of a neighbouring width, and no local monkey-patch of Core's
-      # vocabulary. `1y` remains reachable through `Rest.get_stock_bars/5` directly; it is
-      # simply not nameable in this struct until `dp_exchange_core` widens `nameable/0`.
+      # substitution of a neighbouring width, no local monkey-patch of Core's list.
       #
-      # A crypto or event-contract call still refuses `1w`/`1M` per-call rather than
+      # Core 0.1.57's `@unbucketable` is `~w(1w 1M 1y)`, so the gap is closed and the
+      # subtraction that carried it is gone. A cross-package audit found the workaround
+      # still in place three Core releases after it stopped being needed — the honest
+      # failure mode of a documented workaround is that nothing fails when it becomes
+      # stale, and a real served width stayed hidden from every consumer reading
+      # `capabilities/0`.
+      #
+      # A crypto or event-contract call still refuses `1w`/`1M`/`1y` per-call rather than
       # silently degrading to the nearest width it does serve.
-      historical_timeframes: Rest.wide_timeframes() -- @core_unnameable_widths,
+      historical_timeframes: Rest.wide_timeframes(),
 
       # Bounded by request parameters rather than a stated page size. `nil` until it is
       # measured, rather than a number that looks measured.

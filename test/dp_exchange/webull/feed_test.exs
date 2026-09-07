@@ -1026,7 +1026,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
 
       send(feed, :resubscribe)
-      assert_receive {:blocked, blocked_pid}
+      assert_receive {:blocked, blocked_pid}, 3_000
       on_exit(fn -> if Process.alive?(blocked_pid), do: send(blocked_pid, :release) end)
 
       # A different symbol's tick, while shard 0's resubscribe HTTP call is still

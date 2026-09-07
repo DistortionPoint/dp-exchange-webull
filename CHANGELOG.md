@@ -22,6 +22,50 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`capabilities/0` withheld `1y`, a width this venue serves, three Core releases after
+  the reason stopped applying.** `historical_timeframes` was
+  `Rest.wide_timeframes() -- @core_unnameable_widths`, where the subtracted list was
+  `~w(1y)`. That workaround was correct when written: `dp_exchange_core` 0.1.48's
+  `Timeframe.nameable/0` had no entry for `1y`, so `Capabilities.new/1` raised on it, and
+  the package chose to report the gap upstream rather than invent a boundary rule or
+  substitute a neighbouring width. Core 0.1.57's `@unbucketable` is `~w(1w 1M 1y)`; the gap
+  closed and the subtraction did not. The declaration is now `Rest.wide_timeframes()`
+  directly, so it tracks what `Rest` actually serves instead of a hand-maintained list, and
+  a test asserts the two are equal rather than asserting a literal.
+
+  Worth stating because it will recur: **nothing failed while this was stale.** The
+  workaround was documented, dated, tested and correct on the day it was written, and its
+  own comment said to remove it "the day `nameable/0` adds `1y`" — a condition no test
+  could check, in a package whose tests all passed. Found only by a cross-package audit
+  reading each venue's declaration against the Core version it now depends on.
+
+- **`authenticated_streamable` was `[]` on a venue where every call is signed.** It reads
+  as "none of the streamed kinds needs a credential", on a package that declares
+  `credential_benefit: :required`, builds its MQTT token from `Auth.headers/2` in
+  `Subscription`, and whose broker answers CONNACK `103`/`104` to anything unsigned. A host
+  asking whether it needed a credential to stream quotes, top-of-book or trades was told
+  no. Now `[:quotes, :top_of_book, :trades]` — the whole of `streamable`, since there is no
+  anonymous path to any of them.
+
+  Note the direction, which is easy to get backwards and which `usage-rules/feeds.md`
+  currently states the wrong way round: `Capabilities.new/1` enforces
+  `authenticated_streamable` as a **subset** of `streamable` — "of the kinds you stream,
+  which need a credential" — and raises with "a kind that needs credentials must first be a
+  kind the venue streams". Found by a cross-package audit; `dp_exchange_robinhood` carried
+  the identical `[]` for the identical reason.
+
+- **`FeedTest`'s W3 control-plane test raced under load and failed intermittently on
+  certain random seeds.** `assert_receive {:blocked, blocked_pid}` waited only the
+  suite's default timeout for a message a blocking test `plug` sends essentially
+  synchronously once its process is scheduled — normally near-instant, but too tight
+  once this file ran alongside its siblings under `async: true` with `max_cases: 20`.
+  Widened to 3,000ms locally; the assertion still returns as soon as the message
+  arrives, so this costs nothing on the passing path. Found by a cross-package audit
+  running the full suite on multiple explicit seeds, which this family's CI does not do
+  by default.
+
 ### Documentation
 
 - **`Fake`'s own moduledoc still described a `{:refused, :missing_credentials}` path

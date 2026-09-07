@@ -219,13 +219,17 @@ both report **one print's own size**, which the venue does publish. This package
 sum sizes into an aggregate figure of its own; that would be this package's arithmetic
 wearing the venue's name.
 
-## Ten declared candle widths, an eleventh the venue serves and Core cannot name
+## Eleven declared candle widths
 
-`1m 5m 15m 30m 1h 2h 4h 1d 1w 1M` — the full `capabilities/0` `historical_timeframes` list,
-as of 2026-09-06. Before that date this declared only the first eight, which was the crypto
-and event-contract default generalised to the whole venue: a false under-declaration of the
-equity, option and futures bars, which have always served `1w` and `1M` too — and a third
-width, `1y`, which is real and served and still is not in this list.
+`1m 5m 15m 30m 1h 2h 4h 1d 1w 1M 1y` — the full `capabilities/0` `historical_timeframes`
+list, as of 2026-09-07. Two under-declarations were corrected to get here. Until 2026-09-06
+this declared only the first eight, the crypto and event-contract default generalised to the
+whole venue, which was false for the equity, option and futures bars that have always served
+`1w` and `1M` too. `1y` was then withheld for a real reason that stopped being true:
+`dp_exchange_core` 0.1.48's `Timeframe.nameable/0` had no entry for it and
+`Capabilities.new/1` raised on it. Core 0.1.57 names it, and the workaround outlived the gap
+by three releases — nothing fails when a documented workaround goes stale, which is exactly
+why a served width stayed hidden from consumers reading `capabilities/0`.
 
 The crypto and event-contract bar endpoints serve `1m 5m 15m 30m 1h 2h 4h 1d` and nothing
 wider. `1w` is left off *those* endpoints deliberately: a weekly boundary depends on which
@@ -238,16 +242,11 @@ The equity, option and futures bar endpoints take three widths beyond those eigh
 `1M` and `1y` — because that is the `timespan` vocabulary those endpoints publish
 (`Rest.get_stock_bars/5`, tested against it). `Core.Capabilities` has one flat list for the
 whole package with no per-asset-class shape, so the declaration is the union every active
-path reaches rather than the crypto subset — for `1w` and `1M`. **`1y` is not in
-`capabilities/0` and is not a re-run of the same under-declaration**: `dp_exchange_core`
-0.1.48's `Timeframe.nameable/0` admits `1w` and `1M` beyond what it can bucket but has no
-entry for `1y` at all, so `Capabilities.new/1` raises if this package declares it. `1y` is
-real, reachable through `Rest.get_stock_bars/5`/`get_historical_prices/5` directly, and
-simply cannot be named in this struct until Core's vocabulary widens by one more width —
-see `webull.ex`'s `@core_unnameable_widths` for the full account. Asking a **crypto or
-event-contract** category for `1w`, `1M` or `1y` is still an error, never the nearest width
-it does serve — branch on `opts[:category]`, not on the flat list alone, if you need to know
-which endpoint a width actually reaches.
+path reaches rather than the crypto subset, and it is now derived from
+`Rest.wide_timeframes/0` rather than a hand-maintained subtraction from it. Asking a
+**crypto or event-contract** category for `1w`, `1M` or `1y` is still an error, never the
+nearest width it does serve — branch on `opts[:category]`, not on the flat list alone, if
+you need to know which endpoint a width actually reaches.
 
 ### Equity/ETF bars are adjusted at daily and above, not below
 
