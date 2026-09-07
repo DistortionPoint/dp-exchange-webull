@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`Fake`'s own moduledoc still described a `{:refused, :missing_credentials}` path
+  under `authenticated/1`** after that path was changed to
+  `{:error, {:missing_credentials, :webull}}` — the code was already correct, only the
+  prose describing it had drifted. Found by a cross-package audit comparing this family's
+  credential-refusal vocabulary against each other.
+
 ### Fixed
 
 - **BREAKING: twelve more `Fake` callbacks on the widened surface still succeeded with no
