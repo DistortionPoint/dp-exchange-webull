@@ -26,6 +26,30 @@ from a 401.
 
 You keep the credentials. This package signs one request with them and holds nothing.
 
+### It is not only market data, and the fake enforces all of it
+
+Every account and order call — `get_balances/2`, `get_accounts/2`, `get_fees/2`,
+`get_transfers/2`, `get_transactions/2`, `get_positions/1`, `quantization/2`,
+`place_order/3`, `place_orders/3`, `preview_order/3`, `replace_order/4`,
+`cancel_order/3`, `get_order/3`, `get_orders/2` — refuses the same way market data does
+without a credential: `{:error, {:missing_credentials, :webull}}`, never `{:ok, _}`. Not
+`{:refused, _}` either — a missing local credential never reaches the venue at all
+(`Core.Venue`'s `:refused` is the venue's own permanent word about a request it
+*received*), so this is `Auth.headers/2`'s own return value, not an invented one.
+
+**`DpExchange.Webull.Fake` enforces this too, and it did not before.** Before this
+fix, `Fake.get_fees/2`, `Fake.get_accounts/2`, `Fake.get_balances/2`,
+`Fake.get_transfers/2`, `Fake.get_transactions/2`, `Fake.place_order/3`,
+`Fake.place_orders/3`, `Fake.preview_order/3`, `Fake.replace_order/4`,
+`Fake.cancel_order/3`, `Fake.get_order/3`, `Fake.get_orders/2`, `Fake.get_positions/1`
+and `Fake.quantization/2` answered `{:ok, _}` regardless of whether credentials were
+supplied at all — several ignored the argument outright, and two checked only
+`opts[:account_id]`, a different question. A consuming test suite that called any of
+these without credentials and asserted success was passing against behaviour the real
+venue does not have. If your own tests do this, they need updating; that is the point of
+the fix, not a regression in it. `market_status/1` is the one exception — the real venue
+answers it with no credential either, and the fake still does too.
+
 ## Start it, and it brings its own rate limiter
 
 ```elixir

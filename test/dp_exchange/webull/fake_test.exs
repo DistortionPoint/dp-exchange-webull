@@ -20,12 +20,50 @@ defmodule DpExchange.Webull.FakeTest do
 
   describe "the credentials gate" do
     test "reads refuse without credentials rather than answering" do
-      assert {:refused, :missing_credentials} = Fake.get_price("BTC-USD", [])
-      assert {:refused, :missing_credentials} = Fake.get_top_of_book("BTC-USD", [])
-      assert {:refused, :missing_credentials} = Fake.get_symbols([])
+      # `{:error, {:missing_credentials, :webull}}`, not `{:refused, _}` — a missing
+      # LOCAL credential never reaches the venue, so `Core.Venue`'s own reservation of
+      # `:refused` for the venue's own permanent word does not apply here. This is
+      # `Auth.headers/2`'s own return value, echoed rather than invented.
+      assert {:error, {:missing_credentials, :webull}} = Fake.get_price("BTC-USD", [])
+      assert {:error, {:missing_credentials, :webull}} = Fake.get_top_of_book("BTC-USD", [])
+      assert {:error, {:missing_credentials, :webull}} = Fake.get_symbols([])
 
-      assert {:refused, :missing_credentials} =
+      assert {:error, {:missing_credentials, :webull}} =
                Fake.get_historical_prices("BTC-USD", "1m", [], [])
+    end
+
+    test "every credentialed account and order call refuses without credentials too" do
+      # Found by `dp_exchange_core` 0.1.57's assertion 17: several of these answered
+      # `{:ok, _}` regardless of the `credentials` argument, because nothing checked it —
+      # `get_fees/2` gated on nothing at all, `get_accounts/2` discarded it outright, and
+      # `get_balances/2`/`get_transfers/2` gated only on `account_id`, an unrelated check.
+      # A fake that succeeded here would certify consumer code that forgot its
+      # credentials, on a venue that declares `credential_benefit: :required`.
+      account = [account_id: "93IUJ28O9VO2KBGHDHR4H9"]
+      missing = {:error, {:missing_credentials, :webull}}
+
+      assert missing == Fake.get_fees(%{}, [])
+      assert missing == Fake.get_accounts(%{}, [])
+      assert missing == Fake.get_balances(%{}, account)
+      assert missing == Fake.get_transfers(%{}, account)
+      assert missing == Fake.get_transactions(%{}, account)
+      assert missing == Fake.get_positions(account)
+      assert missing == Fake.quantization("BTC-USD", [])
+      assert missing == Fake.place_order(%{}, request(%{}), account)
+      assert missing == Fake.place_orders(%{}, [%{symbol: "AAPL"}], account)
+      assert missing == Fake.cancel_order(%{}, "fake-webull-order-1", account)
+      assert missing == Fake.get_order(%{}, "fake-webull-order-1", account)
+      assert missing == Fake.get_orders(%{}, account)
+
+      assert missing ==
+               Fake.preview_order(
+                 %{},
+                 request(%{instrument_type: :equity, time_in_force: :day}),
+                 account
+               )
+
+      assert missing ==
+               Fake.replace_order(%{}, "abc", %{price: Decimal.new("1")}, account)
     end
   end
 

@@ -24,6 +24,66 @@ acceptable changelog line.
 
 ### Fixed
 
+- **BREAKING: `Fake` let several credentialed account and order calls succeed with no
+  credentials at all — the venue declares `credential_benefit: :required` and the fake
+  did not honour it.** Found by `dp_exchange_core` 0.1.57's new assertion 17 ("credential
+  gate"), which reported `get_fees/2` first; auditing every credentialed callback against
+  its real `Rest` counterpart turned up the same defect on `get_accounts/2`,
+  `get_balances/2`, `get_transfers/2`, `get_transactions/2`, `get_positions/1`,
+  `quantization/2`, `place_order/3`, `place_orders/3`, `preview_order/3`,
+  `replace_order/4`, `cancel_order/3`, `get_order/3` and `get_orders/2`. Three different
+  shapes of the same gap: `get_fees/2` and `get_accounts/2` discarded the `credentials`
+  argument outright (`_credentials`) and checked nothing; `get_balances/2` and
+  `get_transfers/2` gated only on `fake_account(opts)`, an account-id check that is a
+  different question from a credential check; the rest simply never referenced
+  `credentials` at all. A consumer's own suite calling any of these with no credentials
+  and asserting success was going green against behaviour the real venue does not have —
+  every one of these hits a signed endpoint and gets a real 401.
+
+  All now gate through `DpExchange.Webull.Auth.present?/1` — the same
+  `%{app_key: <binary>, app_secret: <binary>}` shape check `Auth.headers/2` runs for
+  every real signed request — checked in the same order the real `Rest` call checks it
+  (account id before credentials, where both apply), so the fake's refusal point matches
+  the real one, not just its final answer. `get_fees/2`'s real counterpart
+  (`Rest.get_fees/2`) builds no HTTP request at all — it is a published flat rate, not a
+  query — so it never ran through `Auth.headers/2` to get this check for free; it now
+  calls `Auth.present?/1` directly, which is the one behaviour change on the real facade
+  in this fix (previously `{:ok, _}` for any input whatsoever, including no credential;
+  now `{:error, {:missing_credentials, :webull}}` without one). Every other real `Rest`
+  function was already correctly gated — only the fake had drifted from it.
+
+  **The refusal shape changed too, and this was wrong independently of assertion 17.**
+  `Fake.get_price/2` and the rest of the market-data surface answered
+  `{:refused, :missing_credentials}` for a missing credential. `DpExchange.Core.Venue`'s
+  own moduledoc reserves `{:refused, reason}` for the venue's own **permanent** word about
+  a request it **received** — a request built with no credential never reaches the venue
+  at all; `Auth.headers/2` refuses it locally first. Every credentialed callback,
+  market-data and account/order alike, now answers `{:error, {:missing_credentials,
+  :webull}}` instead — `Auth.headers/2`'s own return value, echoed rather than invented.
+  `market_status/1` is the one callback left unchanged: the real venue answers it with no
+  credential too, so the fake doing the same is not a gap.
+
+  `FakeInjection.credentials_bypassed?/1` still short-circuits every one of these gates,
+  unchanged, for a test that needs to skip the check deliberately.
+
+- **A clean-shutdown `DISCONNECT` warning fired on the ordinary shutdown path, on every
+  test teardown in this package's own suite.** `Feed.terminate/2`'s `DISCONNECT` sweep
+  (added the same day, above) logged `Logger.warning/1` for every `Socket.disconnect/2`
+  failure without distinguishing why it failed. Two of `disconnect/2`'s three error
+  reasons are structural, not a failed send: `:not_alive` means the socket process was
+  already gone — the *ordinary* shape of shutdown, since a shard's socket and the `Feed`
+  supervising it are usually torn down together — and `:calling_self` can only happen
+  through a test fixture handing `terminate/2` its own pid, never in production. Neither
+  is "the venue will see an abrupt disconnect instead of a clean one," which is what the
+  warning said every time. A warning that fires on the normal path is noise that trains
+  a reader to stop reading `[Webull Feed]` warnings at all — the same failure mode a red
+  CI run for a non-failure was fixed for earlier in this package's history.
+
+  `Feed.terminate/2` now logs `:not_alive` and `:calling_self` at `:debug`, and warns as
+  before for every other reason — a genuine send failure against a socket that was alive
+  and reachable, where the venue really will see an abrupt disconnect. Nothing about
+  *when* `DISCONNECT` is attempted changed; only which outcomes are worth a warning.
+
 - **`capabilities/0` under-declared `historical_timeframes` and `reports_trade_volume` —
   both true crypto-only facts generalised to the whole venue.** Found by a
   documentation-accuracy sweep (the one behind commit `94ea0a8`) that deliberately left

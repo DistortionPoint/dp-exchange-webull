@@ -405,20 +405,28 @@ defmodule DpExchange.Webull.Rest do
 
   What Webull does publish, on `webull.com/pricing`, is a single flat crypto spread:
   **1.00% per trade, charged by Webull Pay/Bakkt**, the same rate for every account —
-  not a tier a credential selects among. `credentials` is accepted, to match this
-  contract's shape, and is not otherwise used: there is nothing to look up that would
-  differ by account. Captured #{@crypto_spread_captured_at}; re-check the page before
-  trusting this figure if it is old by the time you read this.
+  not a tier a credential selects among, so `credentials` plays no part in *which* rate
+  comes back. It is still required to be present, though: this venue's own moduledoc
+  says there is no anonymous path on it anywhere, and this is the one endpoint that
+  builds no request and so never runs through `Auth.headers/2`, the gate that would
+  otherwise enforce that for free. `Auth.present?/1` is the same shape check
+  `headers/2` runs, called locally rather than skipped because there is nothing to sign.
+  A caller with no credential at all gets `{:error, {:missing_credentials, :webull}}` —
+  not the `{:ok, _}` this returned unconditionally before that gap was found. Captured
+  #{@crypto_spread_captured_at}; re-check the page before trusting this figure if it is
+  old by the time you read this.
   """
   @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def get_fees(_credentials, _opts) do
-    {:ok,
-     %{
-       crypto_spread_pct: @crypto_spread_pct,
-       charged_by: "Webull Pay/Bakkt",
-       source: :published_rate,
-       captured_at: @crypto_spread_captured_at
-     }}
+  def get_fees(credentials, _opts) do
+    with :ok <- Auth.present?(credentials) do
+      {:ok,
+       %{
+         crypto_spread_pct: @crypto_spread_pct,
+         charged_by: "Webull Pay/Bakkt",
+         source: :published_rate,
+         captured_at: @crypto_spread_captured_at
+       }}
+    end
   end
 
   @doc """

@@ -225,7 +225,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
 
     test "the fake's batch is partial" do
       assert {:ok, [first, second]} =
-               Fake.place_orders(%{}, [order(), order()], account_id: "a")
+               Fake.place_orders(@credentials, [order(), order()], account_id: "a")
 
       assert first["order_id"]
       assert second["code"]

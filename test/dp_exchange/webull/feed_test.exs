@@ -1444,9 +1444,12 @@ defmodule DpExchange.Webull.FeedTest do
     # directly against `terminate/2`, the same way `SocketTest` drives frame handlers
     # directly: no process lifecycle is needed to exercise a plain function of state.
     #
-    # `dead_pid/0` doubles as the observable here — `Socket.disconnect/2` logs a warning
-    # for a dead pid it was asked to send to, so a warning naming a shard's index is
-    # proof `terminate/2` attempted that shard, and its absence is proof it did not.
+    # `dead_pid/0` doubles as the observable here — `Socket.disconnect/2` returns
+    # `{:error, :not_alive}` for a dead pid it was asked to send to, and `terminate/2`
+    # logs that at `:debug` (an already-dead socket on shutdown is the ordinary case, not
+    # a failure — see `log_disconnect_failure/2`'s own comment), so a debug line naming a
+    # shard's index is proof `terminate/2` attempted that shard, and its absence is proof
+    # it did not.
     test "attempts every connected shard, for an ordinary shutdown" do
       shards = %{
         0 => %{connected_shard("s0") | socket: dead_pid()},
@@ -1454,12 +1457,12 @@ defmodule DpExchange.Webull.FeedTest do
       }
 
       log =
-        ExUnit.CaptureLog.capture_log(fn ->
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
           assert Feed.terminate(:normal, %{shards: shards}) == :ok
         end)
 
-      assert log =~ "shard 0 DISCONNECT on shutdown failed"
-      assert log =~ "shard 1 DISCONNECT on shutdown failed"
+      assert log =~ "shard 0 DISCONNECT on shutdown skipped"
+      assert log =~ "shard 1 DISCONNECT on shutdown skipped"
     end
 
     test "skips a shard that never connected — it has no session to close" do
@@ -1478,11 +1481,11 @@ defmodule DpExchange.Webull.FeedTest do
         shards = %{0 => %{connected_shard("s0") | socket: dead_pid()}}
 
         log =
-          ExUnit.CaptureLog.capture_log(fn ->
+          ExUnit.CaptureLog.capture_log([level: :debug], fn ->
             assert Feed.terminate(reason, %{shards: shards}) == :ok
           end)
 
-        assert log =~ "shard 0 DISCONNECT on shutdown failed"
+        assert log =~ "shard 0 DISCONNECT on shutdown skipped"
       end
     end
 
@@ -1511,11 +1514,34 @@ defmodule DpExchange.Webull.FeedTest do
       shards = %{0 => %{connected_shard("s0") | socket: self()}}
 
       log =
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
+          assert Feed.terminate(:normal, %{shards: shards}) == :ok
+        end)
+
+      # `:calling_self` is structural too — see `log_disconnect_failure/2` — so this is
+      # `:debug`, not a warning, the same as the dead-pid cases above.
+      assert log =~ "shard 0 DISCONNECT on shutdown skipped"
+    end
+
+    test "a live socket that fails to send still warns — that one is a real failure" do
+      # `:not_alive` and `:calling_self` are the two structural reasons `terminate/2`
+      # demotes to `:debug` (see `log_disconnect_failure/2`). Neither is "the DISCONNECT
+      # could have been sent and was not" — this fixture is: a genuinely alive process
+      # that never answers, the same shape `SocketTest`'s "an alive process that never
+      # answers times out as an error, not a hang" uses. The venue really will see an
+      # abrupt disconnect here, so this must stay a warning.
+      unresponsive = spawn(fn -> Process.sleep(:infinity) end)
+      shards = %{0 => %{connected_shard("s0") | socket: unresponsive}}
+
+      log =
         ExUnit.CaptureLog.capture_log(fn ->
           assert Feed.terminate(:normal, %{shards: shards}) == :ok
         end)
 
       assert log =~ "shard 0 DISCONNECT on shutdown failed"
+      refute log =~ "skipped"
+
+      Process.exit(unresponsive, :kill)
     end
   end
 end

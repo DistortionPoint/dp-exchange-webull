@@ -126,6 +126,26 @@ defmodule DpExchange.Webull.Auth do
   def headers(_request, _credentials), do: {:error, {:missing_credentials, :webull}}
 
   @doc """
+  Whether `credentials` has the shape `headers/2` accepts — checked without building a
+  request, signing anything, or dialling out.
+
+  `headers/2` is the gate every signed call in this package passes through, so nothing
+  else normally needs its own copy of this check. **`Rest.get_fees/2` is the one
+  exception**: it answers a flat, published rate and builds no request at all, so
+  `headers/2` never runs for it — but this venue's own moduledoc states there is no
+  anonymous path on it anywhere, and an endpoint that skipped the check purely because it
+  has no HTTP call to hang it on would be the one silent exception to that claim.
+  `DpExchange.Webull.Fake` calls this too, for the same reason its own credentialed
+  callbacks need it: so the fake's gate cannot drift from this one.
+  """
+  @spec present?(credentials() | term()) :: :ok | {:error, {:missing_credentials, :webull}}
+  def present?(%{app_key: app_key, app_secret: app_secret})
+      when is_binary(app_key) and is_binary(app_secret),
+      do: :ok
+
+  def present?(_credentials), do: {:error, {:missing_credentials, :webull}}
+
+  @doc """
   The raw signature value.
 
   Exposed so the venue's published worked example can be verified directly — a signature

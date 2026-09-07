@@ -245,10 +245,15 @@ defmodule DpExchange.WebullTest do
   describe "the fake models what makes this venue different" do
     test "market data without credentials is refused, as the real venue refuses it" do
       # A fake that answered anyway would let a consumer's test pass while the real call
-      # returns 401.
-      assert Fake.get_price("BTC-USD") == {:refused, :missing_credentials}
-      assert Fake.get_symbols() == {:refused, :missing_credentials}
-      assert Fake.get_historical_prices("BTC-USD", "1m") == {:refused, :missing_credentials}
+      # returns 401. `{:error, {:missing_credentials, :webull}}`, not `{:refused, _}` — a
+      # missing local credential never reaches the venue, so `Auth.headers/2`'s own
+      # return value is echoed here rather than a `:refused` this package would be
+      # inventing on the venue's behalf.
+      assert Fake.get_price("BTC-USD") == {:error, {:missing_credentials, :webull}}
+      assert Fake.get_symbols() == {:error, {:missing_credentials, :webull}}
+
+      assert Fake.get_historical_prices("BTC-USD", "1m") ==
+               {:error, {:missing_credentials, :webull}}
     end
 
     test "with credentials it answers" do

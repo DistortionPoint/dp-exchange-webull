@@ -141,7 +141,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
 
   describe "bypass_credentials/1" do
     test "skips the venue-faithful credential refusal" do
-      assert Fake.get_symbols([]) == {:refused, :missing_credentials}
+      assert Fake.get_symbols([]) == {:error, {:missing_credentials, :webull}}
 
       FakeInjection.bypass_credentials(:webull)
 
@@ -149,7 +149,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
     end
 
     test "the default, without calling bypass_credentials/1, is still venue-faithful" do
-      assert Fake.get_price("BTC-USD", []) == {:refused, :missing_credentials}
+      assert Fake.get_price("BTC-USD", []) == {:error, {:missing_credentials, :webull}}
     end
   end
 

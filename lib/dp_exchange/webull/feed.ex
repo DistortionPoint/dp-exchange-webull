@@ -743,15 +743,39 @@ defmodule DpExchange.Webull.Feed do
           :ok
 
         {:error, reason} ->
-          Logger.warning(
-            "[Webull Feed] shard #{index} DISCONNECT on shutdown failed: " <>
-              "#{inspect(reason)} — the venue will see an abrupt disconnect instead of a " <>
-              "clean one"
-          )
+          log_disconnect_failure(index, reason)
       end
     end)
 
     :ok
+  end
+
+  # `:not_alive` and `:calling_self` are structural, not a failed send — see
+  # `Socket.disconnect/2`'s own moduledoc. `:not_alive` means the socket process is
+  # already gone, which on the normal shutdown path (every socket's supervisor is
+  # shutting down at the same time this `Feed` is) is the ordinary case, not a failure
+  # worth a warning: this ran on *every* test teardown before this fix, training whoever
+  # read CI output to stop reading `[Webull Feed]` warnings at all — the exact failure
+  # mode a red build for a non-failure caused earlier. `:calling_self` can only happen
+  # through a test fixture that hands `terminate/2` its own pid, never in production.
+  #
+  # Any OTHER reason means the socket was alive and reachable and the send still failed —
+  # a real send failure the venue will see as an abrupt disconnect, worth surfacing at the
+  # level it was before.
+  defp log_disconnect_failure(index, reason) when reason in [:not_alive, :calling_self] do
+    Logger.debug(
+      "[Webull Feed] shard #{index} DISCONNECT on shutdown skipped: #{inspect(reason)} — " <>
+        "the socket was already gone, which is the ordinary shape of a shutdown, not a " <>
+        "failed send"
+    )
+  end
+
+  defp log_disconnect_failure(index, reason) do
+    Logger.warning(
+      "[Webull Feed] shard #{index} DISCONNECT on shutdown failed: " <>
+        "#{inspect(reason)} — the venue will see an abrupt disconnect instead of a " <>
+        "clean one"
+    )
   end
 
   # A shard that has never linked up has nothing subscribed yet — on_link_up/2's own

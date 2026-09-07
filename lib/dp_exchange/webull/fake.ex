@@ -17,10 +17,19 @@ defmodule DpExchange.Webull.Fake do
 
   ## It models the three things that make this venue different
 
-  - **Credentials are required for market data.** `get_price/2` without them is
-    `{:refused, :missing_credentials}`, because the real venue signs every call and has no
-    anonymous endpoint. A fake that answered anyway would let a consumer's test pass while
-    the real call returns 401.
+  - **Credentials are required everywhere, not just for market data.** `get_price/2`
+    without them is `{:error, {:missing_credentials, :webull}}`, because the real venue
+    signs every call and has no anonymous endpoint — and so is every credentialed account
+    and order call (`get_balances/2`, `get_accounts/2`, `get_fees/2`, `place_order/3`, and
+    the rest). `{:error, {:missing_credentials, :webull}}`, not `{:refused, _}`: a missing
+    *local* credential never reaches the venue at all, and `DpExchange.Core.Venue`'s own
+    moduledoc reserves `:refused` for the venue's own permanent word about a request it
+    received. It is `Auth.headers/2`'s own return value for a credential that does not
+    match its shape, echoed here rather than invented — this used to answer
+    `{:refused, :missing_credentials}` here and `{:ok, _}` on several of the account and
+    order callbacks, both wrong for the reasons above; found by `dp_exchange_core`
+    0.1.57's assertion 17. A fake that answered anyway would let a consumer's test pass
+    while the real call returns 401.
   - **No volume.** `volume` is `nil` on every quote and every bar, matching a venue that
     reports none. Returning `0` would look like a real measurement of no trading.
   - **UAT has no stream.** `subscribe/2` under `environment: :uat` refuses, exactly as the
@@ -45,7 +54,7 @@ defmodule DpExchange.Webull.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{FakeInjection, Notice, Types, Venue}
-  alias DpExchange.Webull.{Environment, Rest}
+  alias DpExchange.Webull.{Auth, Environment, Rest}
 
   @symbols ~w(BTC-USD ETH-USD SOL-USD)
 
@@ -321,9 +330,13 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def list_instruments(_opts), do: Venue.not_supported()
   @impl true
-  def get_balances(_credentials, opts) do
+  def get_balances(credentials, opts) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — the same order `Rest.get_balances/2` checks
+      # them in (`account_id(opts)` then `Auth.headers/2`), so a caller missing both sees
+      # the same error here as it would there.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         {:ok,
          [
            %Types.Balance{
@@ -342,47 +355,56 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_accounts(_credentials, _opts) do
+  def get_accounts(credentials, _opts) do
     with_injection(fn ->
-      # Two accounts of different classes, because that is the fact about this venue a
-      # consumer most needs to handle: one credential reaches crypto and cash alike.
-      {:ok,
-       [
-         %{
-           "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
-           "account_number" => "10010048",
-           "account_type" => "CASH",
-           "account_label" => "Crypto",
-           "account_class" => "CRYPTO"
-         },
-         %{
-           "account_id" => "LOJOQITOD49R6G9BPQM489CISA",
-           "account_number" => "10010049",
-           "account_type" => "MARGIN",
-           "account_label" => "Individual Margin",
-           "account_class" => "INDIVIDUAL_MARGIN"
-         }
-       ]}
+      with :ok <- credentialed(credentials) do
+        # Two accounts of different classes, because that is the fact about this venue a
+        # consumer most needs to handle: one credential reaches crypto and cash alike.
+        {:ok,
+         [
+           %{
+             "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
+             "account_number" => "10010048",
+             "account_type" => "CASH",
+             "account_label" => "Crypto",
+             "account_class" => "CRYPTO"
+           },
+           %{
+             "account_id" => "LOJOQITOD49R6G9BPQM489CISA",
+             "account_number" => "10010049",
+             "account_type" => "MARGIN",
+             "account_label" => "Individual Margin",
+             "account_class" => "INDIVIDUAL_MARGIN"
+           }
+         ]}
+      end
     end)
   end
 
   @impl true
-  def get_fees(_credentials, _opts) do
+  def get_fees(credentials, _opts) do
     with_injection(fn ->
-      {:ok,
-       %{
-         crypto_spread_pct: Decimal.new("1.00"),
-         charged_by: "Webull Pay/Bakkt",
-         source: :published_rate,
-         captured_at: ~D[2026-09-03]
-       }}
+      # `Rest.get_fees/2` builds no request and so never runs through `Auth.headers/2`,
+      # but it still requires a credential shaped like every other call — see its own
+      # moduledoc. `Auth.present?/1` is the same check, run here rather than skipped.
+      with :ok <- credentialed(credentials) do
+        {:ok,
+         %{
+           crypto_spread_pct: Decimal.new("1.00"),
+           charged_by: "Webull Pay/Bakkt",
+           source: :published_rate,
+           captured_at: ~D[2026-09-03]
+         }}
+      end
     end)
   end
 
   @impl true
-  def get_transfers(_credentials, opts) do
+  def get_transfers(credentials, opts) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.get_transfers/2`'s own order.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         # A dividend alongside a deposit, because that is the distinction a consumer must
         # handle: both credit cash and neither is the other. The fake filters the same way
         # the real package does.
@@ -417,9 +439,11 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_transactions(_credentials, opts) do
+  def get_transactions(credentials, opts) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.get_transactions/2`'s own order.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         # Unfiltered by default: the dividend and the fee are here beside the deposit, which
         # is the whole difference from `get_transfers/2`. A fake that returned only the three
         # transfer kinds would make the two functions look interchangeable.
@@ -485,7 +509,7 @@ defmodule DpExchange.Webull.Fake do
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @impl true
-  def preview_order(_credentials, request, opts \\ []) do
+  def preview_order(credentials, request, opts \\ []) do
     with_injection(fn ->
       # Crypto is refused here as it is in production. A fake that priced a crypto order
       # would let a consumer's suite go green on a call the venue rejects.
@@ -494,8 +518,12 @@ defmodule DpExchange.Webull.Fake do
       if instrument == :crypto do
         {:error, {:preview_not_supported, :crypto}}
       else
+        # Account and combination first, credentials last — matching
+        # `Rest.preview_order/3`'s own order (account, combination, THEN
+        # `post/4` -> `Auth.headers/2`).
         with :ok <- fake_account(opts),
-             :ok <- fake_combination(request) do
+             :ok <- fake_combination(request),
+             :ok <- credentialed(credentials) do
           {:ok,
            %{
              instrument_type: instrument,
@@ -508,11 +536,11 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def replace_order(_credentials, client_order_id, changes, opts \\ []) do
-    with_injection(fn -> do_replace_order(client_order_id, changes, opts) end)
+  def replace_order(credentials, client_order_id, changes, opts \\ []) do
+    with_injection(fn -> do_replace_order(credentials, client_order_id, changes, opts) end)
   end
 
-  defp do_replace_order(client_order_id, changes, opts) do
+  defp do_replace_order(credentials, client_order_id, changes, opts) do
     instrument = Keyword.get(opts, :instrument_type, :equity)
     order_type = Keyword.get(opts, :order_type, :limit)
 
@@ -537,7 +565,10 @@ defmodule DpExchange.Webull.Fake do
 
         case Map.keys(changes) -- allowed do
           [] ->
-            with :ok <- fake_account(opts) do
+            # Account first, credentials second — matching `Rest.replace_order/4`'s own
+            # order (account, THEN `post/4` -> `Auth.headers/2`).
+            with :ok <- fake_account(opts),
+                 :ok <- credentialed(credentials) do
               {:ok, %{fake_order() | id: client_order_id, price: Map.get(changes, :price)}}
             end
 
@@ -563,30 +594,35 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
   @impl true
-  def quantization(symbol, _opts \\ []) do
+  def quantization(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      if String.contains?(symbol, "-") do
-        {:ok,
-         %{
-           price_increment: Decimal.new("0.01"),
-           quantity_increment: Decimal.new("0.00000001"),
-           min_quantity: Decimal.new("0.0001"),
-           max_quantity: Decimal.new("1000"),
-           min_quote_size: Decimal.new("1.00"),
-           max_quote_size: Decimal.new("100000"),
-           status: "OC"
-         }}
-      else
-        {:ok,
-         %{
-           price_increment: nil,
-           quantity_increment: Decimal.new("1"),
-           min_quantity: nil,
-           max_quantity: nil,
-           min_quote_size: nil,
-           max_quote_size: nil,
-           status: "OC"
-         }}
+      # `Rest.quantization/3` reads the same `instruments/.../profiles/list` endpoint
+      # every other market-data call does, so it needs the same `authenticated(opts)`
+      # gate they already carry.
+      with :ok <- authenticated(opts) do
+        if String.contains?(symbol, "-") do
+          {:ok,
+           %{
+             price_increment: Decimal.new("0.01"),
+             quantity_increment: Decimal.new("0.00000001"),
+             min_quantity: Decimal.new("0.0001"),
+             max_quantity: Decimal.new("1000"),
+             min_quote_size: Decimal.new("1.00"),
+             max_quote_size: Decimal.new("100000"),
+             status: "OC"
+           }}
+        else
+          {:ok,
+           %{
+             price_increment: nil,
+             quantity_increment: Decimal.new("1"),
+             min_quantity: nil,
+             max_quantity: nil,
+             min_quote_size: nil,
+             max_quote_size: nil,
+             status: "OC"
+           }}
+        end
       end
     end)
   end
@@ -650,14 +686,22 @@ defmodule DpExchange.Webull.Fake do
 
   # The real venue signs every call and has no anonymous endpoint, so a fake that answered
   # without credentials would let a consumer's test pass while the real call returns 401.
-  defp authenticated(opts) do
+  # For the market-data callbacks, which carry credentials in `opts[:credentials]` the same
+  # way the real facade's `credentials(opts)` helper reads them.
+  defp authenticated(opts), do: credentialed(Keyword.get(opts, :credentials, %{}))
+
+  # The same gate for the callbacks that receive credentials as their own first
+  # argument instead — `get_balances/2`, `get_accounts/2`, `get_fees/2`, `place_order/3`
+  # and the rest of this venue's account and order surface. Both converge here because
+  # `Auth.headers/2` (real calls) and `Auth.present?/1` (`get_fees/2`, which builds no
+  # request) are the only two real gates any credentialed call in this package passes
+  # through, and `Auth.present?/1` is the exact shape check both run — reused rather than
+  # re-implemented, so this fake's gate cannot drift out of step with the real one.
+  defp credentialed(credentials) do
     if FakeInjection.credentials_bypassed?(:webull) do
       :ok
     else
-      case Keyword.get(opts, :credentials) do
-        %{app_key: _key, app_secret: _secret} -> :ok
-        _absent -> {:refused, :missing_credentials}
-      end
+      Auth.present?(credentials)
     end
   end
 
@@ -709,7 +753,12 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_positions(opts \\ []) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.get_positions/2`'s own order
+      # (`account_id(opts)` then `Auth.headers/2`). Credentials arrive in
+      # `opts[:credentials]` here, as `DpExchange.Webull.get_positions/1` reads them via
+      # its own `credentials(opts)` helper rather than as a bare argument.
+      with :ok <- fake_account(opts),
+           :ok <- authenticated(opts) do
         # A SHORT position, because that is the case a fake must carry: the venue states
         # direction only in the sign of the quantity, and a package that assumed :long would
         # be exactly backwards with every number still plausible.
@@ -1047,12 +1096,15 @@ defmodule DpExchange.Webull.Fake do
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def place_order(_credentials, request, opts \\ []) do
+  def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
-      # The fake enforces the venue's crypto matrix and its account requirement, so a
-      # consumer's suite cannot go green on an order this venue would reject.
+      # The fake enforces the venue's crypto matrix, its account requirement and its
+      # credential requirement, in the same order `Rest.place_order/3` does (account,
+      # combination, THEN `post/4` -> `Auth.headers/2`), so a consumer's suite cannot go
+      # green on an order the venue would reject.
       with :ok <- fake_account(opts),
-           :ok <- fake_combination(request) do
+           :ok <- fake_combination(request),
+           :ok <- credentialed(credentials) do
         # Round-tripped through the real module's own encode then decode — not the
         # caller's atom echoed back — so a fake-based suite exercises the same wire
         # names the real venue would see, and would catch a decoder gap the way the
@@ -1083,9 +1135,27 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def place_orders(_credentials, requests, opts) do
+  def place_orders(credentials, requests, opts) do
     # The venue's two limits, and a per-order result. A fake that answered ok-or-error would
     # let a consumer ship code that believes "the batch failed" when most of it was placed.
+    #
+    # Every shape check below matches `Rest.place_orders/3`'s own order (account, size,
+    # per-order instrument), with `credentialed/1` last — right before the `post/4` call
+    # it stands in for — via `with`, once every `cond` clause above it has passed.
+    with :ok <- batch_shape(requests, opts),
+         :ok <- credentialed(credentials) do
+      {:ok,
+       requests
+       |> Enum.with_index()
+       |> Enum.map(fn
+         # The second one refused, because a partial batch is the normal shape.
+         {_request, 1} -> %{"code" => "INSUFFICIENT_BUYING_POWER"}
+         {request, index} -> %{"order_id" => "batch-#{index}", "symbol" => request[:symbol]}
+       end)}
+    end
+  end
+
+  defp batch_shape(requests, opts) do
     cond do
       not is_binary(Keyword.get(opts, :account_id)) ->
         {:error, :account_id_required}
@@ -1104,14 +1174,7 @@ defmodule DpExchange.Webull.Fake do
           requests |> Enum.at(index) |> Map.get(:instrument_type)}}
 
       true ->
-        {:ok,
-         requests
-         |> Enum.with_index()
-         |> Enum.map(fn
-           # The second one refused, because a partial batch is the normal shape.
-           {_request, 1} -> %{"code" => "INSUFFICIENT_BUYING_POWER"}
-           {request, index} -> %{"order_id" => "batch-#{index}", "symbol" => request[:symbol]}
-         end)}
+        :ok
     end
   end
 
@@ -1139,9 +1202,11 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def cancel_order(_credentials, client_order_id, opts \\ []) do
+  def cancel_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.cancel_order/3`'s own order.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         case client_order_id do
           "fake-webull-order-1" -> {:ok, :cancelled}
           _unknown -> {:refused, :not_found}
@@ -1151,9 +1216,11 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_order(_credentials, client_order_id, opts \\ []) do
+  def get_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.get_order/3`'s own order.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         case client_order_id do
           "fake-webull-order-1" -> {:ok, fake_order()}
           _unknown -> {:refused, :not_found}
@@ -1163,9 +1230,11 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_orders(_credentials, opts \\ []) do
+  def get_orders(credentials, opts \\ []) do
     with_injection(fn ->
-      with :ok <- fake_account(opts) do
+      # Account first, credentials second — matching `Rest.get_orders/2`'s own order.
+      with :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
         # Open by default, history when asked — the venue has two endpoints, not a filter.
         if Keyword.get(opts, :history, false) do
           {:ok, [%{fake_order() | status: :filled}]}

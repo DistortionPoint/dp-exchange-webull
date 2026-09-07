@@ -542,13 +542,13 @@ defmodule DpExchange.Webull.AccountsTest do
 
     test "the fake returns kinds get_transfers/2 filters out" do
       # The two functions looking interchangeable is the failure this guards.
-      assert {:ok, rows} = Fake.get_transactions(%{}, account_id: "acct-1")
+      assert {:ok, rows} = Fake.get_transactions(@credentials, account_id: "acct-1")
       types = Enum.map(rows, & &1["activity_type"])
       assert "DEPOSIT" in types
       assert "FEES" in types
       assert "DIVIDENDS" in types
 
-      assert {:ok, transfers} = Fake.get_transfers(%{}, account_id: "acct-1")
+      assert {:ok, transfers} = Fake.get_transfers(@credentials, account_id: "acct-1")
       refute Enum.any?(transfers, &(&1["activity_type"] == "FEES"))
     end
 
