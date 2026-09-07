@@ -24,6 +24,38 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A crash of `Feed` printed the `app_secret` HMAC-SHA1 signing key — and, if present,
+  the account's `access_token` — in cleartext, in OTP's own crash report.** `Feed` keeps
+  `state.resubscribe_opts` for its entire lifetime so a reconnect or a rebalance can
+  replay a shard's subscription, and that keyword list's `:credentials` entry was a bare
+  map. `replayable/2` also let a fresh `:credentials` from a later `subscribe/2` or
+  `update_symbols/2` call overwrite it — unwrapped — on every call that supplied one.
+  OTP's default crash report prints a `GenServer`'s state in full on termination, so a
+  crash of `Feed` logged the signing key in cleartext — verified by crashing an
+  equivalent process holding `%{app_key: "...", app_secret: "...", access_token: "..."}`
+  as a bare field and reading the resulting log line back.
+  `Process.flag(:sensitive, true)` was tried as an alternative and does not help: the
+  same crash, with the flag set, printed the same cleartext state.
+
+  Now `Feed` wraps the triple in `DpExchange.Webull.Credentials`, a struct whose
+  `Inspect` is derived with `except:` naming all three fields, at both entry points
+  (`init/1` and `replayable/2`) — `replayable/2`'s wrap is conditional on the key
+  actually being present in the caller's own opts, because an unconditional default
+  would have inserted `credentials: nil` and let `Keyword.merge/2` silently discard the
+  already-wrapped credentials sitting in `state.resubscribe_opts` on every call that did
+  not itself supply fresh ones. Nothing downstream changes: a struct is a map, so
+  `Auth.headers/2`'s `%{app_key: k, app_secret: s} = credentials` still binds the real
+  values inside the one function that has to sign with them, and `app_key_from/1`'s
+  `%{app_key: app_key} when is_binary(app_key) -> app_key` still extracts it for
+  `Socket.start_link/1`. Re-verified against a real crash of the new shape: the log line
+  now reads `credentials: #DpExchange.Webull.Credentials<...>`.
+
+  `Socket`'s own `state.app_key` is deliberately left as a bare string — `app_key` is
+  sent as a plaintext header (`x-app-key`) on every signed request this venue accepts,
+  so it carries none of the confidentiality `app_secret`/`access_token` do, and wrapping
+  it would add a call-site change for no reduction in what a crash of `Socket` actually
+  exposes.
+
 - **`coverage/1`/`coverage_by_kind/1` kept reporting `:stream` for a shard's symbols
   after that shard's socket crashed.** `isolate_crashed_shard/3` (added for the W2 fix,
   see below) already rebuilt `state.shards` and fanned out a `:link_down` notice on a

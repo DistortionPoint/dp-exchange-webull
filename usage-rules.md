@@ -92,6 +92,17 @@ report `:stream` for a connection that no longer exists), you get a `:link_down`
 `Core.Notice` naming the crashed shard, and this package reopens it on its own — you
 never need to call `subscribe/2` again.
 
+**Your `app_secret` and `access_token` will not appear in `Feed`'s crash log.** `Feed`
+keeps what you passed at start (or on a later `subscribe/2`) so it can replay your
+subscriptions after a reconnect — see above — and a crash of `Feed` logs its state via
+OTP's default crash report, which is where you *would* see it, because a crash report
+prints unredacted `Logger` metadata otherwise. The credential map is wrapped in a struct
+before it ever reaches state, so the crash line reads `credentials:
+#DpExchange.Webull.Credentials<...>` rather than the key pair itself. This does not
+extend to `app_key` on a live shard's socket — `app_key` is sent as a plaintext header
+(`x-app-key`) on every signed request this venue accepts by design, so it carries none of
+the confidentiality `app_secret` does, and a shard's own crash report still shows it.
+
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the per-shard crash path, or anything that kills the `Feed` pid directly.
 `DpExchange.Webull.Supervisor` restarts `Feed` under `:one_for_one`, but from the

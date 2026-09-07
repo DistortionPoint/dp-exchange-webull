@@ -273,7 +273,7 @@ defmodule DpExchange.Webull.Feed do
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Webull.{Environment, Socket, Subscription}
+  alias DpExchange.Webull.{Credentials, Environment, Socket, Subscription}
 
   require Logger
 
@@ -381,7 +381,12 @@ defmodule DpExchange.Webull.Feed do
        resubscribe_opts:
          opts
          |> Keyword.take([:credentials, :environment, :limiter, :plug, :rate_limit_blocking])
-         |> Keyword.put_new(:rate_limit_blocking, true),
+         |> Keyword.put_new(:rate_limit_blocking, true)
+         # Wrapped immediately, before this list ever reaches `state` — see
+         # `Credentials`'s moduledoc. Every downstream use (`Subscription.subscribe/3`,
+         # `Auth.headers/2`, the `{:open_shard, ...}` message `isolate_crashed_shard/2`
+         # sends to self) keeps working unchanged: a struct is a map.
+         |> Credentials.wrap_opt(),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
        wanted: MapSet.new(),
@@ -1278,7 +1283,8 @@ defmodule DpExchange.Webull.Feed do
   defp replayable(opts, state) do
     Keyword.merge(
       state.resubscribe_opts,
-      Keyword.take(opts, [
+      opts
+      |> Keyword.take([
         :credentials,
         :environment,
         :limiter,
@@ -1286,6 +1292,11 @@ defmodule DpExchange.Webull.Feed do
         :req_adapter,
         :rate_limit_blocking
       ])
+      # Wrapped only if THIS call actually supplied fresh credentials — see
+      # `Credentials.wrap_opt/1`'s moduledoc. A caller with no opinion here must leave
+      # `state.resubscribe_opts`' already-wrapped credentials as the value `Keyword.merge/2`
+      # keeps, not get them silently replaced with `nil`.
+      |> Credentials.wrap_opt()
     )
   end
 
