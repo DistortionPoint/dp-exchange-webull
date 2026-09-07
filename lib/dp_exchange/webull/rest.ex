@@ -27,13 +27,24 @@ defmodule DpExchange.Webull.Rest do
   Both shapes are handled: a group with `"result"` is flattened, and a flat bar decodes
   directly, in case the equities path or a future change sends one.
 
-  ## No volume, anywhere
+  ## Volume is real on stocks, absent on crypto
 
   Webull's crypto OpenAPI exposes **no trade volume** — not on the bars, not on the
-  snapshot, not on the MQTT stream. `volume` is `nil` rather than `0`, because zero is a
-  volume and this venue is not reporting one. `capabilities/0` declares
-  `reports_trade_volume: false` so a consumer can route volume-dependent work elsewhere
-  rather than discovering a column of zeroes.
+  snapshot, not on the MQTT stream. `volume` is `nil` rather than `0` on a crypto quote,
+  because zero is a volume and this venue is not reporting one.
+
+  The **stock** snapshot is different: `get_price/2` with `category: "US_STOCK"` or
+  `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` therefore
+  declares `reports_trade_volume: true` — the venue does report one, on a real, active
+  path — with `measured_against` carrying the crypto/equity split so a caller does not
+  read the boolean as "every quote has a number." Bars carry no volume on any category —
+  `get_volume_profile/3` is the separate equity endpoint that splits traded volume by
+  price and side.
+
+  This package previously declared `reports_trade_volume: false` unconditionally, which
+  was true of crypto and a false claim about the venue as a whole — the same
+  crypto-generalised-to-venue mistake `docs/reference/webull/negative-claims.md` records
+  for three other refusals. Fixed alongside `historical_timeframes` below.
   """
 
   alias DpExchange.Core.HttpClient
@@ -61,12 +72,16 @@ defmodule DpExchange.Webull.Rest do
 
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
-  # Canonical width => the venue's own timespan code.
+  # Canonical width => the venue's own timespan code, for the **crypto and event-contract**
+  # bars — the two endpoints that stop at `1d`.
   #
-  # `1w` → `W` is served by the venue and deliberately omitted: a weekly bar's boundary
-  # depends on which weekday the venue starts its week, `Core.Timeframe` models no
-  # alignment rule for it, and a bar nobody can verify the boundary of is a bar nobody
-  # should store.
+  # `1w` → `W` is served by the venue's *equity, option and futures* bars (see
+  # `@stock_timespans` below) and deliberately excluded from **this** map: a weekly bar's
+  # boundary depends on which weekday the venue starts its week, `Core.Timeframe` models
+  # no alignment rule for it, and a bar nobody can verify the boundary of is a bar nobody
+  # should store here. That reasoning is about crypto's continuous, boundary-less week —
+  # it does not carry over to equities, which trade on a fixed Monday-to-Friday calendar
+  # the venue's own weekly bar aligns to, which is why `@stock_timespans` accepts it.
   # Bounds the instrument pagination loop. 342 symbols were measured at a page size the
   # venue no longer documents; 50 pages is far above any plausible catalogue and far below
   # forever.
@@ -83,9 +98,29 @@ defmodule DpExchange.Webull.Rest do
     "1d" => "D"
   }
 
-  @doc "Canonical timeframes this venue serves, shortest first."
+  @doc "Canonical timeframes the crypto and event-contract bars serve, shortest first."
   @spec timeframes() :: [String.t()]
   def timeframes, do: ~w(1m 5m 15m 30m 1h 2h 4h 1d)
+
+  @doc """
+  Every canonical timeframe served by *some* active endpoint on this venue —
+  `timeframes/0`'s eight plus `1w`, `1M` and `1y`, which the equity, option and futures
+  bars serve and the crypto and event-contract bars refuse (see `@timespans` above).
+
+  This is a fact about the **venue**, not the finished `capabilities/0` declaration:
+  `Core.Capabilities` has one flat `historical_timeframes` list for the whole package,
+  with no per-asset-class shape, so a width reachable on *any* path belongs in that
+  declaration too — except `1y`, which `Webull.capabilities/0` subtracts because
+  `dp_exchange_core`'s `Timeframe.nameable/0` does not admit it (see
+  `@core_unnameable_widths` in `webull.ex`). Read this function for what the venue
+  serves; read `capabilities/0` for what this package can currently say about it. Which
+  category a given call actually reaches a width on is enforced per-call either way:
+  `get_historical_prices/5` with a crypto or event-contract category returns `{:error,
+  {:unsupported_timeframe, _}}` for `1w`, `1M` and `1y` rather than silently degrading to
+  the nearest width it does serve.
+  """
+  @spec wide_timeframes() :: [String.t()]
+  def wide_timeframes, do: timeframes() ++ ~w(1w 1M 1y)
 
   # **Three snapshot endpoints, one per market**, and they are not interchangeable: the
   # crypto one takes `US_CRYPTO`, the stock one takes `US_STOCK` or `US_ETF` and refuses

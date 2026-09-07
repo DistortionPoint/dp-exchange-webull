@@ -83,7 +83,13 @@ defmodule DpExchange.Webull.Fake do
              %Types.Quote{
                symbol: symbol,
                price: Decimal.new(price),
-               # This venue reports no volume anywhere. `nil`, never zero.
+               # `@symbols` is crypto-only, and the venue's crypto OpenAPI reports no
+               # volume anywhere — `nil`, never zero. The venue's stock snapshot DOES
+               # report a real day-aggregate volume (`Rest.get_price/3`,
+               # `capabilities/0`'s `reports_trade_volume: true`), but this fake models
+               # no stock symbol, so it never has to choose between the two: an equity
+               # ticker here is simply `{:refused, :not_listed}`, "less capable" rather
+               # than "differently capable."
                volume: nil,
                timestamp: @at,
                provider: :webull
@@ -132,8 +138,14 @@ defmodule DpExchange.Webull.Fake do
             {:refused, :not_listed}
 
           timeframe not in Rest.timeframes() ->
-            # Includes `12h` and `1w`, which the shared vocabulary models and this venue
-            # does not serve — `1w` deliberately, since its boundary is unverifiable.
+            # `@symbols` above is crypto-only, so this branch only ever sees a crypto
+            # pair, and `Rest.timeframes/0` is the crypto default — not
+            # `Rest.wide_timeframes/0`, the venue-wide set `capabilities/0` mostly (but
+            # not entirely — see `@core_unnameable_widths` in `webull.ex`) declares.
+            # Includes `12h`, unserved anywhere, and `1w`/`1M`/`1y`, which the venue's
+            # *equity, option and futures* bars serve and its crypto bars refuse
+            # deliberately (crypto's week has no boundary anything here can verify) —
+            # this fake models no non-crypto symbol, so it never has to accept them.
             {:error, {:unsupported_timeframe, timeframe}}
 
           true ->

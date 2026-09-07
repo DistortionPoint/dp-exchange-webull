@@ -22,6 +22,49 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`capabilities/0` under-declared `historical_timeframes` and `reports_trade_volume` —
+  both true crypto-only facts generalised to the whole venue.** Found by a
+  documentation-accuracy sweep (the one behind commit `94ea0a8`) that deliberately left
+  code untouched; this is the code-side fix it called for, run through the full gates.
+  `historical_timeframes` named the eight crypto/event-contract widths only
+  (`1m 5m 15m 30m 1h 2h 4h 1d`) and omitted `1w`, `1M` and `1y`, which
+  `Rest.get_stock_bars/5`'s `@stock_timespans` map has served — and this package's own
+  tests have exercised — on the equity, option and futures bars since that endpoint
+  shipped. `reports_trade_volume` was unconditionally `false`, though `Rest.get_price/3`
+  with `category: "US_STOCK"`/`"US_ETF"` has always carried a real day-aggregate
+  `volume`. `Core.Capabilities` has one flat list and one flat boolean for the whole
+  package, with no way to say "true for equities, false for crypto" — reported upstream
+  as a gap in `dp_exchange_core`'s expressiveness rather than worked around here.
+  `historical_timeframes` is now `Rest.wide_timeframes/0` minus `1y` (see below);
+  `reports_trade_volume` is now `true`. Both fields' crypto exception is spelled out in
+  `measured_against`, `Webull`'s and `Rest`'s moduledocs, and `usage-rules.md`, and both
+  are still enforced per-call: a crypto or event-contract `get_historical_prices/5` still
+  refuses `1w`/`1M`/`1y` rather than degrading to the nearest width, and a crypto
+  `get_price/2` still returns `nil` volume rather than a number.
+
+  **`1y` surfaced a genuine `dp_exchange_core` gap and is reported, not worked around.**
+  `Rest.get_stock_bars/5` serves `1w`, `1M` **and `1y`**, but `dp_exchange_core` 0.1.48's
+  `Timeframe.nameable/0` — the vocabulary `Capabilities.new/1` validates
+  `historical_timeframes` against — admits `1w` and `1M` beyond what it can bucket and has
+  no entry for `1y` at all. Declaring `1y` here raises `Capabilities.new/1`'s own
+  validation, so `historical_timeframes` names ten widths, not eleven, and `1y` stays
+  reachable only by calling `Rest.get_stock_bars/5`/`get_historical_prices/5` directly.
+  This is a Core vocabulary gap, not a decision made here — flagged for
+  `dp_exchange_core` to widen `Timeframe.nameable/0` by one more width rather than
+  silently narrowed to fit, invented a boundary rule for, or substituted with a
+  neighbouring width. See `webull.ex`'s `@core_unnameable_widths` for the full account.
+
+  **A consumer routing on the old declaration changes behaviour.** One that read
+  `reports_trade_volume: false` and routed all Webull volume work to another venue was
+  needlessly discarding a real, reachable equity signal; one that read
+  `historical_timeframes` as the ceiling of what `get_historical_prices/5` could serve
+  and never asked for `1w`/`1M` on an equity, option or futures symbol was doing the
+  same for those three widths. Neither previously received a wrong *value* — the
+  under-declaration only ever caused a consumer to route around a call it could safely
+  have made.
+
 ### Removed — breaking
 
 - **`MqttPacket.subscribe/2` deleted.** Found by `dp_exchange_core`'s new "16. internal

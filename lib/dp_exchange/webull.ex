@@ -39,17 +39,40 @@ defmodule DpExchange.Webull do
   production. A consumer testing against UAT that received production prices would be
   reading real market data believing it was fake.
 
-  ## No trade volume, anywhere
+  ## Trade volume is real on stocks, absent on crypto
 
   Webull's crypto OpenAPI reports no **aggregate** volume: not on bars, not on the
-  snapshot's `Quote.volume`. That field is `nil`, never `0`, and `capabilities/0` says
-  `reports_trade_volume: false` so volume-dependent work can be routed elsewhere rather
-  than reading a column of zeroes.
+  snapshot's `Quote.volume`. That field is `nil`, never `0` on a crypto quote — zero
+  would claim a genuinely flat interval.
+
+  The stock snapshot is different: `get_price/2` with `category: "US_STOCK"` or
+  `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` says
+  `reports_trade_volume: true` because that path is real and active; `measured_against`
+  carries the crypto/equity split so a caller does not read the boolean as "every quote
+  on every category has a number." Bars carry no volume on any category.
 
   This is a different claim from a `Trade.quantity` — the streamed tape (`subscribe/2`)
   and `get_trades/2` both report **one print's own size**, which the venue does publish.
   A sum of individual sizes is not the same statement as the venue's own aggregate
   figure, and this package does not compute one from the other.
+
+  ## Historical widths: eleven reachable, ten declared — Core cannot yet name the eleventh
+
+  `capabilities/0`'s `historical_timeframes` names ten canonical widths — `Rest`'s eight
+  plus `1w` and `1M` — because the equity, option and futures bars serve three the crypto
+  and event-contract bars do not: `1w`, `1M` **and `1y`**. `Core.Capabilities` has one
+  flat list for the whole package, with no room to say "these three only on these asset
+  classes," so the declaration is the union of what any active path serves and Core can
+  name.
+
+  **`1y` is the one exception, and it is a Core gap rather than an under-declaration
+  here.** `dp_exchange_core` 0.1.48's `Timeframe.nameable/0` admits `1w` and `1M` beyond
+  what it can bucket, but not `1y` — declaring it raises `Capabilities.new/1`'s own
+  vocabulary check. This package serves `1y` on the equity, option and futures bars
+  (`Rest.get_stock_bars/5`, tested) and cannot say so in this struct until Core's
+  vocabulary widens by one more width. `get_historical_prices/5` still refuses
+  `1w`/`1M`/`1y` per-call on a crypto or event-contract category rather than degrading to
+  the nearest width it does serve.
 
   ## Supervision
 
@@ -62,6 +85,18 @@ defmodule DpExchange.Webull do
 
   alias DpExchange.Core.{Capabilities, Venue}
   alias DpExchange.Webull.{Environment, Feed, Rest, SymbolFormat}
+
+  # `1y` only, as of `dp_exchange_core` 0.1.48. `Timeframe.nameable/0` is `known/0` (no
+  # `1w`, `1M` or `1y`) plus an `@unbucketable` list that is exactly `~w(1w 1M)` — `1y` is
+  # a real width `Rest.get_stock_bars/5` serves and this package's own tests exercise, and
+  # it belongs in `historical_timeframes` beside `1w` and `1M`, but `Capabilities.new/1`
+  # raises if it is declared: Core's own vocabulary check has no entry for it. This is not
+  # this package under-declaring — it is `dp_exchange_core` not yet naming a width a real
+  # venue serves, the identical gap `nameable/0`'s own moduledoc describes for `1w`/`1M`,
+  # one width short of covering this venue too. See `capabilities/0`'s
+  # `historical_timeframes` for where this is subtracted, and its comment for the full
+  # account. Drop this list (and the subtraction using it) the day `nameable/0` adds `1y`.
+  @core_unnameable_widths ~w(1y)
 
   # Not implemented in this release. None of them is about authentication — the host
   # supplies credentials and these simply have not been ported yet, which is a different
@@ -271,15 +306,51 @@ defmodule DpExchange.Webull do
       # are fixed now (`Subscription`, `Socket`, `Feed.kind_for/1`). See `measured_against`
       # below for what is and is not confirmed live about it.
       streamable: [:quotes, :top_of_book, :trades],
-      historical_timeframes: Rest.timeframes(),
+
+      # **Ten widths, not eight — `1y` is a real, served, twelfth width this package
+      # cannot declare.** `Rest.timeframes/0`'s eight are the crypto and event-contract
+      # default; the equity, option and futures bars additionally serve `1w`, `1M` and
+      # `1y` (`Rest.get_stock_bars/5`, tested against the venue's own `timespan` enum).
+      # `Core.Capabilities` has one flat list for the whole package, so this is the union
+      # of every width *some* active path serves that Core can even name — narrowing it
+      # to the crypto default would under-declare the other three asset classes, exactly
+      # the defect a 2026-09-06 documentation-accuracy sweep found here (this declaration
+      # had been the crypto list all along, unnoticed because `usage-rules.md` and
+      # `Rest.get_stock_bars/5`'s own moduledoc already stated the eleven-width truth —
+      # the code, not the docs, was wrong).
+      #
+      # `1y` is the exception `@core_unnameable_widths` below carries: `dp_exchange_core`
+      # 0.1.48's `Timeframe.nameable/0` is `known/0` (no `1w`, `1M` or `1y`) plus an
+      # `@unbucketable` list of exactly `~w(1w 1M)` — `1y` is in neither, so
+      # `Capabilities.new/1` raises `historical_timeframes ["1y"] are outside the
+      # timeframe vocabulary` if this package declares it. That is not this package
+      # under-declaring; it is Core's nameable vocabulary being one width narrower than
+      # what a real venue serves, the same gap `nameable/0`'s own moduledoc names for
+      # `1w`/`1M` and has not yet been widened to also cover a yearly bar. Reported
+      # upstream rather than worked around: no invented boundary rule, no silent
+      # substitution of a neighbouring width, and no local monkey-patch of Core's
+      # vocabulary. `1y` remains reachable through `Rest.get_stock_bars/5` directly; it is
+      # simply not nameable in this struct until `dp_exchange_core` widens `nameable/0`.
+      #
+      # A crypto or event-contract call still refuses `1w`/`1M` per-call rather than
+      # silently degrading to the nearest width it does serve.
+      historical_timeframes: Rest.wide_timeframes() -- @core_unnameable_widths,
 
       # Bounded by request parameters rather than a stated page size. `nil` until it is
       # measured, rather than a number that looks measured.
       max_candles_per_request: nil,
 
-      # Webull's crypto OpenAPI exposes no trade volume anywhere. Declared so a consumer
-      # routes volume-dependent work elsewhere instead of reading zeroes.
-      reports_trade_volume: false,
+      # **`true`, not the crypto-only `false` this declared before 2026-09-06.** Webull's
+      # crypto OpenAPI exposes no trade volume anywhere — bars, snapshot or MQTT — and
+      # that half of the claim still holds. But the **stock** snapshot (`get_price/2`,
+      # `category: "US_STOCK"`/`"US_ETF"`) carries a real day-aggregate `volume`, a path
+      # this package has served since `Rest.get_price/3` reached the stock snapshot. One
+      # boolean cannot say "true for equities, false for crypto" — `Core.Capabilities` has
+      # no per-asset-class shape for this field either, the same gap `historical_timeframes`
+      # has above — so this is `true` because a real, active, credentialed path reports a
+      # real number, with the crypto exception spelled out in `measured_against` rather
+      # than flattened into a single silent boolean.
+      reports_trade_volume: true,
       catalog_size: :small,
 
       # **The family's first `:required`.** Every call is signed, including the ones that
@@ -302,7 +373,22 @@ defmodule DpExchange.Webull do
           "live — TICK's inclusion in the default sub_types is read from " <>
           "streaming-api.md's topic table only, and a live probe of this venue's crypto " <>
           "sockets has not been retaken to confirm the venue answers a TICK subscribe the " <>
-          "way the table says it should"
+          "way the table says it should; historical_timeframes' two added widths (1w, " <>
+          "1M — 2026-09-06) and reports_trade_volume flipping to true (2026-09-06) are " <>
+          "both read from this package's own equity endpoints, not a fresh venue probe: " <>
+          "Rest.get_stock_bars/5's @stock_timespans map and Rest.get_price/3's " <>
+          "stock-category volume decode are both already live and already tested against " <>
+          "the venue's documented timespan enum and snapshot schema, and the prior " <>
+          "false/eight-width declaration was the crypto-only truth generalised to the " <>
+          "whole venue, not a measurement that changed — 1w/1M/1y and real volume are " <>
+          "false on crypto and true on equity, option and futures, which one flat list " <>
+          "and one flat boolean cannot say; the crypto exception is enforced per-call by " <>
+          "Rest.get_historical_prices/5 and Rest.get_price/3 rather than by this field; " <>
+          "1y is a THIRD width this venue serves the same way but this declaration " <>
+          "cannot name — dp_exchange_core 0.1.48's Timeframe.nameable/0 admits 1w and 1M " <>
+          "beyond what it can bucket but not 1y, so Capabilities.new/1 raises if it is " <>
+          "declared here; see @core_unnameable_widths above and the CHANGELOG entry for " <>
+          "the upstream gap this surfaced, reported rather than worked around"
     )
   end
 

@@ -46,15 +46,36 @@ defmodule DpExchange.WebullTest do
       assert Webull.capabilities().credential_benefit == :required
     end
 
-    test "no trade volume is reported, so volume work can be routed elsewhere" do
-      refute Webull.capabilities().reports_trade_volume
+    test "trade volume IS reported — real on stocks, even though crypto reports none" do
+      # The declaration is one flat boolean for the whole package; `Rest.get_price/3`'s
+      # stock-category path carries a real day-aggregate volume, so the truthful answer
+      # is `true`, with the crypto exception carried in `measured_against` rather than in
+      # this field. See `Rest`'s and `Webull`'s moduledocs.
+      assert Webull.capabilities().reports_trade_volume
     end
 
-    test "declares no timeframe the venue does not serve" do
-      # `1w` is served and deliberately excluded: its boundary depends on the venue's week
-      # start, which nothing here can verify.
-      for absent <- ~w(12h 1w 3d),
+    test "declares the ten widths Core can name that some active path reaches" do
+      # `1w` and `1M` are unreachable on the crypto and event-contract bars — their own
+      # per-call refusal is `Rest`'s test suite's job, not this declaration's — but they
+      # ARE reachable on the equity, option and futures bars, so they belong in the one
+      # flat list `capabilities/0` publishes. `12h` and `3d` are the shared vocabulary's
+      # own widths this venue never serves anywhere.
+      for present <- ~w(1m 5m 15m 30m 1h 2h 4h 1d 1w 1M),
+          do: assert(present in Webull.capabilities().historical_timeframes)
+
+      for absent <- ~w(12h 3d),
           do: refute(absent in Webull.capabilities().historical_timeframes)
+    end
+
+    test "1y is reachable on the venue but Core cannot name it, so it is NOT declared" do
+      # `Rest.get_stock_bars/5` serves `1y` (tested in `order_book_test.exs`) and
+      # `Rest.wide_timeframes/0` names it as a fact about the venue, but
+      # `dp_exchange_core` 0.1.48's `Timeframe.nameable/0` has no entry for it —
+      # `Capabilities.new/1` would raise if this declaration included it. Declaring it
+      # anyway would need a `dp_exchange_core` change, which is out of scope here; the
+      # absence is a Core vocabulary gap, not this package forgetting a width twice.
+      refute "1y" in Webull.capabilities().historical_timeframes
+      assert "1y" in DpExchange.Webull.Rest.wide_timeframes()
     end
 
     test "provenance separates what was measured here from what was inherited" do
