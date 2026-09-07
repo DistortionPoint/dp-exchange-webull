@@ -937,6 +937,12 @@ defmodule DpExchange.Webull.FeedTest do
 
       :ok = Feed.subscribe_notices(feed, to: self())
 
+      # A real arrival on the crashing shard first, so there is something in
+      # `state.delivering`/`state.delivering_by_kind` for the crash to actually clear —
+      # proving "cleared", not "was never populated."
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
       Process.exit(crash_pid, :kill)
 
       # `isolate_crashed_shard/3` fans this notice out synchronously, inside the same
@@ -947,6 +953,11 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
 
       assert Process.alive?(feed)
+
+      # Cleared immediately, not left to report `:stream` for a symbol whose only shard
+      # just crashed until something else happens to overwrite it — the coverage-
+      # truthfulness question the audit asked directly.
+      assert Feed.coverage(feed) == %{}
 
       state = :sys.get_state(feed)
 

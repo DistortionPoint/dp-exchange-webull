@@ -82,6 +82,26 @@ replay, the 60-second blind resubscribe, and `subscribe/2`/`unsubscribe/2`/`upda
 called with no `:limiter` in `opts` — is wired to it automatically. If you do pass one
 explicitly, it wins.
 
+## A shard's socket crash costs one shard, never your whole subscription
+
+Each shard's MQTT-over-WebSocket connection is a **linked** child of `Feed` — not a
+supervised sibling you can restart independently. `Feed` traps exits, so a shard's
+socket dying abnormally does not take `Feed` down with it: only that shard's symbols
+drop out of `coverage/1` and `coverage_by_kind/1` (cleared immediately, not left to
+report `:stream` for a connection that no longer exists), you get a `:link_down`
+`Core.Notice` naming the crashed shard, and this package reopens it on its own — you
+never need to call `subscribe/2` again.
+
+**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
+the per-shard crash path, or anything that kills the `Feed` pid directly.
+`DpExchange.Webull.Supervisor` restarts `Feed` under `:one_for_one`, but from the
+*static* `opts` your supervision tree started it with; every `subscribe/2`,
+`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone. Nothing
+inside this package can replay those calls — it never held onto the functions or the
+process that made them. If your consumer needs to survive a `Feed` restart unattended,
+monitor the `Feed` pid (or the `DpExchange.Webull` pid it sits under) yourself and
+re-issue `subscribe/2` on `:DOWN`.
+
 ## Subscribing is two protocols, and you see neither
 
 Market data arrives over MQTT on a WebSocket. Subscriptions are HTTP calls. They are joined

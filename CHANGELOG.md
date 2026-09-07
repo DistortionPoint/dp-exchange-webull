@@ -24,6 +24,18 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`coverage/1`/`coverage_by_kind/1` kept reporting `:stream` for a shard's symbols
+  after that shard's socket crashed.** `isolate_crashed_shard/3` (added for the W2 fix,
+  see below) already rebuilt `state.shards` and fanned out a `:link_down` notice on a
+  shard crash, but never touched `state.delivering`/`state.delivering_by_kind` — the same
+  gap the WS-level `:link_down` handler has (it only flips `connected?: false`). A symbol
+  whose only shard had just crashed kept reading as delivering until something else
+  happened to overwrite its entry. Found by a 2026-09-07 supervision audit that asked
+  directly whether `coverage/1` tells the truth immediately after a crash. Now cleared in
+  `isolate_crashed_shard/3` the same way `unsubscribe/2` already clears a departing
+  symbol's delivery record — a symbol whose only shard just died has exactly as little
+  arriving for it as one that was never subscribed.
+
 - **`FeedTest`'s `terminate/2` describe block asserted on `ExUnit.CaptureLog` *content*
   under `async: true`, and lost the race on seed 42.** `capture_log/1,2`'s isolation
   depends on a global swap of the Logger backend's output device; a content assertion

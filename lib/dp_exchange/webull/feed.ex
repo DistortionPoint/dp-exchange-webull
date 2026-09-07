@@ -1024,10 +1024,19 @@ defmodule DpExchange.Webull.Feed do
     # fresh session's first resubscribe merely succeeded, for a failure the new connection
     # never actually had — the crash itself is already reported separately, via the
     # `:link_down` notice just above and whatever `:link_up`/`:link_down` pair follows.
+    # `coverage/1`/`coverage_by_kind/1` must not keep answering `:stream` for a shard
+    # that just crashed — the same "silent half-dead feed" this module's moduledoc is
+    # about, one step earlier: the shard IS reported (via the `:link_down` notice above),
+    # but until this, `coverage/1` itself kept lying in the meantime. Dropped the same
+    # way `unsubscribe/2` already drops a departing symbol's delivery record — see
+    # `drop_symbols_by_kind/2` above — because a symbol whose only shard just died has
+    # exactly as little arriving for it as one that was never subscribed.
     state = %{
       state
       | shards: Map.delete(state.shards, index),
-        resubscribe_failed: MapSet.delete(state.resubscribe_failed, index)
+        resubscribe_failed: MapSet.delete(state.resubscribe_failed, index),
+        delivering: Map.drop(state.delivering, shard.symbols),
+        delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
 
     send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
