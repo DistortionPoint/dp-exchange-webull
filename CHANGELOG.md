@@ -24,6 +24,27 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`FeedTest`'s `terminate/2` describe block asserted on `ExUnit.CaptureLog` *content*
+  under `async: true`, and lost the race on seed 42.** `capture_log/1,2`'s isolation
+  depends on a global swap of the Logger backend's output device; a content assertion
+  raced against it is exactly the case concurrency breaks, and this file has 60+ other
+  tests logging at `:debug` alongside unrelated HTTP request logging elsewhere in the
+  suite under `max_cases: 20`. `refute log =~ "skipped"` failed against a blob of another
+  test's log output that happened to contain it. Split into
+  `FeedTerminateLogTest`, `async: false`, which removes the race structurally rather than
+  narrowing the substring or widening a timeout — the underlying mechanism genuinely
+  is not concurrency-safe for content assertions. Found by a cross-package audit running
+  the full suite on multiple explicit seeds, which this family's CI does not do by
+  default.
+
+- **`child_spec/1` did not declare `type: :supervisor`, so OTP defaulted it to `:worker`**
+  — which also defaults `:shutdown` to `5_000`ms instead of `:infinity`. A consumer
+  terminating this child gave the whole nested tree (shards, MQTT sessions, rate limiter)
+  only five seconds to shut down gracefully before `:kill`, rather than letting it unwind
+  on its own terms. Invisible to any single-package review, and found only by diffing
+  `child_spec/1` across all five venue packages against each other; `dp_exchange_schwab`
+  was the only one that already declared it.
+
 - **`capabilities/0` withheld `1y`, a width this venue serves, three Core releases after
   the reason stopped applying.** `historical_timeframes` was
   `Rest.wide_timeframes() -- @core_unnameable_widths`, where the subtracted list was

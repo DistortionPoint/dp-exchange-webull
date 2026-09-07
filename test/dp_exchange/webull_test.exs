@@ -254,6 +254,13 @@ defmodule DpExchange.WebullTest do
       assert %{id: :custom} = Webull.child_spec(name: :custom)
       assert %{id: DpExchange.Webull} = Webull.child_spec([])
     end
+
+    test "child_spec/1 declares :supervisor, not OTP's default :worker shutdown" do
+      # `start_link/1` starts a `Supervisor`. Without `type: :supervisor` OTP defaults
+      # `:shutdown` to 5_000ms instead of `:infinity`, giving the whole nested tree only
+      # five seconds to unwind gracefully before `:kill`.
+      assert %{type: :supervisor} = Webull.child_spec([])
+    end
   end
 
   describe "the fake models what makes this venue different" do
