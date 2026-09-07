@@ -436,19 +436,40 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
   describe "the fake and the facade" do
     test "the fake refuses what the package refuses" do
-      assert {:error, :symbol_required} = Fake.get_corporate_events()
-      assert {:error, :symbols_required} = Fake.get_news()
-      assert {:error, {:unknown_screener, "nope"}} = Fake.get_screener("nope")
+      assert {:error, :symbol_required} = Fake.get_corporate_events(credentials: @credentials)
+      assert {:error, :symbols_required} = Fake.get_news(credentials: @credentials)
+
+      assert {:error, {:unknown_screener, "nope"}} =
+               Fake.get_screener("nope", credentials: @credentials)
     end
 
     test "the fake's statement keeps the integer fiscal period" do
-      assert {:ok, [statement]} = Fake.get_financials("AAPL", :balance_sheet)
+      assert {:ok, [statement]} =
+               Fake.get_financials("AAPL", :balance_sheet, credentials: @credentials)
+
       assert statement.fiscal_period == "FY"
     end
 
     test "the fake's news names the venue as the source" do
-      assert {:ok, [item]} = Fake.get_news(symbols: ["AAPL"])
+      assert {:ok, [item]} = Fake.get_news(credentials: @credentials, symbols: ["AAPL"])
       assert item.source == "webull"
+    end
+
+    # Every reference-data endpoint here is signed, so the fake refuses without
+    # credentials rather than answering where the real venue returns 401. The credential
+    # check comes before the argument checks above, matching `Rest`'s own order. All are
+    # outside `Core.AdapterContract`'s `@credentialed` list, so assertion 17 never asks.
+    test "the reference-data callbacks need credentials, as the real venue does" do
+      assert Fake.get_corporate_events(symbol: "AAPL") ==
+               {:error, {:missing_credentials, :webull}}
+
+      assert Fake.get_news(symbols: ["AAPL"]) == {:error, {:missing_credentials, :webull}}
+      assert Fake.get_filings("AAPL") == {:error, {:missing_credentials, :webull}}
+
+      assert Fake.get_financials("AAPL", :balance_sheet) ==
+               {:error, {:missing_credentials, :webull}}
+
+      assert Fake.get_screener("nope") == {:error, {:missing_credentials, :webull}}
     end
 
     test "the facade delegates each of the six" do

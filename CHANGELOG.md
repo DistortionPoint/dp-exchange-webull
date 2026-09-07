@@ -24,6 +24,32 @@ acceptable changelog line.
 
 ### Fixed
 
+- **BREAKING: twelve more `Fake` callbacks on the widened surface still succeeded with no
+  credentials — the same defect as the entry below, on the endpoints assertion 17
+  structurally cannot reach.** `get_option_chain/2`, `get_option_expirations/2`,
+  `list_watchlists/1`, `get_watchlist/2`, `create_watchlist/3`, `update_watchlist/2`,
+  `delete_watchlist/2`, `get_financials/3`, `get_corporate_events/1`, `get_filings/2`,
+  `get_news/1` and `get_screener/2` all bound their options as `_opts` and never inspected
+  `credentials`, while every one of their real counterparts reaches the venue through
+  `Rest`'s signed request path and answers `{:error, {:missing_credentials, :webull}}`
+  without one. All twelve now gate through the same `authenticated/1` →
+  `Auth.present?/1` helper the rest of the fake already used, checked **before** the
+  argument validation they already did, matching `Rest`'s own order — so
+  `Fake.get_news(symbols: ["AAPL"])` with no credentials is now a credential error rather
+  than a success, and `Fake.get_corporate_events()` with neither is the credential error
+  rather than `:symbol_required`.
+
+  **Why the earlier fix missed them.** Assertion 17 gates on
+  `Core.AdapterContract`'s hardcoded `@credentialed` list — `get_balances`,
+  `get_accounts`, `get_fees`, `get_transfers`, `place_order`, `cancel_order`, `get_order`,
+  `get_orders`, `get_trade_history` — which names none of the twelve. The list predates the
+  widened callback surface and was never extended with it, so a venue can pass assertion 17
+  with the whole options/watchlists/fundamentals/news/screener surface ungated. This was
+  found by a cross-package audit that compared all five venue packages against each other,
+  which also found the identical gap in `dp_exchange_schwab`'s fake on its own widened
+  surface — it is a property of the assertion's fixed list, not of either venue, and the
+  durable fix belongs in Core rather than here.
+
 - **BREAKING: `Fake` let several credentialed account and order calls succeed with no
   credentials at all — the venue declares `credential_benefit: :required` and the fake
   did not honour it.** Found by `dp_exchange_core` 0.1.57's new assertion 17 ("credential

@@ -30,6 +30,18 @@ defmodule DpExchange.Webull.Fake do
     order callbacks, both wrong for the reasons above; found by `dp_exchange_core`
     0.1.57's assertion 17. A fake that answered anyway would let a consumer's test pass
     while the real call returns 401.
+
+    **The gate covers the widened surface too, and that part assertion 17 cannot check.**
+    Options, watchlists, financials, corporate events, filings, news and the screener all
+    reach the venue through the same signed `Rest` request path as everything else, so
+    they refuse without credentials exactly as `get_price/2` does. They were missed
+    originally because assertion 17 gates on `Core.AdapterContract`'s hardcoded
+    `@credentialed` list — `get_balances`, `get_accounts`, `get_fees`, `get_transfers`,
+    `place_order`, `cancel_order`, `get_order`, `get_orders`, `get_trade_history` — which
+    names none of them, so twelve callbacks answered `{:ok, _}` with no credentials while
+    the real venue returned 401. A cross-package audit found the identical gap in
+    `dp_exchange_schwab`'s fake on the same widened surface; it is a property of the
+    assertion's fixed list, not of either venue.
   - **No volume.** `volume` is `nil` on every quote and every bar, matching a venue that
     reports none. Returning `0` would look like a real measurement of no trading.
   - **UAT has no stream.** `subscribe/2` under `environment: :uat` refuses, exactly as the
@@ -42,8 +54,8 @@ defmodule DpExchange.Webull.Fake do
   first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
   `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
   `authenticated/1` also checks `FakeInjection.credentials_bypassed?/1` before its normal
-  `{:refused, :missing_credentials}` path. Neither changes anything for a test that never
-  calls `FakeInjection` — see that module for the full contract.
+  `{:error, {:missing_credentials, :webull}}` path. Neither changes anything for a test
+  that never calls `FakeInjection` — see that module for the full contract.
 
   `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are NOT wired: each takes a list
   of symbols in one call, and "this one symbol in the batch fails, the rest succeed" is a
@@ -842,33 +854,37 @@ defmodule DpExchange.Webull.Fake do
     do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def get_option_chain(underlying, _opts \\ []) do
+  def get_option_chain(underlying, opts \\ []) do
     with_injection(underlying, fn ->
-      # A strike with only a call on it, because that is the case a consumer iterating strikes
-      # has to see. A fake whose grid was always complete would let one ship code that skips it.
-      call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
-      put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
-      lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
+      with :ok <- authenticated(opts) do
+        # A strike with only a call on it, because that is the case a consumer iterating strikes
+        # has to see. A fake whose grid was always complete would let one ship code that skips it.
+        call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
+        put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
+        lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
 
-      {:ok,
-       %Types.OptionChain{
-         underlying: underlying,
-         expiries: %{
-           ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
-           ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
-         },
-         # The contract list does not quote the underlying, and a fake that filled this in
-         # would teach a consumer to rely on a field that is nil in production.
-         underlying_price: nil,
-         venue_time: nil,
-         provider: :webull
-       }}
+        {:ok,
+         %Types.OptionChain{
+           underlying: underlying,
+           expiries: %{
+             ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
+             ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
+           },
+           # The contract list does not quote the underlying, and a fake that filled this in
+           # would teach a consumer to rely on a field that is nil in production.
+           underlying_price: nil,
+           venue_time: nil,
+           provider: :webull
+         }}
+      end
     end)
   end
 
   @impl true
-  def get_option_expirations(underlying, _opts \\ []) do
-    with_injection(underlying, fn -> {:ok, [~D[2026-03-20], ~D[2026-06-19]]} end)
+  def get_option_expirations(underlying, opts \\ []) do
+    with_injection(underlying, fn ->
+      with :ok <- authenticated(opts), do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+    end)
   end
 
   defp fake_contract(underlying, expiry, strike, right) do
@@ -893,65 +909,35 @@ defmodule DpExchange.Webull.Fake do
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
   @impl true
-  def list_watchlists(_opts \\ []) do
+  def list_watchlists(opts \\ []) do
     with_injection(fn ->
-      # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
-      # membership, and a fake returning `[]` would teach a consumer that they are empty.
-      {:ok,
-       [
-         %Types.Watchlist{
-           id: "wl-1",
-           name: "My Tech Stocks",
-           symbols: nil,
-           venue_time: nil,
-           provider: :webull
-         }
-       ]}
+      with :ok <- authenticated(opts) do
+        # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
+        # membership, and a fake returning `[]` would teach a consumer that they are empty.
+        {:ok,
+         [
+           %Types.Watchlist{
+             id: "wl-1",
+             name: "My Tech Stocks",
+             symbols: nil,
+             venue_time: nil,
+             provider: :webull
+           }
+         ]}
+      end
     end)
   end
 
   @impl true
-  def get_watchlist(id, _opts \\ []) do
+  def get_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      # And `name: nil` here, because the membership endpoint does not return it.
-      {:ok,
-       %Types.Watchlist{
-         id: id,
-         name: nil,
-         symbols: ["AAPL", "GOOG"],
-         venue_time: nil,
-         provider: :webull
-       }}
-    end)
-  end
-
-  @impl true
-  def create_watchlist(name, symbols, _opts \\ []) do
-    with_injection(fn ->
-      {:ok,
-       %Types.Watchlist{
-         id: "wl-new",
-         name: name,
-         symbols: symbols,
-         venue_time: nil,
-         provider: :webull
-       }}
-    end)
-  end
-
-  @impl true
-  def update_watchlist(id, opts \\ []) do
-    with_injection(fn ->
-      if Keyword.has_key?(opts, :symbols) do
-        # Refused rather than silently skipped, as in the package: this venue's update
-        # endpoint does not touch membership.
-        {:error, :membership_not_updatable_here}
-      else
+      with :ok <- authenticated(opts) do
+        # And `name: nil` here, because the membership endpoint does not return it.
         {:ok,
          %Types.Watchlist{
            id: id,
-           name: Keyword.get(opts, :name),
-           symbols: nil,
+           name: nil,
+           symbols: ["AAPL", "GOOG"],
            venue_time: nil,
            provider: :webull
          }}
@@ -960,128 +946,178 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def delete_watchlist(_id, _opts \\ []) do
-    with_injection(fn -> {:ok, :ok} end)
+  def create_watchlist(name, symbols, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts) do
+        {:ok,
+         %Types.Watchlist{
+           id: "wl-new",
+           name: name,
+           symbols: symbols,
+           venue_time: nil,
+           provider: :webull
+         }}
+      end
+    end)
   end
 
   @impl true
-  def get_financials(symbol, kind, _opts \\ []) do
+  def update_watchlist(id, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts) do
+        if Keyword.has_key?(opts, :symbols) do
+          # Refused rather than silently skipped, as in the package: this venue's update
+          # endpoint does not touch membership.
+          {:error, :membership_not_updatable_here}
+        else
+          {:ok,
+           %Types.Watchlist{
+             id: id,
+             name: Keyword.get(opts, :name),
+             symbols: nil,
+             venue_time: nil,
+             provider: :webull
+           }}
+        end
+      end
+    end)
+  end
+
+  @impl true
+  def delete_watchlist(_id, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts), do: {:ok, :ok}
+    end)
+  end
+
+  @impl true
+  def get_financials(symbol, kind, opts \\ []) do
     with_injection(symbol, fn ->
-      {:ok,
-       [
-         %Types.FinancialStatement{
-           symbol: symbol,
-           kind: kind,
-           line_items: %{
-             "total_assets" => "379297000000",
-             "fiscal_year" => 2026,
-             "fiscal_period" => 0
-           },
-           period_end: ~D[2025-12-27],
-           # The venue's integer code, not a string. `0` is the full year.
-           fiscal_period: "FY",
-           currency: "USD",
-           venue_time: nil,
-           provider: :webull
-         }
-       ]}
+      with :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %Types.FinancialStatement{
+             symbol: symbol,
+             kind: kind,
+             line_items: %{
+               "total_assets" => "379297000000",
+               "fiscal_year" => 2026,
+               "fiscal_period" => 0
+             },
+             period_end: ~D[2025-12-27],
+             # The venue's integer code, not a string. `0` is the full year.
+             fiscal_period: "FY",
+             currency: "USD",
+             venue_time: nil,
+             provider: :webull
+           }
+         ]}
+      end
     end)
   end
 
   @impl true
   def get_corporate_events(opts \\ []) do
     with_injection(fn ->
-      case Keyword.get(opts, :symbol) do
-        symbol when is_binary(symbol) ->
-          {:ok,
-           [
-             %Types.CorporateEvent{
-               symbol: symbol,
-               kind: :dividend,
-               ex_date: ~D[2026-08-10],
-               record_date: ~D[2026-08-11],
-               pay_date: ~D[2026-08-14],
-               announced_date: nil,
-               amount: Decimal.new("0.25"),
-               currency: "USD",
-               ratio: nil,
-               # The venue publishes no confirmed flag. `true` would claim an earnings date is
-               # final when one routinely is not.
-               confirmed: nil,
-               details: %{},
-               provider: :webull
-             }
-           ]}
+      with :ok <- authenticated(opts) do
+        case Keyword.get(opts, :symbol) do
+          symbol when is_binary(symbol) ->
+            {:ok,
+             [
+               %Types.CorporateEvent{
+                 symbol: symbol,
+                 kind: :dividend,
+                 ex_date: ~D[2026-08-10],
+                 record_date: ~D[2026-08-11],
+                 pay_date: ~D[2026-08-14],
+                 announced_date: nil,
+                 amount: Decimal.new("0.25"),
+                 currency: "USD",
+                 ratio: nil,
+                 # The venue publishes no confirmed flag. `true` would claim an earnings date
+                 # is final when one routinely is not.
+                 confirmed: nil,
+                 details: %{},
+                 provider: :webull
+               }
+             ]}
 
-        _missing ->
-          {:error, :symbol_required}
+          _missing ->
+            {:error, :symbol_required}
+        end
       end
     end)
   end
 
   @impl true
-  def get_filings(symbol, _opts \\ []) do
+  def get_filings(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      {:ok,
-       [
-         %Types.Filing{
-           symbol: symbol,
-           id: "f-1",
-           form_type: "10-Q",
-           title: "Quarterly report",
-           url: "https://example.invalid/f-1",
-           filed_at: nil,
-           period_end: ~D[2025-12-27],
-           provider: :webull
-         }
-       ]}
+      with :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %Types.Filing{
+             symbol: symbol,
+             id: "f-1",
+             form_type: "10-Q",
+             title: "Quarterly report",
+             url: "https://example.invalid/f-1",
+             filed_at: nil,
+             period_end: ~D[2025-12-27],
+             provider: :webull
+           }
+         ]}
+      end
     end)
   end
 
   @impl true
   def get_news(opts \\ []) do
     with_injection(fn ->
-      case Keyword.get(opts, :symbols) do
-        [_first | _rest] = symbols ->
-          {:ok,
-           [
-             %Types.NewsItem{
-               id: "n-1",
-               headline: "Summary",
-               summary: "A model's paraphrase, not the publisher's text.",
-               url: nil,
-               # The venue generated it; naming a publisher would attribute a paraphrase.
-               source: "webull",
-               symbols: symbols,
-               published_at: nil,
-               provider: :webull
-             }
-           ]}
+      with :ok <- authenticated(opts) do
+        case Keyword.get(opts, :symbols) do
+          [_first | _rest] = symbols ->
+            {:ok,
+             [
+               %Types.NewsItem{
+                 id: "n-1",
+                 headline: "Summary",
+                 summary: "A model's paraphrase, not the publisher's text.",
+                 url: nil,
+                 # The venue generated it; naming a publisher would attribute a paraphrase.
+                 source: "webull",
+                 symbols: symbols,
+                 published_at: nil,
+                 provider: :webull
+               }
+             ]}
 
-        _missing ->
-          {:error, :symbols_required}
+          _missing ->
+            {:error, :symbols_required}
+        end
       end
     end)
   end
 
   @impl true
-  def get_screener(name, _opts \\ []) do
+  def get_screener(name, opts \\ []) do
     with_injection(fn ->
-      if name in Rest.screeners() do
-        {:ok,
-         [
-           %Types.ScreenerResult{
-             symbol: "AAPL",
-             screener: name,
-             # The venue's returned order, not a metric this package ranked on.
-             rank: 1,
-             metrics: %{"change_ratio" => "0.031"},
-             venue_time: nil,
-             provider: :webull
-           }
-         ]}
-      else
-        {:error, {:unknown_screener, name}}
+      with :ok <- authenticated(opts) do
+        if name in Rest.screeners() do
+          {:ok,
+           [
+             %Types.ScreenerResult{
+               symbol: "AAPL",
+               screener: name,
+               # The venue's returned order, not a metric this package ranked on.
+               rank: 1,
+               metrics: %{"change_ratio" => "0.031"},
+               venue_time: nil,
+               provider: :webull
+             }
+           ]}
+        else
+          {:error, {:unknown_screener, name}}
+        end
       end
     end)
   end

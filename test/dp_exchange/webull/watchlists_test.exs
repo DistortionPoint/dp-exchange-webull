@@ -318,20 +318,38 @@ defmodule DpExchange.Webull.WatchlistsTest do
 
   describe "the fake and the facade" do
     test "the fake keeps both absences" do
-      assert {:ok, [watchlist]} = Fake.list_watchlists()
+      assert {:ok, [watchlist]} = Fake.list_watchlists(credentials: @credentials)
       assert watchlist.symbols == nil
 
-      assert {:ok, read} = Fake.get_watchlist("wl-1")
+      assert {:ok, read} = Fake.get_watchlist("wl-1", credentials: @credentials)
       assert read.name == nil
       assert read.symbols == ["AAPL", "GOOG"]
     end
 
     test "the fake refuses a membership update" do
       assert {:error, :membership_not_updatable_here} =
-               Fake.update_watchlist("wl-1", symbols: ["AAPL"])
+               Fake.update_watchlist("wl-1", credentials: @credentials, symbols: ["AAPL"])
 
-      assert {:ok, %{name: "Renamed"}} = Fake.update_watchlist("wl-1", name: "Renamed")
-      assert {:ok, :ok} = Fake.delete_watchlist("wl-1")
+      assert {:ok, %{name: "Renamed"}} =
+               Fake.update_watchlist("wl-1", credentials: @credentials, name: "Renamed")
+
+      assert {:ok, :ok} = Fake.delete_watchlist("wl-1", credentials: @credentials)
+    end
+
+    # Watchlists are a signed endpoint like everything else here, so the fake refuses
+    # without credentials rather than answering where the real venue returns 401. Outside
+    # `Core.AdapterContract`'s `@credentialed` list, so assertion 17 never asks.
+    test "the watchlist callbacks need credentials, as the real venue does" do
+      assert Fake.list_watchlists() == {:error, {:missing_credentials, :webull}}
+      assert Fake.get_watchlist("wl-1") == {:error, {:missing_credentials, :webull}}
+
+      assert Fake.create_watchlist("New", ["AAPL"]) ==
+               {:error, {:missing_credentials, :webull}}
+
+      assert Fake.update_watchlist("wl-1", name: "Renamed") ==
+               {:error, {:missing_credentials, :webull}}
+
+      assert Fake.delete_watchlist("wl-1") == {:error, {:missing_credentials, :webull}}
     end
 
     test "the facade delegates all eight" do

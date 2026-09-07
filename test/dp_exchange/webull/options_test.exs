@@ -239,20 +239,28 @@ defmodule DpExchange.Webull.OptionsTest do
 
   describe "the fake" do
     test "the chain carries a strike with only one side" do
-      assert {:ok, chain} = Fake.get_option_chain("AAPL")
+      assert {:ok, chain} = Fake.get_option_chain("AAPL", credentials: @credentials)
       row = chain.expiries[~D[2026-06-19]][Decimal.new("120")]
       assert row.call
       assert row.put == nil
     end
 
     test "the underlying price stays nil, as it does in the package" do
-      assert {:ok, chain} = Fake.get_option_chain("AAPL")
+      assert {:ok, chain} = Fake.get_option_chain("AAPL", credentials: @credentials)
       assert chain.underlying_price == nil
     end
 
     test "the expiries are the chain's" do
-      assert {:ok, expiries} = Fake.get_option_expirations("AAPL")
+      assert {:ok, expiries} = Fake.get_option_expirations("AAPL", credentials: @credentials)
       assert expiries == [~D[2026-03-20], ~D[2026-06-19]]
+    end
+
+    # The options endpoints sign like every other call on this venue, so the fake has to
+    # refuse without credentials the way `Rest` does. They are outside
+    # `Core.AdapterContract`'s hardcoded `@credentialed` list, so assertion 17 never asks.
+    test "the options callbacks need credentials, as the real venue does" do
+      assert Fake.get_option_chain("AAPL") == {:error, {:missing_credentials, :webull}}
+      assert Fake.get_option_expirations("AAPL") == {:error, {:missing_credentials, :webull}}
     end
 
     test "greeks refuse, because the venue publishes none" do

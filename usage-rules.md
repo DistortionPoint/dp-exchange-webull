@@ -31,7 +31,11 @@ You keep the credentials. This package signs one request with them and holds not
 Every account and order call — `get_balances/2`, `get_accounts/2`, `get_fees/2`,
 `get_transfers/2`, `get_transactions/2`, `get_positions/1`, `quantization/2`,
 `place_order/3`, `place_orders/3`, `preview_order/3`, `replace_order/4`,
-`cancel_order/3`, `get_order/3`, `get_orders/2` — refuses the same way market data does
+`cancel_order/3`, `get_order/3`, `get_orders/2` — and every options, watchlist,
+fundamentals, news and screener call — `get_option_chain/2`, `get_option_expirations/2`,
+`list_watchlists/1`, `get_watchlist/2`, `create_watchlist/3`, `update_watchlist/2`,
+`delete_watchlist/2`, `get_financials/3`, `get_corporate_events/1`, `get_filings/2`,
+`get_news/1`, `get_screener/2` — refuses the same way market data does
 without a credential: `{:error, {:missing_credentials, :webull}}`, never `{:ok, _}`. Not
 `{:refused, _}` either — a missing local credential never reaches the venue at all
 (`Core.Venue`'s `:refused` is the venue's own permanent word about a request it
@@ -49,6 +53,19 @@ these without credentials and asserted success was passing against behaviour the
 venue does not have. If your own tests do this, they need updating; that is the point of
 the fix, not a regression in it. `market_status/1` is the one exception — the real venue
 answers it with no credential either, and the fake still does too.
+
+The same gap survived one round longer on the options, watchlist, fundamentals, news and
+screener callbacks, and is now closed as well: `Fake.get_option_chain/2`,
+`Fake.get_option_expirations/2`, `Fake.list_watchlists/1`, `Fake.get_watchlist/2`,
+`Fake.create_watchlist/3`, `Fake.update_watchlist/2`, `Fake.delete_watchlist/2`,
+`Fake.get_financials/3`, `Fake.get_corporate_events/1`, `Fake.get_filings/2`,
+`Fake.get_news/1` and `Fake.get_screener/2` all answered `{:ok, _}` with no credentials.
+The credential check now runs **before** each call's own argument validation, matching the
+real `Rest` order — so `Fake.get_corporate_events()` with neither a credential nor a
+`:symbol` is `{:error, {:missing_credentials, :webull}}`, not `{:error, :symbol_required}`.
+These were missed by the earlier sweep because `dp_exchange_core`'s assertion 17 checks a
+fixed list of nine callback names that predates this surface and does not include any of
+them — passing that assertion is not evidence that the rest of your fake gates credentials.
 
 ## Start it, and it brings its own rate limiter
 
