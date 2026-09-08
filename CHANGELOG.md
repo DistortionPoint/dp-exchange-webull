@@ -24,6 +24,32 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`public_ceiling`/`authenticated_ceiling` were `%{limit: 10, per_ms: 1_000}` with no
+  comment and no mention anywhere in `capabilities/0`'s own `measured_against` string —
+  unlabelled and inherited, and load-bearing: `Supervisor`'s private `limits/0` feeds
+  this straight into the real `DefaultRateLimiter` this package starts, so the
+  unexamined number was actually throttling (or failing to throttle) every REST call.**
+  Found by a
+  family-wide sweep for the `@pairs_per_socket`/`@shard_spacing_ms` defect class in
+  `dp_exchange_coinbase` — an unverified number sitting where a cited one belongs.
+  Webull's own Data API FAQ (`developer.webull.com/apis/docs/market-data-api/faq/`,
+  read 2026-09-08) states "a rate limit of 300 requests per 60 seconds" — `300 / 60 = 5`
+  — now `docs/reference/webull/rest-rate-limits.md`. Both ceilings are now `5`, not `10`;
+  every endpoint here is signed (`credential_benefit: :required`), so there is no
+  separate public/authenticated figure to distinguish. This *lowers* the rate this
+  package will request against the venue — a caller running close to the old,
+  unverified `10` may now see requests queue that previously went straight through — but
+  the old number rested on nothing, and this one rests on the venue's own stated ceiling.
+  Two smaller citation gaps found in the same sweep, values unchanged: `Rest.place_orders/3`'s
+  50-orders-equities-only batch limit now cites `docs/reference/webull/batch-orders.md`
+  (previously "its page says so" with no committed source); `Rest.get_order_book/3`'s
+  `depth` default of `10` is now labelled as generalised from the event-contracts
+  endpoint's documented default rather than confirmed for the stock/futures endpoints it
+  actually applies to — the stock endpoint's own parameter table has never been captured
+  (JS-rendered, same limitation `negative-claims.md` already records elsewhere), and the
+  futures endpoint's own page states `depth` is `1–10, required` with **no** default,
+  making the prior "L2 defaults to 10" doc comment an overgeneralisation for that case.
+
 - **A malformed WebSocket close frame from Webull crashed a shard's socket before
   `handle_disconnect/2` ever ran — dp-exchange-core issue #27.** Webull sometimes closes
   this venue's MQTT-over-WebSocket connection with a close frame carrying **prose**

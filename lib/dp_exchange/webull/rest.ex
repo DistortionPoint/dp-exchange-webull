@@ -1080,9 +1080,26 @@ defmodule DpExchange.Webull.Rest do
   symbol is refused before the request rather than sent and rejected.
 
   `opts[:category]` picks `US_STOCK` (the default) or `US_ETF`; `opts[:depth]` is the
-  venue's own level count — L1 is 1, L2 defaults to 10. `opts[:overnight]` includes
-  overnight trading data, and the venue **requires the parameter**, so `false` is sent
-  explicitly rather than omitted.
+  venue's own level count. `opts[:overnight]` includes overnight trading data, and the
+  venue **requires the parameter**, so `false` is sent explicitly rather than omitted.
+
+  ## `depth`'s default of `10` is this package's own choice, not a confirmed venue default
+
+  Unlike `overnight_required`, the stocks depth endpoint's own parameter table has never
+  been captured — `endpoint-inventory.md` has its path and nothing else (the vendor's
+  reference pages build parameter tables in JavaScript; a plain fetch returns only the
+  method, path and one-line description, same limitation `negative-claims.md` already
+  records for other endpoints). `10` is inherited from a sibling endpoint that IS
+  documented — `/market-data/event-contracts/depths/list` states "`depth` (default 10)"
+  (`docs/reference/webull/futures-and-event-contracts.md`) — generalised here without
+  confirmation that the stock endpoint shares it. On `US_FUTURES` specifically, the
+  venue's own page states `depth` is **`1–10, required`** with no default at all
+  (same file), so supplying `10` there is this package filling a required parameter with
+  a value known to be in range, not a venue default being honoured.
+
+  Settling the stock case needs either a browser-rendered read of this endpoint's own
+  parameter table (the same way `futures-and-event-contracts.md` was captured) or a
+  credentialed consumer's tier-3 probe of what an omitted `depth` actually returns.
 
   ## What is dropped, and why that is stated rather than silent
 
@@ -1106,6 +1123,8 @@ defmodule DpExchange.Webull.Rest do
         %{
           "symbol" => symbol,
           "category" => category,
+          # `10` is generalised from the event-contracts endpoint's documented default,
+          # NOT confirmed for this endpoint — see this function's own @doc.
           "depth" => to_string(Keyword.get(opts, :depth, 10))
         }
         |> put_present("overnight_required", book_overnight(category, opts))
@@ -3072,10 +3091,11 @@ defmodule DpExchange.Webull.Rest do
   caller that looped would be reconciling N outcomes instead of reading one response.
 
   **The venue's limits, enforced here rather than discovered.** A maximum of **50** orders
-  per request, and **equities only** — its page says so in both cases. A batch over the cap
-  is refused before it is sent rather than split, because splitting turns one request into
-  several and undoes the only reason to call this. An order whose instrument type is not
-  equity is refused by index, so a caller knows which one.
+  per request, and **equities only** — `docs/reference/webull/batch-orders.md` quotes the
+  page verbatim for both. A batch over the cap is refused before it is sent rather than
+  split, because splitting turns one request into several and undoes the only reason to
+  call this. An order whose instrument type is not equity is refused by index, so a caller
+  knows which one.
 
   **The vendor also says this is not available to every client.** A refusal here can mean
   the account is not entitled rather than that the batch was wrong, and the venue's own

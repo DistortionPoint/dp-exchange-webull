@@ -81,6 +81,13 @@ defmodule DpExchange.Webull.Socket do
 
   require Logger
 
+  # This package's own choice, not a venue-mandated value — MQTT 3.1.1's keep-alive is a
+  # client-selected 16-bit second count (0-65535), and nothing in
+  # docs/reference/webull/streaming-api.md states a required or recommended figure.
+  # Already investigated once as a possible cause of a ~10s close cadence and ruled out
+  # on the arithmetic alone (this schedule cannot explain a period shorter than the
+  # 30s PINGREQ half-interval below it) — see the CHANGELOG's "Why the venue closes the
+  # connection at all" entry.
   @keep_alive_s 60
 
   # Chosen against `Feed`'s own `@call_timeout` (15s), not inherited.

@@ -399,8 +399,19 @@ defmodule DpExchange.Webull do
       # exception apart from a defect. See `Rest.get_fees/2`'s own moduledoc for the
       # incident.
       no_venue_contact: [{:get_fees, 2}],
-      public_ceiling: %{limit: 10, per_ms: 1_000},
-      authenticated_ceiling: %{limit: 10, per_ms: 1_000},
+
+      # Was `10` on both, with no comment and no mention in `measured_against` below —
+      # unlabelled and inherited, found by a family-wide sweep for the
+      # `@pairs_per_socket`/`@shard_spacing_ms` defect class. This one is load-bearing:
+      # `Supervisor`'s private `limits/0` feeds it straight into the real `DefaultRateLimiter` this
+      # package starts, so the unexamined number was actually throttling (or failing to
+      # throttle) every REST call. Webull's own Data API FAQ states "a rate limit of 300
+      # requests per 60 seconds" — `300 / 60 = 5` — see
+      # `docs/reference/webull/rest-rate-limits.md`. Every endpoint here is signed
+      # (`credential_benefit: :required` above), so there is no separate public/
+      # authenticated split to make; both ceilings carry the same documented figure.
+      public_ceiling: %{limit: 5, per_ms: 1_000},
+      authenticated_ceiling: %{limit: 5, per_ms: 1_000},
       measured_at: ~D[2026-08-28],
       measured_against:
         "streaming contract, MQTT endpoints and protobuf schema read from " <>
@@ -431,7 +442,12 @@ defmodule DpExchange.Webull do
           "cannot name — dp_exchange_core 0.1.48's Timeframe.nameable/0 admits 1w and 1M " <>
           "beyond what it can bucket but not 1y, so Capabilities.new/1 raises if it is " <>
           "declared here; see @core_unnameable_widths above and the CHANGELOG entry for " <>
-          "the upstream gap this surfaced, reported rather than worked around"
+          "the upstream gap this surfaced, reported rather than worked around; " <>
+          "public_ceiling/authenticated_ceiling (2026-09-08) ARE now doc-derived — " <>
+          "developer.webull.com's Data API FAQ states \"a rate limit of 300 requests per " <>
+          "60 seconds\" (300 / 60 = 5), committed to " <>
+          "docs/reference/webull/rest-rate-limits.md — replacing a prior 10 req/s figure " <>
+          "that carried no citation and was not mentioned in this string at all"
     )
   end
 
