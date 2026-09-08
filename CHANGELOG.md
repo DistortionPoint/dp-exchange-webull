@@ -24,6 +24,22 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`dp_exchange_core` was pinned to `~> 0.1.48`, a floor this package has not actually
+  run against since `capabilities/0` started declaring `no_venue_contact: [{:get_fees,
+  2}]`.** `Capabilities.new/1` builds the struct with `struct!/2`, and `no_venue_contact`
+  is a key Core only defines from **0.1.68** — any lower resolution raises `KeyError` the
+  first time `capabilities/0` is called, which is every conformance run and every host
+  that calls it during venue discovery. `~> 0.1.48` compiled and every test passed
+  because CI always resolves the newest allowed version (0.1.68, per `mix.lock`);
+  a consumer whose own dependency graph forced an older Core would not resolve that.
+  Found in a family-wide audit of declared-vs-actual dependency floors, prompted by the
+  same defect class already fixed in `websockex` (`~> 0.4` → `~> 0.5`, previous entry).
+  Raised to `~> 0.1.68`. This also covers `Timeframe.nameable/0` admitting `1y`, needed
+  since Core 0.1.57 (see the "capabilities/0 withheld 1y" entry below) — 0.1.68 is the
+  binding constraint of the two. A new test in `webull_test.exs` asserts the resolved
+  Core's `Capabilities` struct defines `:no_venue_contact`, so a future loosening of this
+  pin without a matching code change fails loudly instead of only failing for a consumer.
+
 - **This reverts and corrects `get_fees/2`'s credential gate, added in the "Fix Fake
   credential gate (Core 0.1.57 assertion 17)" entry below. That earlier entry was
   wrong about this one endpoint.** `get_fees/2` builds no request — it answers a

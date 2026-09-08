@@ -82,6 +82,18 @@ defmodule DpExchange.WebullTest do
                Enum.sort(DpExchange.Webull.Rest.wide_timeframes())
     end
 
+    test "the resolved Core is new enough to define Capabilities.no_venue_contact" do
+      # `capabilities/0` declares `no_venue_contact: [{:get_fees, 2}]`, and
+      # `Capabilities.new/1` builds the struct via `struct!/2` — a key the struct does not
+      # define raises `KeyError` rather than being dropped. `no_venue_contact` was added
+      # to `Capabilities` in Core 0.1.68; `mix.exs` pins `dp_exchange_core` there for
+      # exactly this reason. This asserts the capability the code actually needs, the way
+      # `function_exported?/3` pins an arity elsewhere in this family — so a future
+      # loosening of that pin without a matching code change fails here first, not only
+      # for a consumer who resolves an older Core.
+      assert Map.has_key?(%Capabilities{endpoints: %{}, supported_quotes: []}, :no_venue_contact)
+    end
+
     test "every streamed kind needs a credential, because every call here is signed" do
       caps = Webull.capabilities()
 

@@ -48,7 +48,18 @@ defmodule DpExchangeWebull.MixProject do
     [
       # The contract. Three-part pin: while Core is 0.x a minor bump may break us, and
       # that is the signal it is meant to send.
-      {:dp_exchange_core, "~> 0.1.48"},
+      #
+      # `0.1.68` is the floor because `capabilities/0` declares
+      # `no_venue_contact: [{:get_fees, 2}]`, and `Capabilities.new/1` builds the struct
+      # with `struct!/2` — a key the struct does not define raises `KeyError` rather than
+      # being silently dropped. `no_venue_contact` was added to `Capabilities` in Core
+      # 0.1.68; under any lower floor (this pin previously allowed down to 0.1.48) a
+      # consumer resolving an old-enough Core gets this package's `capabilities/0`
+      # crashing on every call. `~> 0.1.48` compiled and passed here only because CI always
+      # resolves the newest allowed version. 0.1.68 also covers `Timeframe.nameable/0`
+      # admitting `1y` (needed since 0.1.57 — see `webull_test.exs`'s "1y is declared"
+      # test), so it is the binding constraint, not an additional one.
+      {:dp_exchange_core, "~> 0.1.68"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
