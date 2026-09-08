@@ -51,13 +51,33 @@ defmodule DpExchange.Webull.Socket do
   `disconnect/2` is how it says so on the wire before that shard's process goes down. See
   `MqttPacket.disconnect/0` for why a clean `DISCONNECT` matters and `Feed`'s own
   `terminate/2` for where this is actually called.
-  """
 
-  use WebSockex
+  ## The transport underneath is a private fork — dp-exchange-core issue #27
+
+  Webull sometimes closes this socket with a WebSocket close frame that carries **prose**
+  instead of a 2-byte RFC 6455 status code (measured: `"bye-bye!!!"`, no valid close code
+  in the first two bytes). Hex's latest `websockex` (0.5.1, and its unreleased upstream)
+  raises and kills the process on that frame *before* `handle_disconnect/2` below ever
+  runs — turning a peer's protocol violation into 117 crashes in 7 minutes, live. See
+  `DpExchange.Webull.Vendor.WebSockex`'s own moduledoc for the full incident, the exact
+  two-line fix, and why vendoring (not switching transports, not waiting on upstream) was
+  the right call. `use WebSockex` two lines below resolves to that vendored module, not
+  the real dependency, via the `alias` immediately above it — every callback in this
+  module is otherwise unchanged.
+  """
 
   alias DpExchange.Core.Notice
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{MqttPacket, QuoteProto, SymbolFormat}
+
+  # `DpExchange.Webull.Vendor.WebSockex`, not the real `websockex` hex package's
+  # `WebSockex` — see that module's own moduledoc for why. This alias, and its position
+  # before `use WebSockex` immediately below (aliasing is lexical, so the alias must be
+  # declared first), is the only change in this module that switches it over; every
+  # callback below is unchanged.
+  alias DpExchange.Webull.Vendor.WebSockex
+
+  use WebSockex
 
   require Logger
 

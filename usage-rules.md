@@ -114,6 +114,24 @@ extend to `app_key` on a live shard's socket — `app_key` is sent as a plaintex
 (`x-app-key`) on every signed request this venue accepts by design, so it carries none of
 the confidentiality `app_secret` does, and a shard's own crash report still shows it.
 
+**A specific cause of that per-shard crash is now a clean reconnect instead — see
+dp-exchange-core issue #27.** Webull sometimes closes a shard's socket with a WebSocket
+close frame that carries prose instead of an RFC 6455 status code (observed:
+`"bye-bye!!!"`). Every published version of `websockex` through 0.5.1 (the current Hex
+release) raises on that frame and kills the socket process outright — before this
+package's own reconnect logic runs at all — which is indistinguishable from any other
+crash from where you sit, except that it can repeat every few seconds under sustained
+conditions, holding a shard's coverage down well below its symbol count even though
+nothing alarms (each crash is caught and reopened, so supervision "works"). This package
+now vendors a two-line fix ahead of upstream — see `DpExchange.Webull.Vendor.WebSockex`'s
+own moduledoc if you want the mechanism — so this specific cause no longer crashes the
+shard: it is an ordinary `:link_down` / reconnect-and-resubscribe cycle, the same as any
+other disconnect reason. If you were seeing elevated shard-crash `:link_down` notices or
+a Webull coverage ceiling well below your symbol count before this fix, that is the most
+likely explanation; if it persists after upgrading, the venue is closing the connection
+for a different, still-open reason — see this package's own CHANGELOG entry for what was
+and was not established about why.
+
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the per-shard crash path, or anything that kills the `Feed` pid directly.
 `DpExchange.Webull.Supervisor` restarts `Feed` under `:one_for_one`, but from the

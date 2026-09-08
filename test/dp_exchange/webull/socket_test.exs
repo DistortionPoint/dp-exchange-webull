@@ -316,31 +316,30 @@ defmodule DpExchange.Webull.SocketTest do
       assert Socket.disconnect(pid) == {:error, :not_alive}
     end
 
-    test "the WebSockex arity disconnect/2 depends on actually exists" do
-      # `disconnect/2` calls `WebSockex.send_frame/3`, whose third argument — the send
-      # timeout — exists only from websockex 0.5. `mix.exs` declared `~> 0.4` until
-      # 2026-09-08, so this package resolved 0.5.1 locally, compiled, and passed every
-      # test, while a consumer resolving 0.4.x got `:undef` the moment `disconnect/2` ran.
+    test "the send_frame/3 arity disconnect/2 depends on actually exists" do
+      # `disconnect/2` calls `DpExchange.Webull.Vendor.WebSockex.send_frame/3` (aliased
+      # to bare `WebSockex` in `Socket.ex` — see that module's own moduledoc for why it
+      # is no longer the real `websockex` hex package). The vendored module owns this
+      # function outright (copied verbatim from websockex 0.5.1), so an arity regression
+      # here would be this package's own authored bug, not a silent dependency-drift one
+      # — but the guard this test used to provide against a *dependency's* arity moving
+      # under us is now real, not incidental, precisely because the vendored file calls
+      # into `WebSockex.Conn` and `WebSockex.Frame` (the real, unmodified dependency) the
+      # same private-in-spirit way the original `websockex.ex` did. `mix.exs` now pins
+      # `== 0.5.1` exactly rather than `~> 0.5.1` for exactly this reason — see that
+      # comment for the full history this test's own name still points back to.
       #
-      # Nothing caught it because arity is checked at the call, not at compile time — it
-      # emitted a warning, not an error — and no test exercised that path against a live
-      # socket. `disconnect/2`'s own `catch` then turned the `:undef` into
-      # `{:error, {:error, :undef}}`, so the caller was not taken down, but the DISCONNECT
-      # never reached the venue and the error said nothing about why.
-      #
-      # This asserts the dependency the code actually needs rather than the one `mix.exs`
-      # happens to say. A future `send_frame/4` would break the same silent way.
       # `Code.ensure_loaded!/1` first, and it is not decoration. `function_exported?/3`
       # answers `false` for a module that is merely not loaded YET, so on its own this
       # assertion passes or fails depending on whether some earlier test happened to
-      # touch `WebSockex` — it failed on seeds 42 and 999 and passed on 1, 2 and 3 while
-      # being written. That is the same defect it exists to catch, one level up: a check
-      # that reports absence when it means "not looked yet".
-      Code.ensure_loaded!(WebSockex)
+      # touch the module — it failed on seeds 42 and 999 and passed on 1, 2 and 3 while
+      # this test's predecessor was being written. That is the same defect it exists to
+      # catch, one level up: a check that reports absence when it means "not looked yet".
+      Code.ensure_loaded!(DpExchange.Webull.Vendor.WebSockex)
 
-      assert function_exported?(WebSockex, :send_frame, 3),
-             "Socket.disconnect/2 calls WebSockex.send_frame/3; the resolved websockex " <>
-               "does not export it. Check mix.exs's websockex requirement."
+      assert function_exported?(DpExchange.Webull.Vendor.WebSockex, :send_frame, 3),
+             "Socket.disconnect/2 calls DpExchange.Webull.Vendor.WebSockex.send_frame/3; " <>
+               "it does not export it."
     end
 
     test "an alive process that never answers times out as an error, not a hang" do

@@ -13,7 +13,14 @@
           "apps/*/test/",
           "apps/*/web/"
         ],
-        excluded: [~r"/_build/", ~r"/deps/", ~r"/node_modules/", ~r"/docs/"]
+        # `lib/vendor/` is third-party code (currently `websockex` 0.5.1's process-loop
+        # file, vendored for dp-exchange-core issue #27 — see its own moduledoc), copied
+        # in with a two-line fix and otherwise unmodified. It was never written to this
+        # project's style, the same reason `deps/` itself is excluded below; scoring it
+        # against `--strict` would mean reformatting and restructuring an upstream
+        # library's own code for no safety gained, on a file this repo diffs against
+        # upstream releases rather than edits freely.
+        excluded: [~r"/_build/", ~r"/deps/", ~r"/node_modules/", ~r"/docs/", ~r"/lib/vendor/"]
       },
       plugins: [],
       requires: [],

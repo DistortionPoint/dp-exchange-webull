@@ -24,6 +24,123 @@ acceptable changelog line.
 
 ### Fixed
 
+- **A malformed WebSocket close frame from Webull crashed a shard's socket before
+  `handle_disconnect/2` ever ran — dp-exchange-core issue #27.** Webull sometimes closes
+  this venue's MQTT-over-WebSocket connection with a close frame carrying **prose**
+  where RFC 6455 §5.5.1 requires a 2-byte status code — measured live:
+  `<<136, 10, 98, 121, 101, 45, 98, 121, 101, 33, 33, 33>>`, i.e. `"bye-bye!!!"`. The
+  first two bytes parse as `"by"` = 25209, outside every valid close-code range
+  (1000–1015, 3000–4999). `WebSockex.Frame.parse_frame/1` correctly returns
+  `{:error, %WebSockex.FrameError{reason: :invalid_close_code}}` for this; `websocket_loop/3`
+  one level up matched only `{:ok, frame, buffer}` and `:incomplete}` even though
+  `parse_frame/1`'s own `@spec` names the error tuple as a real return value, so the
+  process raised an uncaught `CaseClauseError` and died **before any callback ran** —
+  `Socket.handle_disconnect/2` never fired. Measured consumer impact: 117 crashes in 7
+  minutes across three shards, roughly one close every 10 seconds per shard, sustained.
+  `Feed`'s own supervision reopened each shard, so nothing alarmed; the venue simply
+  never reached full coverage (one consumer's fresh-tick count oscillated between 76 and
+  243 against a 325-symbol scope, all day).
+
+  websockex 0.5.1 is the latest Hex release and still has this; confirmed the same
+  unguarded `case` is still present, unreleased, on `dominicletz/websockex`'s current
+  `master` (2026-09-08) — the maintained upstream repo (`Azolo/websockex` is
+  abandoned). There is no upstream fix to wait for.
+
+  **Fixed by vendoring, not by switching transport.** A transport swap
+  (`Mint.WebSocket`, `:gun`, `fresh`) was evaluated and rejected: this package already
+  owns its transport by design (`CLAUDE.md`: "Core ships no venue-specific dependency…
+  a venue that speaks WebSocket ships what it needs to speak it"), but websockex
+  already supplies TCP/TLS connection handling, the HTTP upgrade handshake, frame
+  fragmentation reassembly and automatic reconnect — replacing all of that to work
+  around a two-line defect would have meant hand-rebuilding a WebSocket client on a
+  production incident's timeline, a strictly larger and riskier change for the same
+  outcome. Intercepting the buffer before `WebSockex.Frame.parse_frame/1` sees it was
+  considered and ruled out on inspection, not assumption: every byte from the socket
+  reaches `websockex`'s own private process loop directly (`WebSockex.Conn.
+  controlling_process/2` + `set_active/2`), with no seam in the callback model for a
+  consumer to sit in front of it.
+
+  A **git-dependency fork was rejected** because Hex refuses to publish a package that
+  depends on git — shipping a fork this way would mean publishing an entire separate
+  package under a new name on Hex, a maintenance commitment (a new repo, its own CI, its
+  own releases, tracking every future upstream websockex release for anything beyond
+  this one fix) out of proportion to a two-line defect, and one this package's own
+  authority does not extend to unilaterally taking on.
+
+  Instead, `lib/vendor/websockex.ex` vendors `websockex` 0.5.1's single process-loop
+  file (not the whole package — `WebSockex.Frame`, `WebSockex.Conn`, WebSockex.Utils
+  (hidden from its own docs, so plain text here),
+  `WebSockex.Application` and every `WebSockex.*Error` struct stay the real,
+  unmodified dependency; none of those carried the bug), private to this package,
+  under `DpExchange.Webull.Vendor.WebSockex` — never bare `WebSockex`, so a consumer
+  who also depends on the real `websockex` package (directly, or through another venue
+  in this family) is unaffected. Exactly two things changed from upstream, both marked
+  `## VENDORED FIX` at their call site: (1) `websocket_loop/3` gains a clause for
+  `{:error, %WebSockex.FrameError{}}`, routed through the *already-existing*
+  `handle_close({:error, reason}, ...)` path `sync_send/5` already used for a
+  send-time framing error — RFC 6455 §7.1.7's specified response to a peer's malformed
+  frame is to close the connection, not crash reading it, and that path already sends
+  this side's own close frame and runs the ordinary disconnect flow, so no new recovery
+  logic was written; (2) WebSockex.Utils.spawn/5 (hidden from its own docs, so plain
+  text here) hardcodes the literal atom
+  `WebSockex` as its `:proc_lib` entry module, which would have booted every vendored
+  socket into the real, unpatched module regardless of the rename — `do_spawn/2` is
+  reimplemented locally using `__MODULE__` to close that one gap. See the vendored
+  module's own moduledoc for the full incident, and an upstream PR was opened against
+  `dominicletz/websockex` alongside this fix (it cannot be the fix that ships today,
+  but it is worth landing regardless).
+
+  `mix.exs` now pins `{:websockex, "== 0.5.1"}` exactly rather than `~> 0.5.1`: the
+  vendored file calls `WebSockex.Conn`'s and `WebSockex.Frame`'s functions the same
+  private-in-spirit way the original did, an internal API those modules never promised
+  to keep stable across releases the way their own public behaviour is — a `~>` floor
+  would invite the exact failure this same dependency already caused this family once
+  (the `send_frame/3` arity floor, this file's own earlier entry). `lib/vendor/` sits
+  outside `test/dp_exchange/webull_contract_test.exs`'s (narrowed) `package_root`,
+  `.credo.exs`'s scanned paths and `mix.exs`'s coverage `ignore_modules` — all for the
+  same reason: this is third-party code carried for a two-line necessity, not code
+  written to this family's own conventions, and none of those checks can see the OTP
+  dynamic dispatch (`:proc_lib`, `:sys`) that keeps several of its exports legitimately
+  public with no caller `:xref` can find.
+
+  **Proven by `test/dp_exchange/webull/socket_malformed_close_test.exs`**: a real
+  `Socket.start_link/1` against a real local TCP server that completes the WebSocket
+  handshake and then sends the exact 12-byte frame from the incident. Confirmed to fail
+  with the pre-fix `CaseClauseError` when the fix's one clause is removed, and to pass
+  with it restored — `handle_disconnect/2` runs (`:link_down` notice received, naming
+  the `WebSockex.FrameError` and `:invalid_close_code` reason), and the socket process
+  is still alive afterward rather than crashed.
+
+- **Why the venue closes the connection at all — investigated, not fully resolved.**
+  Fixing the crash turns each of these into a clean reconnect instead of a crash, but
+  does not by itself explain why Webull sends this close so often. Ruled out with
+  evidence already in hand before this fix: the 60s keep-alive/30s `PINGREQ` schedule
+  cannot explain a ~10s close cadence, and shards do not share an MQTT client id (each
+  socket, and each reopen, gets its own `generate_session_id()`), so the venue's
+  documented "a new connection with the same session_id kicks the previous one" rule
+  does not apply at the shard level. The consumer's own hypothesis — a crashed socket
+  never sent a clean MQTT `DISCONNECT`, so the broker held the dead session for its
+  documented ~1 minute retention window while shards kept reopening, and enough
+  overlapping zombie sessions eventually hit the "5 concurrent connections per App Key"
+  ceiling (Webull's own docs: exceeding it returns error code 105, and duplicate/expired
+  sessions get kicked with no more specific reason given at the WebSocket layer) — is
+  plausible, evidence-consistent, and testable, but **not established**: this repo holds
+  no Webull credential and cannot run it live. This fix is the fix that makes the
+  hypothesis testable at all, since before it no shard ever sent a clean `DISCONNECT` in
+  the first place.
+
+  **The exact probe**, for a consumer running this live (as the reporting consumer has
+  offered to): after upgrading, watch a shard's `:link_down` notices across an extended
+  run. If the ~10-second-per-shard close cadence stops or drops substantially, the
+  zombie-session hypothesis is confirmed. If it persists at the same rate with clean
+  reconnects now happening every time, the hypothesis is falsified and the cause is
+  something else — a concurrent-connection cap behaving differently than documented, an
+  idle-connection policy independent of MQTT keep-alive, or something the CONNECT
+  packet itself triggers — and would need a second, separate investigation with the
+  close reason now visible on every occurrence (this fix logs `WebSockex.FrameError`'s
+  full detail on the malformed case; an *unrelated* future close would carry its own,
+  different `reason`, distinguishable in the same `:link_down` notice).
+
 - **`dp_exchange_core` was pinned to `~> 0.1.48`, a floor this package has not actually
   run against since `capabilities/0` started declaring `no_venue_contact: [{:get_fees,
   2}]`.** `Capabilities.new/1` builds the struct with `struct!/2`, and `no_venue_contact`

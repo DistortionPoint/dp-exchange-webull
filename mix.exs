@@ -64,31 +64,66 @@ defmodule DpExchangeWebull.MixProject do
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
       #
-      # `~> 0.5.1`, not `~> 0.5`: `Socket.disconnect/2` calls `WebSockex.send_frame/3`,
-      # and the third argument — the send timeout — only exists from 0.5.1, not 0.5.0.
-      # Under `~> 0.4` this package resolved 0.5.1 locally and so compiled and passed,
-      # while a consumer who resolved 0.4.x got `:undef` at the call. DpCryptoManagement
-      # hit exactly that on 2026-09-08. Arity is only checked when the function runs, so
-      # it shipped as a compile warning rather than an error, and only on a path nothing
-      # exercised.
+      # `== 0.5.1`, not `~>` — pinned exactly, not floored, since dp-exchange-core issue
+      # #27. `DpExchange.Webull.Socket` no longer calls this dependency's own `WebSockex`
+      # module directly: it calls `DpExchange.Webull.Vendor.WebSockex`, a private
+      # vendored fork of `websockex` 0.5.1's single process-loop file
+      # (`lib/vendor/websockex.ex`), carrying a two-line fix. Webull
+      # can close this venue's socket with a WebSocket close frame that carries prose
+      # instead of an RFC 6455 status code; upstream 0.5.1 (and its unreleased
+      # successor, confirmed 2026-09-08) turns that into an uncaught `CaseClauseError`
+      # that kills the process before `handle_disconnect/2` ever runs. See the vendored
+      # module's own moduledoc for the full incident, exactly what changed (two lines),
+      # and why vendoring — not a transport swap, not waiting on upstream — was correct
+      # here. This history (the `send_frame/3` arity floor below) is why an exact pin,
+      # not a range, is what this dependency gets now.
       #
-      # The floor was first corrected to `~> 0.5`, on the belief that the argument landed
-      # somewhere in the 0.5 line. `script/check_dependency_floor.sh` (added the same day,
-      # to close exactly this blind spot family-wide) resolved that floor for real and
-      # found `WebSockex.send_frame/3 is undefined or private` against 0.5.0 itself —
-      # `send_frame/3` is new in 0.5.1, one patch later than the first fix assumed, and
-      # `~> 0.5` still permitted the version that lacks it. Confirmed by reading both
-      # resolved sources directly: 0.5.0's `lib/websockex.ex` defines only `send_frame/2`;
-      # 0.5.1's defines `send_frame(client, frame, timeout \\ 5_000)`. The lesson this
-      # family had already drawn — a "corrected" floor still needs to be resolved to prove
-      # it, not just reasoned about — applied to its own correction within the same day.
+      # Still required directly: the vendored file calls `WebSockex.Frame`,
+      # `WebSockex.Conn`, `WebSockex.Utils`, `WebSockex.Application` and every
+      # `WebSockex.*Error` struct from this real, unmodified dependency — none of those
+      # carried the bug, and vendoring them too would have tripled the diff for no
+      # safety gained.
+      #
+      # The exact pin matters more here than an ordinary dependency's would: the
+      # vendored file calls into `WebSockex.Conn`'s and `WebSockex.Frame`'s functions
+      # the same way the original `websockex.ex` did — a private-in-spirit internal API
+      # those modules never promised to keep stable across releases the way their own
+      # public behaviour is. A `~>` floor invites the exact failure this dependency
+      # already caused this family once (below): a version the range permits silently
+      # changing a shape this file depends on, with neither SemVer nor this comment's
+      # own history catching it. `script/check_dependency_floor.sh` still resolves and
+      # compiles this pin — an exact pin removes the *range* failure mode that script
+      # exists to catch, not the value of running it.
+      #
+      # Original floor history, preserved because the lesson still applies: `~> 0.5.1`,
+      # not `~> 0.5`, used to be the constraint, because `Socket.disconnect/2` called
+      # `WebSockex.send_frame/3` directly and the third argument — the send timeout —
+      # only exists from 0.5.1, not 0.5.0. Under `~> 0.4` this package resolved 0.5.1
+      # locally and so compiled and passed, while a consumer who resolved 0.4.x got
+      # `:undef` at the call. DpCryptoManagement hit exactly that on 2026-09-08. Arity
+      # is only checked when the function runs, so it shipped as a compile warning
+      # rather than an error, and only on a path nothing exercised.
+      #
+      # The floor was first corrected to `~> 0.5`, on the belief that the argument
+      # landed somewhere in the 0.5 line. `script/check_dependency_floor.sh` (added the
+      # same day, to close exactly this blind spot family-wide) resolved that floor for
+      # real and found `WebSockex.send_frame/3 is undefined or private` against 0.5.0
+      # itself — `send_frame/3` is new in 0.5.1, one patch later than the first fix
+      # assumed, and `~> 0.5` still permitted the version that lacks it. Confirmed by
+      # reading both resolved sources directly: 0.5.0's `lib/websockex.ex` defines only
+      # `send_frame/2`; 0.5.1's defines `send_frame(client, frame, timeout \\ 5_000)`.
+      # The lesson this family had already drawn — a "corrected" floor still needs to be
+      # resolved to prove it, not just reasoned about — applied to its own correction
+      # within the same day.
       #
       # `send_frame/2` works on both and is the WRONG fix: it takes WebSockex's own
       # 5_000ms default, where `@disconnect_timeout_ms` is deliberately 500ms because
       # `disconnect/2` runs inside `Feed.terminate/2`, under a supervisor's shutdown
-      # budget. Ten times the wait during shutdown is not a free compatibility win, so the
-      # honest fix is to require the version whose API this package actually uses.
-      {:websockex, "~> 0.5.1"},
+      # budget. Ten times the wait during shutdown is not a free compatibility win, so
+      # the vendored `send_frame/3` (copied verbatim from 0.5.1) is what this package
+      # calls now — the honest fix is still to depend on the version whose API this
+      # package actually uses, now enforced by an exact pin instead of a range.
+      {:websockex, "== 0.5.1"},
       {:jason, "~> 1.4"},
       {:decimal, "~> 2.0"},
 
@@ -105,7 +140,19 @@ defmodule DpExchangeWebull.MixProject do
     ]
   end
 
-  defp test_coverage, do: [threshold: 90, ignore_modules: []]
+  # `DpExchange.Webull.Vendor.WebSockex` is excluded: a private vendored fork of
+  # `websockex` 0.5.1's process-loop file, carrying a two-line fix for dp-exchange-core
+  # issue #27 (see its own moduledoc). This package's tier-1 suite exercises the paths
+  # this venue actually uses — connect, CONNACK, frame draining, the malformed-close fix
+  # itself (`socket_malformed_close_test.exs`), a clean shutdown DISCONNECT — not the
+  # SSL transport, named-process registration, `:async` start, fragmented-frame
+  # reassembly or `:sys` debug tracing this venue never exercises. Writing tests to hit
+  # 90% on code copied verbatim from an already-tested upstream library would mean
+  # re-deriving that library's own test suite rather than testing anything about this
+  # package. Same reasoning `.credo.exs` and `webull_contract_test.exs`'s narrowed
+  # `package_root` already apply to this file for the same reason.
+  defp test_coverage,
+    do: [threshold: 90, ignore_modules: [DpExchange.Webull.Vendor.WebSockex]]
 
   defp aliases do
     [quality: ["format --check-formatted", "credo --strict", "dialyzer", "sobelow --config"]]
