@@ -28,7 +28,7 @@ You keep the credentials. This package signs one request with them and holds not
 
 ### It is not only market data, and the fake enforces all of it
 
-Every account and order call — `get_balances/2`, `get_accounts/2`, `get_fees/2`,
+Every account and order call — `get_accounts/2`, `get_balances/2`,
 `get_transfers/2`, `get_transactions/2`, `get_positions/1`, `quantization/2`,
 `place_order/3`, `place_orders/3`, `preview_order/3`, `replace_order/4`,
 `cancel_order/3`, `get_order/3`, `get_orders/2` — and every options, watchlist,
@@ -42,7 +42,7 @@ without a credential: `{:error, {:missing_credentials, :webull}}`, never `{:ok, 
 *received*), so this is `Auth.headers/2`'s own return value, not an invented one.
 
 **`DpExchange.Webull.Fake` enforces this too, and it did not before.** Before this
-fix, `Fake.get_fees/2`, `Fake.get_accounts/2`, `Fake.get_balances/2`,
+fix, `Fake.get_accounts/2`, `Fake.get_balances/2`,
 `Fake.get_transfers/2`, `Fake.get_transactions/2`, `Fake.place_order/3`,
 `Fake.place_orders/3`, `Fake.preview_order/3`, `Fake.replace_order/4`,
 `Fake.cancel_order/3`, `Fake.get_order/3`, `Fake.get_orders/2`, `Fake.get_positions/1`
@@ -51,8 +51,19 @@ supplied at all — several ignored the argument outright, and two checked only
 `opts[:account_id]`, a different question. A consuming test suite that called any of
 these without credentials and asserted success was passing against behaviour the real
 venue does not have. If your own tests do this, they need updating; that is the point of
-the fix, not a regression in it. `market_status/1` is the one exception — the real venue
-answers it with no credential either, and the fake still does too.
+the fix, not a regression in it.
+
+**`market_status/1` and `get_fees/2` are the exceptions, and stay exceptions.**
+`market_status/1` answers `{:error, :not_supported}` regardless of credentials — this
+venue publishes no reachable market-status endpoint, so there is nothing to gate.
+`get_fees/2` answers `{:ok, _}` with no credential at all: it builds no request and
+returns a crypto spread rate captured from Webull's own published pricing
+(`source: :published_rate`), so there is nothing here for a credential to gate either.
+A 2026-09-06 sweep gated `get_fees/2` behind a credential anyway, reasoning that its
+real path "had never run through `Auth.headers/2`" — true, and the reason there is
+nothing to gate, not a reason to add a check. That broke a real consumer resolving fees
+before any account is attached, and was reverted 2026-09-07. If your code passes no
+credential to `get_fees/2`, that is correct usage, not a workaround.
 
 The same gap survived one round longer on the options, watchlist, fundamentals, news and
 screener callbacks, and is now closed as well: `Fake.get_option_chain/2`,

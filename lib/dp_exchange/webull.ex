@@ -388,6 +388,17 @@ defmodule DpExchange.Webull do
       # **The family's first `:required`.** Every call is signed, including the ones that
       # look public — there is no anonymous quote endpoint on this venue.
       credential_benefit: :required,
+
+      # `get_fees/2` is the one active endpoint this is not true of: it answers a flat
+      # crypto spread captured from Webull's own published pricing
+      # (`source: :published_rate`) and builds no request at all, so no credential could
+      # change what it returns. Declaring it here — rather than gating it behind a
+      # credential it does not use, as a 2026-09-06 sweep mistakenly did — is what lets
+      # `AdapterContract`'s assertion 17 (`Capabilities.no_venue_contact`, added in
+      # `dp_exchange_core` to resolve this exact finding) tell this true per-endpoint
+      # exception apart from a defect. See `Rest.get_fees/2`'s own moduledoc for the
+      # incident.
+      no_venue_contact: [{:get_fees, 2}],
       public_ceiling: %{limit: 10, per_ms: 1_000},
       authenticated_ceiling: %{limit: 10, per_ms: 1_000},
       measured_at: ~D[2026-08-28],

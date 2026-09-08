@@ -35,14 +35,17 @@ defmodule DpExchange.Webull.FakeTest do
     test "every credentialed account and order call refuses without credentials too" do
       # Found by `dp_exchange_core` 0.1.57's assertion 17: several of these answered
       # `{:ok, _}` regardless of the `credentials` argument, because nothing checked it —
-      # `get_fees/2` gated on nothing at all, `get_accounts/2` discarded it outright, and
-      # `get_balances/2`/`get_transfers/2` gated only on `account_id`, an unrelated check.
-      # A fake that succeeded here would certify consumer code that forgot its
-      # credentials, on a venue that declares `credential_benefit: :required`.
+      # `get_accounts/2` discarded it outright, and `get_balances/2`/`get_transfers/2`
+      # gated only on `account_id`, an unrelated check. A fake that succeeded here would
+      # certify consumer code that forgot its credentials, on a venue that declares
+      # `credential_benefit: :required`.
+      #
+      # `get_fees/2` is NOT in this list — see "get_fees/2 answers without credentials"
+      # below. It builds no request and answers a captured published rate, so there is
+      # nothing here for a credential to gate.
       account = [account_id: "93IUJ28O9VO2KBGHDHR4H9"]
       missing = {:error, {:missing_credentials, :webull}}
 
-      assert missing == Fake.get_fees(%{}, [])
       assert missing == Fake.get_accounts(%{}, [])
       assert missing == Fake.get_balances(%{}, account)
       assert missing == Fake.get_transfers(%{}, account)
@@ -64,6 +67,18 @@ defmodule DpExchange.Webull.FakeTest do
 
       assert missing ==
                Fake.replace_order(%{}, "abc", %{price: Decimal.new("1")}, account)
+    end
+
+    test "get_fees/2 answers without credentials, because it builds no request" do
+      # Regression for the 2026-09-06/07 incident: a sweep gated this behind
+      # `Auth.present?/1` on the reasoning that the real path "had never run through
+      # `Auth.headers/2`" — true, and the point: there is nothing here to sign, and
+      # `source: :published_rate` already says this answers from a captured constant,
+      # not a venue call. Gating it broke a consumer who resolves venue fees before any
+      # account is attached, with no credential to supply by design.
+      assert {:ok, fees} = Fake.get_fees(%{}, [])
+      assert fees.source == :published_rate
+      assert Decimal.equal?(fees.crypto_spread_pct, Decimal.new("1.00"))
     end
   end
 

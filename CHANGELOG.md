@@ -24,6 +24,48 @@ acceptable changelog line.
 
 ### Fixed
 
+- **This reverts and corrects `get_fees/2`'s credential gate, added in the "Fix Fake
+  credential gate (Core 0.1.57 assertion 17)" entry below. That earlier entry was
+  wrong about this one endpoint.** `get_fees/2` builds no request — it answers a
+  crypto spread rate captured from Webull's own published pricing
+  (`source: :published_rate`) — and yet, since that sweep, both `Rest.get_fees/2` and
+  `Fake.get_fees/2` refused with `{:error, {:missing_credentials, :webull}}` when
+  called without one. The sweep's reasoning was that the real path "had never run
+  through `Auth.headers/2`", which was true and was exactly the point: there is
+  nothing here to sign. The fake should have been matched to the real path's
+  ungated behaviour; instead the real path was gated to match the fake's incorrect
+  refusal.
+
+  **Reported by a consumer** (DpCryptoManagement) who resolves venue fees to score
+  *candidate* strategy genomes before any account is attached — no credential exists
+  at that point by design. With `get_fees/2` unanswerable without one, their
+  `round_trip_bps` computation lost its input and their fee-overcome admission gate,
+  a live-trading gate, could not run.
+
+  **Now `get_fees/2` answers unconditionally on both `Rest` and `Fake`, matching its
+  pre-sweep behaviour.** `credentials` is accepted for shape parity with every other
+  callback and never inspected. A swept audit of the other twelve callbacks the same
+  commit gated (`get_accounts/2`, `get_balances/2`, `get_positions/1`,
+  `get_transfers/2`, `get_transactions/2`, `quantization/2`, `place_order/3`,
+  `place_orders/3`, `preview_order/3`, `replace_order/4`, `cancel_order/3`,
+  `get_order/3`, `get_orders/2`) and the twelve gated by "Gate the widened Fake
+  surface on credentials" (`get_option_chain/2`, `get_option_expirations/2`,
+  `list_watchlists/1`, `get_watchlist/2`, `create_watchlist/3`, `update_watchlist/2`,
+  `delete_watchlist/2`, `get_financials/3`, `get_corporate_events/1`,
+  `get_filings/2`, `get_news/1`, `get_screener/2`) confirmed every one of them
+  reaches the venue through `Rest`'s signed `get/4` or `post/4` request path — the
+  gate on all twenty-four is correct and stays.
+
+  Regression test added asserting `get_fees/2` answers `{:ok, _}` with no credential
+  on both `Rest` and `Fake`, so this cannot be re-broken by the next credential-gate
+  sweep.
+
+  **Moved to `dp_exchange_core` 0.1.68**, which resolves this the way the false
+  positive is actually fixed rather than papered over: assertion 17 gains
+  `Capabilities.no_venue_contact`, a per-endpoint declaration a venue makes when a
+  specific active endpoint's real implementation never builds a request to the venue.
+  `capabilities/0` now declares `no_venue_contact: [{:get_fees, 2}]`.
+
 - **`market_status/1` answered `{:ok, :open}` unconditionally — true only for the one
   asset class this venue does not restrict to trading hours, and a lie for the other
   four.** This venue is not crypto-only: `asset_classes/0` is `[:crypto, :equity,

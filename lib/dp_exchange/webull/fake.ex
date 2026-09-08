@@ -17,19 +17,26 @@ defmodule DpExchange.Webull.Fake do
 
   ## It models the three things that make this venue different
 
-  - **Credentials are required everywhere, not just for market data.** `get_price/2`
-    without them is `{:error, {:missing_credentials, :webull}}`, because the real venue
-    signs every call and has no anonymous endpoint — and so is every credentialed account
-    and order call (`get_balances/2`, `get_accounts/2`, `get_fees/2`, `place_order/3`, and
-    the rest). `{:error, {:missing_credentials, :webull}}`, not `{:refused, _}`: a missing
-    *local* credential never reaches the venue at all, and `DpExchange.Core.Venue`'s own
-    moduledoc reserves `:refused` for the venue's own permanent word about a request it
-    received. It is `Auth.headers/2`'s own return value for a credential that does not
-    match its shape, echoed here rather than invented — this used to answer
-    `{:refused, :missing_credentials}` here and `{:ok, _}` on several of the account and
-    order callbacks, both wrong for the reasons above; found by `dp_exchange_core`
-    0.1.57's assertion 17. A fake that answered anyway would let a consumer's test pass
-    while the real call returns 401.
+  - **Credentials are required everywhere a real call reaches the venue — not for
+    market data alone, and not for a callback that never builds a request.**
+    `get_price/2` without them is `{:error, {:missing_credentials, :webull}}`, because
+    the real venue signs every call and has no anonymous endpoint — and so is every
+    credentialed account and order call (`get_balances/2`, `get_accounts/2`,
+    `place_order/3`, and the rest). `{:error, {:missing_credentials, :webull}}`, not
+    `{:refused, _}`: a missing *local* credential never reaches the venue at all, and
+    `DpExchange.Core.Venue`'s own moduledoc reserves `:refused` for the venue's own
+    permanent word about a request it received. It is `Auth.headers/2`'s own return
+    value for a credential that does not match its shape, echoed here rather than
+    invented — this used to answer `{:refused, :missing_credentials}` here and
+    `{:ok, _}` on several of the account and order callbacks, both wrong for the
+    reasons above; found by `dp_exchange_core` 0.1.57's assertion 17. A fake that
+    answered anyway would let a consumer's test pass while the real call returns 401.
+
+    **`get_fees/2` is the one deliberate exception.** It answers a captured published
+    rate and never builds a request, so there is nothing for a credential to gate — see
+    its own moduledoc. A 2026-09-06 sweep gated it anyway, on the reasoning that the
+    real path "had never run through `Auth.headers/2`"; that broke a real consumer who
+    resolves fees before any account is attached, and was reverted 2026-09-07.
 
     **The gate covers the widened surface too, and that part assertion 17 cannot check.**
     Options, watchlists, financials, corporate events, filings, news and the screener all
@@ -394,20 +401,21 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @impl true
-  def get_fees(credentials, _opts) do
+  def get_fees(_credentials, _opts) do
     with_injection(fn ->
-      # `Rest.get_fees/2` builds no request and so never runs through `Auth.headers/2`,
-      # but it still requires a credential shaped like every other call — see its own
-      # moduledoc. `Auth.present?/1` is the same check, run here rather than skipped.
-      with :ok <- credentialed(credentials) do
-        {:ok,
-         %{
-           crypto_spread_pct: Decimal.new("1.00"),
-           charged_by: "Webull Pay/Bakkt",
-           source: :published_rate,
-           captured_at: ~D[2026-09-03]
-         }}
-      end
+      # `Rest.get_fees/2` answers from a captured published rate and builds no request
+      # at all, so unlike every other credentialed callback there is nothing here for a
+      # credential to gate — see its own moduledoc for the 2026-09-07 incident where
+      # gating this anyway broke a consumer who resolves fees before any account is
+      # attached. No `credentialed/1` check, deliberately, and this must keep matching
+      # `Rest.get_fees/2` exactly.
+      {:ok,
+       %{
+         crypto_spread_pct: Decimal.new("1.00"),
+         charged_by: "Webull Pay/Bakkt",
+         source: :published_rate,
+         captured_at: ~D[2026-09-03]
+       }}
     end)
   end
 
@@ -706,12 +714,13 @@ defmodule DpExchange.Webull.Fake do
   defp authenticated(opts), do: credentialed(Keyword.get(opts, :credentials, %{}))
 
   # The same gate for the callbacks that receive credentials as their own first
-  # argument instead — `get_balances/2`, `get_accounts/2`, `get_fees/2`, `place_order/3`
-  # and the rest of this venue's account and order surface. Both converge here because
-  # `Auth.headers/2` (real calls) and `Auth.present?/1` (`get_fees/2`, which builds no
-  # request) are the only two real gates any credentialed call in this package passes
-  # through, and `Auth.present?/1` is the exact shape check both run — reused rather than
-  # re-implemented, so this fake's gate cannot drift out of step with the real one.
+  # argument instead — `get_balances/2`, `get_accounts/2`, `place_order/3` and the rest
+  # of this venue's account and order surface. `Auth.headers/2` is the real gate every
+  # one of those calls passes through, and `Auth.present?/1` is its exact shape check,
+  # reused rather than re-implemented so this fake's gate cannot drift out of step with
+  # the real one. `get_fees/2` does NOT call this: it builds no request and answers a
+  # captured published rate, so there is nothing here for a credential to gate — see
+  # its own moduledoc for the incident where gating it anyway broke a consumer.
   defp credentialed(credentials) do
     if FakeInjection.credentials_bypassed?(:webull) do
       :ok

@@ -361,6 +361,11 @@ defmodule DpExchange.Webull.RestTest do
       assert fees.source == :published_rate
       assert fees.captured_at == ~D[2026-09-03]
     end
+
+    test "answers without credentials, because it builds no request — regression for the 2026-09-06 gate" do
+      assert {:ok, fees} = Rest.get_fees(%{}, [])
+      assert fees.source == :published_rate
+    end
   end
 
   describe "quantization/3" do

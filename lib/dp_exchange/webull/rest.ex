@@ -406,27 +406,33 @@ defmodule DpExchange.Webull.Rest do
   What Webull does publish, on `webull.com/pricing`, is a single flat crypto spread:
   **1.00% per trade, charged by Webull Pay/Bakkt**, the same rate for every account —
   not a tier a credential selects among, so `credentials` plays no part in *which* rate
-  comes back. It is still required to be present, though: this venue's own moduledoc
-  says there is no anonymous path on it anywhere, and this is the one endpoint that
-  builds no request and so never runs through `Auth.headers/2`, the gate that would
-  otherwise enforce that for free. `Auth.present?/1` is the same shape check
-  `headers/2` runs, called locally rather than skipped because there is nothing to sign.
-  A caller with no credential at all gets `{:error, {:missing_credentials, :webull}}` —
-  not the `{:ok, _}` this returned unconditionally before that gap was found. Captured
+  comes back, and there is nothing here for a credential to gate.
+
+  ## No credential gate, and that is deliberate (incident, 2026-09-07)
+
+  This is the one endpoint on this venue that answers without a credential.
+  `credentials` is accepted, for shape parity with every other callback in this
+  module, and never inspected. A 2026-09-06 sweep gated this behind `Auth.present?/1`
+  on the reasoning that the real path "had never run through `Auth.headers/2`" —
+  true, and beside the point: there is nothing here to sign, because this function
+  never builds a request. Gating it broke a real consumer, who resolves venue fees to
+  score *candidate* strategy genomes before any account is attached — no credential
+  exists at that point by design, so `get_fees/2` became unanswerable and their
+  fee-overcome admission gate lost its input. `source: :published_rate` already says
+  this answers from a captured constant, not a venue call; a callback that says that
+  about itself must not also demand a credential it makes no use of. Captured
   #{@crypto_spread_captured_at}; re-check the page before trusting this figure if it is
   old by the time you read this.
   """
   @spec get_fees(map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def get_fees(credentials, _opts) do
-    with :ok <- Auth.present?(credentials) do
-      {:ok,
-       %{
-         crypto_spread_pct: @crypto_spread_pct,
-         charged_by: "Webull Pay/Bakkt",
-         source: :published_rate,
-         captured_at: @crypto_spread_captured_at
-       }}
-    end
+  def get_fees(_credentials, _opts) do
+    {:ok,
+     %{
+       crypto_spread_pct: @crypto_spread_pct,
+       charged_by: "Webull Pay/Bakkt",
+       source: :published_rate,
+       captured_at: @crypto_spread_captured_at
+     }}
   end
 
   @doc """
