@@ -15,9 +15,14 @@ defmodule DpExchange.Webull.FakeInjectionTest do
   # Function names only are compile-time module attributes (plain strings, escapable);
   # the closures themselves live in ordinary functions below and are built at runtime —
   # a map of closures cannot be embedded in a module attribute at all.
+  # `market_status/1` is deliberately absent: it is `Venue.not_supported()`
+  # unconditionally now (this venue is not crypto-only and publishes no reachable
+  # market-status endpoint — see `DpExchange.Webull.market_status/1`), so there is no
+  # real success path left to inject a failure into, the same reason `test_connection/2`
+  # and `get_rate_limit_status/2` are absent from this list too.
   @whole_call_names ~w(
     get_symbols/1 get_balances/2 get_accounts/2 get_fees/2 get_transfers/2
-    get_transactions/2 preview_order/3 replace_order/4 market_status/1 get_positions/1
+    get_transactions/2 preview_order/3 replace_order/4 get_positions/1
     list_watchlists/1 get_watchlist/2 create_watchlist/3 update_watchlist/2
     delete_watchlist/2 get_corporate_events/1 get_news/1 get_screener/2 place_order/3
     cancel_order/3 get_order/3 get_orders/2
@@ -46,7 +51,6 @@ defmodule DpExchange.Webull.FakeInjectionTest do
       "replace_order/4" => fn ->
         Fake.replace_order(@credentials, "id", %{price: 1}, account_id: "1")
       end,
-      "market_status/1" => fn -> Fake.market_status([]) end,
       "get_positions/1" => fn -> Fake.get_positions(account_id: "1") end,
       "list_watchlists/1" => fn -> Fake.list_watchlists([]) end,
       "get_watchlist/2" => fn -> Fake.get_watchlist("wl-1", []) end,

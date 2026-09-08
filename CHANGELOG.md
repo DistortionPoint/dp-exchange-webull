@@ -24,6 +24,44 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`market_status/1` answered `{:ok, :open}` unconditionally — true only for the one
+  asset class this venue does not restrict to trading hours, and a lie for the other
+  four.** This venue is not crypto-only: `asset_classes/0` is `[:crypto, :equity,
+  :option, :future, :event_contract]`, and equities, options, futures and event
+  contracts all trade on real, exchange-set hours. A consumer checking market status
+  before placing an equity or options order was told the market was open at 3am on a
+  Sunday. Found by `dp_exchange_core` 0.1.66's widened assertion 17 (the credential
+  gate): this venue declares `credential_benefit: :required`, and the literal answered
+  `{:ok, _}` with no credential because nothing here ever read one.
+
+  **Now `{:error, :not_supported}`, declared `:unsupported` in `capabilities/0`.**
+  Checked against the vendor's own documentation before deciding, per this package's
+  own rule (fail closed; never substitute) rather than assumed: Webull's OpenAPI
+  documents 85 endpoints (`docs/reference/webull/endpoint-inventory.md`) and none of
+  them is a market-status or trading-calendar call. The one trading-calendar endpoint
+  Webull publishes anywhere, `GET /broker/master-data/trading-calendars/list`, belongs
+  to a different product entirely — the **Broker API**, served from
+  `broker-api.webull.com` rather than this package's `api.webull.com`, reachable only
+  with its own broker-tier credential obtained through a separate business relationship
+  this package has none of. Even setting the credential question aside,
+  `market_status/1` carries no symbol or asset-class argument — it answers ONE status
+  for the whole venue, and this venue spans five asset classes with different calendars,
+  so no single value could ever honestly describe it, reachable endpoint or not. Full
+  reasoning in `docs/reference/webull/negative-claims.md` and
+  `DpExchange.Webull.market_status/1`'s own doc.
+
+  **Breaking for any consumer routing on `market_status/1`.** A caller that previously
+  got `{:ok, :open}` now gets `{:error, :not_supported}` and must treat this venue as
+  not answerable for market status, the same way it already must for
+  `test_connection/2` and `get_rate_limit_status/2`.
+
+  Regression tests added in `webull_test.exs` (`describe "market_status/1"`); the
+  existing `capabilities().endpoints[{name, arity}] == :unsupported` sweep in
+  `webull_test.exs`'s "the declaration" tests now covers it automatically.
+  `fake_test.exs` and `fake_injection_test.exs` updated: `market_status/1` no longer has
+  a real success path, so it is removed from `FakeInjection`'s whole-call injection
+  surface, the same way `test_connection/2` and `get_rate_limit_status/2` already are.
+
 - **`Fake.get_corporate_events/1` and `Fake.get_news/1` checked credentials before the
   argument `Rest`'s own equivalents require first**, the reverse of `Rest.get_corporate_events/2`
   and `Rest.get_news/2`'s own order (both run `required_symbol/1`/`required_symbols/1`

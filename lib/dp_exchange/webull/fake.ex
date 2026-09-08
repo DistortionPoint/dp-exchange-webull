@@ -639,10 +639,13 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  # Matches the real facade: this venue is not crypto-only, `market_status/1` carries no
+  # symbol or asset-class argument to answer per-class with, and the venue publishes no
+  # market-status or trading-calendar endpoint this package can reach. See
+  # `DpExchange.Webull.market_status/1`'s own doc for the full reasoning. The real facade
+  # never dials out for this either, so there is nothing for `with_injection/2` to wrap.
   @impl true
-  def market_status(_opts) do
-    with_injection(fn -> {:ok, :open} end)
-  end
+  def market_status(_opts), do: Venue.not_supported()
 
   @impl true
   def subscribe(symbols, opts \\ []) do

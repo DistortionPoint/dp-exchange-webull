@@ -111,8 +111,9 @@ defmodule DpExchange.Webull.FakeTest do
       assert "BTC-USD" in symbols
     end
 
-    test "the market is open, because this venue's crypto market does not close" do
-      assert {:ok, :open} = Fake.market_status([])
+    test "market_status/1 is not supported — this venue is not crypto-only and " <>
+           "publishes no reachable market-status endpoint" do
+      assert Fake.market_status([]) == {:error, :not_supported}
     end
   end
 

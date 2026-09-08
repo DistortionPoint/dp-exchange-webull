@@ -158,7 +158,22 @@ defmodule DpExchange.Webull do
     # Reading a position and placing the opposite order sizes against the last read, and a
     # position that moved leaves a residue — which is exactly what a venue-side close
     # avoids, and this venue does not offer.
-    {:close_position, 3}
+    {:close_position, 3},
+    # **No market-status or trading-calendar endpoint anywhere on the surface this
+    # package can reach.** Checked against `docs/reference/webull/endpoint-inventory.md`
+    # (85 documented OpenAPI endpoints, live-verified against the vendor's sitemap
+    # 2026-09-07) and against the vendor's own docs directly: the one trading-calendar
+    # endpoint Webull publishes anywhere, `GET /broker/master-data/trading-calendars/
+    # list`, belongs to a different product entirely — the **Broker API**, served from
+    # `broker-api.webull.com` rather than this package's `api.webull.com` — reachable
+    # only with its own broker-tier credential, obtained through a separate business
+    # relationship this package has none of and this venue's `credentials()` cannot
+    # represent. Even setting that aside, `market_status/1` carries no symbol or
+    # asset-class argument: it answers ONE status for the whole venue, and this venue
+    # spans five asset classes with different calendars (crypto trades continuously; the
+    # other four do not) — no single value could honestly describe it even with a
+    # reachable endpoint. See `DpExchange.Webull.market_status/1`'s own doc.
+    {:market_status, 1}
   ]
 
   # Not ported yet. **The venue serves these, or has not been checked closely enough to say
@@ -693,8 +708,39 @@ defmodule DpExchange.Webull do
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not supported. This package cannot answer market status honestly for this venue.
+
+  Webull is not crypto-only — `asset_classes/0` is `[:crypto, :equity, :option, :future,
+  :event_contract]`, and equities, options and futures all trade on real, exchange-set
+  hours. `market_status/1` takes no symbol or asset-class argument at all: it answers ONE
+  status for the WHOLE venue, so even a working implementation could not honestly report
+  a single open/closed value across a venue that spans a 24/7 asset class and four that
+  are not.
+
+  That question is moot here anyway: **the venue publishes nothing this package can
+  reach.** Webull's OpenAPI (`docs/reference/webull/endpoint-inventory.md`) documents 85
+  endpoints and none of them is a market-status or trading-calendar call. The one
+  trading-calendar endpoint Webull publishes anywhere,
+  `GET /broker/master-data/trading-calendars/list`, belongs to a different product
+  entirely — the **Broker API**, served from `broker-api.webull.com` rather than this
+  package's `api.webull.com`/`us-openapi-alb.uat.webullbroker.com`, and reachable only
+  with its own broker-tier credential, obtained through a separate business relationship
+  ("contact our business team" — `developer.webull.com/apis/docs/broker-api/about-broker-
+  api.md`). This package's `credentials()` is an OpenAPI App Key/App Secret pair; it does
+  not model that credential and this package has no relationship that could supply one.
+  Calling that endpoint with an OpenAPI credential would not honestly serve this venue's
+  callers — it would 401 regardless of what any caller here supplies.
+
+  Previously `{:ok, :open}` unconditionally, found by `dp_exchange_core` 0.1.66's
+  widened assertion 17: this venue declares `credential_benefit: :required` and that
+  literal answered `{:ok, _}` with no credential — true by construction (nothing here
+  ever read one), and a false claim for four of the five asset classes this package
+  serves. Verified against the vendor's own documentation, not assumed — see
+  `docs/reference/webull/negative-claims.md`.
+  """
   @impl true
-  def market_status(_opts), do: {:ok, :open}
+  def market_status(_opts), do: Venue.not_supported()
 
   @doc """
   Rounds a price and quantity to what the venue will actually accept.

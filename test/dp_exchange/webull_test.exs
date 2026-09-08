@@ -112,11 +112,28 @@ defmodule DpExchange.WebullTest do
       # The order builder serves all five of the venue's instrument types, so the
       # declaration says so. It follows the code rather than leading it.
       assert Webull.asset_classes() == [:crypto, :equity, :option, :future, :event_contract]
-      assert Webull.market_status([]) == {:ok, :open}
     end
 
     test "quotes/0 reports the venue's settlement currencies" do
       assert "USD" in Webull.quotes()
+    end
+  end
+
+  describe "market_status/1" do
+    # Pins the fix for the family's recurring defect: this venue is not crypto-only, and
+    # `market_status/1` used to answer `{:ok, :open}` unconditionally regardless of
+    # asset class — a plausible value that lied for equities, options, futures and event
+    # contracts. The generic "declared :unsupported" sweep above already covers this
+    # (`{:market_status, 1}` is in `@venue_does_not_serve`); this test names the specific
+    # regression so a future change that quietly reintroduces `{:ok, :open}` fails here
+    # even if the generic sweep were ever narrowed.
+    test "answers :not_supported rather than an asset-class-blind :open" do
+      assert Webull.market_status([]) == {:error, :not_supported}
+      assert Fake.market_status([]) == {:error, :not_supported}
+    end
+
+    test "capabilities/0 agrees — market_status/1 is declared :unsupported" do
+      assert Webull.capabilities().endpoints[{:market_status, 1}] == :unsupported
     end
   end
 
@@ -358,7 +375,6 @@ defmodule DpExchange.WebullTest do
       assert Fake.capabilities() == Webull.capabilities()
       assert Fake.start_link([]) == :ignore
       assert %{id: :fake} = Fake.child_spec(name: :fake)
-      assert Fake.market_status([]) == {:ok, :open}
       assert Fake.provider_name() == "Webull"
       assert Fake.runtime_id() == :webull
       assert Fake.asset_classes() == [:crypto, :equity, :option, :future, :event_contract]
