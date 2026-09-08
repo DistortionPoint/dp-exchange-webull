@@ -33,12 +33,31 @@ acceptable changelog line.
   because CI always resolves the newest allowed version (0.1.68, per `mix.lock`);
   a consumer whose own dependency graph forced an older Core would not resolve that.
   Found in a family-wide audit of declared-vs-actual dependency floors, prompted by the
-  same defect class already fixed in `websockex` (`~> 0.4` → `~> 0.5`, previous entry).
+  same defect class already fixed in `websockex` (`~> 0.4` → `~> 0.5`, next entry below —
+  which itself needed a second correction the same day; see that entry).
   Raised to `~> 0.1.68`. This also covers `Timeframe.nameable/0` admitting `1y`, needed
   since Core 0.1.57 (see the "capabilities/0 withheld 1y" entry below) — 0.1.68 is the
   binding constraint of the two. A new test in `webull_test.exs` asserts the resolved
   Core's `Capabilities` struct defines `:no_venue_contact`, so a future loosening of this
   pin without a matching code change fails loudly instead of only failing for a consumer.
+
+- **`websockex` was corrected twice in one day, and the first correction was itself
+  wrong.** `Socket.disconnect/2` calls `WebSockex.send_frame/3`; `mix.exs` declared
+  `~> 0.4`, which does not have that arity at all. The first fix (`0646201`, this
+  package's own commit, undocumented here at the time — a gap this entry also closes)
+  raised the floor to `~> 0.5`, reasoning that the third `send_frame` argument "only
+  exists from 0.5". It does not: `send_frame/3` is new in **0.5.1**, and `~> 0.5` still
+  permits `0.5.0`, which lacks it — confirmed by reading both resolved sources directly
+  (`deps/websockex/lib/websockex.ex` defines only `send_frame/2` at `0.5.0`; the same
+  file defines `send_frame(client, frame, timeout \\ 5_000)` at `0.5.1`). Caught by
+  `script/check_dependency_floor.sh`, added the same day family-wide to close exactly
+  this blind spot, on its first real run against this package: resolving `~> 0.5` to its
+  actual floor reproduced the original `WebSockex.send_frame/3 is undefined or private`
+  warning against `0.5.0` itself. Raised to `~> 0.5.1`. No `mix.lock` change was needed —
+  this package already had `0.5.1` locked; only the stated floor, and the comment
+  reasoning about it instead of resolving it, were wrong. See
+  `docs/design/closed/2026-09-08_dependency-floor-check.md` in `dp_exchange_core` for the
+  full family-wide writeup.
 
 - **This reverts and corrects `get_fees/2`'s credential gate, added in the "Fix Fake
   credential gate (Core 0.1.57 assertion 17)" entry below. That earlier entry was
