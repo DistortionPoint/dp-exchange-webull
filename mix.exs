@@ -52,7 +52,20 @@ defmodule DpExchangeWebull.MixProject do
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
-      {:websockex, "~> 0.4"},
+      #
+      # `~> 0.5`, not `~> 0.4`: `Socket.disconnect/2` calls `WebSockex.send_frame/3`, and
+      # the third argument — the send timeout — only exists from 0.5. Under `~> 0.4` this
+      # package resolved 0.5.1 locally and so compiled and passed, while a consumer who
+      # resolved 0.4.x got `:undef` at the call. DpCryptoManagement hit exactly that on
+      # 2026-09-08. Arity is only checked when the function runs, so it shipped as a
+      # compile warning rather than an error, and only on a path nothing exercised.
+      #
+      # `send_frame/2` works on both and is the WRONG fix: it takes WebSockex's own
+      # 5_000ms default, where `@disconnect_timeout_ms` is deliberately 500ms because
+      # `disconnect/2` runs inside `Feed.terminate/2`, under a supervisor's shutdown
+      # budget. Ten times the wait during shutdown is not a free compatibility win, so the
+      # honest fix is to require the version whose API this package actually uses.
+      {:websockex, "~> 0.5"},
       {:jason, "~> 1.4"},
       {:decimal, "~> 2.0"},
 

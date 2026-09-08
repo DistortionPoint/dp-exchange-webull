@@ -316,6 +316,33 @@ defmodule DpExchange.Webull.SocketTest do
       assert Socket.disconnect(pid) == {:error, :not_alive}
     end
 
+    test "the WebSockex arity disconnect/2 depends on actually exists" do
+      # `disconnect/2` calls `WebSockex.send_frame/3`, whose third argument — the send
+      # timeout — exists only from websockex 0.5. `mix.exs` declared `~> 0.4` until
+      # 2026-09-08, so this package resolved 0.5.1 locally, compiled, and passed every
+      # test, while a consumer resolving 0.4.x got `:undef` the moment `disconnect/2` ran.
+      #
+      # Nothing caught it because arity is checked at the call, not at compile time — it
+      # emitted a warning, not an error — and no test exercised that path against a live
+      # socket. `disconnect/2`'s own `catch` then turned the `:undef` into
+      # `{:error, {:error, :undef}}`, so the caller was not taken down, but the DISCONNECT
+      # never reached the venue and the error said nothing about why.
+      #
+      # This asserts the dependency the code actually needs rather than the one `mix.exs`
+      # happens to say. A future `send_frame/4` would break the same silent way.
+      # `Code.ensure_loaded!/1` first, and it is not decoration. `function_exported?/3`
+      # answers `false` for a module that is merely not loaded YET, so on its own this
+      # assertion passes or fails depending on whether some earlier test happened to
+      # touch `WebSockex` — it failed on seeds 42 and 999 and passed on 1, 2 and 3 while
+      # being written. That is the same defect it exists to catch, one level up: a check
+      # that reports absence when it means "not looked yet".
+      Code.ensure_loaded!(WebSockex)
+
+      assert function_exported?(WebSockex, :send_frame, 3),
+             "Socket.disconnect/2 calls WebSockex.send_frame/3; the resolved websockex " <>
+               "does not export it. Check mix.exs's websockex requirement."
+    end
+
     test "an alive process that never answers times out as an error, not a hang" do
       # Real, live, ordinary process — not a `Socket`, so it never replies to the
       # `WebSockex.send_frame/3` call underneath `disconnect/2`. A short explicit
