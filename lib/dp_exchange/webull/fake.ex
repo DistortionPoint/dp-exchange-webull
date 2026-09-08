@@ -1019,9 +1019,14 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_corporate_events(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
-        case Keyword.get(opts, :symbol) do
-          symbol when is_binary(symbol) ->
+      # Symbol first, credentials second — `Rest.get_corporate_events/2`'s own
+      # `required_symbol/1` runs before anything reaches `Auth.headers/2`, so a caller
+      # supplying neither sees `:symbol_required` here too, not
+      # `{:missing_credentials, :webull}` — found by a cross-package audit: the two
+      # checks were the right side of `with`, but in the wrong order.
+      case Keyword.get(opts, :symbol) do
+        symbol when is_binary(symbol) ->
+          with :ok <- authenticated(opts) do
             {:ok,
              [
                %Types.CorporateEvent{
@@ -1041,10 +1046,10 @@ defmodule DpExchange.Webull.Fake do
                  provider: :webull
                }
              ]}
+          end
 
-          _missing ->
-            {:error, :symbol_required}
-        end
+        _missing ->
+          {:error, :symbol_required}
       end
     end)
   end
@@ -1073,9 +1078,12 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_news(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
-        case Keyword.get(opts, :symbols) do
-          [_first | _rest] = symbols ->
+      # Symbols first, credentials second — see `get_corporate_events/1`'s own comment;
+      # `Rest.get_news/2`'s `required_symbols/1` runs before anything reaches
+      # `Auth.headers/2`.
+      case Keyword.get(opts, :symbols) do
+        [_first | _rest] = symbols ->
+          with :ok <- authenticated(opts) do
             {:ok,
              [
                %Types.NewsItem{
@@ -1090,10 +1098,10 @@ defmodule DpExchange.Webull.Fake do
                  provider: :webull
                }
              ]}
+          end
 
-          _missing ->
-            {:error, :symbols_required}
-        end
+        _missing ->
+          {:error, :symbols_required}
       end
     end)
   end

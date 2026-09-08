@@ -24,6 +24,15 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`Fake.get_corporate_events/1` and `Fake.get_news/1` checked credentials before the
+  argument `Rest`'s own equivalents require first**, the reverse of `Rest.get_corporate_events/2`
+  and `Rest.get_news/2`'s own order (both run `required_symbol/1`/`required_symbols/1`
+  before anything reaches `Auth.headers/2`). Calling either with neither the argument nor
+  credentials answered `{:error, {:missing_credentials, :webull}}` here and
+  `:symbol_required`/`:symbols_required` for real — a narrow but real way this fake was
+  differently capable than the venue it stands in for. Found by a cross-package audit.
+  Both now check the argument first, matching `Rest`'s order exactly.
+
 - **A crash of `Feed` printed the `app_secret` HMAC-SHA1 signing key — and, if present,
   the account's `access_token` — in cleartext, in OTP's own crash report.** `Feed` keeps
   `state.resubscribe_opts` for its entire lifetime so a reconnect or a rebalance can

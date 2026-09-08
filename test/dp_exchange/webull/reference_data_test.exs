@@ -443,6 +443,19 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                Fake.get_screener("nope", credentials: @credentials)
     end
 
+    # Traced regression: the fake checked credentials before the argument, the opposite
+    # of `Rest.get_corporate_events/2` and `Rest.get_news/2`'s own order (both run
+    # `required_symbol/1`/`required_symbols/1` before anything reaches `Auth.headers/2`).
+    # Calling with NEITHER supplied is the one case that surfaces the mismatch: the fake
+    # answered `{:missing_credentials, :webull}` where the real facade answers
+    # `:symbol_required`/`:symbols_required`, a real (if narrow) way for this fake to be
+    # differently capable than the venue it stands in for.
+    test "with neither credentials nor the required argument, the argument refusal wins, " <>
+           "matching Rest's own check order" do
+      assert Fake.get_corporate_events() == {:error, :symbol_required}
+      assert Fake.get_news() == {:error, :symbols_required}
+    end
+
     test "the fake's statement keeps the integer fiscal period" do
       assert {:ok, [statement]} =
                Fake.get_financials("AAPL", :balance_sheet, credentials: @credentials)
@@ -456,9 +469,10 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     end
 
     # Every reference-data endpoint here is signed, so the fake refuses without
-    # credentials rather than answering where the real venue returns 401. The credential
-    # check comes before the argument checks above, matching `Rest`'s own order. All are
-    # outside `Core.AdapterContract`'s `@credentialed` list, so assertion 17 never asks.
+    # credentials rather than answering where the real venue returns 401. All are outside
+    # `Core.AdapterContract`'s `@credentialed` list, so assertion 17 never asks — each
+    # call below supplies its own required argument precisely so the credential check is
+    # what's actually being proven, not incidentally shadowed by an argument refusal.
     test "the reference-data callbacks need credentials, as the real venue does" do
       assert Fake.get_corporate_events(symbol: "AAPL") ==
                {:error, {:missing_credentials, :webull}}
