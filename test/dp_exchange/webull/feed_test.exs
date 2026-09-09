@@ -720,6 +720,77 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:request, "shard-0", ["BTCUSD"]}
     end
 
+    test "INVALID_SESSION reopens the shard instead of re-asking the dead session forever",
+         %{limiter: limiter} do
+      # dp-exchange-core issue #30. `INVALID_SESSION` says the session this subscribe is
+      # addressed to no longer exists, so re-sending the identical subscribe is the one
+      # action guaranteed not to help — and it is what this Feed did, once a minute, for
+      # fourteen hours across all four shards. 1,479 identical warnings; 260 of 325 symbols
+      # receiving nothing; a human restarting the feed as the only recovery. The venue was
+      # handing out working sessions the whole time.
+      #
+      # A distinct socket process stands in for the shard's, NOT `self()` the way
+      # `connected_shard/1` defaults: the recovery stops that process, and pointing it at
+      # the test process would kill the test.
+      test_pid = self()
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      socket_ref = Process.monitor(socket)
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        session_id = Jason.decode!(body)["session_id"]
+        send(test_pid, {:subscribe_attempt, session_id})
+
+        conn
+        |> Plug.Conn.put_status(417)
+        |> Req.Test.json(%{
+          "error_code" => "INVALID_SESSION",
+          "message" => "Mqtt connection not exist for session:#{session_id}"
+        })
+      end
+
+      shard = %{connected_shard("dead-session") | socket: socket, symbols: ["BTCUSD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0,
+          # The reopen this triggers is real. Pointed at a closed local port so it fails
+          # fast and offline — the assertion here is about the DECISION to reopen, and a
+          # tier-1 test must never reach the venue.
+          url: "ws://127.0.0.1:1"
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+
+      send(feed, :resubscribe)
+      assert_receive {:subscribe_attempt, "dead-session"}, 1_000
+
+      # The stale socket is torn down rather than left holding a connection the venue has
+      # already discarded. This venue allows five concurrent connections per App Key, so
+      # leaking one per dead session would turn a recoverable outage into an unrecoverable
+      # one.
+      assert_receive {:DOWN, ^socket_ref, :process, ^socket, _reason}, 1_000
+
+      # Reported as a link_down naming the cause, not latched as an unexplained generic
+      # resubscribe failure — a consumer watching notices can now see WHY the shard went
+      # dark, which is what fourteen hours of WARN lines never said.
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 1_000
+      assert notice.details.session_id == "dead-session"
+      assert notice.details.reason =~ "INVALID_SESSION"
+
+      # The defect itself: the next tick must NOT re-ask the same dead session. The shard
+      # is gone from state, so there is nothing left addressed to `"dead-session"`.
+      send(feed, :resubscribe)
+      refute_receive {:subscribe_attempt, "dead-session"}, 300
+
+      assert Process.alive?(feed)
+    end
+
     test "a shard that has never linked up is skipped, not asked to subscribe before it can" do
       plug = fn _conn -> flunk("a shard with no CONNACK yet must never be asked to subscribe") end
 

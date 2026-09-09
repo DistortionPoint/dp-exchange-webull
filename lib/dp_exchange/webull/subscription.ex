@@ -128,6 +128,26 @@ defmodule DpExchange.Webull.Subscription do
           # with nothing to pattern-match to recover automatically.
           {:error, :oversubscribed}
 
+        {:ok, %{status: 417, body: %{"error_code" => "INVALID_SESSION"} = response_body}} ->
+          # The session this subscribe is addressed to no longer exists venue-side. Named
+          # separately from the generic `exchange_error` below for the same reason
+          # `:oversubscribed` and `:invalid_symbols` are: it is an answer `Feed` can ACT on,
+          # and it is the one answer where retrying the identical call is guaranteed never
+          # to work.
+          #
+          # dp-exchange-core issue #30: it collapsed into the opaque string below, `Feed`
+          # retried the same dead session id every 60 seconds, and four shards stayed dark
+          # for fourteen hours — 1,479 identical warnings — until a human restarted the
+          # feed. The venue was handing out working sessions the whole time; only the code
+          # path to ask for one was missing.
+          #
+          # The session id is carried out of the message so a caller can tell WHICH session
+          # died, which matters on a sharded venue where three of four may be fine. When it
+          # cannot be parsed the error still says `:invalid_session` — the recovery does not
+          # depend on the id, and refusing to name the failure because one detail is missing
+          # would put us straight back in the fourteen-hour loop.
+          {:error, {:invalid_session, session_id_from(response_body)}}
+
         {:ok, %{status: 417, body: %{"error_code" => "INVALID_SYMBOL"} = response_body}} ->
           # See the moduledoc's "`INVALID_SYMBOL` names the offending symbols" —
           # DpCryptoManagement's issue #24.
@@ -163,6 +183,20 @@ defmodule DpExchange.Webull.Subscription do
   # symbol must fall through to the opaque `exchange_error` shape, not be reported as
   # zero rejected symbols.
   @invalid_symbol_list ~r/\[([^\]]+)\]/
+
+  # `"Mqtt connection not exist for session:3c4fdabd54097164fbd0f66d95743aae"` — the venue
+  # names the dead session in prose, so this reads it out of prose. Deliberately tolerant:
+  # `nil` when the shape changes, never a raise and never a guess, because the caller's
+  # recovery (reopen the shard) does not depend on the id and must not be blocked by a
+  # message this parser has not seen before.
+  defp session_id_from(%{"message" => message}) when is_binary(message) do
+    case Regex.run(~r/session:\s*([A-Za-z0-9_-]+)/, message) do
+      [_match, session_id] -> session_id
+      nil -> nil
+    end
+  end
+
+  defp session_id_from(_no_message), do: nil
 
   defp invalid_symbols(%{"message" => message}) when is_binary(message) do
     case Regex.run(@invalid_symbol_list, message) do

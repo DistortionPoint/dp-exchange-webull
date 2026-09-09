@@ -24,6 +24,74 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`INVALID_SESSION` was retried as a subscribe failure forever — dp-exchange-core issue
+  #30.** All four MQTT shards stopped delivering and the blind resubscribe timer kept
+  firing against sessions the venue had already discarded: **1,479 identical warnings over
+  fourteen hours**, 260 of 325 symbols receiving nothing, and a manual `Feed` restart as
+  the only recovery. `INVALID_SESSION` says the session a subscribe is addressed to no
+  longer exists, so re-sending that same subscribe is the one action guaranteed not to
+  help — and nothing escalated from "subscribe failed" to "reconnect", so it could not
+  recover in-process.
+
+  Two causes, both fixed. **`Subscription` collapsed the venue's answer into the opaque
+  `{:exchange_error, :webull, "HTTP 417: ..."}` string**, which `Feed` could log and could
+  not match on; a `417` carrying `INVALID_SESSION` is now
+  `{:error, {:invalid_session, session_id}}`, with the dead session id parsed out of the
+  venue's prose (`"...not exist for session:<id>"`) because on a sharded venue three of
+  four sessions may be perfectly fine. A message this parser cannot read still returns
+  `:invalid_session` with a `nil` id — the recovery does not depend on the id, and refusing
+  to name the failure over a missing detail would restore the fourteen-hour loop.
+
+  **`Feed` now rebuilds the shard** rather than retrying it, through the recovery it
+  already had for a crashed socket: drop the shard and reopen it, which mints a fresh
+  session id in `open_socket/2`. It has to be a reopen and not a retry, because the session
+  id is minted when the socket opens — there is no subscribe-level fix available at all.
+  Handled in the shared `handle_subscribe_result/3` funnel, so every subscribe path
+  recovers the same way; the blind resubscribe is merely where it was first observed.
+
+  Two details that would be easy to get wrong, both recorded at the code: the shard leaves
+  `state.shards` **before** its socket is stopped, so the resulting `{:EXIT, ...}` finds no
+  shard and cannot drive a second concurrent rebuild through `isolate_crashed_shard/3`; and
+  the socket is **stopped**, not abandoned, because unlike a crash the process is very
+  likely still alive holding a connection the venue has already discarded — this venue
+  allows five concurrent connections per App Key, so leaking one per stale session would
+  turn a recoverable outage into an unrecoverable one.
+
+  It is reported as a `:link_down` notice naming `INVALID_SESSION`, rather than latched as
+  a generic resubscribe failure. The reporting consumer's point stands on its own: the only
+  signal before this was a WARN line saying the symbols were stuck, offering no path out.
+  This is the **third** failure mode of the resubscribe path — #17 added it (symbols going
+  quiet on a live session), #23 fixed it failing throttled, and this is the session
+  underneath it being gone.
+
+  A note on why it stayed invisible for fourteen hours, worth carrying: the failure is
+  *partial by construction*. Dead sessions strand their symbols while surviving ones keep
+  delivering, so venue-wide "has this gone quiet" answered **no** the entire time — the
+  reported `min` stream age was 81s while the p50 was 3,497s.
+
+### Documentation
+
+- **`Credentials`' moduledoc now says that the redaction wrap lives in `child_spec/1`, and
+  that bypassing `child_spec/1` bypasses it.** Requested by the consumer who verified the
+  dp-exchange-core #29 fix and then went looking for their canary in their own supervisor's
+  state — and found it. Their supervision code builds the child spec itself
+  (`start: {__MODULE__, :start_feed, [module, opts, pairs]}`) for a legitimate reason: a
+  `Core.PollingFeed`-shaped facade defaults `subscriber` to `self()`, which resolves to the
+  *supervisor* when `start_link/1` is called from `init/1`, so a different delivery target
+  can only be set at `start_link` time. On that path `child_spec/1` never runs, their
+  supervisor stores the raw map, and OTP renders the live key on the next crash exactly as
+  before. **Upgrading does not fix it, because nothing from this package is on that path.**
+
+  No code change: `wrap/1` and `wrap_opt/1` were already public, which was all that path
+  needed. What was missing was anyone saying so — the natural assumption, "upgraded,
+  therefore redacted", is wrong there, and assertion 22 cannot see it because it asks about
+  `child_spec/1`'s own rendering. `dp_exchange_core`'s `usage-rules/auth.md` carries the
+  full version, including the reshaping case that bit them: a host mapping its own key
+  names into a venue's and returning a bare map re-introduces the leak in its own code,
+  downstream of anything a package can reach.
+
+### Fixed
+
 - **Credentials were written to the log in cleartext by any crash — dp-exchange-core issue
   #29.** A supervisor stores the `{module, :start_link, [opts]}` MFA its child spec names,
   and OTP writes that argument list through `inspect/1` into the `Start Call:` line of the

@@ -1130,7 +1130,92 @@ defmodule DpExchange.Webull.Feed do
     {%{state | rejected: rejected}, true}
   end
 
+  # See `rebuild_stale_shard/3`. Placed in this shared funnel rather than in one
+  # `{:reconcile_done, ...}` clause so every subscribe path — a caller's own `subscribe/2`,
+  # a background reconcile, a post-CONNACK replay and the blind resubscribe timer — recovers
+  # the same way. The blind resubscribe is merely where it was first observed.
+  defp handle_subscribe_result(state, index, {:error, {:invalid_session, session_id}}),
+    do: {rebuild_stale_shard(state, index, session_id), false}
+
   defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  # A subscribe answered `INVALID_SESSION`: the session this shard is addressed to no longer
+  # exists venue-side, so its MQTT connection is gone whatever the socket process still
+  # believes. Re-sending the identical subscribe is the ONE action guaranteed not to help —
+  # which is exactly what this package did, once a minute, for fourteen hours across all
+  # four shards (dp-exchange-core issue #30: 1,479 identical warnings, 260 of 325 symbols
+  # receiving nothing, and a human restarting the feed as the only recovery). The venue was
+  # handing out working sessions the whole time; only the path to ask for one was missing.
+  #
+  # The recovery is the one this module already has for a crashed socket: drop the shard
+  # wholesale and reopen it. It has to be a reopen rather than a retry because the session
+  # id is minted in `open_socket/2` when the socket opens — a fresh session REQUIRES a fresh
+  # socket, so there is no subscribe-level fix available here at all.
+  #
+  # ORDER MATTERS. The shard leaves `state.shards` BEFORE its socket is stopped, so the
+  # `{:EXIT, ...}` that stopping it produces finds no shard for that pid and is ignored by
+  # `handle_info({:EXIT, ...})`, rather than driving a second concurrent rebuild of the same
+  # index through `isolate_crashed_shard/3`.
+  #
+  # The socket is stopped, not abandoned. Unlike a crash, the process here is very likely
+  # still alive, holding a WebSocket the venue has already discarded. This venue allows
+  # **five concurrent connections per App Key**, so leaking one per stale session would
+  # exhaust the budget after a handful of these and turn a recoverable outage into an
+  # unrecoverable one. No MQTT `DISCONNECT` is sent first: `Socket.disconnect/2` addresses
+  # the session, and the session is precisely what no longer exists.
+  #
+  # No reply is sent to `shard.reply_to` here, deliberately — unlike `isolate_crashed_shard/3`,
+  # which is reached from an `{:EXIT, ...}` nobody is waiting on. This runs inside a
+  # `{:reconcile_done, ...}` clause that already owns the caller's reply and answers it with
+  # this same error, so replying again would be a double `GenServer.reply/2`.
+  defp rebuild_stale_shard(state, index, session_id) do
+    case Map.fetch(state.shards, index) do
+      :error ->
+        state
+
+      {:ok, shard} ->
+        named = session_id || shard.session_id
+
+        Logger.warning(
+          "[Webull Feed] shard #{index} session #{inspect(named)} no longer exists " <>
+            "venue-side (INVALID_SESSION) — reopening the shard on a fresh session; its " <>
+            "#{length(shard.symbols)} symbol(s) go dark until it reconnects, while every " <>
+            "other shard keeps delivering"
+        )
+
+        fan_out(
+          state.notice_subscribers,
+          {:dp_exchange, :webull,
+           Notice.new(:link_down, :webull,
+             details: %{
+               session_id: named,
+               reason: "INVALID_SESSION — reopening the shard on a fresh session"
+             }
+           )}
+        )
+
+        state = %{
+          state
+          | shards: Map.delete(state.shards, index),
+            resubscribe_failed: MapSet.delete(state.resubscribe_failed, index),
+            delivering: Map.drop(state.delivering, shard.symbols),
+            delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
+        }
+
+        stop_socket(shard.socket)
+        send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
+        state
+    end
+  end
+
+  # `:shutdown` rather than `:kill`: the socket does not trap exits, so either terminates
+  # it, and `:shutdown` is the reason that reads as intentional in any report it produces.
+  defp stop_socket(socket) when is_pid(socket) do
+    if Process.alive?(socket), do: Process.exit(socket, :shutdown)
+    :ok
+  end
+
+  defp stop_socket(_no_socket), do: :ok
 
   # Mirrors, on purpose, the exact classification `handle_subscribe_result/3` just applied
   # above: `:oversubscribed` self-heals silently (a capacity measurement, not a failure to
@@ -1141,6 +1226,10 @@ defmodule DpExchange.Webull.Feed do
   # error — is the generic shape this module's own `:coverage_change` notice exists for.
   defp generic_resubscribe_error?(:oversubscribed), do: false
   defp generic_resubscribe_error?({:invalid_symbols, _symbols}), do: false
+  # Not generic: it has a real recovery (`rebuild_stale_shard/3`) and emits its own
+  # `:link_down` notice, so latching it as an unexplained failure would report the same
+  # event twice and in the less useful shape.
+  defp generic_resubscribe_error?({:invalid_session, _session_id}), do: false
   defp generic_resubscribe_error?(_other), do: true
 
   # Fires once per transition into a shard's blind-resubscribe failing generically — see

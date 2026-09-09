@@ -228,6 +228,48 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
   end
 
   describe "the HTTP half of subscribing" do
+    test "INVALID_SESSION is named, and carries the dead session id", %{limiter: limiter} do
+      # dp-exchange-core issue #30. This used to collapse into the opaque
+      # `{:exchange_error, :webull, "HTTP 417: ..."}` string below, which `Feed` could log
+      # and could not match on — so it retried the dead session every 60 seconds for
+      # fourteen hours. The id is carried out because on a sharded venue three of four
+      # sessions may be perfectly fine.
+      assert {:error, {:invalid_session, "3c4fdabd54097164fbd0f66d95743aae"}} =
+               Subscription.subscribe("session-1", ["BTC-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug:
+                   responding(
+                     %{
+                       "error_code" => "INVALID_SESSION",
+                       "message" =>
+                         "Mqtt connection not exist for session:3c4fdabd54097164fbd0f66d95743aae",
+                       "status" => 417
+                     },
+                     417
+                   ),
+                 retry_attempts: 0
+               )
+    end
+
+    test "an INVALID_SESSION whose message names no session is still INVALID_SESSION",
+         %{limiter: limiter} do
+      # The recovery — reopen the shard — does not depend on the id, so refusing to name
+      # the failure because one detail is missing would put this straight back into the
+      # fourteen-hour retry loop. `nil`, never a raise and never a guess.
+      assert {:error, {:invalid_session, nil}} =
+               Subscription.subscribe("session-1", ["BTC-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug:
+                   responding(
+                     %{"error_code" => "INVALID_SESSION", "message" => "gone"},
+                     417
+                   ),
+                 retry_attempts: 0
+               )
+    end
+
     test "a refusal is reported with its status", %{limiter: limiter} do
       assert {:error, {:refused, 401, _body}} =
                Subscription.subscribe("session-1", ["BTC-USD"],
