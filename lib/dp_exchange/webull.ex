@@ -403,10 +403,10 @@ defmodule DpExchange.Webull do
       # Was `10` on both, with no comment and no mention in `measured_against` below —
       # unlabelled and inherited, found by a family-wide sweep for the
       # `@pairs_per_socket`/`@shard_spacing_ms` defect class. This one is load-bearing:
-      # `Supervisor`'s private `limits/0` feeds it straight into the real `DefaultRateLimiter` this
-      # package starts, so the unexamined number was actually throttling (or failing to
-      # throttle) every REST call. Webull's own Data API FAQ states "a rate limit of 300
-      # requests per 60 seconds" — `300 / 60 = 5` — see
+      # `Supervisor`'s private `limits/0` feeds it straight into the real
+      # `DefaultRateLimiter` this package starts, so the unexamined number was actually
+      # throttling (or failing to throttle) every REST call. Webull's own Data API FAQ
+      # states "a rate limit of 300 requests per 60 seconds" — `300 / 60 = 5` — see
       # `docs/reference/webull/rest-rate-limits.md`. Every endpoint here is signed
       # (`credential_benefit: :required` above), so there is no separate public/
       # authenticated split to make; both ceilings carry the same documented figure.
