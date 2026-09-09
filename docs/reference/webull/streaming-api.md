@@ -1,6 +1,6 @@
 # Data Streaming API — reference
 
-**Source**: `https://developer.webull.com/apis/docs/market-data-api/data-streaming-api`.
+**Source**: `https://developer.webull.com/apis/docs/market-data-api/data-streaming-api/`.
 **Read and measured 2026-08-28.**
 
 Committed rather than linked, per D13. This venue's streaming design is the one the plan

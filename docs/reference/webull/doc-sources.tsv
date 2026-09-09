@@ -1,0 +1,26 @@
+# Vendor documentation pages this package cites, and what each one DID when a person read
+# it. Checked by `script/check_doc_sources.sh`; see that script's header for why this is
+# status-and-destination rather than a content diff, and why a redirect is the signal.
+#
+# Columns, tab-separated:
+#   url  expect_status  expect_location  observed_on  class  note
+#
+# `expect_location` is `-` when the page does not redirect. It is never left blank: TAB is
+# IFS whitespace, so a run of tabs collapses into one delimiter and every later column
+# shifts. The first draft of this file did leave it blank and the checker reported all
+# seven rows as changed.
+#
+# `class` is `auto` (a machine can verify this) or `manual` (it cannot — a human must
+# re-read it, and the row goes STALE to force that). Every row here is `auto`: this
+# vendor publishes its documentation anonymously, which not every venue in this family
+# does.
+#
+# Do not edit a row to make the check pass. The row records what someone READ; rewriting
+# it to match a fetch nobody looked at turns this file into a rubber stamp.
+https://developer.webull.com/apis/docs/rate-limits/	200	-	2026-09-09	auto	THE load-bearing page: the per-endpoint rate-limit table capabilities/0's ceilings come from. Added by the vendor 2026-08-14 and missed until 2026-09-09.
+https://developer.webull.com/apis/docs/market-data-api/faq/	200	-	2026-09-09	auto	States 300 requests per 60 seconds, which the per-endpoint table above contradicts by 5x. Watched BECAUSE it is wrong: if the vendor corrects it, that resolves a known self-contradiction.
+https://developer.webull.com/apis/docs/market-data-api/data-streaming-api/	200	-	2026-09-09	auto	MQTT-over-WebSocket contract, topic table and the 3 msg/sec/connection push rate Feed's sharding is built on.
+https://developer.webull.com/apis/docs/reference/order-batch-place/	200	-	2026-09-09	auto	Batch order semantics behind Rest's @batch_limit of 50.
+https://developer.webull.com/apis/docs/reference/crypto-snapshot/	200	-	2026-09-09	auto	Corroborates the per-endpoint ceiling in different units ("1 request per second per App Key") and states the 20-symbols-per-request cap.
+https://developer.webull.com/apis/sitemap.xml	200	-	2026-09-09	auto	The index. Diffing THIS is the one mechanism that has ever caught a real vendor change in this family — the rate-limits page was listed here from 2026-08-14.
+https://developer.webull.com/apis/docs/changelog/	200	-	2026-09-09	auto	The vendor's dated changelog. Kept for provenance, not trusted as a detector: across five venues a changelog diff has caught nothing.

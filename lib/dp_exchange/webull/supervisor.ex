@@ -51,7 +51,7 @@ defmodule DpExchange.Webull.Supervisor do
     # reconnect and blind resubscribe thereafter — actually names the limiter this
     # Supervisor just started, not the one nobody starts.
     children = [
-      {DefaultRateLimiter, name: limiter_name(opts), limits: limits()},
+      {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
       {Feed,
        opts
        |> Keyword.put_new(:limiter, limiter_name(opts))
@@ -96,12 +96,43 @@ defmodule DpExchange.Webull.Supervisor do
     end)
   end
 
-  # Straight from the declaration. If a ceiling changes, it changes in one place.
-  defp limits do
-    caps = DpExchange.Webull.capabilities()
+  @doc """
+  The limits this venue's `DefaultRateLimiter` is started with, for the environment `opts`
+  resolves to.
 
-    %{webull: to_limit(caps.public_ceiling), default: to_limit(caps.public_ceiling)}
+  Public for the same reason `limiter_name/1` and `feed_name/1` are: it is a derivation a
+  reader has to be able to check, and the figure it produces gates every REST call this
+  package makes. Not part of the facade — `DpExchange.Webull` is the boundary.
+  """
+  @spec limits(keyword()) :: %{
+          atom() => %{limit: pos_integer(), per_ms: pos_integer(), burst: pos_integer()}
+        }
+  def limits(opts) do
+    caps = DpExchange.Webull.capabilities()
+    ceiling = environment_ceiling(caps.public_ceiling, Environment.resolve(opts))
+
+    %{webull: to_limit(ceiling), default: to_limit(ceiling)}
   end
+
+  # `capabilities/0` declares the PRODUCTION ceiling and can declare nothing else: it takes
+  # no arguments, so it cannot state a figure that differs per environment, and production
+  # is the figure a consumer is entitled to read as this venue's contract.
+  #
+  # The venue's per-endpoint rate-limit table gives sandbox exactly half of every
+  # production limit — `30/60s` against `60/60s`, on every market-data endpoint without
+  # exception — so UAT is metered at half here rather than silently inheriting a budget
+  # twice what that environment permits. The halving is the venue's own relationship
+  # between its two columns, not a safety margin invented here.
+  #
+  # This matters for the reason the moduledoc above already gives about buckets: UAT and
+  # production are separately named limiters precisely so one cannot spend the other's
+  # budget. Giving them the same LIMITS would have left that separation cosmetic in the
+  # direction that bites — UAT traffic pacing itself against a production allowance the
+  # sandbox will refuse, surfacing as a 429 on a test run with nothing pointing at why.
+  defp environment_ceiling(ceiling, :production), do: ceiling
+
+  defp environment_ceiling(%{limit: limit} = ceiling, :uat),
+    do: %{ceiling | limit: max(div(limit, 2), 1)}
 
   # No published burst depth on this venue — unlike Gemini, which states one. Falling back
   # to the per-interval limit is the conventional GCRA choice and is labelled as ours

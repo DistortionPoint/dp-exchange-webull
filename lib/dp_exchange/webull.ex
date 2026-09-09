@@ -400,18 +400,47 @@ defmodule DpExchange.Webull do
       # incident.
       no_venue_contact: [{:get_fees, 2}],
 
-      # Was `10` on both, with no comment and no mention in `measured_against` below —
-      # unlabelled and inherited, found by a family-wide sweep for the
-      # `@pairs_per_socket`/`@shard_spacing_ms` defect class. This one is load-bearing:
-      # `Supervisor`'s private `limits/0` feeds it straight into the real
-      # `DefaultRateLimiter` this package starts, so the unexamined number was actually
-      # throttling (or failing to throttle) every REST call. Webull's own Data API FAQ
-      # states "a rate limit of 300 requests per 60 seconds" — `300 / 60 = 5` — see
-      # `docs/reference/webull/rest-rate-limits.md`. Every endpoint here is signed
-      # (`credential_benefit: :required` above), so there is no separate public/
-      # authenticated split to make; both ceilings carry the same documented figure.
-      public_ceiling: %{limit: 5, per_ms: 1_000},
-      authenticated_ceiling: %{limit: 5, per_ms: 1_000},
+      # **60 requests per 60 seconds, per endpoint, in production** — from the venue's own
+      # per-endpoint rate-limit reference,
+      # `https://developer.webull.com/apis/docs/rate-limits/`, committed to
+      # `docs/reference/webull/rest-rate-limits.md`.
+      #
+      # This number has now been wrong twice, in opposite directions, and both are kept
+      # because the second correction is the one that would have reached a consumer.
+      #
+      #   - It was `10`, with no comment and no mention in `measured_against` below —
+      #     unlabelled and inherited, found by a family-wide sweep for the
+      #     `@pairs_per_socket`/`@shard_spacing_ms` defect class.
+      #   - It was then `5`, from the Market Data FAQ's "a rate limit of 300 requests per
+      #     60 seconds" (300 / 60 = 5). That page is real and still says exactly that. It
+      #     is also **contradicted by the venue's own per-endpoint table**, which caps
+      #     every market-data endpoint — crypto, stock, option, future, event contract —
+      #     at `60/60s` in production. Five times stricter than what we declared.
+      #
+      # The venue contradicts itself, so this picks by rule rather than by preference: the
+      # per-endpoint table is more specific, is newer (announced in the vendor changelog
+      # 2026-08-14), states its own units, and is the STRICTER of the two. Fail closed.
+      # The cost of being wrong is asymmetric here in a way it usually is not — that same
+      # page states "repeatedly exceeding rate limits may result in temporary IP-level
+      # blocking", so guessing high does not cost latency, it costs the connection.
+      #
+      # Declared in the venue's own units (`N/Ts`) rather than reduced to a per-second
+      # rate, so the burst the venue actually permits survives the transcription.
+      #
+      # **Deliberately conservative in one direction**: the venue meters per endpoint and
+      # `Supervisor`'s limiter is one shared bucket across all of them, so this spends a
+      # single 60/60s budget where the venue would allow each endpoint its own. Under-using
+      # a documented allowance is the safe side of a limit that answers 429 and then
+      # blocks. Sandbox is half this (`30/60s`) and is applied by `Supervisor.limits/1`
+      # from the resolved environment rather than declared here: `capabilities/0` takes no
+      # arguments and so cannot state a figure that differs per environment.
+      #
+      # Load-bearing, not documentation: `Supervisor`'s private `limits/1` feeds this
+      # straight into the real `DefaultRateLimiter` this package starts. Every endpoint is
+      # signed (`credential_benefit: :required` above), so there is no public/authenticated
+      # split to make; both ceilings carry the same figure.
+      public_ceiling: %{limit: 60, per_ms: 60_000},
+      authenticated_ceiling: %{limit: 60, per_ms: 60_000},
       measured_at: ~D[2026-08-28],
       measured_against:
         "streaming contract, MQTT endpoints and protobuf schema read from " <>
@@ -443,11 +472,17 @@ defmodule DpExchange.Webull do
           "beyond what it can bucket but not 1y, so Capabilities.new/1 raises if it is " <>
           "declared here; see @core_unnameable_widths above and the CHANGELOG entry for " <>
           "the upstream gap this surfaced, reported rather than worked around; " <>
-          "public_ceiling/authenticated_ceiling (2026-09-08) ARE now doc-derived — " <>
-          "developer.webull.com's Data API FAQ states \"a rate limit of 300 requests per " <>
-          "60 seconds\" (300 / 60 = 5), committed to " <>
-          "docs/reference/webull/rest-rate-limits.md — replacing a prior 10 req/s figure " <>
-          "that carried no citation and was not mentioned in this string at all"
+          "public_ceiling/authenticated_ceiling (corrected 2026-09-09) are doc-derived " <>
+          "from developer.webull.com/apis/docs/rate-limits/ — the venue's per-endpoint " <>
+          "table, which caps EVERY market-data endpoint at 60/60s in production and " <>
+          "30/60s in sandbox — committed to docs/reference/webull/rest-rate-limits.md; " <>
+          "this replaced a 5 req/s figure taken 2026-09-08 from the Market Data FAQ's " <>
+          "\"300 requests per 60 seconds\", which that per-endpoint table contradicts by " <>
+          "a factor of five; the FAQ still says it, so this is a venue self-contradiction " <>
+          "resolved in favour of the stricter, more specific and newer page, NOT a vendor " <>
+          "change we detected; the 5 had itself replaced a prior 10 req/s figure carrying " <>
+          "no citation at all; the sandbox half is applied by Supervisor.limits/1, which " <>
+          "capabilities/0 cannot express because it takes no arguments"
     )
   end
 

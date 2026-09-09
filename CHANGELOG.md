@@ -24,6 +24,56 @@ acceptable changelog line.
 
 ### Fixed
 
+- **The REST ceiling was five times too permissive, and the entry below it in this same
+  unreleased section is what made it so.** `public_ceiling`/`authenticated_ceiling` are
+  now `%{limit: 60, per_ms: 60_000}` — 60 requests per 60-second window, the venue's own
+  units — replacing the `%{limit: 5, per_ms: 1_000}` the next entry describes arriving at.
+  That `5` came from Webull's Market Data FAQ ("a rate limit of 300 requests per 60
+  seconds"). The FAQ is real and still says that. It is also contradicted by **the
+  venue's own per-endpoint rate-limit table**, `developer.webull.com/apis/docs/rate-limits/`,
+  which caps *every* market-data endpoint — crypto, stock, option, future, event
+  contract, display and non-display, including the HTTP `streaming/subscribe` calls — at
+  `60/60s` in production and `30/60s` in sandbox. A second, independently maintained set
+  of pages corroborates it in different units: each endpoint's own reference page states
+  "1 request per second per App Key", which *is* 60/60s.
+
+  The venue contradicts itself, so this was decided by rule, not preference: the
+  per-endpoint table is more specific, newer, states its own units, is corroborated, and
+  is the **stricter** of the two. Fail closed. The asymmetry matters more than usual here
+  — that page also states that repeatedly exceeding a limit "may result in temporary
+  IP-level blocking", so guessing high does not cost latency, it costs the connection.
+
+  **This number has now been wrong twice in a row, in the same direction, and the second
+  time it carried a citation.** That is the part worth keeping: a citation makes a number
+  checkable, it does not make it right. Operationally the tightening costs nothing —
+  `Subscription.subscribe/3` batches symbols into one call per shard rather than one per
+  symbol, and `get_price/3`/`get_top_of_book/3` are per-symbol calls a consumer paces
+  itself.
+
+- **UAT was metered against production's budget.** `Supervisor`'s `limits/1` (was
+  `limits/0`, now taking `opts`) halves the declared ceiling to `30/60s` when
+  `Environment.resolve/1` says `:uat`, which is the venue's own relationship between its
+  two columns rather than a margin invented here. The Supervisor already gave production
+  and UAT separately *named* limiters precisely so one could not spend the other's budget;
+  handing both the same limits left that separation cosmetic in the direction that bites —
+  UAT pacing itself against an allowance the sandbox refuses, surfacing as a `429` on a
+  test run with nothing pointing at the cause. `capabilities/0` still declares the
+  production figure and can declare nothing else: it takes no arguments. `limits/1` is now
+  public and documented, matching its already-public siblings `limiter_name/1` and
+  `feed_name/1`, so the derivation is checkable; `test/dp_exchange/webull/rate_ceiling_test.exs`
+  pins both environments and the burst that follows each.
+
+- **A cited vendor page 404s, and that is how all of the above was found.**
+  `docs/reference/webull/rest-rate-limits.md` cited
+  `.../docs/reference/option-market-data/`; the page is `options-market-data`, plural.
+  Three bullets in that file carried per-endpoint figures — "40 requests per 2 seconds"
+  for orders, "600 requests per minute" for futures, "60 requests per minute" for option
+  tick data — each attributed to a reference page. **Every reference page on this vendor's
+  site was fetched and searched: none of them contains any rate-limit text of that form.**
+  Those bullets are deleted rather than corrected — unsourced numbers wearing a citation
+  are worse than missing ones. The real per-endpoint figures, from the table that does
+  publish them, are now recorded in full.
+
 - **`public_ceiling`/`authenticated_ceiling` were `%{limit: 10, per_ms: 1_000}` with no
   comment and no mention anywhere in `capabilities/0`'s own `measured_against` string —
   unlabelled and inherited, and load-bearing: `Supervisor`'s private `limits/0` feeds
@@ -397,6 +447,31 @@ acceptable changelog line.
   arrives, so this costs nothing on the passing path. Found by a cross-package audit
   running the full suite on multiple explicit seeds, which this family's CI does not do
   by default.
+
+### Added
+
+- **`script/check_doc_sources.sh` and `docs/reference/webull/doc-sources.tsv`** — a weekly,
+  non-blocking check that every vendor documentation page this package cites still resolves
+  the way it did when a person read it. It records status and redirect destination, and
+  does **not** follow redirects or diff content: a permanent redirect is itself the change
+  notice (this family lost a streaming API to one), while content diffing a rendered docs
+  site would be red every week for reasons that are never the reason we care about. This
+  is the instrument that found the 404 above, on its first run. Scheduled Mondays 09:20
+  UTC via `.github/workflows/doc-sources-check.yml`, never on push, never in the publish
+  chain, and it touches documentation sites only — never a venue API, which tier-2's
+  never-on-a-schedule rule still forbids.
+
+### Changed
+
+- `docs/reference/webull/rest-rate-limits.md` rewritten against the per-endpoint table,
+  and now records exactly **what is and is not machine-readable** on this vendor's site.
+  Endpoint descriptions and their rate-limit blocks live in `<meta>` content and are
+  fetchable anonymously; per-endpoint **parameter tables** are not, and still require an
+  authenticated console — so `get_order_book/3`'s `depth` default remains uncaptured, as
+  `negative-claims.md` already records. The belief that the rate-limit data was likewise
+  unreachable was wrong, and it was wrong partly for a mundane reason now written down:
+  every `docs/` URL without a trailing slash answers `301`, and the 189-byte redirect stub
+  that comes back reads exactly like a JS-rendered shell unless you check the status code.
 
 ### Documentation
 
