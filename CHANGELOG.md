@@ -22,6 +22,25 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`script/check_endpoint_inventory.sh` and `docs/reference/webull/endpoint-pages.txt`** —
+  a weekly, non-blocking diff of the vendor's published endpoint reference pages against a
+  committed capture, via `.github/workflows/inventory-check.yml`. One HTTP request: this
+  vendor publishes no machine-readable specification, but its `sitemap.xml` lists one
+  `docs/reference/*` page per endpoint, so that set is the closest thing to an operation
+  list available here.
+
+  **This venue is why the mechanism exists.** The identical sitemap search found
+  `developer.webull.com/apis/docs/rate-limits/` — a per-endpoint rate-limit table that had
+  been published since 2026-08-14 while this package declared a REST ceiling **five times
+  too permissive**, against a venue whose documented penalty for exceeding it is a
+  temporary IP block. Nobody found it for weeks because nobody was comparing indexes. A
+  page appearing here now says so.
+
+  Baseline: **248 reference pages**, captured 2026-09-09, unchanged on the check's first
+  run.
+
 ### Fixed
 
 - **Reads now carry `@call_timeout` explicitly, exactly as writes already did.**
