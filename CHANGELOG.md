@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-09-10
+
 ## [0.4.4] - 2026-09-10
 
 ### Fixed
