@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-10
+
 ### Fixed
 
 - **Every venue notice arrived with `message: nil` while the venue's own words sat in
