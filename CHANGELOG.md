@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-10
+
 ### Documentation
 
 - **`Rest.wide_timeframes/0`'s reasoning is now the family's written rule, not a local
