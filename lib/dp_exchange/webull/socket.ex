@@ -318,17 +318,70 @@ defmodule DpExchange.Webull.Socket do
   # it hides everything else about how this venue is reached.
   defp emit(state, "tick", payload), do: emit_trade(state, QuoteProto.decode_tick(payload))
 
+  # The venue's own words go in `:message`, which is the field a consumer renders.
+  #
+  # dp-exchange-core issue #33: this used to pass only `details: %{venue_notice: body}`, so
+  # a consumer printing `notice.message` printed nothing **while holding the text**. The
+  # reporter's node logged `webull degraded: (no message)` 230 times in 66 minutes over
+  # "Permission grabbed by other session, category : us-crypto" — a line that is not noise
+  # and was made to look like noise. `handle_packet(state, {:connack, 105})` above already
+  # set `:message`; this path simply never did.
+  #
+  # **`"content"` is OBSERVED, not documented.** The vendor's streaming page documents that
+  # the `notice` topic carries JSON and does not publish its field schema
+  # (`docs/reference/webull/streaming-api.md`'s topic table is as far as it goes). The key
+  # comes from a consumer's production frames. Reading it is still safe rather than a guess:
+  # an absent or non-string `content` yields `nil`, the raw body stays in `details`
+  # untouched, and nothing is substituted — `nil` keeps meaning "the venue sent no text",
+  # which is a real answer for the code-only shape the same reporter saw alongside it
+  # (four numeric-keyed fields, no `content`).
   defp emit(state, "notice", payload) do
     case Jason.decode(payload) do
       {:ok, %{} = body} ->
-        notify(state, Notice.new(:degraded, :webull, details: %{venue_notice: body}))
+        notify(
+          state,
+          Notice.new(:degraded, :webull,
+            message: venue_notice_text(body),
+            details: %{venue_notice: body}
+          )
+        )
 
       _undecodable ->
-        :ok
+        # The venue said something this package could not parse as JSON. Dropping it
+        # silently is the same defect as the one above, one level down — so the text is
+        # carried as-is when it is text at all. A payload that is not valid UTF-8 has no
+        # words to keep and stays dropped rather than becoming mojibake in a log line.
+        emit_unparsed_notice(state, payload)
     end
   end
 
   defp emit(_state, _topic, _payload), do: :ok
+
+  # No non-binary clause: dialyzer proves this call site always passes a binary, and a dead
+  # fallback is the unreachable code assertion 16 exists to find. A non-binary would raise
+  # here, which is the fail-closed answer rather than a silent `:ok`.
+  defp emit_unparsed_notice(state, payload) when is_binary(payload) do
+    if String.valid?(payload) and String.trim(payload) != "" do
+      notify(
+        state,
+        Notice.new(:degraded, :webull,
+          message: String.trim(payload),
+          details: %{venue_notice_unparsed: payload}
+        )
+      )
+    end
+
+    :ok
+  end
+
+  defp venue_notice_text(%{"content" => content}) when is_binary(content) do
+    case String.trim(content) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp venue_notice_text(_no_content), do: nil
 
   defp emit_top_of_book(state, decoded) do
     with {:ok, timestamp} <- venue_time(decoded) do

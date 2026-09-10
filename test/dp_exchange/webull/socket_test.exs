@@ -164,6 +164,64 @@ defmodule DpExchange.Webull.SocketTest do
       assert notice.details.venue_notice["type"] == "rate"
     end
 
+    test "the venue's own words reach :message, not only details (core #33)" do
+      # The reported defect, in the reporter's own frame shape. A consumer rendering
+      # `notice.message` printed "(no message)" 230 times in 66 minutes while the package
+      # held the text — over "Permission grabbed by other session", which is not a line to
+      # make look like noise.
+      #
+      # `"content"` is an OBSERVED key, not a documented one: the vendor publishes that the
+      # `notice` topic carries JSON and never publishes its field schema. Reading it is safe
+      # rather than a guess — absent yields nil, and the raw body stays in `details`.
+      body = %{
+        "content" => "Permission grabbed by other session, category : us-crypto",
+        "type" => "1002"
+      }
+
+      frame = publish("notice", Jason.encode!(body))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
+      assert notice.message == "Permission grabbed by other session, category : us-crypto"
+      assert notice.details.venue_notice["type"] == "1002"
+    end
+
+    test "a notice the venue sent no text with keeps message nil, never an invented one" do
+      # The second shape the same reporter saw alongside it: numeric-keyed fields and no
+      # `content`. `nil` here has to keep meaning "the venue sent no text", so a consumer
+      # can trust it rather than going digging in `details` every time.
+      frame = publish("notice", Jason.encode!(%{"1" => "a", "2" => "b", "type" => "1003"}))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
+      assert is_nil(notice.message)
+      assert notice.details.venue_notice["type"] == "1003"
+    end
+
+    test "a notice that is not JSON at all is still delivered, with its text kept" do
+      # Dropping it silently is the same defect one level down: the venue said something and
+      # the package threw it away.
+      frame = publish("notice", "Permission grabbed by other session")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
+      assert notice.message == "Permission grabbed by other session"
+      assert notice.details.venue_notice_unparsed == "Permission grabbed by other session"
+    end
+
+    test "a notice payload that is not text at all is dropped rather than mangled" do
+      # Invalid UTF-8 has no words to keep, and forcing it into a log line produces mojibake
+      # that reads like a decoding bug in whatever renders it.
+      frame = publish("notice", <<0xFF, 0xFE, 0xFD>>)
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+    end
+
     test "an echo heartbeat carries no payload and produces nothing" do
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("echo", "")}, state())
 

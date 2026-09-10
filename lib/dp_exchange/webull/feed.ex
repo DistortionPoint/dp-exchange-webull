@@ -365,11 +365,16 @@ defmodule DpExchange.Webull.Feed do
     Process.flag(:trap_exit, true)
     {:ok, task_supervisor} = Task.Supervisor.start_link()
 
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    resubscribe_interval_ms =
+      (Keyword.get(opts, :resubscribe_interval_ms) || @resubscribe_interval_ms)
+      |> validate_resubscribe_interval_ms!()
+
+    Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
     {:ok,
      %{
        task_supervisor: task_supervisor,
+       resubscribe_interval_ms: resubscribe_interval_ms,
        socket_opts:
          Keyword.take(opts, [
            :url,
@@ -627,7 +632,7 @@ defmodule DpExchange.Webull.Feed do
   # this: it only touches a shard whose *wanted* symbol set changed, and re-asking for
   # exactly what is already wanted computes an empty diff.
   def handle_info(:resubscribe, state) do
-    Process.send_after(self(), :resubscribe, @resubscribe_interval_ms)
+    Process.send_after(self(), :resubscribe, state.resubscribe_interval_ms)
     state = Enum.reduce(state.shards, state, &resubscribe_shard/2)
 
     # A TTL-expired rejection (see the moduledoc's "A venue-rejected symbol is excluded,
@@ -793,6 +798,35 @@ defmodule DpExchange.Webull.Feed do
         "#{inspect(reason)} — the venue will see an abrupt disconnect instead of a " <>
         "clean one"
     )
+  end
+
+  # Overridable at start, defaulting to `@resubscribe_interval_ms`.
+  #
+  # It was a hardcoded attribute until dp-exchange-core issue #33, where a consumer watching
+  # "Permission grabbed by other session, category : us-crypto" arrive ~3.5 times a minute
+  # across four shards asked whether this package's own shards were taking the category from
+  # each other. That rate is very close to what this timer produces — four connected shards
+  # re-asserting once per 60_000 ms is 4/min, and they measured 230 in 66 minutes — but
+  # arithmetic agreeing is a hypothesis, not a finding, and nothing here can probe a venue
+  # that needs a credential this repository must never hold.
+  #
+  # **A consumer can settle it, and could not before**: raise this to 300_000 and the notice
+  # rate should fall to a fifth if this timer is the trigger, and not move at all if it is
+  # not. `dp_exchange_coinbase` already exposed the identical knob; this venue's staying
+  # private is what made a live degradation undiagnosable from outside.
+  #
+  # Validated rather than coerced, the same way that package validates its own: a value that
+  # cannot schedule anything fails `init/1` loudly instead of silently reverting to the
+  # default and leaving the experiment looking like a negative result.
+  defp validate_resubscribe_interval_ms!(value) when is_integer(value) and value >= 1_000,
+    do: value
+
+  defp validate_resubscribe_interval_ms!(value) do
+    raise ArgumentError,
+          "DpExchange.Webull.Feed :resubscribe_interval_ms must be an integer of at least " <>
+            "1_000 ms, got #{inspect(value)}. Below a second this re-asserts every shard's " <>
+            "whole subscription faster than the venue can answer it, which is a load " <>
+            "problem rather than a safety net."
   end
 
   # A shard that has never linked up has nothing subscribed yet — on_link_up/2's own

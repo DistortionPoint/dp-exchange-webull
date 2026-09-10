@@ -22,6 +22,46 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every venue notice arrived with `message: nil` while the venue's own words sat in
+  `details.venue_notice["content"]` (dp-exchange-core issue #33).** A consumer rendering
+  `notice.message` printed nothing while this package held the text — 230 times in 66
+  minutes on the reporter's node, over *"Permission grabbed by other session, category :
+  us-crypto"*, which is not a line to make look like noise.
+
+  `:message` is now set from the venue's field, with the raw body still in `:details`.
+  `handle_packet(state, {:connack, 105})` already did this; the `notice` topic path simply
+  never had.
+
+  **`"content"` is an observed key, not a documented one** — the vendor publishes that the
+  topic carries JSON and never publishes its field schema, so this is labelled as such at
+  the code. Reading it is safe rather than a guess: absent or non-string yields `nil`, the
+  raw body is untouched, and `nil` keeps meaning *the venue sent no text* — which is the
+  right answer for the code-only shape the same reporter saw alongside it.
+
+  A notice that is **not JSON at all** used to be dropped silently. That is the same defect
+  one level down, so its text is now carried too — unless the payload is not valid UTF-8, in
+  which case there are no words to keep and forcing them into a log line only produces
+  mojibake that reads like a bug in whatever renders it.
+
+### Added
+
+- **`:resubscribe_interval_ms` is a start option**, defaulting to the previous hardcoded
+  60_000 and validated at `init/1`.
+
+  It exists because of the second half of that issue. The reporter asked whether this
+  package's four shards are taking the `us-crypto` category from each other, and the rate is
+  suggestive: four connected shards re-asserting once per 60 s is **4/min**, against their
+  measured **230 in 66 minutes (3.48/min)**. Arithmetic agreeing is a hypothesis, not a
+  finding, and nothing here can probe a venue that needs a credential this repository must
+  never hold.
+
+  So what shipped is the knob that lets them settle it: raise it to 300_000 and the notice
+  rate should fall to a fifth if this timer is the trigger, and not move at all if it is not.
+  `dp_exchange_coinbase` already exposed the identical option — this venue keeping it private
+  is what made a live degradation undiagnosable from outside.
+
 ## [0.4.3] - 2026-09-10
 
 ### Documentation

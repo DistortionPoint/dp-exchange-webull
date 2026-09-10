@@ -1520,4 +1520,35 @@ defmodule DpExchange.Webull.FeedTest do
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
     end
   end
+
+  describe ":resubscribe_interval_ms is configurable (core #33)" do
+    test "defaults to 60_000, the cadence four shards turn into ~4 notices a minute" do
+      feed = start_feed()
+
+      assert :sys.get_state(feed).resubscribe_interval_ms == 60_000
+    end
+
+    test "a consumer can raise it, which is what makes the notice hypothesis testable" do
+      # It was a hardcoded attribute until a consumer watching "Permission grabbed by other
+      # session" ~3.5x/minute across four shards asked whether this package's own shards
+      # were taking the category from each other. Four shards re-asserting once per 60s is
+      # 4/min; they measured 230 in 66 minutes. Arithmetic agreeing is a hypothesis, and
+      # nothing here can probe a venue needing a credential this repo must never hold — so
+      # the useful thing to ship was the knob that lets them settle it.
+      feed = start_feed(resubscribe_interval_ms: 300_000)
+
+      assert :sys.get_state(feed).resubscribe_interval_ms == 300_000
+    end
+
+    test "a value too small to be a safety net fails init loudly, not silently" do
+      # Reverting to the default would make a deliberate experiment look like a negative
+      # result, which is worse than refusing.
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(name: nil, resubscribe_interval_ms: 10)
+
+      assert message =~ "at least"
+    end
+  end
 end
