@@ -38,6 +38,12 @@ expressible before, because there was no way to see which kind of time you had.
 `:timestamp`, because every one of them is built from a venue-supplied time and fails closed
 without it.
 
+
+**When is `venue_time` `nil` on this venue? It never is.** Every `Quote` and `OrderBook` this
+package builds parses a time the venue sent — the REST quote, the order book, and the MQTT
+tick alike — and fails closed when it cannot. A `nil` branch for this venue is dead code.
+Other venues in the family do return `nil`, which is why the field is nullable.
+
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
 
