@@ -108,9 +108,14 @@ defmodule DpExchange.Webull.Rest do
   bars serve and the crypto and event-contract bars refuse (see `@timespans` above).
 
   This is a fact about the **venue**, not the finished `capabilities/0` declaration:
-  `Core.Capabilities` has one flat `historical_timeframes` list for the whole package,
-  with no per-asset-class shape, so a width reachable on *any* path belongs in that
-  declaration too — except `1y`, which `Webull.capabilities/0` subtracts because
+  `Core.Capabilities` has one flat `historical_timeframes` list for the whole package, with
+  no per-asset-class shape, so a width reachable on *any* path belongs in that declaration
+  too — **which is now the family's written rule rather than an inference made here**: see
+  `DpExchange.Core.Capabilities`' "A list-valued capability is a UNION across asset classes"
+  section, which cites this function as its worked example. This package chose that reading
+  before it was written down, and the rule's second half is what makes it honest: the
+  per-call path must fail closed, which is what the last paragraph below describes.
+  One exception: `1y`, which `Webull.capabilities/0` subtracts because
   `dp_exchange_core`'s `Timeframe.nameable/0` does not admit it (see
   `@core_unnameable_widths` in `webull.ex`). Read this function for what the venue
   serves; read `capabilities/0` for what this package can currently say about it. Which

@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **`Rest.wide_timeframes/0`'s reasoning is now the family's written rule, not a local
+  inference.** It explained why a width reachable on any path belongs in a flat
+  `historical_timeframes` — correctly, and before anything said so. `dp_exchange_core`
+  0.2.4 writes that rule into `Core.Capabilities` and cites this function as its worked
+  example, so the doc here points at it instead of re-deriving it.
+
+  The half worth keeping visible is the second one: a union declaration is only honest
+  because `get_historical_prices/5` **fails closed** — `{:error, {:unsupported_timeframe, _}}`
+  for a crypto or event-contract category — rather than degrading to the nearest width it
+  does serve.
+
+
 ## [0.4.2] - 2026-09-10
 
 ### Fixed
