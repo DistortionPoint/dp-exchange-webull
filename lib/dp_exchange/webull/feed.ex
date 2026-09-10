@@ -1155,7 +1155,21 @@ defmodule DpExchange.Webull.Feed do
   # symbol that only ever disappears from shard composition is coverage silently shrinking
   # with no way for a consumer to learn why.
   defp handle_subscribe_result(state, index, {:error, {:invalid_symbols, symbols}}) do
-    expires_at = :os.system_time(:millisecond) + state.rejected_symbol_ttl_ms
+    # `System.monotonic_time/1`, NOT `:os.system_time/1`, and `active_rejections/1`
+    # compares on the same scale. This is an in-VM duration — "exclude this symbol for
+    # 24 hours from now" — and the wall clock is not a duration source: an NTP step, a
+    # host resync after a bad RTC, or a VM resuming from a snapshot moves it backwards,
+    # and every unexpired entry silently gains that much extra life. The default TTL is
+    # 24 hours precisely so a "the venue refuses this" belief has a bound; a belief that
+    # can outlive its own bound by however far the clock jumped is the bound not holding.
+    # A forward step is the mirror image: every rejection expires at once and the shard
+    # re-subscribes symbols the venue is still refusing.
+    #
+    # `Core.PollingFeed` already computes its own staleness window this way. This was the
+    # only in-VM duration in the family still measured on the wall clock — the auth token
+    # expiries and the nonce next to it are wall-clock on purpose, because those instants
+    # come from the venue and are compared against the venue's clock, not ours.
+    expires_at = System.monotonic_time(:millisecond) + state.rejected_symbol_ttl_ms
     rejected = Enum.reduce(symbols, state.rejected, &Map.put(&2, &1, expires_at))
 
     Logger.warning(
@@ -1335,7 +1349,7 @@ defmodule DpExchange.Webull.Feed do
   # this pass's effective wanted set. An expired entry is treated as no longer rejected
   # without needing to be actively pruned from the map first; see the moduledoc.
   defp active_rejections(state) do
-    now = :os.system_time(:millisecond)
+    now = System.monotonic_time(:millisecond)
 
     state.rejected
     |> Enum.filter(fn {_symbol, expires_at} -> expires_at > now end)

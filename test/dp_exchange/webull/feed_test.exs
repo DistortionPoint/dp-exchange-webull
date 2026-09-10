@@ -1336,6 +1336,45 @@ defmodule DpExchange.Webull.FeedTest do
       assert details.symbols == ["BAD-USD"]
     end
 
+    # A wall-clock `expires_at` looks identical in every test that only sleeps past a short
+    # TTL — the two clocks agree until something steps one of them, and nothing in a test
+    # run steps the host's. So what this pins is the scale itself: on the BEAM the monotonic
+    # clock reads around -5.8e11 while the epoch clock reads around 1.8e12, so an expiry
+    # built from the wrong one is out by that whole distance rather than by the TTL. Without
+    # this, the fix reverts silently under any later edit and the whole suite stays green.
+    test "a rejection's expiry is measured on the monotonic clock, not the wall clock",
+         %{limiter: limiter} do
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        if conn.request_path == "/market-data/streaming/subscribe" and
+             "BADUSD" in decoded["symbols"] do
+          conn
+          |> Plug.Conn.put_status(417)
+          |> Req.Test.json(%{
+            "error_code" => "INVALID_SYMBOL",
+            "message" => "The symbols does not exist in the category. [BADUSD]"
+          })
+        else
+          Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      ttl = 60_000
+
+      feed =
+        start_feed(shards: %{0 => connected_shard("shard-0")}, rejected_symbol_ttl_ms: ttl)
+
+      assert :ok =
+               Feed.subscribe(feed, ["GOOD-USD", "BAD-USD"], subscribe_opts(limiter, plug: plug))
+
+      assert [expires_at] = feed |> :sys.get_state() |> Map.fetch!(:rejected) |> Map.values()
+
+      remaining = expires_at - System.monotonic_time(:millisecond)
+      assert remaining > 0 and remaining <= ttl
+    end
+
     test "a rejection's TTL expiring returns the symbol to shard composition automatically",
          %{limiter: limiter} do
       test_pid = self()

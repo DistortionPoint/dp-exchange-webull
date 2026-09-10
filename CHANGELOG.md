@@ -47,6 +47,30 @@ acceptable changelog line.
   which case there are no words to keep and forcing them into a log line only produces
   mojibake that reads like a bug in whatever renders it.
 
+- **A venue-rejected symbol's 24-hour exclusion was timed on the wall clock, so it could
+  outlive its own bound.** `state.rejected` stored `:os.system_time(:millisecond) + ttl` and
+  compared against the wall clock again later. That is an in-VM duration — *exclude this
+  symbol for 24 hours from now* — and the wall clock is not a duration source. An NTP step,
+  a host resync after a bad RTC, or a VM resuming from a snapshot moves it backwards, and
+  every unexpired rejection silently gains exactly that much extra life. The TTL is 24 hours
+  precisely so a "the venue refuses this" belief has a bound; a belief that can outlive its
+  bound by however far the clock jumped is the bound not holding. A forward step is the
+  mirror image — every rejection expires at once and the shard re-subscribes symbols the
+  venue is still refusing.
+
+  Both sites now use `System.monotonic_time/1`, which is what `Core.PollingFeed` already
+  computes its own staleness window with. Nothing in the facade changes; a symbol still
+  returns to shard composition on the first reshard after its TTL, and now does so after the
+  TTL it was given.
+
+  Found by sweeping every clock read in the family. This was the only in-VM duration still
+  measured on the wall clock. The auth-token expiries and the request nonces sitting beside
+  it are wall-clock **on purpose** — those instants come from the venue and are compared
+  against the venue's clock, not ours — and were left alone. The `delivering` timestamps in
+  this and three sibling feeds are written and never compared, so their clock source decides
+  nothing today; that is noted here rather than changed, since changing it would be motion
+  without a defect behind it.
+
 ### Added
 
 - **`:resubscribe_interval_ms` is a start option**, defaulting to the previous hardcoded
