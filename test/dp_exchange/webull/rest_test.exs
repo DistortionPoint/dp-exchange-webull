@@ -299,8 +299,8 @@ defmodule DpExchange.Webull.RestTest do
                  retry_attempts: 0
                )
 
-      assert from_seconds.timestamp.year == 2026
-      assert from_millis.timestamp.year == 2026
+      assert from_seconds.venue_time.year == 2026
+      assert from_millis.venue_time.year == 2026
     end
 
     test "an ISO-8601 timestamp is read too" do
@@ -309,7 +309,7 @@ defmodule DpExchange.Webull.RestTest do
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert quote_struct.timestamp == ~U[2026-08-28 17:00:01Z]
+      assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
     end
 
     test "an unparseable timestamp is an error, not a guess" do

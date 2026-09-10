@@ -159,7 +159,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert quote_struct.timestamp.year == 2026
+      assert quote_struct.venue_time.year == 2026
     end
 
     test "a timestamp of an unexpected TYPE is an error, not a guess" do

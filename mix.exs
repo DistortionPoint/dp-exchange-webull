@@ -6,7 +6,7 @@ defmodule DpExchangeWebull.MixProject do
   # change is signalled. The bump script matches the attribute assignment below by its
   # exact literal form — do not reformat it, and do not repeat that form anywhere else
   # in this file, comments included, or the script will rewrite the wrong line.
-  @version "0.2.30"
+  @version "0.3.0"
   @source_url "https://github.com/DistortionPoint/dp-exchange-webull"
 
   def project do
@@ -59,7 +59,7 @@ defmodule DpExchangeWebull.MixProject do
       # resolves the newest allowed version. 0.1.68 also covers `Timeframe.nameable/0`
       # admitting `1y` (needed since 0.1.57 — see `webull_test.exs`'s "1y is declared"
       # test), so it is the binding constraint, not an additional one.
-      {:dp_exchange_core, "~> 0.1.68"},
+      {:dp_exchange_core, "~> 0.2.1"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

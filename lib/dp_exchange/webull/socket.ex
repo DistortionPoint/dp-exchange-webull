@@ -363,7 +363,8 @@ defmodule DpExchange.Webull.Socket do
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
            price: price,
            volume: nil,
-           timestamp: timestamp,
+           venue_time: timestamp,
+           observed_at: DateTime.utc_now(),
            provider: :webull
          }}
       )

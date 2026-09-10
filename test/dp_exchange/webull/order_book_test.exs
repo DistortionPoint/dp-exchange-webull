@@ -118,7 +118,7 @@ defmodule DpExchange.Webull.OrderBookTest do
                  retry_attempts: 0
                )
 
-      assert book.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
     test "an undated book is REFUSED, not stamped with the local clock" do

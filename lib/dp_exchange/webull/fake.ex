@@ -119,7 +119,8 @@ defmodule DpExchange.Webull.Fake do
                # ticker here is simply `{:refused, :not_listed}`, "less capable" rather
                # than "differently capable."
                volume: nil,
-               timestamp: @at,
+               venue_time: @at,
+               observed_at: @at,
                provider: :webull
              }}
 
@@ -217,7 +218,8 @@ defmodule DpExchange.Webull.Fake do
                  {Decimal.new("13.91"), Decimal.new("3")},
                  {Decimal.new("13.92"), Decimal.new("20")}
                ],
-               timestamp: @at,
+               venue_time: @at,
+               observed_at: @at,
                sequence: nil,
                provider: :webull
              }}

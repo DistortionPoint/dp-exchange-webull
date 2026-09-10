@@ -200,7 +200,8 @@ defmodule DpExchange.Webull.Rest do
            symbol: snapshot_canonical(native, category),
            price: price,
            volume: snapshot_volume(row, category),
-           timestamp: timestamp,
+           venue_time: timestamp,
+           observed_at: DateTime.utc_now(),
            provider: :webull
          }}
       end
@@ -1164,7 +1165,8 @@ defmodule DpExchange.Webull.Rest do
          symbol: symbol,
          bids: book_levels(value(row, ["bids"])),
          asks: book_levels(value(row, ["asks"])),
-         timestamp: timestamp,
+         venue_time: timestamp,
+         observed_at: DateTime.utc_now(),
          # No sequence on this endpoint. `nil` means the venue did not say, so a caller
          # cannot use this book to detect a gap in a stream.
          sequence: nil,
