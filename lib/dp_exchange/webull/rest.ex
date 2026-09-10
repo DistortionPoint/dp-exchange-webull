@@ -591,7 +591,7 @@ defmodule DpExchange.Webull.Rest do
         # Permanent for the request as sent. A caller whose token expired refreshes and
         # calls again, which is a different request rather than a retry of this one.
         {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, refusal(body)}
+          {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
           {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(body)}"}}
@@ -631,7 +631,7 @@ defmodule DpExchange.Webull.Rest do
           {:ok, decode(response)}
 
         {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-          {:refused, refusal(response)}
+          {:refused, refusal(status, response)}
 
         {:ok, %{status: status, body: response}} ->
           {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
@@ -1724,7 +1724,7 @@ defmodule DpExchange.Webull.Rest do
           {:ok, decode_map(body)}
 
         {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, body}
+          {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
           {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(body)}"}}
@@ -2978,11 +2978,29 @@ defmodule DpExchange.Webull.Rest do
 
   defp value(_row, _keys), do: nil
 
-  defp refusal(body) do
+  # A refusal carries the venue's status AND its words. This used to take only the body, so
+  # every `4xx` this package refuses on — 400, 401 and 403 — arrived at the caller looking
+  # identical, and their remedies are not: a 400 means fix the request, a 401 means refresh
+  # the token and call again, a 403 means a person has to change what the credential is
+  # entitled to. The clause above `refusal/2`'s callers even says so ("a caller whose token
+  # expired refreshes and calls again") — the code knew which status it had matched and then
+  # discarded the only thing that could tell a caller.
+  #
+  # Same shape as `dp_exchange_coinbase`, `dp_exchange_robinhood` and `dp_exchange_schwab`
+  # already use. This venue was the one outlier, found by sweeping the family for the
+  # principle a consumer named on dp-exchange-gemini#1: **a caller must never be handed less
+  # than this package already had.**
+  #
+  # An unrecognised body keeps the status rather than collapsing to a bare `:refused`. A
+  # status alone is thin, but it is the difference between "the venue rejected this and here
+  # is which kind" and "something went wrong".
+  defp refusal(status, body) do
     case decode(body) do
-      %{"msg" => message} when is_binary(message) -> {:venue_error, message}
-      %{"code" => code} -> {:venue_error, code}
-      _other -> :refused
+      %{"msg" => message} when is_binary(message) -> {:venue_error, status, message}
+      %{"message" => message} when is_binary(message) -> {:venue_error, status, message}
+      %{"error_description" => detail} when is_binary(detail) -> {:venue_error, status, detail}
+      %{"code" => code} -> {:venue_error, status, code}
+      _other -> {:venue_error, status}
     end
   end
 

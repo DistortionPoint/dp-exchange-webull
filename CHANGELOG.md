@@ -22,6 +22,36 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **A refusal now carries the venue's HTTP status as well as its words.**
+  `{:refused, {:venue_error, 401, "signature mismatch"}}`, where it used to be
+  `{:refused, {:venue_error, "signature mismatch"}}`.
+
+  This package refuses on `400`, `401` and `403`, and **all three arrived at a caller looking
+  identical** — while their remedies are opposite: a `400` means fix the request, a `401`
+  means refresh the token and call again, a `403` means a person must change what the
+  credential is entitled to. The clause raising the refusal even documents the `401` remedy
+  in a comment, so the code knew which status it had matched and then discarded the only
+  thing that could tell a caller which one it was.
+
+  An unrecognised body keeps its status too — `{:venue_error, 403}` rather than a bare
+  `:refused`. Thin, but it is the difference between "the venue rejected this and here is
+  which kind" and "something went wrong". `oauth_token/3` was worse still: it returned the
+  **raw body** as the reason, with no classification at all, on a call where `400` (bad
+  grant) and `401` (bad client credentials) again mean different things.
+
+  **This venue was the outlier.** `dp_exchange_coinbase`, `dp_exchange_robinhood` and
+  `dp_exchange_schwab` all already used `{:venue_error, status, detail}`. Found by sweeping
+  the family for the principle a consumer named on dp-exchange-gemini#1 — *a known reason is
+  never less informative than an unknown one* — generalised to: **a caller must never be
+  handed less than this package already had.**
+
+  **If you pattern-match refusal reasons, check that clause before upgrading.** A caller
+  matching `{:venue_error, message}` now falls through to whatever catch-all follows it,
+  silently, with nothing raising. That exact trap cost a consumer a canonical error mapping
+  on `dp_exchange_gemini`, which is why it is called out here rather than left to be found.
+
 ### Documentation
 
 - **`usage-rules.md` now answers the question a consumer actually has after 0.2.0: when is

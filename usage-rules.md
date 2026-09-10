@@ -8,6 +8,38 @@ Everything general is in
 This file is only what is **specific to Webull**.
 
 
+
+## BREAKING — a refusal now carries the venue's status as well as its words
+
+```elixir
+# before
+{:refused, {:venue_error, "signature mismatch"}}
+
+# after
+{:refused, {:venue_error, 401, "signature mismatch"}}
+```
+
+This package refuses on `400`, `401` and `403`, and **all three used to look identical to a
+caller** even though their remedies are opposite:
+
+| status | what to do |
+|---|---|
+| `400` | fix the request — sending it again unchanged cannot work |
+| `401` | refresh the token and call again, which is a different request |
+| `403` | a person must change what this credential is entitled to |
+
+An unrecognised body now keeps its status too — `{:venue_error, 403}` rather than a bare
+`:refused`. Thin, but it is the difference between "the venue rejected this and here is
+which kind" and "something went wrong".
+
+This is the shape `dp_exchange_coinbase`, `dp_exchange_robinhood` and `dp_exchange_schwab`
+already used; this venue was the outlier.
+
+**If you pattern-match refusal reasons, check that clause before upgrading.** A caller
+matching `{:venue_error, message}` will now fall through to whatever catch-all follows it —
+silently, with nothing raising. That exact trap cost a consumer a canonical error mapping on
+`dp_exchange_gemini` and is worth ten seconds of grep here.
+
 ## BREAKING — `Quote` and `OrderBook` no longer carry `:timestamp`
 
 They carry **`:venue_time`** (the venue's own, `nil` where the venue publishes none) and

@@ -170,7 +170,7 @@ defmodule DpExchange.Webull.OrderMappingTest do
 
   describe "what the venue said when it said no" do
     test "a 400 carrying a message keeps the message" do
-      assert {:refused, {:venue_error, "insufficient buying power"}} =
+      assert {:refused, {:venue_error, 400, "insufficient buying power"}} =
                Rest.cancel_order(@credentials, "abc",
                  plug: responding(%{"msg" => "insufficient buying power"}, 400),
                  account_id: @account,
@@ -179,7 +179,7 @@ defmodule DpExchange.Webull.OrderMappingTest do
     end
 
     test "a 403 carrying only a code keeps the code" do
-      assert {:refused, {:venue_error, "TRADE_NOT_PERMITTED"}} =
+      assert {:refused, {:venue_error, 403, "TRADE_NOT_PERMITTED"}} =
                Rest.cancel_order(@credentials, "abc",
                  plug: responding(%{"code" => "TRADE_NOT_PERMITTED"}, 403),
                  account_id: @account,
@@ -187,8 +187,8 @@ defmodule DpExchange.Webull.OrderMappingTest do
                )
     end
 
-    test "a refusal that explains nothing is still a refusal, not an error" do
-      assert {:refused, :refused} =
+    test "a refusal that explains nothing still says WHICH refusal it was" do
+      assert {:refused, {:venue_error, 401}} =
                Rest.cancel_order(@credentials, "abc",
                  plug: responding([], 401),
                  account_id: @account,
@@ -212,7 +212,7 @@ defmodule DpExchange.Webull.OrderMappingTest do
     test "a body that is not JSON at all does not crash the refusal reader" do
       plug = fn conn -> Plug.Conn.resp(conn, 400, "<html>gateway</html>") end
 
-      assert {:refused, :refused} =
+      assert {:refused, {:venue_error, 400}} =
                Rest.cancel_order(@credentials, "abc",
                  plug: plug,
                  account_id: @account,

@@ -139,9 +139,42 @@ defmodule DpExchange.Webull.RestTest do
     test "a 401 is a refusal carrying the venue's own message" do
       body = %{"code" => "AUTH_FAILED", "msg" => "signature mismatch"}
 
-      assert {:refused, {:venue_error, "signature mismatch"}} =
+      assert {:refused, {:venue_error, 401, "signature mismatch"}} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(body, 401),
+                 retry_attempts: 0
+               )
+    end
+
+    test "400, 401 and 403 are told apart, because their remedies differ" do
+      # The property the status exists for. All three are refusals — permanent for the
+      # request as sent — and a caller does something different with each:
+      #
+      #   400 → fix the request; sending it again unchanged cannot work
+      #   401 → refresh the token and call again, which is a different request
+      #   403 → a person must change what this credential is entitled to
+      #
+      # Before this, all three arrived as `{:venue_error, message}` and were indistinguishable
+      # unless the venue's prose happened to say. The clause that raises the refusal even
+      # documents the 401 remedy — the code knew which status it had matched and then
+      # discarded it.
+      body = %{"msg" => "no"}
+
+      assert {:refused, {:venue_error, 400, "no"}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(body, 400),
+                 retry_attempts: 0
+               )
+
+      assert {:refused, {:venue_error, 401, "no"}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(body, 401),
+                 retry_attempts: 0
+               )
+
+      assert {:refused, {:venue_error, 403, "no"}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(body, 403),
                  retry_attempts: 0
                )
     end

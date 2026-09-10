@@ -139,15 +139,15 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "a refusal with only a code still carries it" do
       body = %{"code" => "AUTH_FAILED"}
 
-      assert {:refused, {:venue_error, "AUTH_FAILED"}} =
+      assert {:refused, {:venue_error, 403, "AUTH_FAILED"}} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(body, 403),
                  retry_attempts: 0
                )
     end
 
-    test "a refusal with neither code nor message is still a refusal" do
-      assert {:refused, :refused} =
+    test "a refusal with neither code nor message still carries its status" do
+      assert {:refused, {:venue_error, 401}} =
                Rest.get_price("BTC-USD", @credentials, plug: raw("nope", 401), retry_attempts: 0)
     end
   end
