@@ -22,7 +22,56 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A link drop flipped the shard's `connected?` and left `coverage/1` answering `:stream`
+  for what that dead connection had been delivering.** `Socket.handle_disconnect/2` returns
+  `{:reconnect, …}`, so the socket *process* survives a transport drop and no `:EXIT` ever
+  reaches `isolate_crashed_shard/3` — the one path that cleared delivery records. So between
+  a drop and a successful resubscribe, that shard's symbols reported as arriving when they
+  were arriving from nowhere; and where the reconnect restored the socket while the venue
+  silently failed to restore a symbol, it reported `:stream` indefinitely.
+
+  This package had already written down why that is wrong, on the crash path:
+  *"`coverage/1`/`coverage_by_kind/1` must not keep answering `:stream` for a shard that just
+  crashed … until this, `coverage/1` itself kept lying in the meantime."* The reason does not
+  depend on what killed the link, so the `:link_down` clause now drops the same records the
+  same way — scoped to that one shard, since the others are on their own sockets. The shard
+  keeps its entry, unlike the crash path: it is reconnecting rather than dead, and its
+  symbols return as frames arrive after the next resubscribe.
+
+  `dp_exchange_core` 0.2.5 writes the rule into `Core.Venue`'s `coverage/1` doc — observation
+  is scoped to the current transport session — and records why it cannot be carried by a
+  conformance assertion. All four streaming venues in the family had this wrong in the same
+  way and are fixed in the same batch.
+
 ## [0.4.5] - 2026-09-10
+
+### Fixed
+
+- **A venue-rejected symbol's 24-hour exclusion was timed on the wall clock, so it could
+  outlive its own bound.** `state.rejected` stored `:os.system_time(:millisecond) + ttl` and
+  compared against the wall clock again later. That is an in-VM duration — *exclude this
+  symbol for 24 hours from now* — and the wall clock is not a duration source. An NTP step,
+  a host resync after a bad RTC, or a VM resuming from a snapshot moves it backwards, and
+  every unexpired rejection silently gains exactly that much extra life. The TTL is 24 hours
+  precisely so a "the venue refuses this" belief has a bound; a belief that can outlive its
+  bound by however far the clock jumped is the bound not holding. A forward step is the
+  mirror image — every rejection expires at once and the shard re-subscribes symbols the
+  venue is still refusing.
+
+  Both sites now use `System.monotonic_time/1`, which is what `Core.PollingFeed` already
+  computes its own staleness window with. Nothing in the facade changes; a symbol still
+  returns to shard composition on the first reshard after its TTL, and now does so after the
+  TTL it was given.
+
+  Found by sweeping every clock read in the family. This was the only in-VM duration still
+  measured on the wall clock. The auth-token expiries and the request nonces sitting beside
+  it are wall-clock **on purpose** — those instants come from the venue and are compared
+  against the venue's clock, not ours — and were left alone. The `delivering` timestamps in
+  this and three sibling feeds are written and never compared, so their clock source decides
+  nothing today; that is noted here rather than changed, since changing it would be motion
+  without a defect behind it.
 
 ## [0.4.4] - 2026-09-10
 
@@ -48,30 +97,6 @@ acceptable changelog line.
   one level down, so its text is now carried too — unless the payload is not valid UTF-8, in
   which case there are no words to keep and forcing them into a log line only produces
   mojibake that reads like a bug in whatever renders it.
-
-- **A venue-rejected symbol's 24-hour exclusion was timed on the wall clock, so it could
-  outlive its own bound.** `state.rejected` stored `:os.system_time(:millisecond) + ttl` and
-  compared against the wall clock again later. That is an in-VM duration — *exclude this
-  symbol for 24 hours from now* — and the wall clock is not a duration source. An NTP step,
-  a host resync after a bad RTC, or a VM resuming from a snapshot moves it backwards, and
-  every unexpired rejection silently gains exactly that much extra life. The TTL is 24 hours
-  precisely so a "the venue refuses this" belief has a bound; a belief that can outlive its
-  bound by however far the clock jumped is the bound not holding. A forward step is the
-  mirror image — every rejection expires at once and the shard re-subscribes symbols the
-  venue is still refusing.
-
-  Both sites now use `System.monotonic_time/1`, which is what `Core.PollingFeed` already
-  computes its own staleness window with. Nothing in the facade changes; a symbol still
-  returns to shard composition on the first reshard after its TTL, and now does so after the
-  TTL it was given.
-
-  Found by sweeping every clock read in the family. This was the only in-VM duration still
-  measured on the wall clock. The auth-token expiries and the request nonces sitting beside
-  it are wall-clock **on purpose** — those instants come from the venue and are compared
-  against the venue's clock, not ours — and were left alone. The `delivering` timestamps in
-  this and three sibling feeds are written and never compared, so their clock source decides
-  nothing today; that is noted here rather than changed, since changing it would be motion
-  without a defect behind it.
 
 ### Added
 

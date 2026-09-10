@@ -534,8 +534,36 @@ defmodule DpExchange.Webull.Feed do
       ) do
     state =
       case shard_index_for_session(state, session_id) do
-        nil -> state
-        index -> put_in(state.shards[index].connected?, false)
+        nil ->
+          state
+
+        index ->
+          # A TRANSPORT drop, not a shard crash, and until this the two were handled
+          # differently for no reason. `Socket.handle_disconnect/2` returns
+          # `{:reconnect, …}`, so the socket process survives and no `:EXIT` reaches
+          # `isolate_crashed_shard/3` — which meant this clause flipped `connected?` and
+          # left the delivery records from the connection that just died answering
+          # `:stream` for symbols arriving from nowhere. Worse, a reconnect that restored
+          # the socket while the venue silently failed to restore a symbol left that symbol
+          # answering `:stream` indefinitely: the 325-subscribed/174-delivering shape
+          # `coverage/1` exists to make visible.
+          #
+          # `isolate_crashed_shard/3` already says why, and the reason does not depend on
+          # what killed the link — *"`coverage/1`/`coverage_by_kind/1` must not keep
+          # answering `:stream` for a shard that just crashed … until this, `coverage/1`
+          # itself kept lying in the meantime."* Dropped the same way, for the same reason,
+          # and scoped to that one shard: the other three shards are on their own sockets
+          # and untouched. See `Core.Venue`'s `coverage/1` doc.
+          #
+          # The shard KEEPS its entry, unlike the crash path — it is reconnecting rather
+          # than dead, and its symbols return as frames arrive after the next resubscribe.
+          shard = Map.fetch!(state.shards, index)
+
+          %{
+            put_in(state.shards[index].connected?, false)
+            | delivering: Map.drop(state.delivering, shard.symbols),
+              delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
+          }
       end
 
     fan_out(state.notice_subscribers, message)

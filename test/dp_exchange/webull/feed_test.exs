@@ -151,6 +151,42 @@ defmodule DpExchange.Webull.FeedTest do
 
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
+
+    test "a link drop clears what that shard's dead connection had been delivering" do
+      # `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so a transport drop leaves
+      # the socket PROCESS alive and no `:EXIT` reaches `isolate_crashed_shard/3`. Before
+      # this, the `:link_down` clause flipped `connected?` and left the delivery records
+      # from the dead connection answering `:stream` for symbols arriving from nowhere —
+      # and a reconnect that restored the socket while the venue silently failed to restore
+      # a symbol left it answering `:stream` forever. `isolate_crashed_shard/3` already
+      # named the reason this is wrong: "`coverage/1` itself kept lying in the meantime".
+      # See `Core.Venue`'s `coverage/1` doc.
+      dropping = %{connected_shard("session-dropping") | symbols: ["BTC-USD"]}
+      surviving = %{connected_shard("session-surviving") | symbols: ["ETH-USD"]}
+      feed = start_feed(shards: %{0 => dropping, 1 => surviving})
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      send(feed, {:dp_exchange, :webull, top_of_book_for("ETH-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+
+      send(feed, {:dp_exchange, :webull, link_down("session-dropping")})
+
+      # Scoped to the shard that dropped. The other three shards of a four-shard feed are
+      # on their own sockets and keep every symbol they are delivering.
+      assert Feed.coverage(feed) == %{"ETH-USD" => :stream}
+      # `:quotes` stays present and empty rather than disappearing — the same shape
+      # `unsubscribe/2` already leaves through `drop_symbols_by_kind/2`, and the honest one:
+      # an empty map reads as "nothing observed", where an absent key reads as "unknown".
+      assert Feed.coverage_by_kind(feed) == %{
+               quotes: %{},
+               top_of_book: %{"ETH-USD" => :stream}
+             }
+
+      # The shard keeps its entry, unlike the crash path — it is reconnecting rather than
+      # dead — and its symbols return as frames arrive again.
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream, "ETH-USD" => :stream}
+    end
   end
 
   describe "coverage by kind — this venue's two streamed kinds are independent" do
