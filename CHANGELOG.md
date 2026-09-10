@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-09-10
+
 ### Fixed
 
 - **A link drop flipped the shard's `connected?` and left `coverage/1` answering `:stream`
