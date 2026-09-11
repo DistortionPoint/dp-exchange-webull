@@ -280,6 +280,15 @@ defmodule DpExchange.Webull.Feed do
   @frame_window_ms 5_000
   @call_timeout @frame_window_ms * 3
 
+  # How long a shard may sit connected-but-unacknowledged before a caller parked on it is
+  # answered.
+  #
+  # Bounded against `@call_timeout` rather than picked: a caller that gives up at
+  # `@call_timeout` is gone, so a deadline at or past that answers nobody. Two thirds leaves
+  # room for the reply to land while the caller is still there, and is still far longer than
+  # a CONNACK takes on a venue that is answering at all.
+  @connack_timeout_ms div(@call_timeout * 2, 3)
+
   # How long a control-plane reconcile may run before this feed stops waiting for it.
   #
   # The task body is a `Subscription.subscribe/unsubscribe` HTTP round trip through
@@ -390,6 +399,8 @@ defmodule DpExchange.Webull.Feed do
        # links nor monitors, so without this a lost task strands that caller for the whole of
        # `@call_timeout` and then exits it.
        reconciling: %{},
+       # See `@connack_timeout_ms`. Overridable so a test proving it fires need not wait.
+       connack_timeout_ms: Keyword.get(opts, :connack_timeout_ms) || @connack_timeout_ms,
        # See `@reconcile_timeout_ms`. Overridable so a test proving the timeout fires need
        # not wait out the real one.
        reconcile_timeout_ms: Keyword.get(opts, :reconcile_timeout_ms) || @reconcile_timeout_ms,
@@ -673,6 +684,58 @@ defmodule DpExchange.Webull.Feed do
               delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
           }
       end
+
+    fan_out(state.notice_subscribers, message)
+    {:noreply, state}
+  end
+
+  # The venue accepted the WebSocket and never answered the MQTT CONNECT. Matched on both
+  # `index` and `session_id`, so a timer armed for one attempt cannot answer a caller parked
+  # on the shard that replaced it.
+  #
+  # A shard that has since connected, been refused, or been rebuilt finds no match and the
+  # timer is ignored — this only ever fires for a caller still waiting on the exact session it
+  # was armed for.
+  #
+  # The socket is left alone for the same reason the refusal clause leaves it alone: the
+  # connection may still come good, and what must not persist is the caller's wait.
+  def handle_info({:connack_timeout, index, session_id}, state) do
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id, connected?: false, reply_to: {from, overflow}} ->
+        GenServer.reply(
+          from,
+          combine_overflow({:error, {:connack_timeout, state.connack_timeout_ms}}, overflow)
+        )
+
+        {:noreply, put_in(state.shards[index].reply_to, nil)}
+
+      _connected_refused_or_replaced ->
+        {:noreply, state}
+    end
+  end
+
+  # The venue REFUSED this shard's MQTT session. Ordered above the generic `%Notice{}` clause
+  # below, which used to swallow it.
+  #
+  # This was the most reachable stranded caller in the package, and it needed no failure at
+  # all beyond a wrong key. `subscribe/2` on a shard that is still connecting parks the caller
+  # in `shard.reply_to` and waits for `on_link_up/2`. A CONNACK carrying 3, 103 or 104
+  # (credentials rejected) or 105 (five concurrent connections per App Key) means that
+  # `link_up` is never coming — the socket stays `connected?: false` forever — and nothing
+  # here answered the caller. It waited out `@call_timeout` and then EXITED, taking the
+  # calling process with it. So a consumer with a revoked App Key got a crash rather than
+  # `{:error, ...}` on its very first subscribe.
+  #
+  # Verified by driving it: after a refused CONNACK, `reply_to` was still set and
+  # `connected?` still false, with nothing left that could ever change either.
+  #
+  # The socket is NOT torn down here. `websockex` will reconnect it on its own schedule and a
+  # later CONNACK may well succeed — a rotated key, or a concurrent session that has since
+  # expired (the venue holds one about a minute). What must not persist is the caller's wait,
+  # not the connection attempt.
+  def handle_info({:dp_exchange, :webull, %Notice{} = notice} = message, state)
+      when notice.kind in [:credentials_rejected, :degraded] do
+    state = answer_refused_session(state, notice.details)
 
     fan_out(state.notice_subscribers, message)
     {:noreply, state}
@@ -1085,6 +1148,21 @@ defmodule DpExchange.Webull.Feed do
           reply_to: {from, overflow}
         }
 
+        # The caller is now parked until a CONNACK arrives, and nothing else bounds that
+        # wait. `Socket`'s `:socket_connect_timeout` and `:socket_recv_timeout` cover the TCP
+        # connect and the HTTP upgrade; once the WebSocket is up, `websockex` simply waits for
+        # frames. A venue that accepts the connection and then never answers the MQTT CONNECT
+        # leaves this shard `connected?: false` and this caller waiting forever — the same
+        # stranding a refused CONNACK caused, with nothing to react to at all.
+        #
+        # Keyed by `session_id` as well as `index`, so a timer armed for one attempt cannot
+        # answer a caller parked on the shard that replaced it.
+        Process.send_after(
+          self(),
+          {:connack_timeout, index, session_id},
+          state.connack_timeout_ms
+        )
+
         put_in(state.shards[index], shard)
 
       {:error, reason} ->
@@ -1132,6 +1210,48 @@ defmodule DpExchange.Webull.Feed do
 
   # The tail of `on_link_up/2`, shared with the async completion of the HTTP subscribe it
   # may have started — see `handle_info({:reconcile_done, {:link_up, index}, result}, ...)`.
+
+  # Answers a caller parked on the shard whose session the venue just refused.
+  #
+  # Two clauses rather than a `case`, because a refusal notice WITHOUT a session id is a real
+  # shape this must tolerate rather than crash on: `Socket` now attaches one to every CONNACK
+  # refusal, but a `:degraded` notice can be raised elsewhere in this package for reasons that
+  # have nothing to do with a shard, and those must pass straight through.
+  defp answer_refused_session(state, %{session_id: session_id} = details) do
+    case shard_index_for_session(state, session_id) do
+      nil -> state
+      index -> answer_refused_shard(state, index, details)
+    end
+  end
+
+  defp answer_refused_session(state, _no_session_id), do: state
+
+  # Answers a caller parked on a shard whose session the venue just refused, and leaves the
+  # shard otherwise untouched.
+  #
+  # `{:error, {:connection_refused, details}}` rather than a bare atom: `details` carries the
+  # venue's own CONNACK code and, for 105, the `:connection_limit` reason. A caller acting on
+  # this needs to tell "rotate the key" from "you already hold five sessions" — reporting a
+  # limit breach as rejected credentials is the exact confusion `Socket`'s own comment warns
+  # about, one layer up.
+  #
+  # `reply_to` is cleared whether or not anyone was waiting, so a second refusal on the same
+  # shard cannot reply twice to a `from` that has already been answered.
+  defp answer_refused_shard(state, index, details) do
+    case Map.get(state.shards, index) do
+      %{reply_to: {from, overflow}} ->
+        GenServer.reply(
+          from,
+          combine_overflow({:error, {:connection_refused, details}}, overflow)
+        )
+
+        put_in(state.shards[index].reply_to, nil)
+
+      _no_one_waiting ->
+        state
+    end
+  end
+
   defp complete_link_up(state, index, result) do
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state

@@ -282,8 +282,21 @@ defmodule DpExchange.Webull.Socket do
   # are one integer apart: 103/104 are credential answers, 105 is our own behaviour.
   # Reporting a connection-limit breach as rejected credentials sends an operator to
   # rotate a key that is fine.
+  #
+  # `session_id` rides along on every one of these, exactly as it does on `:link_up` and
+  # `:link_down`, and for the same reason: a `Feed` managing several shards' sockets cannot
+  # otherwise tell WHICH shard the venue refused. It could not, and the cost was a caller
+  # parked on that shard's `reply_to` with nothing able to answer it — see `Feed`'s own
+  # refusal clause. The two notices that carry a session id and the three that did not were
+  # the same event class all along; only the successful one had been wired up.
   defp handle_packet(state, {:connack, code}) when code in [3, 103, 104] do
-    notify(state, Notice.new(:credentials_rejected, :webull, details: %{connack: code}))
+    notify(
+      state,
+      Notice.new(:credentials_rejected, :webull,
+        details: %{connack: code, session_id: state.session_id}
+      )
+    )
+
     state
   end
 
@@ -291,7 +304,7 @@ defmodule DpExchange.Webull.Socket do
     notify(
       state,
       Notice.new(:degraded, :webull,
-        details: %{connack: 105, reason: :connection_limit},
+        details: %{connack: 105, reason: :connection_limit, session_id: state.session_id},
         message: "five concurrent connections per App Key; the venue holds state ~1 minute"
       )
     )
@@ -300,7 +313,11 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp handle_packet(state, {:connack, code}) do
-    notify(state, Notice.new(:link_down, :webull, details: %{connack: code}))
+    notify(
+      state,
+      Notice.new(:link_down, :webull, details: %{connack: code, session_id: state.session_id})
+    )
+
     state
   end
 

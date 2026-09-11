@@ -22,6 +22,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A refused MQTT CONNACK stranded the `subscribe/2` caller, and a revoked App Key produces
+  one on the very first call.** `subscribe/2` on a shard that is still connecting parks the
+  caller in `shard.reply_to` and waits for `on_link_up/2`. A CONNACK carrying 3, 103 or 104
+  (credentials rejected) or 105 (five concurrent connections per App Key) means that
+  `link_up` is never coming — the socket stays `connected?: false` — and nothing answered the
+  caller. It waited out `@call_timeout` and then **exited, taking the calling process with
+  it**. So a consumer with a bad key got a crash instead of `{:error, ...}`.
+
+  This is the most reachable stranded caller found in this sweep: it needs no failure at all
+  beyond a wrong credential. Verified by driving it — after a refused CONNACK, `reply_to` was
+  still set and `connected?` still false, with nothing left that could ever change either.
+
+  The caller now gets `{:error, {:connection_refused, details}}`, carrying the venue's own
+  CONNACK code and, for 105, `reason: :connection_limit`. A caller has to tell "rotate the
+  key" from "you already hold five sessions" — reporting a limit breach as rejected
+  credentials is the exact confusion `Socket`'s own comment warns about, one layer up.
+
+- **Those refusal notices did not carry a `session_id`, so a multi-shard `Feed` could not
+  tell which shard the venue had refused.** `:link_up` and `:link_down` carry one precisely
+  so it can. The three CONNACK-refusal notices did not, and that omission is *why* nothing
+  could answer the parked caller. They were the same event class all along; only the
+  successful one had been wired up.
+
+- **A CONNACK that never arrives is now bounded too.** `Socket`'s `:socket_connect_timeout`
+  and `:socket_recv_timeout` cover the TCP connect and the HTTP upgrade; once the WebSocket
+  is up, `websockex` simply waits for frames, so a venue that accepts the connection and then
+  says nothing left the caller waiting with nothing to react to.
+  `@connack_timeout_ms` bounds it — **derived, not picked**: two thirds of `@call_timeout`,
+  because a deadline at or past the caller's own gives up after the caller has already gone.
+  Keyed by `session_id` as well as shard index, so a timer armed for one attempt cannot
+  answer a caller parked on the shard that replaced it.
+
+  The socket is left running in both cases. `websockex` reconnects on its own schedule and a
+  later CONNACK may well succeed — a rotated key, or a concurrent session that has since
+  expired. What must not persist is the caller's wait, not the connection attempt.
+
 ## [0.4.13] - 2026-09-11
 
 ### Fixed

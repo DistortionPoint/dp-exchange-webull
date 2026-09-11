@@ -118,6 +118,165 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  describe "a caller parked on a shard that never links up is answered" do
+    # `subscribe/2` on a shard that is still connecting parks the caller in `shard.reply_to`
+    # and waits for `on_link_up/2`. Three things can mean that `link_up` never comes, and
+    # before this none of them answered the caller: it waited out `@call_timeout` and then
+    # EXITED, taking the calling process with it.
+    #
+    # The credentials case is the reachable one — a revoked App Key produces CONNACK 3 on the
+    # very first subscribe, so a consumer got a crash rather than `{:error, ...}`.
+
+    test "a refused CONNACK answers the caller with the venue's own code" do
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+      end)
+
+      send(
+        feed,
+        {:dp_exchange, :webull,
+         Notice.new(:credentials_rejected, :webull, details: %{connack: 3, session_id: "s0"})}
+      )
+
+      _settled = Feed.coverage(feed)
+
+      # The caller is answered, and the answer names the venue's own CONNACK code — a
+      # consumer has to tell "rotate the key" from "you already hold five sessions".
+      assert_received {_ref, {:error, {:connection_refused, %{connack: 3}}}}
+      assert :sys.get_state(feed).shards[0].reply_to == nil
+    end
+
+    test "a connection-limit CONNACK answers too, and says which it was" do
+      # 105 is not a credentials problem. Reporting it as one sends an operator to rotate a
+      # key that is fine — `Socket`'s own comment says so, and the reply has to keep them
+      # apart as well.
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+      end)
+
+      send(
+        feed,
+        {:dp_exchange, :webull,
+         Notice.new(:degraded, :webull,
+           details: %{connack: 105, reason: :connection_limit, session_id: "s0"}
+         )}
+      )
+
+      _settled = Feed.coverage(feed)
+
+      assert_received {_ref, {:error, {:connection_refused, %{reason: :connection_limit}}}}
+    end
+
+    test "a refusal for a session this feed does not track leaves everything alone" do
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+      end)
+
+      send(
+        feed,
+        {:dp_exchange, :webull,
+         Notice.new(:credentials_rejected, :webull,
+           details: %{connack: 3, session_id: "someone-elses-session"}
+         )}
+      )
+
+      _settled = Feed.coverage(feed)
+
+      refute_received {_ref, {:error, {:connection_refused, _details}}}
+      assert :sys.get_state(feed).shards[0].reply_to != nil
+    end
+
+    test "a CONNACK that never arrives at all is timed out" do
+      # Nothing else bounds this wait. `Socket`'s connect and recv timeouts cover the TCP
+      # connect and the HTTP upgrade; once the WebSocket is up, `websockex` simply waits for
+      # frames, and a venue that accepts the connection and stays silent strands the caller
+      # with nothing to react to.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, connack_timeout_ms: 50)
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+      end)
+
+      send(feed, {:connack_timeout, 0, "s0"})
+      _settled = Feed.coverage(feed)
+
+      assert_received {_ref, {:error, {:connack_timeout, _ms}}}
+      assert :sys.get_state(feed).shards[0].reply_to == nil
+    end
+
+    test "a timeout for a session that has since been replaced answers nobody" do
+      # Armed per attempt and matched on the session id, so a timer for a shard that has been
+      # rebuilt cannot answer the caller now parked on its replacement.
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+      end)
+
+      send(feed, {:connack_timeout, 0, "a-previous-session"})
+      _settled = Feed.coverage(feed)
+
+      refute_received {_ref, {:error, {:connack_timeout, _ms}}}
+      assert :sys.get_state(feed).shards[0].reply_to != nil
+    end
+
+    test "a shard that DID connect is not disturbed by its own late timer" do
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      send(feed, {:connack_timeout, 0, "s0"})
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+      assert :sys.get_state(feed).shards[0].connected?
+    end
+  end
+
   describe "a reconcile task that never answers does not strand its caller" do
     # `Task.Supervisor.start_child/2` gives a child that is neither linked nor monitored, and
     # the reconcile's `tag` carries the caller's `from` on the primary path. So a task that
@@ -153,7 +312,7 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:reconciling, task_pid}, 3_000
       Process.exit(task_pid, :kill)
 
-      assert_receive {:subscribed, {:error, _reason}}, 3_000
+      assert_receive {:subscribed, {:error, _reason}}, 5_000
       assert :sys.get_state(feed).reconciling == %{}
       assert Process.alive?(feed)
     end
@@ -170,7 +329,12 @@ defmodule DpExchange.Webull.FeedTest do
         conn
       end
 
-      feed = start_feed(shards: %{0 => connected_shard("s0")}, reconcile_timeout_ms: 100)
+      # 1_000 rather than 100. The plug runs INSIDE the reconcile task, so a budget tight
+      # enough to kill the task before its body executes means `{:reconciling, _}` never
+      # arrives and the test fails on its own setup — which it did, three runs in five,
+      # while the behaviour under test was working perfectly. A second of budget is still
+      # far under the real `@call_timeout * 4` and leaves no doubt about the ordering.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, reconcile_timeout_ms: 1_000)
 
       spawn(fn ->
         send(
@@ -180,7 +344,7 @@ defmodule DpExchange.Webull.FeedTest do
       end)
 
       assert_receive {:reconciling, task_pid}, 3_000
-      assert_receive {:subscribed, {:error, _reason}}, 3_000
+      assert_receive {:subscribed, {:error, _reason}}, 5_000
 
       assert :sys.get_state(feed).reconciling == %{}
       refute Process.alive?(task_pid)
@@ -1301,6 +1465,12 @@ defmodule DpExchange.Webull.FeedTest do
 
       # `:sys.replace_state/2` runs its function *inside* the target process, so
       # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
+
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
         state
@@ -1357,6 +1527,12 @@ defmodule DpExchange.Webull.FeedTest do
       }
 
       feed = start_feed(shards: %{0 => shard0})
+
+      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
+      # the target process, so `self()` in there is the feed, not this test. Parking a
+      # `from` built that way sends the reply to the feed itself and the assertion sees
+      # nothing — which is exactly how the first draft of these tests failed.
+      test_pid = self()
 
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
