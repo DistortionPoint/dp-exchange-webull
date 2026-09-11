@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-09-11
+
 ### Fixed
 
 - **A control-plane reconcile task that died or hung left its caller with no answer at all.**
