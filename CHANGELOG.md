@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-09-11
+
 ### Fixed
 
 - **A dead subscriber's pid was never removed, and the fan-out walked it on every message
