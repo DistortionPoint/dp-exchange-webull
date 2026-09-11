@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-09-11
+
 ### Added
 
 - **This package now emits the `[:dp_exchange, :link, …]` telemetry the contract has
