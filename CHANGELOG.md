@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-09-11
+
 ### Fixed
 
 - **A refused MQTT CONNACK stranded the `subscribe/2` caller, and a revoked App Key produces
