@@ -422,4 +422,84 @@ defmodule DpExchange.Webull.SocketTest do
       assert Socket.disconnect(self()) == {:error, :calling_self}
     end
   end
+
+  describe "the link reports itself on the metrics channel too" do
+    # `Core.Telemetry` documented `[:dp_exchange, :link, …]` as events "every venue package
+    # emits" and nothing in the family emitted any of them, for as long as the spec existed.
+    # `:telemetry.attach/4` against a name nobody emits SUCCEEDS, so a consumer's dashboard
+    # showed an empty panel — which reads as a venue with no traffic, not as an unimplemented
+    # spec. These tests attach real handlers: one that only called an emitter and checked it
+    # returned `:ok` would pass just as happily against the version that emitted nothing.
+    setup do
+      test_pid = self()
+      handler_id = "link-telemetry-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [
+          [:dp_exchange, :link, :up],
+          [:dp_exchange, :link, :down],
+          [:dp_exchange, :link, :event]
+        ],
+        fn event, measurements, metadata, _config ->
+          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
+          # one also receives every other concurrently-running test's events.
+          if metadata.provider == :webull do
+            send(test_pid, {:telemetry, event, measurements, metadata})
+          end
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+      :ok
+    end
+
+    test "link up waits for the CONNACK, not the WebSocket" do
+      # The transport being up is not the link on this venue: `handle_connect/2` only sends
+      # the MQTT CONNECT, and the venue may still refuse the session. Emitting on connect
+      # would report a live venue for a socket that has not authenticated — the
+      # transport-vs-link confusion `Core.Telemetry`'s own "Why `:link` and not `:ws`"
+      # section exists to prevent, and this venue is where the two genuinely come apart.
+      assert {:ok, _state} = Socket.handle_connect(%{}, state())
+      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, connack(0)}, state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}
+    end
+
+    test "a REFUSED CONNACK is not a link up" do
+      # 105 is the venue's "too many concurrent connections". A socket that reported the
+      # link up here would show a healthy venue for a session it never got.
+      assert {:ok, _state} = Socket.handle_frame({:binary, connack(105)}, state())
+      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+    end
+
+    test "disconnecting emits link down with an already-inspected reason" do
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, metadata}
+      assert is_binary(metadata.reason)
+      assert metadata.reason =~ "closed"
+    end
+
+    test "every WEBSOCKET frame is a link event, whatever it reassembles into" do
+      # Counted per frame, not per reassembled MQTT packet: one frame can carry several
+      # packets and a packet can span two, so the frame is what the venue actually put on
+      # the wire. Counting packets would report a number this socket computed.
+      frame = connack(0)
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], measurements, metadata}
+      assert measurements.bytes == byte_size(frame)
+      assert metadata.type == :frame
+    end
+
+    test "a partial frame that reassembles into nothing is still counted" do
+      # The venue sent bytes. A buffer that cannot yet yield a packet is this package's
+      # state, not the venue going quiet.
+      assert {:ok, _state} = Socket.handle_frame({:binary, <<0x20>>}, state())
+      assert_receive {:telemetry, [:dp_exchange, :link, :event], %{bytes: 1}, _metadata}
+    end
+  end
 end

@@ -66,7 +66,7 @@ defmodule DpExchange.Webull.Socket do
   module is otherwise unchanged.
   """
 
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{MqttPacket, QuoteProto, SymbolFormat}
 
@@ -200,6 +200,15 @@ defmodule DpExchange.Webull.Socket do
       )
     )
 
+    Telemetry.link_down(:webull, inspect(reason))
+
+    # No `link_reconnect_attempt` here, deliberately. This socket reconnects immediately and
+    # keeps no attempt counter, so the only number it could report is `attempt: 1` — every
+    # time. A reconnect LOOP would then render as an endless series of first attempts, which
+    # is worse than no event: it looks like a venue flapping once, repeatedly, rather than a
+    # socket that cannot get back. `dp_exchange_schwab` tracks `login_failures` and does
+    # emit it. An invented counter is exactly the plausible-wrong-value this family keeps
+    # writing rules against.
     {:reconnect, %{state | buffer: <<>>, connected?: false}}
   end
 
@@ -221,6 +230,13 @@ defmodule DpExchange.Webull.Socket do
 
   @impl true
   def handle_frame({:binary, data}, state) do
+    # Counted per WEBSOCKET frame, which on this venue is not the same as per MQTT packet:
+    # `drain/1` reassembles packets out of a buffer, so one frame can carry several and a
+    # packet can span two. The frame is the honest unit for a link event — it is what the
+    # venue actually put on the wire, and `byte_size(data)` is exactly what arrived. Counting
+    # reassembled packets instead would report a number this socket computed rather than one
+    # the venue sent.
+    Telemetry.link_event(:webull, :frame, byte_size(data))
     drain(%{state | buffer: state.buffer <> data})
   end
 
@@ -248,6 +264,17 @@ defmodule DpExchange.Webull.Socket do
     # session_id rides along so a Feed managing several shards' sockets can tell which
     # one just came up — see the matching comment on handle_disconnect/2.
     notify(state, Notice.new(:link_up, :webull, details: %{session_id: state.session_id}))
+
+    # Here and not in `handle_connect/2`, for the reason that callback already gives: the
+    # WebSocket being up is the transport, and the LINK is the venue accepting the MQTT
+    # CONNECT. Emitting on `handle_connect/2` would report a live venue for a socket that
+    # has not authenticated — the transport-vs-link confusion `Core.Telemetry`'s "Why the
+    # category is `:link` and not `:ws`" section exists to prevent, and this venue is the
+    # one where the two genuinely come apart.
+    #
+    # The metrics channel alongside the notice channel, never instead of it: a `Core.Notice`
+    # is a condition a consumer must ACT on, telemetry is aggregate and lossy by design.
+    Telemetry.link_up(:webull)
     %{state | connected?: true}
   end
 

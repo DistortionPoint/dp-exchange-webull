@@ -68,7 +68,7 @@ defmodule DpExchangeWebull.MixProject do
       # keeps applying: a floor is only correct once it has been RESOLVED and compiled
       # against, never once it has been reasoned about.
       #
-      {:dp_exchange_core, "~> 0.2.6"},
+      {:dp_exchange_core, "~> 0.2.8"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
