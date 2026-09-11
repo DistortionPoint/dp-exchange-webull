@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-09-11
+
 ### Fixed
 
 - **A balance the venue did not attribute to an asset was returned as success.**
