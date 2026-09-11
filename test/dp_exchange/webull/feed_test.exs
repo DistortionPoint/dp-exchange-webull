@@ -1465,11 +1465,6 @@ defmodule DpExchange.Webull.FeedTest do
 
       # `:sys.replace_state/2` runs its function *inside* the target process, so
       # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
 
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
@@ -1527,12 +1522,6 @@ defmodule DpExchange.Webull.FeedTest do
       }
 
       feed = start_feed(shards: %{0 => shard0})
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
 
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
