@@ -22,6 +22,37 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A control-plane reconcile task that died or hung left its caller with no answer at all.**
+  `Task.Supervisor.start_child/2` gives a child that is neither linked nor monitored, and the
+  reconcile's `tag` carries the caller's `from` on the primary path. So a lost task sent no
+  `{:reconcile_done, ...}`, nothing here learned of it, and that caller waited out
+  `@call_timeout` and then **exited, taking the calling process with it**.
+
+  The task is now monitored and bounded. A `:DOWN` or a timeout is synthesised into the
+  ordinary `{:reconcile_done, tag, {:error, _}}` shape and re-dispatched, so the caller and
+  every retry ladder are answered exactly as they would be for a reconcile that failed by
+  replying — a task that failed by dying is not a different *kind* of failure, and giving it
+  its own path is how the two drift.
+
+  **Less severe than the sibling wedges fixed the same day in `dp_exchange_schwab` and
+  `dp_exchange_coinbase`, and the difference is worth stating.** This venue has no "already
+  in flight, join the queue" guard on the primary path, so each subscribe spawns its own
+  reconcile and a lost task strands exactly one caller rather than every future one. Bounded
+  — and still a caller that never gets an answer.
+
+  `@reconcile_timeout_ms` is `@call_timeout * 4`, deliberately **above** the caller's own
+  deadline: a reconcile that outlives the caller waiting on it has already lost that caller,
+  and firing sooner would only replace one lost reply with another while the request was
+  still in flight. The task body is an HTTP round trip through `Core.HttpClient`, which
+  carries its own per-attempt timeout and retries; this is the outer bound for a task that
+  has stopped answering entirely.
+
+  One `:DOWN` clause now serves both this and the subscriber-pruning added last release,
+  because Elixir takes the first matching clause and there is no falling through — the
+  monitor ref decides which.
+
 ## [0.4.12] - 2026-09-11
 
 ### Fixed

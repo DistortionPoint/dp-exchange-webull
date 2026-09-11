@@ -280,6 +280,16 @@ defmodule DpExchange.Webull.Feed do
   @frame_window_ms 5_000
   @call_timeout @frame_window_ms * 3
 
+  # How long a control-plane reconcile may run before this feed stops waiting for it.
+  #
+  # The task body is a `Subscription.subscribe/unsubscribe` HTTP round trip through
+  # `Core.HttpClient`, which carries its own per-attempt timeout and retries — so this is the
+  # outer bound for a task that has stopped answering entirely, not a second, tighter
+  # deadline on a healthy one. Set above `@call_timeout`, because a reconcile that outlives
+  # the caller waiting on it has already lost that caller; firing sooner would only replace
+  # one lost reply with another while the request was still in flight.
+  @reconcile_timeout_ms @call_timeout * 4
+
   # The venue's own stated ceiling. See the moduledoc and the design doc §3.1 — not a
   # padded-down guess.
   @pairs_per_socket 100
@@ -374,6 +384,15 @@ defmodule DpExchange.Webull.Feed do
     {:ok,
      %{
        task_supervisor: task_supervisor,
+       # In-flight control-plane reconciles, keyed by their `tag`: `%{ref:, pid:}`. Exists so
+       # a task that dies or hangs can still answer whatever is waiting on it — `tag` carries
+       # the caller's `from` on the primary path, and `Task.Supervisor.start_child/2` neither
+       # links nor monitors, so without this a lost task strands that caller for the whole of
+       # `@call_timeout` and then exits it.
+       reconciling: %{},
+       # See `@reconcile_timeout_ms`. Overridable so a test proving the timeout fires need
+       # not wait out the real one.
+       reconcile_timeout_ms: Keyword.get(opts, :reconcile_timeout_ms) || @reconcile_timeout_ms,
        resubscribe_interval_ms: resubscribe_interval_ms,
        socket_opts:
          Keyword.take(opts, [
@@ -543,15 +562,61 @@ defmodule DpExchange.Webull.Feed do
   # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
   # its holder's death would silently unsubscribe a consumer its supervisor is about to
   # restart under the same name.
-  def handle_info({:DOWN, _ref, :process, pid, _reason}, state) do
-    state = %{
-      state
-      | subscribers: MapSet.delete(state.subscribers, pid),
-        notice_subscribers: MapSet.delete(state.notice_subscribers, pid),
-        monitors: Fanout.forget(pid, state.monitors)
-    }
+  # One `:DOWN` clause serving two unrelated monitors, because Elixir takes the first
+  # matching clause and there is no falling through from one to the next. The ref decides
+  # which: a reconcile task this feed is tracking, or a subscriber it is watching.
+  def handle_info({:DOWN, ref, :process, pid, reason}, state) do
+    case reconcile_tag_for(state, ref) do
+      nil ->
+        drop_dead_subscriber(state, pid)
 
-    {:noreply, state}
+      tag ->
+        # The reconcile task died without answering. Synthesised into the ordinary
+        # `{:reconcile_done, tag, {:error, _}}` shape and re-dispatched, so every caller and
+        # every retry ladder below is answered exactly as it would be for a reconcile that
+        # failed by replying. A task that failed by dying is not a different KIND of failure,
+        # and giving it its own path is how the two drift.
+        #
+        # Without this, `tag` — which carries the caller's `from` on the primary path — is
+        # simply lost: the caller waits out `@call_timeout` and then EXITS, taking the
+        # calling process with it. `Task.Supervisor.start_child/2` gives a child that is
+        # neither linked nor monitored, so nothing here learned of the death at all.
+        handle_info(
+          {:reconcile_done, tag, {:error, {:reconcile_task_down, reason}}},
+          forget_reconcile(state, tag)
+        )
+    end
+  end
+
+  # A reconcile task that is still alive and has stopped answering. No `:DOWN` can catch
+  # that, and only a timer tells it apart from one about to succeed. A timer for a tag that
+  # already answered finds nothing tracked and is ignored, so a slow-but-successful reconcile
+  # is never torn down by its own deadline arriving late.
+  def handle_info({:reconcile_timeout, tag}, state) do
+    case Map.fetch(state.reconciling, tag) do
+      {:ok, %{pid: pid}} ->
+        Process.exit(pid, :kill)
+
+        handle_info(
+          {:reconcile_done, tag, {:error, {:reconcile_timeout, state.reconcile_timeout_ms}}},
+          forget_reconcile(state, tag)
+        )
+
+      :error ->
+        {:noreply, state}
+    end
+  end
+
+  # Clears the bookkeeping for a reconcile that answered, then lets the reply fall through to
+  # whichever clause below actually handles that `tag`.
+  #
+  # One clause rather than four: every `{:reconcile_done, ...}` clause would otherwise need
+  # the same two lines, and the one somebody forgets is the one that leaks. The guard is what
+  # makes the re-dispatch terminate — after `forget_reconcile/2` the tag is gone from
+  # `reconciling`, so it cannot match this clause a second time.
+  def handle_info({:reconcile_done, tag, _result} = message, %{reconciling: in_flight} = state)
+      when is_map_key(in_flight, tag) do
+    handle_info(message, forget_reconcile(state, tag))
   end
 
   @impl true
@@ -1100,15 +1165,73 @@ defmodule DpExchange.Webull.Feed do
   # never blocks this GenServer's mailbox — see the moduledoc. The result comes back as
   # `{:reconcile_done, tag, result}`, handled above; `tag` carries whatever the caller of
   # this function needs to know what to do with it.
+
+  # A subscriber that died. Dropped from both sets, and its monitor forgotten.
+  #
+  # Without this, nothing ever removed a subscriber pid: `Core.Fanout.resolve/1` skips a dead
+  # one at send time, so no EVENTS accumulated — but the pid stayed for the life of this
+  # feed, and `deliver/4` walks the whole set calling `Process.alive?/1` once per message.
+  # Measured in Core 0.3.3: 0.095 us per fan-out against a clean set, 22.8 us against one
+  # carrying a thousand dead pids.
+  #
+  # Only pids arrive here. A registered-name subscriber is deliberately never monitored — see
+  # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
+  # its holder's death would silently unsubscribe a consumer its supervisor is about to
+  # restart under the same name.
+  defp drop_dead_subscriber(state, pid) do
+    state = %{
+      state
+      | subscribers: MapSet.delete(state.subscribers, pid),
+        notice_subscribers: MapSet.delete(state.notice_subscribers, pid),
+        monitors: Fanout.forget(pid, state.monitors)
+    }
+
+    {:noreply, state}
+  end
+
+  # Which in-flight reconcile a monitor ref belongs to, or `nil` for a ref this feed tracks
+  # for some other reason. `reconciling` is keyed by TAG rather than by ref, because the tag
+  # is what comes back in `{:reconcile_done, tag, result}` and is therefore the only handle
+  # both the success and the failure paths share; the ref is carried alongside so a `:DOWN`
+  # can find its way back to one.
+  defp reconcile_tag_for(state, ref) do
+    Enum.find_value(state.reconciling, fn
+      {tag, %{ref: ^ref}} -> tag
+      _other -> nil
+    end)
+  end
+
+  # Stops tracking a reconcile and releases its monitor. `flush: true` drops a `:DOWN`
+  # already in the mailbox, so a task that finishes and then dies in the same instant cannot
+  # have its reply counted once and its death counted again.
+  defp forget_reconcile(state, tag) do
+    case Map.pop(state.reconciling, tag) do
+      {nil, _reconciling} ->
+        state
+
+      {%{ref: ref}, reconciling} ->
+        Process.demonitor(ref, [:flush])
+        %{state | reconciling: reconciling}
+    end
+  end
+
   defp spawn_reconcile(state, tag, fun) do
     me = self()
 
-    {:ok, _pid} =
+    {:ok, pid} =
       Task.Supervisor.start_child(state.task_supervisor, fn ->
         send(me, {:reconcile_done, tag, fun.()})
       end)
 
-    state
+    # Monitored and timed, because `Task.Supervisor.start_child/2` gives a child that is
+    # neither linked nor monitored: if it dies without sending `{:reconcile_done, ...}`,
+    # nothing here ever learns. `tag` carries the caller's `from` on the primary path, so
+    # that caller waits out `@call_timeout` and then EXITS, taking the calling process with
+    # it. See the `:DOWN` and `{:reconcile_timeout, _}` clauses.
+    ref = Process.monitor(pid)
+    Process.send_after(self(), {:reconcile_timeout, tag}, state.reconcile_timeout_ms)
+
+    put_in(state.reconciling[tag], %{ref: ref, pid: pid})
   end
 
   # A shard's socket crashing abnormally is contained here rather than taking the whole

@@ -118,6 +118,88 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  describe "a reconcile task that never answers does not strand its caller" do
+    # `Task.Supervisor.start_child/2` gives a child that is neither linked nor monitored, and
+    # the reconcile's `tag` carries the caller's `from` on the primary path. So a task that
+    # died or hung sent no `{:reconcile_done, ...}`, nothing here learned of it, and the
+    # caller waited out `@call_timeout` and then EXITED — taking the calling process with it.
+    #
+    # Less severe than the sibling wedges fixed the same day in `dp_exchange_schwab` and
+    # `dp_exchange_coinbase`, and the difference is worth stating: this venue has no
+    # "already in flight, join the queue" guard on the primary path, so each subscribe spawns
+    # its own reconcile and a lost task strands exactly one caller rather than every future
+    # one. Bounded — and still a caller that never gets an answer.
+
+    test "a killed reconcile task answers its caller instead of stranding it", %{
+      limiter: limiter
+    } do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:reconciling, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      spawn(fn ->
+        send(
+          test_pid,
+          {:subscribed, Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))}
+        )
+      end)
+
+      assert_receive {:reconciling, task_pid}, 3_000
+      Process.exit(task_pid, :kill)
+
+      assert_receive {:subscribed, {:error, _reason}}, 3_000
+      assert :sys.get_state(feed).reconciling == %{}
+      assert Process.alive?(feed)
+    end
+
+    test "a reconcile that never returns is timed out and its caller answered", %{
+      limiter: limiter
+    } do
+      # The half no `:DOWN` can catch: the task is perfectly alive, it just never answers.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:reconciling, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, reconcile_timeout_ms: 100)
+
+      spawn(fn ->
+        send(
+          test_pid,
+          {:subscribed, Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))}
+        )
+      end)
+
+      assert_receive {:reconciling, task_pid}, 3_000
+      assert_receive {:subscribed, {:error, _reason}}, 3_000
+
+      assert :sys.get_state(feed).reconciling == %{}
+      refute Process.alive?(task_pid)
+      assert Process.alive?(feed)
+    end
+
+    test "a timer for a reconcile that already answered is ignored" do
+      # Armed per tag, so one arriving late for a reconcile that has since completed must not
+      # tear down whatever is running now.
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+
+      send(feed, {:reconcile_timeout, {:background, 0}})
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+      assert :sys.get_state(feed).reconciling == %{}
+    end
+  end
+
   describe "a dead subscriber is dropped, not walked forever" do
     # `Core.Fanout.resolve/1` already skipped a dead subscriber at send time, so no EVENTS
     # accumulated — but nothing removed the pid, so a supervised consumer that restarts left
