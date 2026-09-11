@@ -132,6 +132,92 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  describe "back-pressure — a slow subscriber does not get an unbounded mailbox" do
+    # `Core.Venue`'s `subscribe/2` doc promised this from the day the contract was written,
+    # and no venue in this family implemented any of it: every one fanned out with a bare
+    # `send/2` and had never looked at a subscriber's mailbox. A consumer that stalls
+    # accumulated a mailbox until the node died, with no notice, no log line, and
+    # `coverage/1` reporting perfect health throughout — because the feed genuinely was
+    # delivering. Implemented in `Core.Fanout` 0.2.6 and wired here.
+
+    # A subscriber that never consumes, so everything sent to it stays queued. That is what
+    # a stalled consumer looks like from the sender's side, and the only way to build a real
+    # backlog without guessing at timing.
+    defp stalled_subscriber do
+      pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(pid, :kill) end)
+      pid
+    end
+
+    defp queued(pid) do
+      {:message_queue_len, len} = Process.info(pid, :message_queue_len)
+      len
+    end
+
+    test "past its bound, a subscriber stops being sent to and its mailbox stops growing" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 3)
+      :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+
+      for _each <- 1..10, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      # A call is answered only after every send above has been handled.
+      _settled = Feed.coverage(feed)
+
+      # Three got through, then the bound stopped it. Not ten, and — the point — not
+      # unbounded.
+      assert queued(slow) == 3
+    end
+
+    test "a stalled subscriber is reported once, not once per dropped message" do
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+      :ok = Feed.subscribe_notices(feed, to: self())
+
+      for _each <- 1..2, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :degraded, severity: :warning, details: details}}
+
+      assert details.bound == 1
+      assert details.dropping == :newest
+      assert details.subscriber == inspect(slow)
+
+      # A notice per dropped message would arrive at the rate of the stream the consumer
+      # already cannot keep up with, into the same fan-out that is overloaded.
+      for _each <- 1..5, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      _settled = Feed.coverage(feed)
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :degraded}}, 100
+    end
+
+    test "a symbol whose frames are dropped for a slow consumer is still covered" do
+      # `coverage/1` reports what the VENUE delivered to this package, not what this package
+      # forwarded. Reporting `:not_covered` here would blame the venue for a consumer's own
+      # backlog, and send an operator looking at the wrong system entirely.
+      slow = stalled_subscriber()
+      feed = start_feed(max_queue_len: 1)
+      :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+
+      for _each <- 1..5, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+    end
+
+    test "an invalid bound fails at init, loudly, rather than falling back to the default" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stack}} =
+               Feed.start_link(
+                 name: :"bad_bound_#{System.unique_integer([:positive])}",
+                 max_queue_len: "3"
+               )
+
+      assert message =~ ":webull"
+      assert message =~ ":max_queue_len"
+    end
+  end
+
   describe "coverage is observed, never intended" do
     test "a subscribed symbol that has delivered nothing is absent", %{limiter: limiter} do
       # On this venue there are three distinct moments: asked, HTTP-accepted, delivering.

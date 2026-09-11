@@ -59,7 +59,16 @@ defmodule DpExchangeWebull.MixProject do
       # resolves the newest allowed version. 0.1.68 also covers `Timeframe.nameable/0`
       # admitting `1y` (needed since 0.1.57 — see `webull_test.exs`'s "1y is declared"
       # test), so it is the binding constraint, not an additional one.
-      {:dp_exchange_core, "~> 0.2.1"},
+      # `0.2.6` is the floor now, and unlike the history below it is a HARD one: `Feed`
+      # calls `Core.Fanout.max_queue_len!/2` in `init/1` and `Core.Fanout.deliver/4` on
+      # every payload, and neither existed before 0.2.6. Against a lower Core this package
+      # does not merely misbehave, it fails to compile — which is the good outcome, and the
+      # reason the floor is stated rather than left to `script/check_dependency_floor.sh` to
+      # discover. The older floor history is kept above because its lesson is the one that
+      # keeps applying: a floor is only correct once it has been RESOLVED and compiled
+      # against, never once it has been reasoned about.
+      #
+      {:dp_exchange_core, "~> 0.2.6"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

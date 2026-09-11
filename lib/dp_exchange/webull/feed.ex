@@ -271,7 +271,7 @@ defmodule DpExchange.Webull.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.Notice
+  alias DpExchange.Core.{Fanout, Notice}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{Credentials, Environment, Socket, Subscription}
 
@@ -406,6 +406,13 @@ defmodule DpExchange.Webull.Feed do
          |> Credentials.wrap_opt(),
        subscribers: MapSet.new(),
        notice_subscribers: MapSet.new(),
+       # Back-pressure, per `Core.Venue`'s `subscribe/2` doc and implemented by
+       # `Core.Fanout`: `dropping` is the set of subscribers currently over their mailbox
+       # bound, carried across calls so a stalled consumer produces one `:degraded` notice
+       # when delivery to it stops and one when it resumes — never one per dropped message,
+       # which would arrive at the rate of the stream it already cannot keep up with.
+       dropping: MapSet.new(),
+       max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
        # kind() => %{symbol => timestamp}, built alongside `delivering` above from the
@@ -575,8 +582,11 @@ defmodule DpExchange.Webull.Feed do
     {:noreply, state}
   end
 
+  # `delivering` is recorded whether or not the payload reached anybody — see `deliver/2`.
+  # `coverage/1` reports what the VENUE delivered to this package, not what this package
+  # forwarded.
   def handle_info({:dp_exchange, :webull, quote_struct} = message, state) do
-    fan_out(state.subscribers, message)
+    state = deliver(state, message)
 
     now = :os.system_time(:millisecond)
     symbol = quote_struct.symbol
@@ -1479,6 +1489,32 @@ defmodule DpExchange.Webull.Feed do
 
   defp environment(state, opts), do: Environment.resolve(Keyword.merge(state.socket_opts, opts))
 
+  # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
+  # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
+  # notice, and reported again when it catches up.
+  #
+  # Notices keep going through `fan_out/2` unbounded, and must: the notice saying a
+  # subscriber is being dropped cannot be the first casualty of that same subscriber being
+  # dropped.
+  defp deliver(state, message) do
+    {_sent, dropping, transitions} =
+      Fanout.deliver(state.subscribers, message, state.dropping,
+        max_queue_len: state.max_queue_len
+      )
+
+    Enum.each(transitions, fn transition ->
+      fan_out(
+        state.notice_subscribers,
+        {:dp_exchange, :webull, Fanout.notice_for(transition, :webull, state.max_queue_len)}
+      )
+    end)
+
+    %{state | dropping: dropping}
+  end
+
+  # The UNBOUNDED path — notices only. See `deliver/2` above for why the data stream does
+  # not come through here and why notices deliberately still do.
+  #
   # A subscriber may be a raw pid or a registered name — `subscribe/2`'s `to:` accepts
   # either, matching ordinary OTP practice (a consumer registering itself by name and
   # handing that name to a producer). `Process.alive?/1` only accepts a pid and raises on
@@ -1489,18 +1525,12 @@ defmodule DpExchange.Webull.Feed do
   # to `nil` and is silently skipped, the same as a dead subscriber already was.
   defp fan_out(subscribers, message) do
     Enum.each(subscribers, fn subscriber ->
-      case resolve_subscriber(subscriber) do
+      case Fanout.resolve(subscriber) do
         pid when is_pid(pid) -> send(pid, message)
         nil -> :ok
       end
     end)
   end
-
-  defp resolve_subscriber(pid) when is_pid(pid) do
-    if Process.alive?(pid), do: pid
-  end
-
-  defp resolve_subscriber(name) when is_atom(name), do: Process.whereis(name)
 
   # Unique per shard. The venue disconnects an older connection presenting the same id.
   defp generate_session_id do
