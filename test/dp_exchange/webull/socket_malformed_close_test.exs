@@ -99,6 +99,22 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
 
     :ok = :gen_tcp.send(client_socket, response)
     :ok = :gen_tcp.send(client_socket, @malformed_close_frame)
+
+    # Waits for the CLIENT to tear the connection down, rather than closing it from here.
+    #
+    # This used to `:gen_tcp.close/1` immediately after the send, and that races the frame:
+    # the FIN can reach the client and be observed before WebSockex has parsed the bytes
+    # ahead of it, so `handle_disconnect/2` reports `%WebSockex.ConnError{original: :closed}`
+    # instead of the `FrameError` this test exists for. It passed locally every time and
+    # failed in CI, where fewer cores and `max_cases: 8` change the interleaving — the classic
+    # shape of a race that reads as a settled test.
+    #
+    # Not closing at all is wrong too, and was tried: no disconnect fires, because it is the
+    # client's own reaction to the bad frame that ends the connection. So the server blocks
+    # on a read instead. `{:error, :closed}` arrives exactly when the client has finished
+    # with the frame and torn down — the event this test is actually waiting for — which
+    # makes the ordering deterministic without guessing at a sleep.
+    _client_closed = :gen_tcp.recv(client_socket, 0, 5_000)
     :gen_tcp.close(client_socket)
   end
 

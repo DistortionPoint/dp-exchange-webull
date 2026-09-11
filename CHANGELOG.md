@@ -53,6 +53,21 @@ acceptable changelog line.
   because Elixir takes the first matching clause and there is no falling through — the
   monitor ref decides which.
 
+- **A racy test in `socket_malformed_close_test.exs`, which CI caught and six local runs did
+  not.** The fake server closed the TCP connection in the same breath as sending the
+  malformed close frame, so the FIN could reach the client and be observed *before* WebSockex
+  had parsed the bytes ahead of it — and `handle_disconnect/2` then reported
+  `%WebSockex.ConnError{original: :closed}` rather than the `FrameError` the test exists to
+  pin.
+
+  The server now blocks on a read and closes only after the **client** tears the connection
+  down, which is the event the assertion is actually waiting for. Not closing at all was
+  tried first and is wrong: no disconnect fires, because it is the client's own reaction to
+  the bad frame that ends the connection.
+
+  Worth recording because of where it showed: green on every local run, red in CI, where
+  fewer cores and `max_cases: 8` change the interleaving. Reproduced locally by passing
+  `--max-cases 8`, then six clean runs at that concurrency.
 ## [0.4.12] - 2026-09-11
 
 ### Fixed
