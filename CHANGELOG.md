@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-09-11
+
 ### Added
 
 - **`script/check_doc_sources.sh` now reports the age and provenance of this package's own
