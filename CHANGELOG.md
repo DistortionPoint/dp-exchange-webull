@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.16] - 2026-09-11
+
 ### Fixed
 
 - **A `200` this package could not decode became an empty object, and then an empty
