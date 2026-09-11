@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `200` this package could not decode became an empty object, and then an empty
+  everything.** `decode/1` collapsed any unparseable body to `%{}`. `%{}` is a map, so it
+  passed straight through the readers and came out as a well-formed struct with every field
+  `nil`, returned as `{:ok, value}`.
+
+  There was already a test for this — "a non-JSON body decodes to nothing rather than
+  crashing" — and it passed, which is why the defect survived: its name described the
+  substitution, and it only held because `get_price/3`'s reader rejected `%{}` for carrying
+  no price. Readers whose fields are all optional, like the order and balance ones, accepted
+  the same `%{}` and answered `{:ok, value}`.
+
+  **`oauth_token/3` was the sharpest instance.** `decode_map/1` returned `%{}` for a body
+  that was undecodable *or* not an object, so a token exchange that had not returned a token
+  reported `{:ok, %{}}` — success. The failure then surfaced at the next signed call as an
+  authentication error, with nothing tying it back to the refresh that caused it.
+
+  The realistic source is not malformed JSON from Webull. It is a `200` that never reached
+  Webull: an interstitial, a captive portal or a CDN maintenance page, each of which answers
+  `200 text/html`.
+
+  Success bodies now refuse with `{:error, {:undecodable_response, :webull}}`, and a token
+  response that decodes but is not an object refuses with
+  `{:error, :unexpected_response_shape}`. Refusal bodies keep the lenient decode on purpose —
+  a `4xx` is read for a human-readable reason, the status code has already established the
+  refusal, and `{:venue_error, status}` stays true whether or not there was a reason in the
+  body.
+
 ## [0.4.15] - 2026-09-11
 
 ### Added

@@ -93,12 +93,44 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert Decimal.equal?(quote_struct.price, Decimal.new("2"))
     end
 
-    test "a non-JSON body decodes to nothing rather than crashing" do
-      assert {:error, :unexpected_response_shape} =
+    test "a non-JSON 200 body names the decode failure rather than decoding to nothing" do
+      # The old name ("decodes to nothing rather than crashing") described the defect. The
+      # body did not decode to nothing — `decode/1` substituted `%{}` for it, and this test
+      # passed only because `get_price/3`'s reader then rejected `%{}` for carrying no
+      # price. Readers whose fields are all optional, like the order and balance ones,
+      # accepted the same `%{}` and returned a struct with every field `nil` as
+      # `{:ok, value}`; `oauth_token/3` accepted it as a token response with no token in it.
+      #
+      # The refusal now happens where the fact is known — the decoder — so it holds for
+      # every endpoint rather than only the ones whose readers happened to be strict.
+      assert {:error, {:undecodable_response, :webull}} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: raw("<html>maintenance</html>"),
                  retry_attempts: 0
                )
+    end
+
+    test "a non-JSON 200 refuses on the endpoints whose readers used to accept %{}" do
+      opts = [plug: raw("<html>maintenance</html>"), retry_attempts: 0]
+
+      assert {:error, {:undecodable_response, :webull}} =
+               Rest.get_balances(@credentials, Keyword.put(opts, :account_id, "acct-1"))
+
+      # The sharpest one. A token exchange that did not return a token used to answer
+      # `{:ok, %{}}`, so the failure surfaced later as an authentication error at the next
+      # signed call, with nothing tying it back to the refresh that caused it.
+      assert {:error, {:undecodable_response, :webull}} =
+               Rest.oauth_token("client", "secret", Keyword.put(opts, :refresh_token, "r"))
+    end
+
+    test "a 200 JSON token response that is not an object is refused as a shape failure" do
+      # Distinct from the clause above: this body decodes fine. It is simply not an object,
+      # so there is nowhere for `access_token` to be, and `{:ok, value}` would be a claim
+      # about a token that does not exist.
+      opts = [plug: raw(~s(["token"])), retry_attempts: 0, refresh_token: "r"]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.oauth_token("client", "secret", opts)
     end
 
     test "numbers arriving as JSON numbers still become Decimals" do

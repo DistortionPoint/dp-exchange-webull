@@ -591,7 +591,7 @@ defmodule DpExchange.Webull.Rest do
 
       case HttpClient.request(:get, url, headers, nil, request_opts(opts)) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
-          {:ok, decode(body)}
+          decoded_body(body)
 
         # Permanent for the request as sent. A caller whose token expired refreshes and
         # calls again, which is a different request rather than a retry of this one.
@@ -633,7 +633,7 @@ defmodule DpExchange.Webull.Rest do
 
       case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
         {:ok, %{status: status, body: response}} when status in 200..299 ->
-          {:ok, decode(response)}
+          decoded_body(response)
 
         {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
           {:refused, refusal(status, response)}
@@ -1726,7 +1726,7 @@ defmodule DpExchange.Webull.Rest do
 
       case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
-          {:ok, decode_map(body)}
+          decoded_token(body)
 
         {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
           {:refused, refusal(status, body)}
@@ -1766,15 +1766,6 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp decode_map(body) when is_binary(body) do
-    case Jason.decode(body) do
-      {:ok, %{} = decoded} -> decoded
-      _other -> %{}
-    end
-  end
-
-  defp decode_map(%{} = body), do: body
-  defp decode_map(_body), do: %{}
   # --- watchlists ---------------------------------------------------------
 
   @doc """
@@ -3000,7 +2991,7 @@ defmodule DpExchange.Webull.Rest do
   # status alone is thin, but it is the difference between "the venue rejected this and here
   # is which kind" and "something went wrong".
   defp refusal(status, body) do
-    case decode(body) do
+    case refusal_body(body) do
       %{"msg" => message} when is_binary(message) -> {:venue_error, status, message}
       %{"message" => message} when is_binary(message) -> {:venue_error, status, message}
       %{"error_description" => detail} when is_binary(detail) -> {:venue_error, status, detail}
@@ -3009,14 +3000,55 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp decode(body) when is_binary(body) do
+  # A 2xx body this package cannot decode is NOT an empty object.
+  #
+  # This used to collapse any unparseable body to `%{}` and hand it on as success. Nothing
+  # downstream could tell that apart from a real but sparse response: `%{}` flows into every
+  # reader in this module and comes out as a well-formed struct with each field `nil`,
+  # returned as `{:ok, value}`. The realistic way to get there is not malformed JSON from
+  # the venue but a `200` that is not the venue at all — an interstitial, a captive portal,
+  # or a CDN maintenance page, all of which answer `200 text/html`. A caller polling
+  # balances through one of those was told, truthfully-looking, that it held nothing.
+  #
+  # Refuse instead. `refusal_body/1` below stays lenient on purpose, for a body read for a
+  # different reason.
+  defp decoded_body(body) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, decoded} -> {:ok, decoded}
+      {:error, _reason} -> {:error, {:undecodable_response, :webull}}
+    end
+  end
+
+  defp decoded_body(body), do: {:ok, body}
+
+  # The OAuth token response, which must be an object because the caller reads
+  # `access_token`, `refresh_token` and two separate expiries out of it.
+  #
+  # This was the sharpest instance of the `%{}` collapse: an unparseable or non-object token
+  # response became `{:ok, %{}}`, so a refresh that had not actually returned a token
+  # reported success and the session ended at the next signed call with an authentication
+  # failure nothing connected back to the refresh.
+  defp decoded_token(body) do
+    case decoded_body(body) do
+      {:ok, %{} = decoded} -> {:ok, decoded}
+      {:ok, _other} -> {:error, :unexpected_response_shape}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  # Deliberately lenient, unlike `decoded_body/1`. A refusal's body is read for a
+  # human-readable reason and "there wasn't one in it" is an honest answer — the refusal
+  # itself is already established by the status code, so collapsing an unparseable body to
+  # `%{}` here loses nothing and `{:venue_error, status}` remains true. On a 2xx body the
+  # identical collapse invents a success, which is the whole difference.
+  defp refusal_body(body) when is_binary(body) do
     case Jason.decode(body) do
       {:ok, decoded} -> decoded
       {:error, _reason} -> %{}
     end
   end
 
-  defp decode(body), do: body
+  defp refusal_body(body), do: body
 
   defp stringify(params), do: Map.new(params, fn {k, v} -> {to_string(k), to_string(v)} end)
 
