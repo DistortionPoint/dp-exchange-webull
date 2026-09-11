@@ -61,20 +61,6 @@ defmodule DpExchange.Webull.FeedTest do
     }
   end
 
-  # A real pid, guaranteed dead by the time it is used — `Socket.disconnect/2` must
-  # answer with `{:error, :not_alive}` for one rather than raise, and asserting on that
-  # from here doubles as an observable signal that `terminate/2` actually attempted the
-  # shard: a shard it skips never calls `disconnect/2` at all, so it never logs.
-  defp dead_pid do
-    pid = spawn(fn -> :ok end)
-    # Not pinned to `:normal` — the process can finish and exit before `Process.monitor/1`
-    # runs, in which case the monitor reports `:noproc` instead. Either way it is dead,
-    # which is all this helper promises. See `SocketTest`'s matching helper.
-    ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
-    pid
-  end
-
   defp start_feed(opts \\ []) do
     name = :"feed_#{System.unique_integer([:positive])}"
     defaults = [name: name, shards: %{0 => connected_shard()}]

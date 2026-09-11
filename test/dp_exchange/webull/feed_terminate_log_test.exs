@@ -30,12 +30,16 @@ defmodule DpExchange.Webull.FeedTerminateLogTest do
   @moduletag :capture_log
 
   # A pre-connected shard 0, standing in for one that already opened and saw its
-  # CONNACK. `session_id` is overridable because one test in `FeedTest` asserts on it;
-  # nothing here needs that, but the helper is kept identical to `FeedTest`'s own so the
-  # two files stay obviously equivalent at a glance.
-  defp connected_shard(session_id \\ nil) do
+  # CONNACK. `session_id` is a REQUIRED argument here, unlike `FeedTest`'s otherwise
+  # identical helper where it defaults to `nil`: every call in this file names its shard
+  # explicitly ("s0", "s1"), so that default was never once used and the compiler said so.
+  # Kept as a stated difference rather than papered over — an unused default is a small
+  # thing, and the reason it is worth fixing is that it was one of only two compile
+  # warnings in the whole family's test suites, which is the noise a genuinely wrong
+  # warning would have hidden behind.
+  defp connected_shard(session_id) do
     %{
-      session_id: session_id || "session-#{System.unique_integer([:positive])}",
+      session_id: session_id,
       socket: self(),
       connected?: true,
       symbols: [],
