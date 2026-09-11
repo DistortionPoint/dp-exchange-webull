@@ -127,6 +127,46 @@ defmodule DpExchange.Webull.AccountsTest do
       assert balance.provider == :webull
     end
 
+    test "a currency-asset row with no currency refuses the whole reply" do
+      # `Core.Types.Balance`'s `new/1` refuses a nil `:currency`, and nothing in this
+      # package ever called `new/1` — the decoder builds the struct literally, as all five
+      # venues do — so the check never ran and the field came straight out of the venue's
+      # JSON by key. A renamed or absent `"currency"` gave `%Types.Balance{currency: nil}`:
+      # an amount attributable to no asset, inside `{:ok, balances}`, which a consumer
+      # cannot size, book or reconcile against.
+      #
+      # This venue is the likeliest of the five to hit it: `value/2` exists here precisely
+      # because Webull sends the same field under two spellings, so a third spelling is not
+      # hypothetical.
+      body = %{
+        "account_currency_assets" => [%{"cash_balance" => "1.0", "frozen_amount" => "0.0"}]
+      }
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_balances(@credentials,
+                 plug: responding(body),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an unstated cash balance is NOT refused — an unknown total is still a balance" do
+      # The other half of the rule. `Core.Types.Balance` permits a nil `:balance` and not a
+      # nil `:currency`: an unknown quantity is still a balance, an unattributable one is
+      # not. Guarding both would have made this row an error for nobody's benefit — the
+      # `hold` beside it is real.
+      assert {:ok, [balance]} =
+               Rest.get_balances(@credentials,
+                 plug: responding(balance_body(%{"cash_balance" => nil})),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert balance.currency == "USD"
+      assert balance.balance == nil
+      assert Decimal.equal?(balance.hold, Decimal.new("485705"))
+    end
+
     test "available_balance is nil, and none of the five candidates is promoted into it" do
       # buying_power, available_withdrawal, settled_cash, cash minus frozen, cash minus held
       # are five different numbers here. Each is "available" to a different caller, and
