@@ -607,4 +607,54 @@ defmodule DpExchange.Webull.AccountsTest do
                )
     end
   end
+
+  describe "a position row the venue did not attribute to an instrument" do
+    test "refuses the whole reply rather than reporting an unnamed position" do
+      # `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but
+      # this decoder builds the struct literally so that check never ran, and
+      # `canonical_or_nil/1` passed an absent symbol straight through. A position naming no
+      # instrument cannot be sized, closed or reconciled by anyone — it is not a weaker claim
+      # about what is held, it is not a claim at all.
+      row = %{"quantity" => "1", "cost_price" => "100"}
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Rest.get_positions(@credentials,
+                 plug: responding([row]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "one unattributable row refuses even when the others are fine" do
+      # Dropping it silently would read as "you hold none of that instrument", a different
+      # and more dangerous claim than "this response could not be read".
+      rows = [%{"symbol" => "BTCUSD", "quantity" => "1"}, %{"quantity" => "2"}]
+
+      assert {:error, {:missing_required_field, :symbol}} =
+               Rest.get_positions(@credentials,
+                 plug: responding(rows),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an unreadable quantity is NOT refused — that absence is reasoned" do
+      # The other half. `signed_quantity/1` answers `{nil, nil}` for a quantity this package
+      # could not read, deliberately: a position with no quantity has no direction either, and
+      # `:long` would be a guess. Unlike a missing symbol it still leaves a caller knowing the
+      # position exists, so the symbol guard must not tighten into it.
+      row = %{"symbol" => "BTCUSD", "quantity" => "not a number"}
+
+      assert {:ok, [position]} =
+               Rest.get_positions(@credentials,
+                 plug: responding([row]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert position.symbol == "BTC-USD"
+      assert position.quantity == nil
+      assert position.side == nil
+    end
+  end
 end

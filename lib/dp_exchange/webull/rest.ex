@@ -818,11 +818,52 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, account_id} <- account_id(opts),
          {:ok, body} <-
            get("/trading/assets/positions/list", %{"account_id" => account_id}, credentials, opts) do
-      {:ok, body |> rows() |> Enum.map(&to_position/1)}
+      body |> rows() |> to_positions()
     end
   end
 
+  # Refuses a position row this venue did not attribute to an instrument.
+  #
+  # `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but this
+  # decoder builds the struct literally — as everywhere in this family — so that check never
+  # ran, and `canonical_or_nil/1` passes an absent symbol straight through. A position naming
+  # no instrument cannot be sized, closed or reconciled by anyone: it is not a weaker claim
+  # about what is held, it is not a claim at all, and it sits in a list of real positions
+  # looking like one.
+  #
+  # **`side` and `quantity` are deliberately left alone.** `signed_quantity/1` answers
+  # `{nil, nil}` for a quantity this package could not read, and the comment below it states
+  # why: a position with no quantity has no direction either, and `:long` would be a guess.
+  # That is a reasoned absence rather than an oversight, and unlike the symbol it still leaves
+  # a caller knowing the position exists.
   defp to_position(row) do
+    with {:ok, symbol} <-
+           required_position_symbol(row |> value(["symbol"]) |> canonical_or_nil()) do
+      {:ok, position_struct(row, symbol)}
+    end
+  end
+
+  # One unattributable row refuses the whole reply rather than leaving a gap in it. A position
+  # list with an entry silently missing reads as "you hold none of that instrument", which is
+  # a different and more dangerous claim than "this response could not be read".
+  defp to_positions(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_position(row) do
+        {:ok, position} -> {:cont, {:ok, [position | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, positions} -> {:ok, Enum.reverse(positions)}
+      error -> error
+    end
+  end
+
+  defp required_position_symbol(nil), do: {:error, {:missing_required_field, :symbol}}
+  defp required_position_symbol(symbol), do: {:ok, symbol}
+
+  defp position_struct(row, symbol) do
     {side, quantity} =
       row
       |> value(["quantity"])
@@ -830,7 +871,7 @@ defmodule DpExchange.Webull.Rest do
       |> signed_quantity()
 
     %Position{
-      symbol: row |> value(["symbol"]) |> canonical_or_nil(),
+      symbol: symbol,
       side: side,
       quantity: quantity,
       instrument_type: row |> value(["instrument_type", "instrumentType"]) |> instrument_atom(),

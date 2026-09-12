@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A position row the venue did not attribute to an instrument was reported as a position.**
+  `Core.Types.Position` enforces `:symbol` and its `new/1` refuses a `nil` there, but this
+  decoder builds the struct literally — as every decoder in this family does — so that check
+  never ran and the symbol came through by key. A position naming no instrument cannot be
+  sized, closed or reconciled by anyone: it is not a weaker claim about what is held, it is
+  not a claim at all, and it sat in a list of real positions looking like one.
+
+  One unattributable row now refuses the whole reply rather than being dropped. A position
+  list with an entry silently missing reads as "you hold none of that instrument", which is a
+  different and more dangerous claim than "this response could not be read".
+
+- **A reconnect-timing test failed under load while the behaviour was correct.** It asserted
+  the attempt-1 path returns in under 500ms, which is stricter than the claim needs — the
+  claim is "no backoff was applied", and the smallest backoff is a full second, so any time
+  under one proves it. Measured against that boundary now. Same shape as the rate-limiter
+  bucket race and `Core.PollingFeed`'s poll-interval waits: a timing assertion that holds
+  when the machine is quiet and inverts when it is not.
+
 ## [0.4.25] - 2026-09-12
 
 ### Fixed
@@ -700,7 +720,6 @@ acceptable changelog line.
   for a crypto or event-contract category — rather than degrading to the nearest width it
   does serve.
 
-
 ## [0.4.2] - 2026-09-10
 
 ### Fixed
@@ -736,7 +755,6 @@ acceptable changelog line.
   The issue measured five packages, from their `deps/`. `dp_exchange_schwab` has the same
   defect and is not one of their dependencies, so it could not appear in their table: six
   instances, all fixed here.
-
 
 ## [0.4.1] and earlier - 2026-09-10
 
@@ -2229,7 +2247,6 @@ the last block that will ever need a range.
   account is not entitled rather than that the batch was wrong — the venue's own message is
   carried through unchanged.
 
-
 - **The token lifecycle** — `create_token/1`, `check_token/2` and `oauth_token/3`.
 
   **A token that exists is not a token that works.** `create_token/1` returns one that is
@@ -2252,7 +2269,6 @@ the last block that will ever need a range.
 
   **Two expiries come back and they are not the same clock.** `expires_in` is the access
   token's; `rt_expires_in` is the refresh token's, and it is the one that ends the session.
-
 
 - **Reference data and watchlists** — thirty-eight endpoints: twenty-three fundamentals, six
   screeners, news summaries, and the eight watchlist calls.
@@ -2300,7 +2316,6 @@ the last block that will ever need a range.
   and is empty, and that returns `{:error, {:watchlist_created_without_members, id, reason}}`
   carrying the id rather than an `{:ok, watchlist}` a caller would read as complete.
 
-
 - **Futures and event contracts** — sixteen endpoints, and a reference document
   (`docs/reference/webull/futures-and-event-contracts.md`) recording every parameter and
   response field.
@@ -2344,7 +2359,6 @@ the last block that will ever need a range.
 
   `asset_classes/0` gains `:future` and `:event_contract`.
 
-
 - **`get_transactions/2`** — the same `/trading/activities/cash-activities/list` endpoint
   `get_transfers/2` narrows, asked without the filter.
 
@@ -2370,7 +2384,6 @@ the last block that will ever need a range.
   accounts; funding happens in Webull's own applications, which need a person.
   `/trading/activities/cash-activities/list` *reports* money that moved and does not move
   any. No fee-promotion list, FX publication, notional valuation or custody product either.
-
 
 - **The options surface**: `get_option_chain/2`, `get_option_expirations/2`, and `US_OPTION`
   on the snapshot, bars and tape — `/trading/instruments/options/contracts/list`,
@@ -2401,13 +2414,11 @@ the last block that will ever need a range.
 
   `asset_classes/0` gains `:option`.
 
-
 - **`get_symbols/2` reaches the stock instrument profiles**,
   `/trading/instruments/stocks/profiles/list`, routed by `opts[:category]`. Both endpoints
   paginate the same way and both are bounded — a truncated instrument list is the worst
   shape this family has, because every symbol in it is real and the missing ones are simply
   never traded.
-
 
 - **`get_historical_prices/5` reaches the stock bars**, `POST /market-data/stocks/bars/list`,
   routed by `opts[:category]`. **A POST where the crypto bars are a GET**, with its
@@ -2430,7 +2441,6 @@ the last block that will ever need a range.
   The body sends `count`, `start_time` and `end_time` as **numbers, not strings**: the venue
   types them `int32`/`int64`, and a quoted number in a typed JSON field is a different value.
 
-
 - **`get_price/3` and `get_top_of_book/3` reach the stock snapshot**,
   `/market-data/stocks/snapshots/list`, chosen by `opts[:category]`.
 
@@ -2450,7 +2460,6 @@ the last block that will ever need a range.
   `extend_hour_required` and `overnight_required` are sent explicitly on stocks so a caller
   reading `nil` knows it did not ask, rather than that the venue had nothing. Equity tickers
   bypass the canonical pair mapper, as they do on the order path.
-
 
 - **`get_trades/2` — tick-by-tick public trades**, `/market-data/stocks/ticks/list`.
 
@@ -2661,7 +2670,6 @@ the last block that will ever need a range.
   account-volume report. Summing fills here would be this package's arithmetic rather than
   the venue's ledger, which is the number its fee tiers actually come from.
 
-
 - **Core 0.1.21's three new callbacks are declared, each with the venue checked.**
   `preview_replace/4` follows `replace_order/4`: the venue excludes **crypto** from the
   amendment endpoint, and crypto is what this package declares today — so it is
@@ -2671,7 +2679,6 @@ the last block that will ever need a range.
   `client_order_id` and the venue publishes no cancel-all or cancel-session.
   `close_position/3` likewise — `/trading/assets/positions/list` reads positions and
   nothing closes one, at any asset class.
-
 
 - **Corrected a false claim about the venue.** `@unsupported` said `preview_order/3` "has
   no endpoint at all". `/trading/orders/preview` exists and is documented; what the vendor
