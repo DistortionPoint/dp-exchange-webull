@@ -2241,4 +2241,117 @@ defmodule DpExchange.Webull.FeedTest do
       assert notice.details.reason =~ "reconcile_timeout"
     end
   end
+
+  describe "the escalation is gated on delivery — issue #1, field results from 0.4.25" do
+    # 0.4.25 escalated on consecutive failures alone. On the live fleet three shards hit the
+    # limit, reopened, and failed the identical reconcile on the very next tick and every tick
+    # after — a fresh session changed nothing. Coverage fell from 226 distinct symbols to ~160
+    # while the two other streaming venues stayed flat over the same windows.
+    #
+    # The stuck-but-subscribed socket had been delivering. A reconcile is a
+    # subscription-management call and can fail while the transport underneath keeps streaming
+    # what it is already subscribed to, so reopening it can only lose data.
+
+    defp shard_with(session, symbols, socket) do
+      %{
+        session_id: session,
+        socket: socket,
+        connected?: true,
+        symbols: symbols,
+        reply_to: nil
+      }
+    end
+
+    defp fail_n(feed, index, times) do
+      for _attempt <- 1..times do
+        send(feed, {:reconcile_done, {:resubscribe, index}, {:error, :boom}})
+        _settled = Feed.coverage(feed)
+      end
+    end
+
+    test "a shard still delivering is NOT reopened, however many reconciles have failed" do
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(
+          shards: %{0 => shard_with("s0", ["BTC-USD"], socket)},
+          resubscribe_failure_limit: 3,
+          stale_delivery_ms: 60_000
+        )
+
+      # The shard delivered a moment ago — exactly the live case.
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond)}}
+      end)
+
+      fail_n(feed, 0, 5)
+
+      state = :sys.get_state(feed)
+
+      assert Map.has_key?(state.shards, 0),
+             "a shard whose symbols are still arriving must keep its socket"
+
+      assert Process.alive?(socket), "the socket must not be torn down while it is delivering"
+      assert state.resubscribe_failed[0] == 5, "failures keep counting, they just do not act"
+    end
+
+    test "a shard that has gone quiet IS reopened once the limit is reached" do
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(
+          shards: %{0 => shard_with("s0", ["BTC-USD"], socket)},
+          resubscribe_failure_limit: 3,
+          stale_delivery_ms: 50
+        )
+
+      # Delivered, but longer ago than `stale_delivery_ms` — the case where a reopen has
+      # something to gain, because nothing is being lost by it.
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond) - 10_000}}
+      end)
+
+      Feed.subscribe_notices(feed, to: self())
+      fail_n(feed, 0, 3)
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 2_000
+      refute Map.has_key?(:sys.get_state(feed).shards, 0)
+    end
+
+    test "delivery is judged per shard, not across the feed" do
+      # A busy shard must not keep a silent sibling's socket alive. Each shard is its own MQTT
+      # session with its own independent failure and recovery schedule.
+      quiet_socket = spawn(fn -> Process.sleep(:infinity) end)
+      busy_socket = spawn(fn -> Process.sleep(:infinity) end)
+
+      on_exit(fn ->
+        for pid <- [quiet_socket, busy_socket], Process.alive?(pid), do: Process.exit(pid, :kill)
+      end)
+
+      feed =
+        start_feed(
+          shards: %{
+            0 => shard_with("s0", ["BTC-USD"], quiet_socket),
+            1 => shard_with("s1", ["ETH-USD"], busy_socket)
+          },
+          resubscribe_failure_limit: 3,
+          stale_delivery_ms: 60_000
+        )
+
+      # Only shard 1's symbol is arriving.
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"ETH-USD" => :os.system_time(:millisecond)}}
+      end)
+
+      fail_n(feed, 0, 3)
+      fail_n(feed, 1, 3)
+
+      state = :sys.get_state(feed)
+
+      refute Map.has_key?(state.shards, 0), "the silent shard must be reopened"
+      assert Map.has_key?(state.shards, 1), "the delivering shard must be left alone"
+    end
+  end
 end

@@ -707,22 +707,36 @@ restated as a claim about the venue. It also records why the vendor's pages have
 **rendered** to be read — their parameter tables are built in JavaScript, and an inventory
 captured without them looks finished and cannot be implemented from.
 
-## A shard that keeps failing the same resubscribe reopens its own socket
+## A shard reopens its own socket only once it has stopped delivering
 
 Each shard reasserts its symbols on a timer. If one shard's blind resubscribe fails
-**twelve times in a row**, this package stops repeating the identical call and reopens that
-shard's socket on a fresh session — the same recovery an explicit `INVALID_SESSION` has
-always triggered. A `:link_down` notice says so when it happens, naming the shard.
+**twelve times in a row** *and* none of that shard's symbols has arrived for **five minutes**,
+this package reopens that shard's socket on a fresh session — the same recovery an explicit
+`INVALID_SESSION` triggers. A `:link_down` notice says so, naming the shard.
 
-**Why twelve.** Measured, from the incident behind it (issue #1): after a node restart all
-four shards failed, and the three that recovered on their own did so after 8, 10 and 10
-consecutive failures. A lower limit would tear down sockets that were about to recover, and
-every teardown claims a fresh session against the venue's per-account ceiling — the same
-contention (`Permission grabbed by other session`) that tends to cause the failure in the
-first place. Set `resubscribe_failure_limit:` on `start_link/1` if your tolerance differs.
+**Both conditions are required, and the second one is the important half.** A reconcile is a
+subscription-management call: it can keep failing while the transport underneath streams
+everything it is already subscribed to. Reopening in that state loses live data and gains
+nothing.
 
-A success resets the count, so only *consecutive* failures escalate: a shard that fails,
-recovers and fails again has not been stuck for two ticks.
+That is not a theory. Version 0.4.25 escalated on the failure count alone. On a live fleet
+three shards hit the limit, reopened, and failed the identical reconcile on the very next tick
+and every tick after — a fresh session changed nothing — while this venue's coverage fell from
+226 distinct symbols to about 160, with two other streaming venues flat across the same
+windows. The stuck-but-subscribed sockets had been delivering; tearing them down is what
+stopped it.
+
+So while a shard is still delivering, the failures are counted and reported and nothing is
+torn down. The log line says which case you are in.
+
+**Why five minutes of silence.** A shard carries on the order of a hundred symbols. The
+question is not "has this symbol been quiet" — an illiquid pair can go minutes without a print
+— but "has every symbol on this shard been quiet at once", which a live shard does not do.
+Erring long costs a few more minutes of a stale subscription set; erring short costs live
+data. Both are tunable: `resubscribe_failure_limit:` and `stale_delivery_ms:` on
+`start_link/1`.
+
+A success resets the failure count, so only *consecutive* failures count toward the limit.
 
 ## `{:reconcile_timeout, ms, :no_venue_response}` says which of two opposite actions applies
 

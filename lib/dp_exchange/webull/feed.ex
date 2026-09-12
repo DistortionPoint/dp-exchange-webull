@@ -334,6 +334,20 @@ defmodule DpExchange.Webull.Feed do
   # Overridable, because one incident is one sample.
   @resubscribe_failure_limit 12
 
+  # How long a shard must have delivered NOTHING before a reopen is allowed to consider it
+  # stale. See `shard_delivering?/2` for the field result that made this gate necessary: the
+  # failure-count escalation alone reopened sockets that were still streaming and cost 29% of
+  # this venue's coverage.
+  #
+  # Five minutes, against a `@resubscribe_interval_ms` of one minute, so the shard must be
+  # silent across five whole resubscribe cycles. That is deliberately long. A shard carries on
+  # the order of a hundred symbols, and the question is not "has this symbol been quiet" — an
+  # illiquid pair can easily go minutes without a print — but "has EVERY symbol on this shard
+  # been quiet at once", which a live shard does not do. Erring long costs a few more minutes
+  # of a stale subscription set; erring short costs live data, which is the mistake already
+  # made here once.
+  @stale_delivery_ms 300_000
+
   # See the moduledoc's "A venue-rejected symbol is excluded, timed, and reported" —
   # deliberately the same order of magnitude as
   # `DpCryptoManagement.Data.Collection.VenueRefusals`' own 24h TTL for exactly this shape
@@ -438,6 +452,9 @@ defmodule DpExchange.Webull.Feed do
        # tolerance than the one incident behind that number can set their own.
        resubscribe_failure_limit:
          Keyword.get(opts, :resubscribe_failure_limit) || @resubscribe_failure_limit,
+       # See `@stale_delivery_ms`. Overridable so a test proving the delivery gate need not
+       # wait out five real minutes of silence.
+       stale_delivery_ms: Keyword.get(opts, :stale_delivery_ms) || @stale_delivery_ms,
        resubscribe_interval_ms: resubscribe_interval_ms,
        socket_opts:
          Keyword.take(opts, [
@@ -1710,16 +1727,72 @@ defmodule DpExchange.Webull.Feed do
     failures = Map.get(state.resubscribe_failed, index, 0) + 1
     state = %{state | resubscribe_failed: Map.put(state.resubscribe_failed, index, failures)}
 
-    if failures >= state.resubscribe_failure_limit do
-      Logger.warning(
-        "[Webull Feed] shard #{index} has failed #{failures} consecutive blind resubscribes " <>
-          "— reopening its socket on a fresh session rather than attempting the identical " <>
-          "reconcile again"
-      )
+    cond do
+      failures < state.resubscribe_failure_limit ->
+        state
 
-      rebuild_stale_shard(state, index, nil)
-    else
-      state
+      shard_delivering?(state, index) ->
+        # The reconcile keeps timing out and the symbols keep arriving. That is a
+        # subscription-management problem on a WORKING transport, and reopening the transport
+        # can only lose what it was still delivering. Logged once, on the transition, rather
+        # than every tick for as long as the condition lasts.
+        if failures == state.resubscribe_failure_limit do
+          Logger.warning(
+            "[Webull Feed] shard #{index} has failed #{failures} consecutive blind " <>
+              "resubscribes but its symbols are still arriving — NOT reopening the socket, " <>
+              "because a reopen would drop deliveries this shard is still making. It will " <>
+              "reopen if and when those deliveries stop."
+          )
+        end
+
+        state
+
+      true ->
+        Logger.warning(
+          "[Webull Feed] shard #{index} has failed #{failures} consecutive blind resubscribes " <>
+            "and has delivered nothing for #{state.stale_delivery_ms}ms — reopening its " <>
+            "socket on a fresh session rather than attempting the identical reconcile again"
+        )
+
+        rebuild_stale_shard(state, index, nil)
+    end
+  end
+
+  # Has anything this shard is responsible for arrived recently?
+  #
+  # **This gate exists because the version without it made things worse, measured.** Issue #1
+  # shipped an escalation keyed on consecutive failures alone. Run against the live fleet on
+  # 0.4.25, three shards hit the limit, reopened, and failed the identical reconcile on the
+  # very next tick and every tick after — a fresh session did not change the outcome once.
+  # Coverage fell from 226 distinct symbols to ~160 (−29%) while `dp_exchange_coinbase` and
+  # `dp_exchange_gemini` stayed flat across the same windows, so a quiet market cannot explain
+  # it. The stuck-but-subscribed socket had been delivering; tearing it down is what stopped
+  # that. And because `rebuild_stale_shard/3` resets the counter, it had become a cycle: fail
+  # twelve times, reopen, fail twelve times, reopen.
+  #
+  # The inference that failed was mine — that a shard which cannot reconcile is a shard whose
+  # session is no good. It is not. A reconcile is a subscription-management call, and it can
+  # fail while the transport underneath keeps streaming everything already subscribed to.
+  # That is exactly what this `Feed`'s own log line has always promised ("its N symbol(s) stay
+  # on whatever they last delivered until the next resubscribe tick"), and a reopen is what
+  # breaks the promise.
+  #
+  # So the reopen is gated on the thing that actually separates the two cases. A reopen can
+  # only GAIN something once the shard has stopped delivering; while it is still delivering,
+  # the worst case of doing nothing is a stale subscription set, and the worst case of acting
+  # is losing live data.
+  #
+  # `delivering` is `%{symbol => epoch_ms}`, written on every arrival. A shard that has never
+  # delivered at all reads as quiet here, which is right: reaching the failure limit takes
+  # `resubscribe_failure_limit` minutes, and a working shard delivers well inside that.
+  defp shard_delivering?(state, index) do
+    case Map.fetch(state.shards, index) do
+      :error ->
+        false
+
+      {:ok, %{symbols: symbols}} ->
+        cutoff = :os.system_time(:millisecond) - state.stale_delivery_ms
+        Enum.any?(symbols, fn symbol -> Map.get(state.delivering, symbol, 0) > cutoff end)
     end
   end
 

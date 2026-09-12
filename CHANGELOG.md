@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The escalation added in 0.4.25 made things worse, and is now gated on delivery
+  (issue #1).** That version reopened a shard's socket after twelve consecutive blind
+  resubscribe failures. Measured on the reporter's live fleet: three shards hit the limit,
+  reopened, and failed the identical reconcile on the very next tick and every tick after — a
+  fresh session did not change the outcome once — while this venue's coverage fell from 226
+  distinct symbols to about 160 (−29%), with `dp_exchange_coinbase` and `dp_exchange_gemini`
+  flat across the same windows. And because `rebuild_stale_shard/3` resets the counter, it had
+  become a cycle: fail twelve times, reopen, fail twelve times, reopen.
+
+  **The inference that failed was ours**: that a shard which cannot reconcile is a shard whose
+  session is no good. It is not. A reconcile is a subscription-management call, and it can
+  keep failing while the transport underneath streams everything already subscribed to —
+  which is exactly what this package's own log line has always promised, *"its N symbol(s)
+  stay on whatever they last delivered until the next resubscribe tick"*. A reopen breaks that
+  promise.
+
+  The reopen now also requires that **none of the shard's symbols has arrived for
+  `stale_delivery_ms`** (five minutes by default, five whole resubscribe cycles). While a
+  shard is still delivering, failures are counted and reported and nothing is torn down: the
+  worst case of doing nothing is a stale subscription set, and the worst case of acting is
+  losing live data. A reopen can only gain something once the shard has gone quiet.
+
+  Five minutes because a shard carries on the order of a hundred symbols, and the question is
+  not whether one symbol has been quiet — an illiquid pair can go minutes without a print —
+  but whether every symbol on the shard has been quiet at once, which a live shard does not
+  do. Tunable via `stale_delivery_ms:`, alongside `resubscribe_failure_limit:`.
+
 ## [0.4.26] - 2026-09-12
 
 ### Fixed
