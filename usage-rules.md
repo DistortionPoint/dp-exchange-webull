@@ -676,6 +676,29 @@ each has a different remedy.
 **Two expiries come back and they are not the same clock** — `rt_expires_in` is the one that
 ends the session.
 
+## Error shapes that mean "do not act on this answer"
+
+Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
+A consumer matching only `{:ok, _}` needs no change; one that enumerates error reasons
+should know them.
+
+`{:error, {:undecodable_response, :webull}}` — the venue answered `2xx` with a body this
+package could not decode. The realistic cause is not malformed JSON from the venue; it is a
+`2xx` that never reached the venue, such as a captive portal or a CDN maintenance page
+answering `200 text/html`. **Worth retrying**: nothing about the request was wrong. This
+package used to substitute an empty object for such a body, which then decoded into a
+well-formed value with every field `nil` and was returned as success.
+
+`{:error, :unexpected_response_shape}` from `get_balances/2` — a balance row the venue did
+not attribute to an asset refuses the whole reply. An amount you cannot name an asset for
+cannot be sized, booked or reconciled against, and dropping the row silently would read as
+"you hold none of that asset", a different and more dangerous claim than "this response could
+not be read". **Not retryable on its own.**
+
+A `Balance`'s own `balance` field may still be `nil`, and that is a different statement: the
+venue named the asset and did not state a quantity for it. Read that as unknown, never as
+zero.
+
 ## Every negative here is audited
 
 `docs/reference/webull/negative-claims.md` lists each one with the source and date consulted.
