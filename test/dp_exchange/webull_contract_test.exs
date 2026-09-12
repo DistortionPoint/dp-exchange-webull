@@ -23,5 +23,26 @@ defmodule DpExchange.WebullContractTest do
     symbol_format: DpExchange.Webull.SymbolFormat,
     sample_pairs: ~w(BTC-USD ETH-USD SOL-USD),
     credentials: %{app_key: "test-app-key", app_secret: "test-app-secret"},
-    package_root: "lib/dp_exchange"
+    package_root: "lib/dp_exchange",
+    # The options this venue's own endpoints require before its fake will answer at all.
+    #
+    # Without these, every fake-driven assertion that calls an account-scoped endpoint was
+    # refused for the MISSING ACCOUNT before it reached the behaviour under test, and the
+    # suite took that refusal as a legitimate answer and skipped. Assertion 24 is how it
+    # surfaced: niling this package's fake balance currency on purpose left the suite green,
+    # while the two venues that need no account went red. Assertion 17 had the same shape —
+    # it strips credentials and expects a failure, and got one for the account rather than
+    # the credential.
+    #
+    # The key is this venue's, not Core's. A table of `:account_id` / `:account_number` /
+    # `:account_hash` inside the contract would be exactly the venue-specific knowledge the
+    # contract exists to keep out of Core.
+    endpoint_opts: %{
+      {:get_balances, 2} => [account_id: "contract-account"],
+      {:get_accounts, 2} => [account_id: "contract-account"],
+      {:get_orders, 2} => [account_id: "contract-account"],
+      {:place_order, 3} => [account_id: "contract-account"],
+      {:cancel_order, 3} => [account_id: "contract-account"],
+      {:get_order, 3} => [account_id: "contract-account"]
+    }
 end
