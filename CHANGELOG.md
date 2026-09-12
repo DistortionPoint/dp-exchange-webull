@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.25] - 2026-09-12
+
 ### Fixed
 
 - **A shard could retry the identical failing resubscribe forever (issue #1).** After a node
