@@ -172,8 +172,8 @@ defmodule DpExchange.Webull.Feed do
   fires the instant it crosses back OUT, and neither fires again while the shard's own
   state stays put.
 
-  Latched **per shard**, not globally — `state.resubscribe_failed`, a `MapSet` of shard
-  indices currently in this state — because each shard is its own independent MQTT
+  Latched **per shard**, not globally — `state.resubscribe_failed`, a map from shard index to
+  that shard's count of consecutive failures — because each shard is its own independent MQTT
   session with its own independent failure and recovery schedule. A global latch would
   either swallow a second shard's own transition while the first stayed latched, or
   (unlatched entirely) fire a fresh notice from up to five shards every single
@@ -318,6 +318,22 @@ defmodule DpExchange.Webull.Feed do
   # have — see DpCryptoManagement's issue #17.
   @resubscribe_interval_ms 60_000
 
+  # How many consecutive blind resubscribes one shard may fail before this `Feed` stops
+  # repeating the identical call and reopens that shard's socket instead. See
+  # `count_resubscribe_failure/2` for the incident (dp-exchange-webull issue #1) and why the
+  # escalation reuses `rebuild_stale_shard/3` rather than adding a second recovery path.
+  #
+  # **Twelve is measured, not picked.** In the reported incident the three shards that
+  # self-healed did so after 8, 10 and 10 consecutive failures. A limit at or below ten would
+  # have torn down sockets that were about to recover on their own, and every teardown claims
+  # a fresh session against the venue's per-account ceiling — the very contention
+  # (`Permission grabbed by other session`) that started that incident. Twelve clears the
+  # observed self-heal window with margin while bounding the stuck case to roughly twelve
+  # minutes at `@resubscribe_interval_ms` instead of forever.
+  #
+  # Overridable, because one incident is one sample.
+  @resubscribe_failure_limit 12
+
   # See the moduledoc's "A venue-rejected symbol is excluded, timed, and reported" —
   # deliberately the same order of magnitude as
   # `DpCryptoManagement.Data.Collection.VenueRefusals`' own 24h TTL for exactly this shape
@@ -417,6 +433,11 @@ defmodule DpExchange.Webull.Feed do
        # See `@reconcile_timeout_ms`. Overridable so a test proving the timeout fires need
        # not wait out the real one.
        reconcile_timeout_ms: Keyword.get(opts, :reconcile_timeout_ms) || @reconcile_timeout_ms,
+       # See `@resubscribe_failure_limit`. Overridable so a test proving the escalation fires
+       # need not drive twelve real resubscribe ticks, and so an operator with a different
+       # tolerance than the one incident behind that number can set their own.
+       resubscribe_failure_limit:
+         Keyword.get(opts, :resubscribe_failure_limit) || @resubscribe_failure_limit,
        resubscribe_interval_ms: resubscribe_interval_ms,
        socket_opts:
          Keyword.take(opts, [
@@ -494,7 +515,7 @@ defmodule DpExchange.Webull.Feed do
        # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
        # deletes and rebuilds a shard's entry wholesale on a crash, and this latch's own
        # lifecycle is deliberately independent of that — see the comment there.
-       resubscribe_failed: MapSet.new()
+       resubscribe_failed: %{}
      }}
   end
 
@@ -621,8 +642,19 @@ defmodule DpExchange.Webull.Feed do
       {:ok, %{pid: pid}} ->
         Process.exit(pid, :kill)
 
+        # `:no_venue_response` is the third element, and it is a statement of fact rather
+        # than a guess: this clause runs only because the deadline arrived with no answer, so
+        # what is known is precisely that nothing came back — not that the venue refused.
+        #
+        # dp-exchange-webull issue #1 asked for the distinction because the two cases call
+        # for opposite actions: a venue refusing because another session holds the permission
+        # must be waited out (reconnecting claims another session against the same ceiling),
+        # while a wedged socket of our own must be reconnected. A venue that answers with a
+        # refusal reaches a caller as that refusal and never as this tuple; this shape says
+        # which of the two a caller is looking at without either being inferred.
         handle_info(
-          {:reconcile_done, tag, {:error, {:reconcile_timeout, state.reconcile_timeout_ms}}},
+          {:reconcile_done, tag,
+           {:error, {:reconcile_timeout, state.reconcile_timeout_ms, :no_venue_response}}},
           forget_reconcile(state, tag)
         )
 
@@ -933,7 +965,11 @@ defmodule DpExchange.Webull.Feed do
           )
 
           if generic_resubscribe_error?(reason) do
-            latch_resubscribe_failure(state, index, symbols, reason)
+            # Notify on the first failure, count every one, escalate at the limit. The two
+            # are deliberately on different schedules — see `count_resubscribe_failure/2`.
+            state
+            |> latch_resubscribe_failure(index, symbols, reason)
+            |> count_resubscribe_failure(index)
           else
             state
           end
@@ -1415,7 +1451,7 @@ defmodule DpExchange.Webull.Feed do
     state = %{
       state
       | shards: Map.delete(state.shards, index),
-        resubscribe_failed: MapSet.delete(state.resubscribe_failed, index),
+        resubscribe_failed: Map.delete(state.resubscribe_failed, index),
         delivering: Map.drop(state.delivering, shard.symbols),
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
@@ -1587,7 +1623,7 @@ defmodule DpExchange.Webull.Feed do
         state = %{
           state
           | shards: Map.delete(state.shards, index),
-            resubscribe_failed: MapSet.delete(state.resubscribe_failed, index),
+            resubscribe_failed: Map.delete(state.resubscribe_failed, index),
             delivering: Map.drop(state.delivering, shard.symbols),
             delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
         }
@@ -1633,7 +1669,7 @@ defmodule DpExchange.Webull.Feed do
   # here rather than notifying again — a notice per tick on a sustained outage is still a
   # storm, just a slower one.
   defp latch_resubscribe_failure(state, index, symbols, reason) do
-    if MapSet.member?(state.resubscribe_failed, index) do
+    if Map.has_key?(state.resubscribe_failed, index) do
       state
     else
       notice =
@@ -1647,7 +1683,43 @@ defmodule DpExchange.Webull.Feed do
         )
 
       fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
-      %{state | resubscribe_failed: MapSet.put(state.resubscribe_failed, index)}
+      %{state | resubscribe_failed: Map.put(state.resubscribe_failed, index, 0)}
+    end
+  end
+
+  # Counts this shard's consecutive blind-resubscribe failures and escalates once the limit
+  # is reached.
+  #
+  # Separate from `latch_resubscribe_failure/4` above, which is about NOTIFYING once per
+  # transition. This one is about acting, and the two have different schedules on purpose:
+  # the notice fires on the first failure, the escalation on the twelfth.
+  #
+  # **dp-exchange-webull issue #1.** After a node restart, all four shards failed their blind
+  # resubscribe with `{:reconcile_timeout, 60_000}`. Three recovered on their own within
+  # eleven minutes; the fourth failed the identical reconcile 21 consecutive times over 21
+  # minutes and never recovered. Whatever state that shard was in, its own retry could not
+  # leave it — and nothing here counted, so nothing could notice: `resubscribe_failed` was a
+  # `MapSet`, which answers "is this shard failing?" and never "for how long".
+  #
+  # **The escalation is not new machinery.** `rebuild_stale_shard/3` already stops the
+  # socket, drops the shard's bookkeeping and reopens it on a fresh session — it is what
+  # `{:invalid_session, _}` has always done. This makes a repeated timeout reach the same
+  # remedy, because after a dozen identical failures "this shard's session is no good" is a
+  # better hypothesis than "the next attempt will differ".
+  defp count_resubscribe_failure(state, index) do
+    failures = Map.get(state.resubscribe_failed, index, 0) + 1
+    state = %{state | resubscribe_failed: Map.put(state.resubscribe_failed, index, failures)}
+
+    if failures >= state.resubscribe_failure_limit do
+      Logger.warning(
+        "[Webull Feed] shard #{index} has failed #{failures} consecutive blind resubscribes " <>
+          "— reopening its socket on a fresh session rather than attempting the identical " <>
+          "reconcile again"
+      )
+
+      rebuild_stale_shard(state, index, nil)
+    else
+      state
     end
   end
 
@@ -1656,7 +1728,7 @@ defmodule DpExchange.Webull.Feed do
   # and never learned it recovered is only half-served — the same reasoning
   # `Core.PollingFeed`'s own `record_success/2` applies to its sibling case.
   defp clear_resubscribe_failure(state, index) do
-    if MapSet.member?(state.resubscribe_failed, index) do
+    if Map.has_key?(state.resubscribe_failed, index) do
       symbols = state.shards |> Map.get(index, %{symbols: []}) |> Map.fetch!(:symbols)
 
       notice =
@@ -1669,7 +1741,7 @@ defmodule DpExchange.Webull.Feed do
         )
 
       fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
-      %{state | resubscribe_failed: MapSet.delete(state.resubscribe_failed, index)}
+      %{state | resubscribe_failed: Map.delete(state.resubscribe_failed, index)}
     else
       state
     end

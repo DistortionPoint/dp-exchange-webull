@@ -706,3 +706,36 @@ zero.
 restated as a claim about the venue. It also records why the vendor's pages have to be
 **rendered** to be read — their parameter tables are built in JavaScript, and an inventory
 captured without them looks finished and cannot be implemented from.
+
+## A shard that keeps failing the same resubscribe reopens its own socket
+
+Each shard reasserts its symbols on a timer. If one shard's blind resubscribe fails
+**twelve times in a row**, this package stops repeating the identical call and reopens that
+shard's socket on a fresh session — the same recovery an explicit `INVALID_SESSION` has
+always triggered. A `:link_down` notice says so when it happens, naming the shard.
+
+**Why twelve.** Measured, from the incident behind it (issue #1): after a node restart all
+four shards failed, and the three that recovered on their own did so after 8, 10 and 10
+consecutive failures. A lower limit would tear down sockets that were about to recover, and
+every teardown claims a fresh session against the venue's per-account ceiling — the same
+contention (`Permission grabbed by other session`) that tends to cause the failure in the
+first place. Set `resubscribe_failure_limit:` on `start_link/1` if your tolerance differs.
+
+A success resets the count, so only *consecutive* failures escalate: a shard that fails,
+recovers and fails again has not been stuck for two ticks.
+
+## `{:reconcile_timeout, ms, :no_venue_response}` says which of two opposite actions applies
+
+A reconcile that never came back now reports `{:reconcile_timeout, 60_000, :no_venue_response}`
+rather than `{:reconcile_timeout, 60_000}`. The third element is a statement of fact: the
+deadline arrived and nothing answered.
+
+That matters because the two causes call for opposite responses. **A venue refusing** —
+because another session holds the permission, say — must be waited out, since reconnecting
+claims a further session against the same ceiling. **A wedged socket of ours** must be
+reconnected, which is the only thing that helps. A venue that answers with a refusal reaches
+you as that refusal and never as this tuple, so the two are now distinguishable without
+either being inferred.
+
+You do not have to act on it: the escalation above is this package taking the reconnect
+decision itself, on the one signal it has and you do not.

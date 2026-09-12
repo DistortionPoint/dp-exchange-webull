@@ -22,6 +22,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A shard could retry the identical failing resubscribe forever (issue #1).** After a node
+  restart, all four shards failed their blind resubscribe with `{:reconcile_timeout, 60_000}`.
+  Three recovered on their own within eleven minutes; the fourth failed the identical
+  reconcile 21 consecutive times over 21 minutes and never recovered. Nothing counted, so
+  nothing could notice — `state.resubscribe_failed` was a `MapSet`, which answers "is this
+  shard failing?" and never "for how long".
+
+  After twelve consecutive failures a shard now reopens its own socket on a fresh session
+  instead of attempting the same reconcile again. **The escalation is not new machinery**:
+  `rebuild_stale_shard/3` already stops the socket, drops the shard's bookkeeping and reopens
+  it, and is what `{:invalid_session, _}` has always done. A repeated timeout now reaches the
+  same remedy, because after a dozen identical failures "this shard's session is no good" is
+  a better hypothesis than "the next attempt will differ".
+
+  **Twelve is measured, not picked.** In the reported incident the three shards that
+  self-healed did so after 8, 10 and 10 consecutive failures; a lower limit would tear down
+  sockets that were about to recover, and every teardown claims a fresh session against the
+  venue's per-account ceiling — the same contention that caused the incident. Overridable via
+  `resubscribe_failure_limit:`, because one incident is one sample. A success resets the
+  count, so only consecutive failures escalate.
+
+### Changed
+
+- **`{:reconcile_timeout, ms}` is now `{:reconcile_timeout, ms, :no_venue_response}`
+  (issue #1).** The third element is a statement of fact rather than a guess: that clause
+  runs only because the deadline arrived with no answer.
+
+  It exists because the two causes call for opposite actions — a venue refusing because
+  another session holds the permission must be waited out, since reconnecting claims a
+  further session against the same ceiling, while a wedged socket of ours must be
+  reconnected. A venue that answers with a refusal reaches a caller as that refusal and never
+  as this tuple, so the two are now distinguishable without either being inferred.
+
+  A consumer matching the old two-element tuple must widen the match.
+
 ## [0.4.24] - 2026-09-12
 ### Changed
 

@@ -136,6 +136,9 @@ defmodule DpExchange.Webull.FeedTest do
       # nothing — which is exactly how the first draft of these tests failed.
       test_pid = self()
 
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
@@ -168,6 +171,9 @@ defmodule DpExchange.Webull.FeedTest do
       # nothing — which is exactly how the first draft of these tests failed.
       test_pid = self()
 
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
@@ -195,6 +201,9 @@ defmodule DpExchange.Webull.FeedTest do
       # `from` built that way sends the reply to the feed itself and the assertion sees
       # nothing — which is exactly how the first draft of these tests failed.
       test_pid = self()
+
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
 
       :sys.replace_state(feed, fn state ->
         state
@@ -229,6 +238,9 @@ defmodule DpExchange.Webull.FeedTest do
       # nothing — which is exactly how the first draft of these tests failed.
       test_pid = self()
 
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
@@ -252,6 +264,9 @@ defmodule DpExchange.Webull.FeedTest do
       # `from` built that way sends the reply to the feed itself and the assertion sees
       # nothing — which is exactly how the first draft of these tests failed.
       test_pid = self()
+
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
 
       :sys.replace_state(feed, fn state ->
         state
@@ -1466,6 +1481,9 @@ defmodule DpExchange.Webull.FeedTest do
       # `:sys.replace_state/2` runs its function *inside* the target process, so
       # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
 
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
         state
@@ -1522,6 +1540,9 @@ defmodule DpExchange.Webull.FeedTest do
       }
 
       feed = start_feed(shards: %{0 => shard0})
+
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
 
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
@@ -2103,6 +2124,121 @@ defmodule DpExchange.Webull.FeedTest do
       # Proves the call actually queued behind the block rather than being answered before
       # it started — without which this would pass on the unfixed code too.
       assert waited > 5_000
+    end
+  end
+
+  describe "a shard that keeps failing the identical resubscribe — issue #1" do
+    # After a node restart all four shards failed their blind resubscribe with
+    # `{:reconcile_timeout, 60_000}`. Three recovered on their own within eleven minutes; the
+    # fourth failed the identical reconcile 21 consecutive times over 21 minutes and never
+    # recovered. Nothing counted, so nothing could notice: `resubscribe_failed` was a
+    # `MapSet`, which answers "is this shard failing?" and never "for how long".
+
+    defp fail_resubscribe(feed, index, times) do
+      for _attempt <- 1..times do
+        send(feed, {:reconcile_done, {:resubscribe, index}, {:error, :boom}})
+        _settled = Feed.coverage(feed)
+      end
+    end
+
+    test "consecutive failures are counted, not merely latched" do
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, resubscribe_failure_limit: 99)
+
+      fail_resubscribe(feed, 0, 3)
+
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 3}
+    end
+
+    test "a success resets the count, so only CONSECUTIVE failures escalate" do
+      # The three shards that recovered on their own are the reason this matters: a shard
+      # that fails, recovers and fails again is not one that has been stuck for two ticks.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, resubscribe_failure_limit: 99)
+
+      fail_resubscribe(feed, 0, 3)
+      send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).resubscribe_failed == %{}
+
+      fail_resubscribe(feed, 0, 1)
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1}
+    end
+
+    test "at the limit the shard's socket is reopened instead of retried again" do
+      # The escalation is `rebuild_stale_shard/3`, which `{:invalid_session, _}` has always
+      # used: stop the socket, drop the shard, reopen it on a fresh session. Reaching it from
+      # a repeated timeout is the whole fix — after a dozen identical failures "this shard's
+      # session is no good" beats "the next attempt will differ".
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("s0") | socket: socket}},
+          resubscribe_failure_limit: 3
+        )
+
+      Feed.subscribe_notices(feed, to: self())
+      fail_resubscribe(feed, 0, 3)
+
+      # The shard is dropped and re-opening: `rebuild_stale_shard/3` deletes it and sends
+      # itself `{:open_shard, ...}`, so what a consumer sees is the shard going away and a
+      # `:link_down` notice explaining why.
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 2_000
+      assert notice.details.reason =~ "reopening the shard on a fresh session"
+
+      refute Map.has_key?(:sys.get_state(feed).resubscribe_failed, 0)
+      assert Process.alive?(feed)
+    end
+
+    test "a shard below the limit is left alone to recover on its own" do
+      # The other half, and the reason the limit is twelve rather than three: in the reported
+      # incident the shards that self-healed did so after 8, 10 and 10 consecutive failures.
+      # Escalating earlier would tear down sockets that were about to recover, and every
+      # teardown claims a fresh session against the venue's per-account ceiling.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, resubscribe_failure_limit: 12)
+
+      fail_resubscribe(feed, 0, 11)
+
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 11}
+      assert Map.has_key?(:sys.get_state(feed).shards, 0), "the shard must still be there"
+    end
+
+    test "the reconcile timeout says it got no answer, rather than leaving the cause open" do
+      # Issue #1 asked for this because the two causes call for opposite actions: a venue
+      # refusing because another session holds the permission must be waited out, while a
+      # wedged socket of our own must be reconnected. When this timer fires, what is KNOWN is
+      # that nothing came back — so that is what the term says.
+      feed =
+        start_feed(
+          shards: %{0 => connected_shard("s0")},
+          reconcile_timeout_ms: 50,
+          resubscribe_failure_limit: 99
+        )
+
+      stalled = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+
+      :sys.replace_state(feed, fn state ->
+        entry = %{pid: stalled, ref: Process.monitor(stalled)}
+        %{state | reconciling: Map.put(state.reconciling, {:resubscribe, 0}, entry)}
+      end)
+
+      Feed.subscribe_notices(feed, to: self())
+
+      send(feed, {:reconcile_timeout, {:resubscribe, 0}})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1},
+             "the timeout must reach the same failure path a venue error does"
+
+      # The reason term itself, not merely the fact that it failed. `:no_venue_response` is
+      # what distinguishes "nothing came back" from "the venue refused", and a consumer
+      # choosing between waiting and reconnecting needs that distinction to be IN the value
+      # rather than inferred from its absence.
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 2_000
+      assert notice.details.reason =~ "no_venue_response"
+      assert notice.details.reason =~ "reconcile_timeout"
     end
   end
 end
