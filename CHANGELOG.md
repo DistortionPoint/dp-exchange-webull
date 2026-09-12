@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.28] - 2026-09-12
+
 ### Fixed
 
 - **A timed-out reconcile no longer puts an ERROR-level OTP report on the host's logger
