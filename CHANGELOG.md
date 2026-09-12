@@ -21,6 +21,8 @@ what was run against the live venue, and when. "Marked proven" with no evidence 
 acceptable changelog line.
 
 ## [Unreleased]
+
+## [0.4.24] - 2026-09-12
 ### Changed
 
 - **`usage-rules.md` documents the error shapes this package started returning this week.**
