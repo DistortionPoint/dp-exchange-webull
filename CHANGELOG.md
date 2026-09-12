@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A timed-out reconcile no longer puts an ERROR-level OTP report on the host's logger
+  (issue #2).** The reconcile task was torn down with `Process.exit(pid, :kill)`, which
+  reaches its `Task.Supervisor` as `:killed`; OTP skips its child-termination report only
+  for `:normal`, `:shutdown` and `{:shutdown, _}`, and reports every other reason at ERROR.
+  So each timed-out reconcile — one per shard per resubscribe tick — logged
+  `Child :undefined of Supervisor #PID<_> (Task.Supervisor) terminated / ** (exit) killed`.
+  The reporting host saw 234 of 239 ERROR lines in a single boot from this alone.
+
+  Now `:shutdown`, which terminates the task identically (no reconcile task traps exits)
+  and is the reason OTP reads as intentional. This is the same choice `stop_socket/1`
+  already made for the websocket, made there and never carried to the task.
+
+  Nothing was broken by the noise and no caller-visible behaviour changes: the timeout
+  still answers its caller with `{:error, {:reconcile_timeout, ms, :no_venue_response}}`,
+  and the condition is still reported at WARN with the shard named. What changes is that
+  ERROR on a host running this package now carries information again — the OTP report named
+  neither this package nor the shard, and arrived at the level alerting keys off.
+
+  Measured rather than assumed, on 2026-09-12: a `Task.Supervisor` child was exited both
+  ways with `Logger`'s `:logger_translator` primary filter set to `sasl: true` (the host
+  setting that lets these through; this package's test env drops them). `:kill` produced
+  the report above; `:shutdown` produced nothing. The regression test asserts the task's
+  exit reason, which is the whole of what OTP branches on.
+
 ## [0.4.27] - 2026-09-12
 
 ### Fixed

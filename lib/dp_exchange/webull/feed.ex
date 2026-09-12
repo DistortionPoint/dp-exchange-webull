@@ -657,7 +657,7 @@ defmodule DpExchange.Webull.Feed do
   def handle_info({:reconcile_timeout, tag}, state) do
     case Map.fetch(state.reconciling, tag) do
       {:ok, %{pid: pid}} ->
-        Process.exit(pid, :kill)
+        stop_reconcile_task(pid)
 
         # `:no_venue_response` is the third element, and it is a statement of fact rather
         # than a guess: this clause runs only because the deadline arrived with no answer, so
@@ -1649,6 +1649,35 @@ defmodule DpExchange.Webull.Feed do
         send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
         state
     end
+  end
+
+  # `:shutdown` rather than `:kill`, for the same reason `stop_socket/1` below chooses it,
+  # and this is the second half of that decision — made for the socket and not carried to
+  # the task, which is how dp-exchange-webull issue #2 happened.
+  #
+  # The task is a `Task.Supervisor` child with `restart: :temporary`. OTP's supervisor skips
+  # its child-termination report for the reasons `:normal`, `:shutdown` and `{:shutdown, _}`
+  # and emits one at ERROR for every other reason, so `:kill` — reaching the supervisor as
+  # `:killed` — put an ERROR-level report on the host's logger for every timed-out reconcile:
+  # one per shard per resubscribe tick, 234 of 239 ERROR lines over a single boot on the
+  # reporting host. Measured here on 2026-09-12 by exiting a `Task.Supervisor` child both
+  # ways with `Logger`'s `:logger_translator` primary filter set to `sasl: true` (the host
+  # setting that lets these through; this package's own test env drops them): `:kill`
+  # produced `Child :undefined of Supervisor #PID<_> (Task.Supervisor) terminated`, and
+  # `:shutdown` produced nothing.
+  #
+  # Nothing was broken by the noise, and that is exactly the cost. The condition is already
+  # reported here at WARN with the shard named; the OTP report names neither this package nor
+  # the shard, and it arrives at the level anything watching for trouble keys off. An ERROR
+  # stream that is 98% routine is one a reader and an alert rule both learn to ignore, and
+  # the next genuine error arrives into that.
+  #
+  # Safe because no reconcile task traps exits: the body `spawn_reconcile/3` supervises is a
+  # bare `send/2` around `fun.()`, and none of the four reconcile funs sets the flag. A
+  # trapping task would be free to ignore `:shutdown` — if one is ever introduced, this has
+  # to become an untrappable kill again, and the report comes back with it.
+  defp stop_reconcile_task(pid) do
+    Process.exit(pid, :shutdown)
   end
 
   # `:shutdown` rather than `:kill`: the socket does not trap exits, so either terminates

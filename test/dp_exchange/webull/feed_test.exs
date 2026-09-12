@@ -359,7 +359,23 @@ defmodule DpExchange.Webull.FeedTest do
       end)
 
       assert_receive {:reconciling, task_pid}, 3_000
+
+      # Monitored before the deadline can arrive, because the reason this task dies by is
+      # the assertion: `:shutdown` and `:killed` end it identically here, and only the
+      # reason decides whether OTP puts an ERROR-level child-termination report on the
+      # host's logger for every timed-out reconcile. dp-exchange-webull issue #2 — 234 of
+      # 239 ERROR lines in one boot, one per shard per resubscribe tick, describing routine
+      # behaviour this feed already reports at WARN with the shard named.
+      #
+      # Asserted on the exit reason rather than on captured logs: the report is gated by
+      # `Logger`'s `:logger_translator` primary filter, which is global and off in this
+      # package's test env, so a log-capturing version of this test would be neither
+      # `async: true` safe nor able to see the thing it was checking for. The reason is the
+      # whole of what OTP branches on. See `stop_reconcile_task/1`.
+      task_ref = Process.monitor(task_pid)
+
       assert_receive {:subscribed, {:error, _reason}}, 5_000
+      assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :shutdown}, 1_000
 
       assert :sys.get_state(feed).reconciling == %{}
       refute Process.alive?(task_pid)
