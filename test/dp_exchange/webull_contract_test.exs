@@ -44,5 +44,15 @@ defmodule DpExchange.WebullContractTest do
       {:place_order, 3} => [account_id: "contract-account"],
       {:cancel_order, 3} => [account_id: "contract-account"],
       {:get_order, 3} => [account_id: "contract-account"]
-    }
+    },
+    # This venue serves an order book for US stocks and ETFs and refuses one for a crypto
+    # pair — the venue publishes no crypto depth endpoint, and `Fake.get_order_book/2`
+    # refuses it "the same way the real package does rather than inventing a book". Every
+    # entry in `sample_pairs:` above is crypto, so Core's assertion 23 could only ever see
+    # that refusal, and its own skip-on-refusal clause then passed without checking
+    # anything.
+    #
+    # Naming a symbol this endpoint actually serves makes the assertion RUN. The refusal is
+    # still correct and still covered — `order_book_test.exs` asserts it directly.
+    endpoint_symbols: %{{:get_order_book, 2} => "AAPL"}
 end

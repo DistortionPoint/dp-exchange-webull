@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two conformance assertions were inert here, and are not any more.** Core's assertions 14
+  (`get_top_of_book/2` returns a `TopOfBook` with a `DateTime` `observed_at` and no `price`
+  field) and 23 (`Quote`/`OrderBook` carry the venue's own time or `nil`, never an unparsed
+  stand-in) both called this package's fake with no credential — those endpoints are
+  public-SHAPED, so a credential can only travel in `opts`, and nothing put one there. This
+  package answered `{:error, {:missing_credentials, _}}` and the assertions' skip-on-refusal
+  clause took that for an answer.
+
+  Measured: with a fake deliberately returning `observed_at: nil` — the exact defect
+  assertion 14 exists to catch — this package's contract suite passed clean against Core
+  0.3.8. Against 0.3.9 it fails, on exactly the endpoints `capabilities/0` declares active.
+  Locked forward accordingly; `mix.lock` is committed and CI honours it, so the pin allowing
+  the newer Core was never the same thing as running it.
+
+- **The order-book assertion could only ever see a refusal here.** This venue serves an
+  order book for US stocks and ETFs and refuses one for a crypto pair, and every entry in the
+  contract test's `sample_pairs:` is crypto. `endpoint_symbols:` (new in Core 0.3.9) now names
+  a symbol the endpoint actually serves, so assertion 23 runs against a real book instead of
+  skipping. The crypto refusal is still correct and still covered — `order_book_test.exs`
+  asserts it directly.
+
 ## [0.4.21] - 2026-09-12
 
 ### Fixed
