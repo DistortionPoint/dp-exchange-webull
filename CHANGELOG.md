@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.27] - 2026-09-12
+
 ### Fixed
 
 - **The escalation added in 0.4.25 made things worse, and is now gated on delivery
