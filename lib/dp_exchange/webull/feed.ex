@@ -1578,13 +1578,7 @@ defmodule DpExchange.Webull.Feed do
        )}
     )
 
-    case shard.reply_to do
-      nil ->
-        :ok
-
-      {from, overflow} ->
-        GenServer.reply(from, combine_overflow({:error, {:shard_crashed, reason}}, overflow))
-    end
+    answer_parked_caller(shard, {:error, {:shard_crashed, reason}})
 
     # A crash tears this index's shard identity down wholesale and rebuilds it as a fresh
     # open below — the same treatment a brand-new shard gets. Any resubscribe-failure latch
@@ -1772,6 +1766,11 @@ defmodule DpExchange.Webull.Feed do
              }
            )}
         )
+
+        # Answered BEFORE the delete, for the reason `answer_parked_caller/2` carries: after
+        # this the shard is gone, and `complete_link_up/3` reads a missing shard as one whose
+        # caller has already been dealt with.
+        answer_parked_caller(shard, {:error, {:invalid_session, named}})
 
         state = %{
           state
@@ -1999,6 +1998,27 @@ defmodule DpExchange.Webull.Feed do
   # The only case §3.5 says cannot be absorbed internally: every shard already at
   # capacity and there is nowhere left to put a symbol. Reported, never silently dropped
   # or silently subscribed somewhere already full.
+  # Every path that removes a shard answers whoever was parked on it, through here.
+  #
+  # `complete_link_up/3` reads the shard back after `handle_subscribe_result/3` may have
+  # removed it, and treats a missing shard as one whose caller has already been answered.
+  # That was true while `isolate_crashed_shard/3` was the only thing that could remove one
+  # mid-reply. `rebuild_stale_shard/3` was then added, on the line immediately above that
+  # read, and deleted the shard on INVALID_SESSION without answering anyone — so a caller
+  # parked on a still-connecting shard whose replay subscribe came back `INVALID_SESSION`
+  # waited out `@call_timeout` and then EXITED, taking the calling process with it.
+  #
+  # One funnel rather than the reply written out at each teardown, because the two paths
+  # drifting apart is the whole of what went wrong: both of them delete a shard, and only
+  # one of them remembered what that means for a caller. A third teardown must come through
+  # here too.
+  defp answer_parked_caller(%{reply_to: nil}, _result), do: :ok
+
+  defp answer_parked_caller(%{reply_to: {from, overflow}}, result) do
+    GenServer.reply(from, combine_overflow(result, overflow))
+    :ok
+  end
+
   defp combine_overflow(:ok, []), do: :ok
   defp combine_overflow(:ok, overflow), do: {:error, {:capacity_exceeded, overflow}}
   defp combine_overflow({:error, reason}, []), do: {:error, reason}

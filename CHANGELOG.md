@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A caller parked on a shard reopened for `INVALID_SESSION` was never answered.** It waited
+  out `@call_timeout` and then EXITed, taking the calling process with it — the outcome this
+  module's own comments name as the one to avoid.
+
+  `complete_link_up/3` calls `handle_subscribe_result/3`, then reads the shard back and
+  treats a missing one as a caller already dealt with. That was true while
+  `isolate_crashed_shard/3` was the only thing that could remove a shard mid-reply. It
+  stopped being true when `rebuild_stale_shard/3` was added — on the line immediately above
+  that read — because it deleted the shard on `INVALID_SESSION` without answering anyone, and
+  the comment asserting the invariant is what kept it from being noticed.
+
+  The reachable path is ordinary: a caller subscribes to symbols landing on a shard that is
+  still connecting and is parked in `reply_to`; the shard links up; its replay subscribe is
+  answered `INVALID_SESSION`.
+
+  Both teardowns now answer through one funnel, `answer_parked_caller/2`, rather than each
+  writing the reply out for itself — the two drifting apart is the whole of what went wrong,
+  since both delete a shard and only one remembered what that means for a caller. The parked
+  reply's capacity `overflow` travels with the failure here exactly as it does everywhere
+  else. A caller on this path now gets `{:error, {:invalid_session, session_id}}`, or the
+  `{:partial_failure, ...}` shape when it also had symbols that did not fit.
+
 ## [0.4.31] - 2026-09-13
 
 ### Fixed

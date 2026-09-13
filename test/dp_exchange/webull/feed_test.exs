@@ -2453,6 +2453,74 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  describe "every path that removes a shard answers the caller parked on it" do
+    test "a shard reopened on INVALID_SESSION does not strand its parked caller" do
+      # `complete_link_up/3` calls `handle_subscribe_result/3` first and then reads the shard
+      # back; a missing shard is treated as "already answered". That was true when
+      # `isolate_crashed_shard/3` was the only thing that could remove one mid-reply, and
+      # stopped being true when `rebuild_stale_shard/3` was added on the line above it —
+      # which deleted the shard on INVALID_SESSION without answering anybody.
+      #
+      # The reachable path is an ordinary one: a caller subscribes to symbols landing on a
+      # shard that is still connecting and is parked in `reply_to`; the shard links up; its
+      # replay subscribe is answered `INVALID_SESSION`. The caller then waits out
+      # `@call_timeout` and EXITS, taking the calling process with it — which is the outcome
+      # this module's own comments name as the one to avoid.
+      # A stand-in socket rather than `connected_shard/1`'s default of `self()`: this path
+      # stops the shard's socket, and the test process must not be the thing it stops.
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(shards: %{0 => %{connected_shard("s0") | connected?: false, socket: socket}})
+
+      # `test_pid` captured out here deliberately: `:sys.replace_state/2` runs its function
+      # INSIDE the feed, so a `self()` written in there names the feed and the reply would
+      # go to the process under test rather than to this one.
+      test_pid = self()
+      ref = make_ref()
+
+      :sys.replace_state(feed, fn state ->
+        put_in(state.shards[0].reply_to, {{test_pid, ref}, []})
+      end)
+
+      send(feed, {:reconcile_done, {:link_up, 0}, {:error, {:invalid_session, "s0"}}})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {^ref, {:error, {:invalid_session, "s0"}}}, 1_000
+      assert Process.alive?(feed)
+    end
+
+    test "the caller's capacity overflow still travels with that answer" do
+      # The parked reply carries an `overflow` alongside the `from` — symbols that did not
+      # fit any shard. It has to reach the caller with the failure rather than being dropped
+      # on this path, exactly as it does on every other.
+      # A stand-in socket rather than `connected_shard/1`'s default of `self()`: this path
+      # stops the shard's socket, and the test process must not be the thing it stops.
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(shards: %{0 => %{connected_shard("s0") | connected?: false, socket: socket}})
+
+      test_pid = self()
+      ref = make_ref()
+
+      :sys.replace_state(feed, fn state ->
+        put_in(state.shards[0].reply_to, {{test_pid, ref}, ["ETH-USD"]})
+      end)
+
+      send(feed, {:reconcile_done, {:link_up, 0}, {:error, {:invalid_session, "s0"}}})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {^ref,
+                      {:error,
+                       {:partial_failure,
+                        failed: {:invalid_session, "s0"}, capacity_exceeded: ["ETH-USD"]}}},
+                     1_000
+    end
+  end
+
   describe "the escalation is gated on delivery — issue #1, field results from 0.4.25" do
     # 0.4.25 escalated on consecutive failures alone. On the live fleet three shards hit the
     # limit, reopened, and failed the identical reconcile on the very next tick and every tick
