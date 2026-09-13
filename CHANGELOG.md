@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.36] - 2026-09-13
+
 ### Fixed
 
 - **A streamed book or quote the venue did not date was dropped entirely.**
