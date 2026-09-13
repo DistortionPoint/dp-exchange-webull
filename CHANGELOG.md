@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.38] - 2026-09-13
+
 ### Fixed
 
 - **A row the venue did not identify was published with an empty id or symbol.**
