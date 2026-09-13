@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.45] - 2026-09-13
+
 ### Changed
 
 - **`delegation_test.exs` claimed "every facade function reaches the venue" while covering
