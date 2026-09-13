@@ -1420,9 +1420,19 @@ defmodule DpExchange.Webull.Feed do
         put_in(state.shards[index].reply_to, nil)
 
       nil ->
-        # The shard was removed from under this reply — e.g. its socket crashed and was
-        # isolated (see isolate_crashed_shard/3) while its subscribe was in flight. That
-        # path already answered any pending caller; nothing left to do here.
+        # The shard was removed from under this reply while its subscribe was in flight —
+        # its socket crashed and was isolated, or its session came back INVALID_SESSION and
+        # it was reopened. Every such path answers whoever was parked on it, through
+        # `answer_parked_caller/2`; nothing left to do here.
+        #
+        # Stated as the funnel rather than as a list of the paths that reach it, because an
+        # earlier version of this comment named `isolate_crashed_shard/3` alone — correctly,
+        # when it was the only one. `rebuild_stale_shard/3` was then added to
+        # `handle_subscribe_result/3`, which is called on the FIRST line of this function,
+        # and did not answer anybody; a caller parked on a still-connecting shard whose
+        # replay came back INVALID_SESSION waited out `@call_timeout` and took its own
+        # process down with it. The invariant held here is what made that invisible, so what
+        # is named here is the thing that enforces it.
         state
     end
   end
