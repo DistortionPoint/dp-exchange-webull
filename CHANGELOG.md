@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.44] - 2026-09-13
+
 ### Changed
 
 - **The weekly endpoint-index check fired for the first time, and its finding is recorded
