@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.37] - 2026-09-13
+
 ### Fixed
 
 - **A REST quote or order book the venue did not date was refused outright.** `get_price/3`
