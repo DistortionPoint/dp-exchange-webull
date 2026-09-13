@@ -22,6 +22,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **The weekly endpoint-index check fired for the first time, and its finding is recorded
+  rather than rubber-stamped.** `broker-fd-api/order-executions` is a new page in the
+  vendor's sitemap since the 2026-09-09 capture, taking that surface from 79 to 80.
+
+  **No claim in this package changed.** The Broker API is a different product tier from the
+  Trading + Market Data API every callback here is built on, and `endpoint-inventory.md` puts
+  this package's coverage of it at 0. The nearest-sounding claim — `{:get_trade_volume, 2}`
+  declared `:unsupported` — rests on the venue publishing no account volume *report*, not on
+  the absence of an executions endpoint: "the venue reports fills, and summing them here
+  would be this package's arithmetic rather than the venue's ledger". A broker-tier
+  executions page does not supply that ledger.
+
+  The capture is re-dated to 2026-09-13 **after** that analysis, in the order
+  `check_endpoint_inventory.sh` asks for — it warns that updating the capture first "turns
+  this check into a rubber stamp", and the reasoning now lives in the file's own header so
+  the next person diffing it can see what was decided and why.
+
+  Found by running the checker by hand the day before its first scheduled Monday. All
+  fourteen weekly checks across the family had never once executed — they were added on
+  Monday 2026-09-08 at 12:58 UTC, after that day's 09:00 trigger — so the first real run
+  would have been their first run, on jobs that are deliberately non-blocking and therefore
+  fail quietly. Every one was exercised: six dependency-floor checks pass, five doc-source
+  checks resolve all 32 cited URLs, and of the three index checks this was the only one with
+  anything to say.
+
 ## [0.4.43] - 2026-09-13
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

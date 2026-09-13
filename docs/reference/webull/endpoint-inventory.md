@@ -30,6 +30,16 @@ moved at all. Recorded as its own note rather than silently editing the count ab
 the same reason the 2026-09-03 correction got its own paragraph: the change was in this
 package's contract, not in what was re-checked against the venue.
 
+**Re-checked 2026-09-13.** The weekly index diff fired for the first time, reporting one new
+vendor page: `broker-fd-api/order-executions`, taking that surface from 79 to 80 published
+pages. **No claim in this package changed**, and the reasoning is in
+`endpoint-pages.txt`'s own header: the Broker API is a different product tier from the
+Trading + Market Data API every callback here is built on, and this package implements none
+of it. The nearest-sounding claim — `{:get_trade_volume, 2}` `:unsupported` — rests on the
+venue publishing no account volume *report*, not on the absence of an executions endpoint,
+so a broker-tier page does not touch it. The count in the table below is left at its capture
+date, as the 2026-09-03 correction established.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |

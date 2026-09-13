@@ -1,6 +1,6 @@
 # Webull — every endpoint reference page the vendor publishes
 #
-# Captured 2026-09-09 from developer.webull.com/apis/sitemap.xml, filtered to
+# Captured 2026-09-13 from developer.webull.com/apis/sitemap.xml, filtered to
 # `docs/reference/*`. One page per endpoint, which makes this set the venue's own index of
 # what it serves — and therefore diffable. `script/check_endpoint_inventory.sh` compares it
 # weekly.
@@ -20,6 +20,27 @@
 # `docs/rate-limits`, a per-endpoint rate-limit table that had existed since 2026-08-14
 # while this package declared a REST ceiling five times too permissive — on a venue whose
 # documented penalty for exceeding it is a temporary IP block.
+#
+# ## Re-captured 2026-09-13 — one page appeared, and no claim here changed
+#
+# `broker-fd-api/order-executions` is new since the 2026-09-09 capture. It changes nothing
+# this package declares, and the reasoning is recorded rather than left implicit because the
+# checker's own instruction is that updating this file first "turns this check into a rubber
+# stamp":
+#
+#   * It is on the **Broker API (`broker-fd-api`)** surface. `endpoint-inventory.md` puts
+#     this package's coverage of that surface at **0 of 78** — it is a different product
+#     tier from the Trading + Market Data API every callback here is built on, so a page
+#     appearing on it cannot make a `capabilities/0` declaration false.
+#   * The nearest-sounding claim, `{:get_trade_volume, 2}` being `:unsupported`, does not
+#     rest on the absence of an executions endpoint. It rests on the venue publishing no
+#     ACCOUNT VOLUME REPORT: "the venue reports fills, and summing them here would be this
+#     package's arithmetic rather than the venue's ledger, which is the number its fee tiers
+#     actually come from." A broker-tier executions page does not supply that ledger.
+#
+# Found by running the checker by hand on 2026-09-13, the day before its first scheduled
+# Monday — see the release note for why fifteen never-executed weekly jobs were worth
+# exercising early.
 
 account-balance
 account-list
@@ -99,6 +120,7 @@ broker-fd-api/list-stock-instruments
 broker-fd-api/list-trade-calendar
 broker-fd-api/master-data
 broker-fd-api/order-detail
+broker-fd-api/order-executions
 broker-fd-api/order-history
 broker-fd-api/order-open
 broker-fd-api/orders
