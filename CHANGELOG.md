@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.32] - 2026-09-13
+
 ### Fixed
 
 - **A caller parked on a shard reopened for `INVALID_SESSION` was never answered.** It waited
