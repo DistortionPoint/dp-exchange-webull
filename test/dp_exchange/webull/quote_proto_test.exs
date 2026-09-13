@@ -127,6 +127,32 @@ defmodule DpExchange.Webull.QuoteProtoTest do
       refute Map.has_key?(quote_msg, :price)
     end
 
+    test "a level's size is the venue's own and is carried, not discarded" do
+      # `AskBid { string price = 1; string size = 2; }` — the venue's schema, verbatim in
+      # docs/reference/webull/streaming-api.md. Field 2 was decoded off the wire and then
+      # thrown away, while `Socket`'s own comment said "the venue's book message carries
+      # prices and no sizes". It carries both, and the fixtures in this very file have been
+      # building levels with sizes all along.
+      ask = field(1, "77846.48") <> field(2, "0.014")
+      bid = field(1, "77845.79") <> field(2, "0.045")
+
+      payload = field(1, basic("BTCUSD")) <> field(2, ask) <> field(3, bid)
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.ask_size == "0.014"
+      assert quote_msg.bid_size == "0.045"
+    end
+
+    test "a level that states no size reports nil, which is not a size of zero" do
+      # `Core.Types.TopOfBook`: "`nil` means 'not published', never 'none available'". A zero
+      # would say the level is empty, which is a different and much stronger claim.
+      payload = field(1, basic("BTCUSD")) <> field(3, field(1, "77845.79"))
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.bid == "77845.79"
+      assert quote_msg.bid_size == nil
+    end
+
     test "one-sided books yield a nil for the missing side, not a fabricated level" do
       payload = field(1, basic("BTCUSD")) <> field(3, field(1, "77845.79"))
 

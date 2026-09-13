@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed `TopOfBook` reported `bid_size` and `ask_size` as `nil` while the venue was
+  sending them.** `Socket` hardcoded both to `nil` under a comment stating as fact that "the
+  venue's book message carries prices and no sizes". The venue's own protobuf schema, kept
+  verbatim in `docs/reference/webull/streaming-api.md`, is
+  `AskBid { string price = 1; string size = 2; }` — and `QuoteProto` was already walking
+  field 2 off the wire in `decode_message/1` before `level_price/1` threw it away. The test
+  fixtures in this repo have been building levels with sizes all along.
+
+  `Core.Types.TopOfBook` is explicit that a `nil` size "means 'not published', never 'none
+  available'", so a consumer sizing an order against the top was being told the depth was
+  unpublished when it had been published and discarded. Both sizes now reach the consumer. A
+  level that states no size is still `nil`; one that states `"0"` is a zero, because that is
+  what the venue said.
+
+  Found while sweeping the family after the same class of defect in `dp_exchange_schwab` (a
+  Change-delivery delta published as a book). Webull's `quote` topic is **not** a delta
+  stream — its schema carries no sequence number and no operation field, so each message
+  must stand alone — and needs no merge. This was the other half of the same read.
+
+### Changed
+
+- `usage-rules.md` records that streamed sizes are now populated, and what a `nil` there
+  means.
+
 ## [0.4.32] - 2026-09-13
 
 ### Fixed

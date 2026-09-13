@@ -510,10 +510,15 @@ defmodule DpExchange.Webull.Socket do
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
            bid: decimal(decoded[:bid]),
            ask: decimal(decoded[:ask]),
-           # The venue's book message carries prices and no sizes, so these stay nil —
-           # not published, and specifically not zero.
-           bid_size: nil,
-           ask_size: nil,
+           # The venue's `AskBid` carries `price = 1` AND `size = 2` — its own schema, kept
+           # verbatim in `docs/reference/webull/streaming-api.md`. These were hardcoded to
+           # `nil` under a comment saying the venue sent no sizes; it sends them, and
+           # `QuoteProto` was decoding them off the wire and discarding them.
+           #
+           # `nil` still reaches a caller for a level that states no size, which is what
+           # `Core.Types.TopOfBook` requires: "not published", never "none available".
+           bid_size: decimal(decoded[:bid_size]),
+           ask_size: decimal(decoded[:ask_size]),
            venue_time: timestamp,
            observed_at: DateTime.utc_now(),
            provider: :webull

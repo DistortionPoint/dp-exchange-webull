@@ -244,6 +244,13 @@ receive do
 end
 ```
 
+**A streamed `TopOfBook` now carries `bid_size` and `ask_size`.** Until 0.4.34 they were
+always `nil`, on the strength of a comment saying this venue published no depth at the top.
+Its own protobuf schema declares `size` on every level and the decoder had been reading it
+off the wire and discarding it. A `nil` there still means what `Core.Types.TopOfBook` says
+it means — "not published", never "none available" — so a level the venue sends without a
+size is `nil`, and one that states `"0"` is a zero.
+
 `capabilities/0` declares `streamable: [:quotes, :top_of_book, :trades]` for exactly this
 reason. **`Trade.id` is always `nil` on this venue** — the streamed tape carries no
 per-print identifier, on this topic or on `get_trades/2`'s REST tape, and `nil` says that

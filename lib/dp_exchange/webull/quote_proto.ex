@@ -121,7 +121,9 @@ defmodule DpExchange.Webull.QuoteProto do
          %{
            symbol: symbol,
            ask: fields |> first_repeated(2) |> level_price(),
+           ask_size: fields |> first_repeated(2) |> level_size(),
            bid: fields |> first_repeated(3) |> level_price(),
+           bid_size: fields |> first_repeated(3) |> level_size(),
            timestamp: present(basic, 3)
          }}
 
@@ -244,5 +246,22 @@ defmodule DpExchange.Webull.QuoteProto do
 
   defp level_price(binary) when is_binary(binary) do
     binary |> decode_message() |> present(1)
+  end
+
+  # `AskBid { string price = 1; string size = 2; }` — the venue's own schema, verbatim in
+  # `docs/reference/webull/streaming-api.md`. Field 2 was walked off the wire by
+  # `decode_message/1` and then discarded, while `Socket` published `bid_size: nil` under a
+  # comment stating as fact that "the venue's book message carries prices and no sizes". It
+  # carries both. A consumer sizing an order against that `nil` was being told the depth was
+  # unpublished when it had been published and thrown away.
+  #
+  # `present/2` maps an empty string to `nil`, which is what keeps the distinction
+  # `Core.Types.TopOfBook` insists on: `nil` is "not published", and is not a zero. A level
+  # that really does state `"0"` reaches a caller as a zero, because that is what the venue
+  # said.
+  defp level_size(nil), do: nil
+
+  defp level_size(binary) when is_binary(binary) do
+    binary |> decode_message() |> present(2)
   end
 end

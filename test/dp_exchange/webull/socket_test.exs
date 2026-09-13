@@ -142,6 +142,40 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
     end
 
+    test "the sizes on a book message reach the consumer" do
+      # Dropped until now, on the strength of a comment asserting the venue sent none. The
+      # venue's own protobuf schema declares `size` on every level, and a consumer sizing an
+      # order against `nil` was being told the depth was unpublished when it had been
+      # published and discarded.
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+      bid_level = proto_field(1, "77845.79") <> proto_field(2, "0.045")
+      ask_level = proto_field(1, "77846.48") <> proto_field(2, "0.014")
+
+      frame =
+        publish(
+          "quote",
+          proto_field(1, basic) <> proto_field(2, ask_level) <> proto_field(3, bid_level)
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid_size, Decimal.new("0.045"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("0.014"))
+    end
+
+    test "a level the venue sent without a size stays nil, not zero" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      frame =
+        publish("quote", proto_field(1, basic) <> proto_field(3, proto_field(1, "77845.79")))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert top.bid_size == nil
+    end
+
     test "a book with no levels at all delivers nothing" do
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
       frame = publish("quote", proto_field(1, basic))
