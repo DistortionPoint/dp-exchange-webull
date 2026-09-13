@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.34] - 2026-09-13
+
 ### Fixed
 
 - **A streamed `TopOfBook` reported `bid_size` and `ask_size` as `nil` while the venue was
