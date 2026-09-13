@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`usage-rules.md` said `venue_time` is never `nil` on this venue and called a `nil` branch
+  "dead code".** That was true until 0.4.36 and 0.4.37, when the REST quote, the REST order
+  book, and the MQTT quote and book stopped discarding real prices and real levels over a
+  time the venue had not stated — and the documentation did not follow. `usage-rules.md` is
+  what a consuming agent reads, so a consumer taking that advice had a latent crash on a
+  field this package had started returning.
+
+  It now says the opposite, and says what has not changed: the local clock is never
+  substituted into `venue_time`. The "Timestamps come from the venue, or the call fails"
+  section is rewritten to split by TYPE rather than assert one rule — a `Candle`,
+  `VolumeProfile` or `Trade` is still refused undated because each enforces its time, while a
+  `Quote` or `OrderBook` is delivered with `venue_time: nil` because neither does.
+
+### Changed
+
+- `usage-rules.md` now states the order-book ordering guarantee from 0.4.39 and the
+  identity-drop behaviour from 0.4.38 — including that a shorter screener list is not an
+  error and that a dropped row leaves a gap in `rank` rather than renumbering the survivors.
+  Both were consumer-visible changes that shipped without a consumer-facing note.
+
 ## [0.4.39] - 2026-09-13
 
 ### Fixed

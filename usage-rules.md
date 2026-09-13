@@ -71,10 +71,19 @@ expressible before, because there was no way to see which kind of time you had.
 without it.
 
 
-**When is `venue_time` `nil` on this venue? It never is.** Every `Quote` and `OrderBook` this
-package builds parses a time the venue sent — the REST quote, the order book, and the MQTT
-tick alike — and fails closed when it cannot. A `nil` branch for this venue is dead code.
-Other venues in the family do return `nil`, which is why the field is nullable.
+**When is `venue_time` `nil` on this venue? Whenever the venue did not state one — and until
+0.4.37 this section said it never is.** It read: "Every `Quote` and `OrderBook` this package
+builds parses a time the venue sent … and fails closed when it cannot. A `nil` branch for
+this venue is dead code."
+
+That was true and stopped being true in 0.4.36 and 0.4.37, when the REST quote, the REST
+order book, and the MQTT quote and book stopped discarding real prices and real levels over
+a time the venue had not stated. `Core.Types.Quote` and `Core.Types.OrderBook` do not enforce
+`venue_time`, and `observed_at` is what states freshness. **Write the `nil` branch.**
+
+Nothing is ever substituted into that field: it is the venue's own instant or it is `nil`,
+never this package's clock. Other venues in the family return `nil` too, which is why the
+field is nullable.
 
 Full reasoning and the options that were weighed:
 [`dp_exchange_core` issue #31](https://github.com/DistortionPoint/dp-exchange-core/issues/31).
@@ -402,9 +411,45 @@ DpExchange.Webull.adjusted?("1m")  #=> false
 
 ## Timestamps come from the venue, or the call fails
 
-A bar or quote the venue did not date returns `{:error, :missing_venue_timestamp}`. The
-local clock is never substituted — an undated bar stamped with your own clock is
-indistinguishable from a real one, which is how a gap becomes invisible.
+**The local clock is never substituted** — an undated bar stamped with your own clock is
+indistinguishable from a real one, which is how a gap becomes invisible. That guarantee is
+the whole of this section and has never changed.
+
+What an undated value does depends on the TYPE, because the contract differs:
+
+* **A bar, a volume-profile interval or a trade is refused**, with
+  `{:error, :missing_venue_timestamp}`. `Core.Types.Candle` and `VolumeProfile` enforce
+  `:opened_at` and `Trade` enforces `:timestamp`, so a bar at an invented minute or a print
+  that cannot be placed in time is not something this package can report at all.
+* **A quote or an order book is delivered with `venue_time: nil`.** Neither type enforces it,
+  and refusing threw away a real guarded price, or a whole set of book levels, over an
+  optional field. This changed in 0.4.36 and 0.4.37; before then both were refused.
+
+## An order book is sorted, so `hd(bids)` is the best bid
+
+`get_order_book/2` guarantees it as of 0.4.39 — **bids descending, asks ascending** — and it
+is `Core.Types.OrderBook`'s contract rather than this package's convenience. You do not need
+to sort what you receive, and you should not assume the venue's row order means anything.
+
+A level whose price this package cannot read is dropped rather than passed on with a `nil`
+price, because `level/0` is `{Decimal.t(), Decimal.t()}` and `hd(bids)` must be able to
+answer with a real number. A level with a readable price and no size keeps a `nil` size —
+that is a real shape, not an unreadable one.
+
+## A row the venue did not identify is dropped, not given an empty id
+
+As of 0.4.38, `get_screener/2`, `get_news/1` and `list_watchlists/1` drop a row that cannot
+supply its own identifying field rather than publishing it with `""`.
+
+An empty string is worse than the `nil` it replaced: a `nil` is detectable and `""` is a
+value, so a consumer keying coverage by symbol used to get a live entry named `""`, and one
+deduplicating news by id collapsed every unidentified story into a single entry. The news
+case was the worst — an absent id fell back to the **ticker symbol**, which looks like an id
+and collides for every story about that symbol.
+
+**So a shorter list is not an error, and the venue's own ranking is preserved.** A dropped
+screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
+the position the venue returned the row in and closing the gap would re-rank the list.
 
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
