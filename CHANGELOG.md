@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A streamed book or quote the venue did not date was dropped entirely.**
+  `emit_top_of_book/2` and `emit_decoded/2` gated on `venue_time/1`, whose comment read "on a
+  stream, refusing to substitute means dropping the frame rather than stamping it with our
+  own clock". Refusing to substitute is right; that was not it. Writing our own clock into
+  `venue_time` would be the substitution, and emitting `nil` there is its opposite.
+
+  `Core.Types.TopOfBook` enforces `[:symbol, :observed_at, :provider]` and `Core.Types.Quote`
+  `[:symbol, :price, :observed_at, :provider]`. Neither enforces the venue's time, and
+  `observed_at` — always present, documented as "a different, honest fact" rather than a
+  stand-in — is what states freshness. A real bid, ask or traded price was discarded over a
+  field the contract marks optional.
+
+  This package's own REST arm has always answered the other way: `Rest.get_top_of_book/2`
+  reads the time through `top_of_book_time/1`, which returns `nil` when `venue_time/1` fails.
+  Same venue, same type, opposite answer decided by transport — and `Rest.venue_time/1`
+  already carried its own note that an incomplete key list "silently produced
+  `:missing_venue_timestamp` for every row until they were added", which is this same failure
+  having happened once before on the other side.
+
+  `emit_trade/2` still gates on `venue_time/1`, and that is not an inconsistency:
+  `Core.Types.Trade` lists `:timestamp` in `@enforce_keys` and types it non-nullable, so a
+  print this package cannot place in time is genuinely not one it can report. The answers
+  differ because the contracts differ.
+
+  Found by sweeping the family after the identical defect in `dp_exchange_gemini`, where the
+  same sentence appeared in the same role.
+
 ## [0.4.34] - 2026-09-13
 
 ### Fixed

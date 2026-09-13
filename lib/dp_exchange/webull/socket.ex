@@ -502,36 +502,33 @@ defmodule DpExchange.Webull.Socket do
   defp venue_notice_text(_no_content), do: nil
 
   defp emit_top_of_book(state, decoded) do
-    with {:ok, timestamp} <- venue_time(decoded) do
-      send(
-        state.subscriber,
-        {:dp_exchange, :webull,
-         %TopOfBook{
-           symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
-           bid: decimal(decoded[:bid]),
-           ask: decimal(decoded[:ask]),
-           # The venue's `AskBid` carries `price = 1` AND `size = 2` — its own schema, kept
-           # verbatim in `docs/reference/webull/streaming-api.md`. These were hardcoded to
-           # `nil` under a comment saying the venue sent no sizes; it sends them, and
-           # `QuoteProto` was decoding them off the wire and discarding them.
-           #
-           # `nil` still reaches a caller for a level that states no size, which is what
-           # `Core.Types.TopOfBook` requires: "not published", never "none available".
-           bid_size: decimal(decoded[:bid_size]),
-           ask_size: decimal(decoded[:ask_size]),
-           venue_time: timestamp,
-           observed_at: DateTime.utc_now(),
-           provider: :webull
-         }}
-      )
-    end
+    send(
+      state.subscriber,
+      {:dp_exchange, :webull,
+       %TopOfBook{
+         symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
+         bid: decimal(decoded[:bid]),
+         ask: decimal(decoded[:ask]),
+         # The venue's `AskBid` carries `price = 1` AND `size = 2` — its own schema, kept
+         # verbatim in `docs/reference/webull/streaming-api.md`. These were hardcoded to
+         # `nil` under a comment saying the venue sent no sizes; it sends them, and
+         # `QuoteProto` was decoding them off the wire and discarding them.
+         #
+         # `nil` still reaches a caller for a level that states no size, which is what
+         # `Core.Types.TopOfBook` requires: "not published", never "none available".
+         bid_size: decimal(decoded[:bid_size]),
+         ask_size: decimal(decoded[:ask_size]),
+         venue_time: venue_time_or_nil(decoded),
+         observed_at: DateTime.utc_now(),
+         provider: :webull
+       }}
+    )
 
     :ok
   end
 
   defp emit_decoded(state, {:ok, decoded}) do
-    with {:ok, timestamp} <- venue_time(decoded),
-         {:ok, price} <- required_decimal(decoded[:price], :price) do
+    with {:ok, price} <- required_decimal(decoded[:price], :price) do
       send(
         state.subscriber,
         {:dp_exchange, :webull,
@@ -539,7 +536,7 @@ defmodule DpExchange.Webull.Socket do
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
            price: price,
            volume: nil,
-           venue_time: timestamp,
+           venue_time: venue_time_or_nil(decoded),
            observed_at: DateTime.utc_now(),
            provider: :webull
          }}
@@ -588,8 +585,9 @@ defmodule DpExchange.Webull.Socket do
   defp tick_side("S"), do: :sell
   defp tick_side(_undocumented), do: nil
 
-  # Absent, and nothing is emitted. On a stream, refusing to substitute means dropping the
-  # frame rather than stamping it with our own clock.
+  # `{:error, :missing_venue_timestamp}` for a frame the venue did not date, or dated with
+  # something this package cannot read. What a caller does with that depends entirely on the
+  # TYPE being built, and `venue_time_or_nil/1` below is the other answer.
   defp venue_time(%{timestamp: raw}) when is_binary(raw) do
     case Integer.parse(raw) do
       {epoch, ""} when epoch > 100_000_000_000 -> DateTime.from_unix(epoch, :millisecond)
@@ -599,6 +597,34 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp venue_time(_absent), do: {:error, :missing_venue_timestamp}
+
+  # For the types whose contract makes the venue's time OPTIONAL.
+  #
+  # `emit_top_of_book/2` and `emit_decoded/2` used to gate on `venue_time/1` and emit nothing
+  # when it failed, under "on a stream, refusing to substitute means dropping the frame
+  # rather than stamping it with our own clock". Refusing to substitute is right, and that
+  # was not it: writing our own clock into `venue_time` would be the substitution, and
+  # emitting `nil` there is its opposite.
+  #
+  # `Core.Types.TopOfBook` enforces `[:symbol, :observed_at, :provider]` and `Core.Types.Quote`
+  # `[:symbol, :price, :observed_at, :provider]`. Neither enforces the venue's time, and
+  # `observed_at` — always present, and documented as "a different, honest fact" rather than a
+  # stand-in — is what states freshness. A real bid, ask or traded price was being discarded
+  # over a field the contract marks optional.
+  #
+  # `Rest.top_of_book_time/1` has always given exactly this answer on the other transport, so
+  # the same venue and the same type disagreed depending on how the value arrived.
+  #
+  # **`emit_trade/2` still gates on `venue_time/1`, and that is not an inconsistency**:
+  # `Core.Types.Trade` lists `:timestamp` in `@enforce_keys` and types it non-nullable, so a
+  # print this package cannot place in time is genuinely not one it can report. The answers
+  # differ because the contracts differ, which is the only thing that licenses them to.
+  defp venue_time_or_nil(decoded) do
+    case venue_time(decoded) do
+      {:ok, at} -> at
+      {:error, _unstated} -> nil
+    end
+  end
 
   defp notify(state, notice), do: send(state.subscriber, {:dp_exchange, :webull, notice})
 

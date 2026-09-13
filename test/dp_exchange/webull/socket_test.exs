@@ -4,7 +4,7 @@ defmodule DpExchange.Webull.SocketTest do
   import Bitwise
 
   alias DpExchange.Core.Notice
-  alias DpExchange.Core.Types.{Quote, TopOfBook}
+  alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.Socket
 
   @moduletag :capture_log
@@ -91,13 +91,29 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %Quote{volume: nil}}
     end
 
-    test "a payload with no venue timestamp delivers nothing" do
+    test "a payload with no venue timestamp still delivers its Quote" do
+      # This asserted "delivers nothing" until 2026-09-13, on `venue_time/1`'s reasoning:
+      # "on a stream, refusing to substitute means dropping the frame rather than stamping
+      # it with our own clock."
+      #
+      # Refusing to substitute is right. This was not that. Writing our clock into
+      # `venue_time` would be the substitution; emitting `nil` there is its opposite.
+      # `Core.Types.Quote` enforces `[:symbol, :price, :observed_at, :provider]` — not the
+      # venue's time — and `observed_at` is always present and documented as "a different,
+      # honest fact" rather than a stand-in. A real traded price was being discarded over a
+      # field the contract marks optional.
+      #
+      # `Rest`'s `top_of_book_time/1` has always given this answer on the other transport,
+      # so the same venue and the same types disagreed depending on how the value arrived.
       basic = proto_field(1, "BTCUSD")
       frame = publish("snapshot", proto_field(1, basic) <> proto_field(3, "1"))
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      assert_receive {:dp_exchange, :webull, %Quote{} = quoted}
+      assert Decimal.equal?(quoted.price, Decimal.new("1"))
+      assert quoted.venue_time == nil, "the venue stated no time, and nil says exactly that"
+      assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
     end
 
     test "a non-numeric price in a real frame does not crash the socket" do
@@ -174,6 +190,57 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
       assert top.bid_size == nil
+    end
+
+    test "an undated book still delivers, because TopOfBook does not require a venue time" do
+      # `venue_time/1` refused the whole frame when the venue's `Basic.timestamp` was absent
+      # or unparseable, under "refusing to substitute means dropping the frame rather than
+      # stamping it with our own clock". Refusing to substitute is right; this was not that.
+      # Writing our clock into `venue_time` would be the substitution — emitting `nil` there
+      # is its opposite, and `Core.Types.TopOfBook` enforces only
+      # `[:symbol, :observed_at, :provider]`, with `observed_at` carrying freshness.
+      #
+      # This package's own REST arm already answered that way: `Rest.get_top_of_book/2` reads
+      # the time through `top_of_book_time/1`, which returns `nil` when `venue_time/1` fails.
+      # Same venue, same type, opposite answer decided by transport.
+      #
+      # Not hypothetical on this venue: `venue_time/1` in `Rest` carries its own note that an
+      # incomplete key list "silently produced `:missing_venue_timestamp` for every row until
+      # they were added", and this venue is documented to return `"null"` for price fields on
+      # a delisted pair.
+      basic = proto_field(1, "BTCUSD")
+      bid_level = proto_field(1, "77845.79") <> proto_field(2, "0.045")
+      frame = publish("quote", proto_field(1, basic) <> proto_field(3, bid_level))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
+      assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
+      assert top.observed_at, "freshness is still stated, by the field that says what it is"
+    end
+
+    test "an undated tick delivers nothing, because Trade DOES require a timestamp" do
+      # Not an inconsistency with the two above — a different type with a different rule.
+      # `Core.Types.Trade` lists `:timestamp` in `@enforce_keys` and types it non-nullable,
+      # so a print this package cannot place in time is genuinely not one it can report.
+      #
+      # Price (3) and volume (4) are BOTH supplied, and the dated control below is the same
+      # frame plus a trade time. A first version of this test omitted the volume, so it was
+      # refused on `:quantity` and passed without the timestamp guard doing anything —
+      # exactly the shape it exists to catch.
+      undated =
+        proto_field(1, proto_field(1, "BTCUSD")) <>
+          proto_field(3, "77845.79") <> proto_field(4, "0.5")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", undated)}, state())
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+
+      dated = undated <> proto_field(2, "1787936147000")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", dated)}, state())
+      assert_receive {:dp_exchange, :webull, %Trade{} = trade}
+      assert Decimal.equal?(trade.price, Decimal.new("77845.79"))
     end
 
     test "a book with no levels at all delivers nothing" do
