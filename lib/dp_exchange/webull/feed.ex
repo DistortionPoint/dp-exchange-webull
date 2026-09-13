@@ -365,7 +365,11 @@ defmodule DpExchange.Webull.Feed do
   # self-healed did so after 8, 10 and 10 consecutive failures. A limit at or below ten would
   # have torn down sockets that were about to recover on their own, and every teardown claims
   # a fresh session against the venue's per-account ceiling — the very contention
-  # (`Permission grabbed by other session`) that started that incident. Twelve clears the
+  # (`Permission grabbed by other session`) that started that incident. That reading of
+  # the grab as CONTENTION is wrong in its direction, though not in its arithmetic: the
+  # notice tracks a re-subscribe of ours COMPLETING, so a teardown does produce one, and it
+  # is not evidence of anything taking the category away. See
+  # `validate_resubscribe_interval_ms!/1` for the measurement that settled it. Twelve clears the
   # observed self-heal window with margin while bounding the stuck case to roughly twelve
   # minutes at `@resubscribe_interval_ms` instead of forever.
   #
@@ -1150,6 +1154,34 @@ defmodule DpExchange.Webull.Feed do
   # rate should fall to a fifth if this timer is the trigger, and not move at all if it is
   # not. `dp_exchange_coinbase` already exposed the identical knob; this venue's staying
   # private is what made a live degradation undiagnosable from outside.
+  #
+  # ## Settled on 2026-09-13, by a different experiment than the one proposed
+  #
+  # The knob was never turned. dp-exchange-webull issue #3 settled it from the other side:
+  # on 0.4.33 — with the tag-identity defect fixed, so a tick's re-subscribe is no longer
+  # killed at birth by its predecessor's deadline — the grab rate went **UP**, 0.75/min to
+  # 3.3/min, and stayed tick-aligned: 69 of 72 notices at second `:42`, that boot's
+  # resubscribe offset, one burst per tick instead of one per several.
+  #
+  # **This timer is the trigger, and the causal direction is the opposite of the one the
+  # report assumed.** A grab does not mean a session was taken from us; it means one of our
+  # own re-subscribes COMPLETED. Before the fix, attempts were killed before they claimed
+  # anything, so a low grab rate was the signature of a broken repair loop rather than of
+  # calm.
+  #
+  # Two things fall out of that, over the same 21.5-minute window: four sessions DO hold
+  # `us-crypto` concurrently (255 of 325 symbols, 25% of heartbeats at `sent: 0`, against the
+  # ~75% and ~100 symbols that single-session exclusivity predicts), and the
+  # `INVALID_SESSION` link_downs that looked like the venue evicting us went to zero with the
+  # same fix.
+  #
+  # What this does NOT settle is whether `Notice.new(:degraded, ...)` is still the honest
+  # classification for a line the package now knows it causes itself, roughly four times a
+  # minute, while every shard keeps delivering. `Core.Notice` calls severity "a call to
+  # action". Left alone deliberately: dp-exchange-core issue #33 decided this notice is not
+  # noise after a real consumer incident, and 21.5 minutes is not enough to reverse that.
+  # What would settle it is whether a grab ever precedes a delivery gap on a shard that was
+  # streaming.
   #
   # Validated rather than coerced, the same way that package validates its own: a value that
   # cannot schedule anything fails `init/1` loudly instead of silently reverting to the
