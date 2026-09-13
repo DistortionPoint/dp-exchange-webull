@@ -22,6 +22,34 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A superseded reconcile's answer could still settle its successor's tag (issue #3,
+  follow-up).** 0.4.29 tore a superseded attempt down, and the comment there claimed that was
+  what stopped its stale result reaching the successor's callers. It is not, and the claim
+  has been corrected in place. An answer already in the mailbox cannot be recalled by killing
+  the process that sent it — `send/2` completes before the kill does — so an attempt that
+  answers between its successor's trigger arriving and that trigger being *processed* has
+  already left its result behind. Routed by tag alone, that stale result forgot the
+  successor, demonitored it and dropped its bookkeeping, and was then handed to the
+  successor's callers as theirs.
+
+  An attempt now has an identity that its answer carries, not just its deadline: a
+  `{:reconcile_done, tag, attempt, result}` is routed only when the tag is still tracking
+  that attempt. The deadline matches on the same token rather than on the monitor ref, so
+  there is one notion of attempt identity in the module instead of two.
+
+  Also settled by the same check: an answer arriving after its tag's deadline has already
+  fired is now dropped rather than applied. A deadline reported as `:no_venue_response` is
+  not retracted by the answer turning up afterwards — the caller has been answered and the
+  failure counted, and applying the late result would un-count it, making a shard that is
+  reliably too slow indistinguishable from a healthy one. One attempt gets one outcome, and
+  the first thing to conclude it is the one that counts.
+
+  No change to any error shape a caller sees. The synthesised `{:reconcile_done, tag, result}`
+  that the deadline and `:DOWN` paths dispatch is unchanged and does not pass through the new
+  check — those have already decided the outcome.
+
 ## [0.4.29] - 2026-09-13
 
 ### Fixed

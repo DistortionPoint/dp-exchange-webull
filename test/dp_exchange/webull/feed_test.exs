@@ -2242,14 +2242,14 @@ defmodule DpExchange.Webull.FeedTest do
       on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
 
       :sys.replace_state(feed, fn state ->
-        entry = %{pid: stalled, ref: Process.monitor(stalled)}
+        entry = %{pid: stalled, ref: Process.monitor(stalled), attempt: make_ref()}
         %{state | reconciling: Map.put(state.reconciling, {:resubscribe, 0}, entry)}
       end)
 
       Feed.subscribe_notices(feed, to: self())
 
-      tracked_ref = :sys.get_state(feed).reconciling[{:resubscribe, 0}].ref
-      send(feed, {:reconcile_timeout, {:resubscribe, 0}, tracked_ref})
+      tracked = :sys.get_state(feed).reconciling[{:resubscribe, 0}].attempt
+      send(feed, {:reconcile_timeout, {:resubscribe, 0}, tracked})
       _settled = Feed.coverage(feed)
 
       assert :sys.get_state(feed).resubscribe_failed == %{0 => 1},
@@ -2397,6 +2397,58 @@ defmodule DpExchange.Webull.FeedTest do
       assert map_size(:sys.get_state(feed).reconciling) == 1,
              "one tag, one tracked attempt — the superseded one must not still be counted"
 
+      assert Process.alive?(feed)
+    end
+  end
+
+  describe "an answer is routed by the attempt that produced it, not by its tag — issue #3" do
+    test "a superseded attempt's answer does not settle its successor's tag" do
+      # The window tearing the superseded attempt down cannot close: `send/2` completes
+      # before the kill does, so an attempt that answers between its successor's trigger
+      # arriving and that trigger being PROCESSED has already put its result in the mailbox.
+      # Routed by tag alone, that stale result forgets the successor — demonitoring it and
+      # dropping its bookkeeping — and is then handed to the successor's callers as theirs.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, resubscribe_failure_limit: 99)
+
+      live = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(live), do: Process.exit(live, :kill) end)
+
+      current = %{pid: live, ref: Process.monitor(live), attempt: make_ref()}
+
+      :sys.replace_state(feed, fn state ->
+        %{state | reconciling: Map.put(state.reconciling, {:resubscribe, 0}, current)}
+      end)
+
+      # The answer a superseded predecessor left behind: same tag, its own attempt.
+      send(feed, {:reconcile_done, {:resubscribe, 0}, make_ref(), {:error, :stale}})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).reconciling[{:resubscribe, 0}] == current,
+             "the successor must still be tracked, with its deadline still its own"
+
+      refute Map.has_key?(:sys.get_state(feed).resubscribe_failed, 0),
+             "a predecessor's failure must not be counted against its successor"
+
+      assert Process.alive?(feed)
+    end
+
+    test "an answer arriving after its tag was settled is dropped, not applied twice" do
+      # A deadline that has already been reported as `:no_venue_response` is not retracted by
+      # the answer turning up afterwards. The caller has been answered and the failure
+      # counted; applying the late result would un-count it and make a shard that is
+      # reliably too slow indistinguishable from one that is healthy.
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, resubscribe_failure_limit: 99)
+
+      send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :boom}})
+      _settled = Feed.coverage(feed)
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1}
+
+      # Nothing is tracked under the tag now. A task's own answer arriving late must not
+      # reach the success path and reset what the deadline already recorded.
+      send(feed, {:reconcile_done, {:resubscribe, 0}, make_ref(), :ok})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1}
       assert Process.alive?(feed)
     end
   end

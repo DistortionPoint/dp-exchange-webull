@@ -129,7 +129,10 @@ defmodule DpExchange.Webull.Feed do
 
   A tag is not an identity. Every blind resubscribe for shard 2 runs under
   `{:resubscribe, 2}`, and anything keyed only by the tag — a deadline, a monitor, a reply —
-  is keyed to the SLOT rather than to the thing occupying it.
+  is keyed to the SLOT rather than to the thing occupying it. So an attempt mints a token of
+  its own, and BOTH of the things that conclude one carry it: its deadline and its answer.
+  The answer needs it as much as the deadline does, because killing a superseded attempt
+  cannot recall a result it has already put in the mailbox.
 
   `Core.PollingFeed` had already answered the first half of this and said why:
   rescheduling happens in its `finish/3` and nowhere else, "which is what bounds the queue —
@@ -689,9 +692,9 @@ defmodule DpExchange.Webull.Feed do
   # that, and only a timer tells it apart from one about to succeed. A timer for a tag that
   # already answered finds nothing tracked and is ignored, so a slow-but-successful reconcile
   # is never torn down by its own deadline arriving late.
-  def handle_info({:reconcile_timeout, tag, ref}, state) do
+  def handle_info({:reconcile_timeout, tag, attempt}, state) do
     case Map.fetch(state.reconciling, tag) do
-      {:ok, %{pid: pid, ref: ^ref}} ->
+      {:ok, %{pid: pid, attempt: ^attempt}} ->
         stop_reconcile_task(pid)
 
         # `:no_venue_response` is the third element, and it is a statement of fact rather
@@ -728,6 +731,33 @@ defmodule DpExchange.Webull.Feed do
   def handle_info({:reconcile_done, tag, _result} = message, %{reconciling: in_flight} = state)
       when is_map_key(in_flight, tag) do
     handle_info(message, forget_reconcile(state, tag))
+  end
+
+  # A task's own answer, which carries the attempt that produced it. Routed to the clause
+  # above — and from there to whichever clause below handles this `tag` — only when the tag is
+  # still tracking THAT attempt. Anything else is an answer to a question already settled:
+  #
+  #   * a different attempt tracked under the tag means this one was superseded. Tearing a
+  #     superseded attempt down does not make this unreachable, because an answer already in
+  #     the mailbox cannot be recalled by killing the process that sent it — the send
+  #     completed before the kill did. Without this check that stale answer forgets the
+  #     SUCCESSOR and is handed to the successor's callers as theirs.
+  #   * nothing tracked means the tag's deadline has already fired and been reported as
+  #     `:no_venue_response`, or a previous answer already settled it. A deadline that has
+  #     been reported as a failure is not retracted by the answer arriving afterwards: one
+  #     attempt gets one outcome, and the first one to conclude it is the one that counts.
+  #
+  # The synthesised `{:reconcile_done, tag, result}` that the deadline and `:DOWN` paths
+  # dispatch is a 3-tuple and does not pass through here — those have already decided the
+  # outcome and re-dispatch it directly.
+  def handle_info({:reconcile_done, tag, attempt, result}, state) do
+    case Map.fetch(state.reconciling, tag) do
+      {:ok, %{attempt: ^attempt}} ->
+        handle_info({:reconcile_done, tag, result}, state)
+
+      _superseded_or_already_settled ->
+        {:noreply, state}
+    end
   end
 
   @impl true
@@ -1464,9 +1494,15 @@ defmodule DpExchange.Webull.Feed do
     me = self()
     state = supersede_reconcile(state, tag)
 
+    # The attempt's identity, minted before it starts so the answer can carry it. A tag names
+    # a SLOT — every blind resubscribe for shard 2 runs under `{:resubscribe, 2}` — and both
+    # of the things that conclude an attempt, its answer and its deadline, would otherwise be
+    # addressed to the slot and land on whichever attempt happened to be occupying it.
+    attempt = make_ref()
+
     {:ok, pid} =
       Task.Supervisor.start_child(state.task_supervisor, fn ->
-        send(me, {:reconcile_done, tag, fun.()})
+        send(me, {:reconcile_done, tag, attempt, fun.()})
       end)
 
     # Monitored and timed, because `Task.Supervisor.start_child/2` gives a child that is
@@ -1486,17 +1522,23 @@ defmodule DpExchange.Webull.Feed do
     # because each successor was killed microseconds after it started by its predecessor's
     # deadline, and the blind resubscribe is the ONLY recovery this venue has for a session
     # it has silently stopped publishing to.
-    Process.send_after(self(), {:reconcile_timeout, tag, ref}, state.reconcile_timeout_ms)
+    Process.send_after(self(), {:reconcile_timeout, tag, attempt}, state.reconcile_timeout_ms)
 
-    put_in(state.reconciling[tag], %{ref: ref, pid: pid})
+    put_in(state.reconciling[tag], %{ref: ref, pid: pid, attempt: attempt})
   end
 
   # An attempt being replaced under a tag that is still tracking one. Torn down here rather
   # than left to its own deadline, because the entry it is tracked by is about to be
-  # overwritten: after that its monitor ref belongs to nothing, its `:DOWN` reaches
-  # `drop_dead_subscriber/2` as if a subscriber had died, and if it ever answers, the
-  # `{:reconcile_done, tag, _}` clause will forget its SUCCESSOR and hand the successor's
-  # callers this attempt's stale result.
+  # overwritten: after that its monitor ref belongs to nothing and its `:DOWN` reaches
+  # `drop_dead_subscriber/2` as if a subscriber had died.
+  #
+  # Tearing it down is NOT what stops its stale result being handed to the successor's
+  # callers, and an earlier version of this comment claimed it was. An answer already in the
+  # mailbox cannot be recalled by killing the process that sent it — `send/2` completed
+  # before the kill did — so the window where the attempt answers between its successor's
+  # trigger arriving and that trigger being processed stays open however promptly it is
+  # killed. What closes it is the attempt token on the answer itself; see
+  # `handle_info({:reconcile_done, tag, attempt, result}, _)`.
   #
   # `{:resubscribe, _}` never reaches this — `resubscribe_shard/2` skips a tick whose
   # previous attempt is still running — so what arrives here is a `{:link_up, _}` or
