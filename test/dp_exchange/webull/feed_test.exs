@@ -387,7 +387,9 @@ defmodule DpExchange.Webull.FeedTest do
       # tear down whatever is running now.
       feed = start_feed(shards: %{0 => connected_shard("s0")})
 
-      send(feed, {:reconcile_timeout, {:background, 0}})
+      # A ref of its own, because the deadline now names the attempt rather than the tag.
+      # Nothing is tracked here at all, so this is the "already answered" arm.
+      send(feed, {:reconcile_timeout, {:background, 0}, make_ref()})
       _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
@@ -1327,22 +1329,26 @@ defmodule DpExchange.Webull.FeedTest do
 
       shard = %{connected_shard("shard-0") | symbols: ["BTCUSD"]}
 
+      # Driven by the feed's own timer rather than by two hand-sent `:resubscribe` messages.
+      # The hand-sent version tested that the handler can run twice, which is not what this
+      # test is named for, and it only passed by racing: the second send beat the first
+      # attempt's `{:reconcile_done, _}` back to the mailbox, so what it actually exercised
+      # was the overlap that issue #3 turned out to be about. A real interval proves the
+      # rescheduling this claims to prove, and leaves each attempt time to answer.
       feed =
         start_feed(
           shards: %{0 => shard},
           credentials: @credentials,
           limiter: limiter,
           plug: plug,
-          retry_attempts: 0
+          retry_attempts: 0,
+          resubscribe_interval_ms: 1_000
         )
 
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
 
-      send(feed, :resubscribe)
-      assert_receive {:request, ["BTCUSD"]}
-
-      send(feed, :resubscribe)
-      assert_receive {:request, ["BTCUSD"]}
+      assert_receive {:request, ["BTCUSD"]}, 4_000
+      assert_receive {:request, ["BTCUSD"]}, 4_000
     end
   end
 
@@ -2242,7 +2248,8 @@ defmodule DpExchange.Webull.FeedTest do
 
       Feed.subscribe_notices(feed, to: self())
 
-      send(feed, {:reconcile_timeout, {:resubscribe, 0}})
+      tracked_ref = :sys.get_state(feed).reconciling[{:resubscribe, 0}].ref
+      send(feed, {:reconcile_timeout, {:resubscribe, 0}, tracked_ref})
       _settled = Feed.coverage(feed)
 
       assert :sys.get_state(feed).resubscribe_failed == %{0 => 1},
@@ -2255,6 +2262,142 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 2_000
       assert notice.details.reason =~ "no_venue_response"
       assert notice.details.reason =~ "reconcile_timeout"
+    end
+  end
+
+  describe "a tick does not launch a second blind resubscribe over an unfinished one — issue #3" do
+    test "the task a reconcile timeout tears down is the task that timer was armed for", %{
+      limiter: limiter
+    } do
+      # `@resubscribe_interval_ms` and `@reconcile_timeout_ms` are both 60_000, and
+      # `handle_info(:resubscribe, _)` re-arms its own timer BEFORE spawning, so at every
+      # tick boundary the tick is enqueued ahead of the deadline it is racing. The tick was
+      # overwriting `reconciling[{:resubscribe, index}]` with a brand-new task, and the
+      # previous tick's timer then found that successor under the tag it was armed for and
+      # killed it microseconds old — so the blind resubscribe, which is the only recovery
+      # this venue has for a silently-stalled session, could never run to completion.
+      #
+      # Asserted on identity rather than on elapsed time: the invariant is that a deadline
+      # tears down the attempt it was armed for and no other, which a timing bound would
+      # only ever approximate.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:resubscribing, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("s0") | symbols: ["BTC-USD"]}},
+          resubscribe_interval_ms: 1_000,
+          reconcile_timeout_ms: 1_000,
+          resubscribe_failure_limit: 99,
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug
+        )
+
+      assert_receive {:resubscribing, first_task}, 5_000
+      ref = Process.monitor(first_task)
+
+      assert_receive {:DOWN, ^ref, :process, ^first_task, _reason}, 5_000
+      assert Process.alive?(feed)
+    end
+
+    test "an unfinished blind resubscribe is not duplicated on the next tick", %{
+      limiter: limiter
+    } do
+      # The other half of the same defect, and the reason it is a skip rather than a
+      # supersede: a second identical subscribe for a session the venue has not answered for
+      # yet is load, not a safety net. `validate_resubscribe_interval_ms!/1` already refuses
+      # an interval below a second in those exact words; an in-flight attempt makes the
+      # effective interval shorter than the configured one just as surely.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:resubscribing, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("s0") | symbols: ["BTC-USD"]}},
+          resubscribe_interval_ms: 1_000,
+          reconcile_timeout_ms: 60_000,
+          resubscribe_failure_limit: 99,
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug
+        )
+
+      # A deadline far beyond the tick interval, so nothing clears the in-flight attempt:
+      # every later tick sees it still running, and must leave it alone.
+      assert_receive {:resubscribing, _first_task}, 5_000
+      refute_receive {:resubscribing, _second_task}, 3_000
+
+      assert map_size(:sys.get_state(feed).reconciling) == 1
+      assert Process.alive?(feed)
+    end
+  end
+
+  describe "a reconcile superseded under its own tag — issue #3" do
+    test "the superseded attempt is torn down, and its deadline cannot reach its successor",
+         %{limiter: limiter} do
+      # `{:resubscribe, _}` is now skipped while one is in flight, but `{:link_up, _}` is
+      # not and must not be: a shard that links up again genuinely wants the newer replay.
+      # `on_link_up/2` is fully re-entrant, so a reconnect arriving while the previous
+      # replay is still running lands a second attempt on the same tag.
+      #
+      # Two things have to hold for that to be safe, and neither did. The superseded attempt
+      # must be TORN DOWN rather than orphaned — an orphan's monitor ref belongs to nothing,
+      # so its `:DOWN` reaches `drop_dead_subscriber/2` as though a subscriber had died, and
+      # if it ever answers, the `{:reconcile_done, tag, _}` clause forgets its successor and
+      # hands that successor's callers a stale result. And the superseded attempt's DEADLINE
+      # must not reach the successor now holding the tag, which is what `ref` in the timeout
+      # message is for.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:replaying, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      feed =
+        start_feed(
+          shards: %{
+            0 => %{connected_shard("s0") | symbols: ["BTCUSD"], connected?: false}
+          },
+          reconcile_timeout_ms: 2_000,
+          credentials: @credentials,
+          limiter: limiter,
+          plug: plug
+        )
+
+      send(feed, {:dp_exchange, :webull, link_up("s0")})
+      assert_receive {:replaying, first}, 3_000
+      first_ref = Process.monitor(first)
+
+      # Long enough that the first attempt's deadline lands INSIDE the refute window below
+      # while the second attempt holds the tag, and far enough from the second's own
+      # deadline that the two cannot be confused for each other.
+      Process.sleep(1_200)
+
+      send(feed, {:dp_exchange, :webull, link_up("s0")})
+      assert_receive {:replaying, second}, 3_000
+      second_ref = Process.monitor(second)
+
+      assert_receive {:DOWN, ^first_ref, :process, ^first, _reason}, 1_000
+
+      refute_receive {:DOWN, ^second_ref, :process, ^second, _reason}, 1_200
+
+      assert map_size(:sys.get_state(feed).reconciling) == 1,
+             "one tag, one tracked attempt — the superseded one must not still be counted"
+
+      assert Process.alive?(feed)
     end
   end
 

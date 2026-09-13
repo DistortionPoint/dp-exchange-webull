@@ -107,6 +107,30 @@ defmodule DpExchange.Webull.Feed do
   changed — the same shape Coinbase's `Feed` already carries for its own reconnect case,
   applied here to a steady-state failure mode Coinbase does not have.
 
+  ## One tick, one attempt
+
+  That unconditional re-issue is the only recovery this venue has for a session it has
+  silently stopped publishing to, and for a long time it could not complete once a shard
+  actually needed it. `@reconcile_timeout_ms` and `@resubscribe_interval_ms` are both
+  60,000, and `handle_info(:resubscribe, _)` re-arms its own timer BEFORE spawning, so at
+  every tick boundary the tick was enqueued ahead of the deadline armed during the previous
+  one. The tick overwrote `reconciling[{:resubscribe, index}]` with a fresh task; the
+  previous deadline then arrived, found that successor under the tag it had been armed for,
+  and killed it milliseconds old. Issue #3 measured the consequence over a 2h04m boot: 449
+  reconcile timeouts — against 496 ticks that a four-shard, 60-second interval predicts, so
+  very nearly all of them — producing 12 recoveries.
+
+  Two changes, because it was two defects wearing one symptom. A tick whose previous attempt
+  is still running is now SKIPPED rather than stacked on top of it: a second identical
+  subscribe for a session the venue has not answered for yet is load, not a safety net, and
+  `validate_resubscribe_interval_ms!/1` already refuses a configured interval under a second
+  in those words. And a deadline now names the ATTEMPT, not merely the tag it ran under, so
+  a timer can only ever tear down the attempt it was armed for — see `spawn_reconcile/3`.
+
+  A tag is not an identity. Every blind resubscribe for shard 2 runs under
+  `{:resubscribe, 2}`, and anything keyed only by the tag — a deadline, a monitor, a reply —
+  is keyed to the SLOT rather than to the thing occupying it.
+
   ## The resubscribe timer must never fail-fast
 
   A moduledoc worth carrying from `dp_exchange_robinhood`'s `Feed`, which named this
@@ -654,9 +678,9 @@ defmodule DpExchange.Webull.Feed do
   # that, and only a timer tells it apart from one about to succeed. A timer for a tag that
   # already answered finds nothing tracked and is ignored, so a slow-but-successful reconcile
   # is never torn down by its own deadline arriving late.
-  def handle_info({:reconcile_timeout, tag}, state) do
+  def handle_info({:reconcile_timeout, tag, ref}, state) do
     case Map.fetch(state.reconciling, tag) do
-      {:ok, %{pid: pid}} ->
+      {:ok, %{pid: pid, ref: ^ref}} ->
         stop_reconcile_task(pid)
 
         # `:no_venue_response` is the third element, and it is a statement of fact rather
@@ -675,7 +699,10 @@ defmodule DpExchange.Webull.Feed do
           forget_reconcile(state, tag)
         )
 
-      :error ->
+      # Nothing tracked under this tag, or something tracked that this timer was not armed
+      # for. Both are ordinary: the first is a reconcile that already answered, the second
+      # an attempt superseded by a newer one, which now carries its own deadline.
+      _answered_or_superseded ->
         {:noreply, state}
     end
   end
@@ -1103,6 +1130,27 @@ defmodule DpExchange.Webull.Feed do
   defp resubscribe_shard({_index, %{connected?: false}}, state), do: state
   defp resubscribe_shard({_index, %{symbols: []}}, state), do: state
 
+  # A shard whose PREVIOUS blind resubscribe has not finished. Skipped rather than launched
+  # alongside it: a second identical subscribe for a session the venue has not answered for
+  # yet is load, not a safety net. `validate_resubscribe_interval_ms!/1` below refuses a
+  # configured interval under a second in those exact words, and an attempt still in flight
+  # makes the EFFECTIVE interval shorter than the configured one just as surely.
+  #
+  # This is the half of issue #3 that reached the venue. `@reconcile_timeout_ms` and
+  # `@resubscribe_interval_ms` are both 60,000, so in the steady state of a stalled shard
+  # every tick landed on top of an unfinished attempt, and the tick won the ordering (see
+  # `spawn_reconcile/3`). What the venue saw was every shard re-asserting its whole
+  # subscription on a rolling 60-second overlap, on one App Key, forever.
+  #
+  # The cost is that a shard whose attempt is hung re-asserts on the tick AFTER its deadline
+  # clears rather than the next one — the deadline and the interval being equal, that is
+  # every other tick. Stated rather than tuned away: `@reconcile_timeout_ms` is derived from
+  # `@call_timeout` for a reason that has nothing to do with this timer, and shortening it
+  # here to buy back a cadence would change every other reconcile's deadline with it.
+  defp resubscribe_shard({index, _shard}, state)
+       when is_map_key(:erlang.map_get(:reconciling, state), {:resubscribe, index}),
+       do: state
+
   defp resubscribe_shard({index, shard}, state) do
     spawn_reconcile(state, {:resubscribe, index}, fn ->
       Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
@@ -1403,6 +1451,7 @@ defmodule DpExchange.Webull.Feed do
 
   defp spawn_reconcile(state, tag, fun) do
     me = self()
+    state = supersede_reconcile(state, tag)
 
     {:ok, pid} =
       Task.Supervisor.start_child(state.task_supervisor, fn ->
@@ -1413,11 +1462,45 @@ defmodule DpExchange.Webull.Feed do
     # neither linked nor monitored: if it dies without sending `{:reconcile_done, ...}`,
     # nothing here ever learns. `tag` carries the caller's `from` on the primary path, so
     # that caller waits out `@call_timeout` and then EXITS, taking the calling process with
-    # it. See the `:DOWN` and `{:reconcile_timeout, _}` clauses.
+    # it. See the `:DOWN` and `{:reconcile_timeout, _, _}` clauses.
     ref = Process.monitor(pid)
-    Process.send_after(self(), {:reconcile_timeout, tag}, state.reconcile_timeout_ms)
+
+    # The deadline carries `ref`, so it names the ATTEMPT and not merely the tag it ran
+    # under. A tag is reused — every blind resubscribe for shard 2 runs under
+    # `{:resubscribe, 2}` — and a timer that only names the tag will tear down whichever
+    # attempt happens to be holding it when the timer arrives. That is not hypothetical
+    # ordering: `handle_info(:resubscribe, _)` re-arms its own timer BEFORE spawning, so at
+    # a tick boundary the tick is always enqueued ahead of the deadline armed during the
+    # previous one. Issue #3 measured the result — 449 reconciles producing 12 recoveries,
+    # because each successor was killed microseconds after it started by its predecessor's
+    # deadline, and the blind resubscribe is the ONLY recovery this venue has for a session
+    # it has silently stopped publishing to.
+    Process.send_after(self(), {:reconcile_timeout, tag, ref}, state.reconcile_timeout_ms)
 
     put_in(state.reconciling[tag], %{ref: ref, pid: pid})
+  end
+
+  # An attempt being replaced under a tag that is still tracking one. Torn down here rather
+  # than left to its own deadline, because the entry it is tracked by is about to be
+  # overwritten: after that its monitor ref belongs to nothing, its `:DOWN` reaches
+  # `drop_dead_subscriber/2` as if a subscriber had died, and if it ever answers, the
+  # `{:reconcile_done, tag, _}` clause will forget its SUCCESSOR and hand the successor's
+  # callers this attempt's stale result.
+  #
+  # `{:resubscribe, _}` never reaches this — `resubscribe_shard/2` skips a tick whose
+  # previous attempt is still running — so what arrives here is a `{:link_up, _}` or
+  # `{:background, _}` genuinely superseded by newer intent, where the newest attempt
+  # winning is the behaviour wanted. `{:primary, _, from, _, _, _}` carries its caller in
+  # the tag and so is unique per caller; two of them never collide.
+  defp supersede_reconcile(state, tag) do
+    case Map.fetch(state.reconciling, tag) do
+      :error ->
+        state
+
+      {:ok, %{pid: pid}} ->
+        stop_reconcile_task(pid)
+        forget_reconcile(state, tag)
+    end
   end
 
   # A shard's socket crashing abnormally is contained here rather than taking the whole

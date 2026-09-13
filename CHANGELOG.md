@@ -22,6 +22,52 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A blind resubscribe could not complete once a shard needed it, because the next tick
+  killed it (issue #3).** `@resubscribe_interval_ms` and `@reconcile_timeout_ms` are both
+  60,000, and `handle_info(:resubscribe, _)` re-arms its own timer *before* spawning — so at
+  every tick boundary the tick was enqueued ahead of the deadline armed during the previous
+  one. The tick overwrote `reconciling[{:resubscribe, index}]` with a fresh task, and the
+  previous deadline then found that successor under the tag it had been armed for and killed
+  it milliseconds old.
+
+  The blind re-issue is the only recovery this venue has for a session it has silently
+  stopped publishing to (see the moduledoc and DpCryptoManagement's issue #17), so once a
+  shard stalled it could not come back except by escalation. The reported boot measured 449
+  reconcile timeouts producing 12 recoveries; a four-shard, 60-second interval over 2h04m
+  predicts 496 ticks, so very nearly every tick was failing this way.
+
+  Two fixes, because this was two defects wearing one symptom:
+
+  - A tick whose previous attempt is still in flight is now **skipped**. A second identical
+    subscribe for a session the venue has not answered for yet is load, not a safety net —
+    `validate_resubscribe_interval_ms!/1` already refuses a configured interval under a
+    second in those words, and an unfinished attempt shortens the effective interval just as
+    surely. Consequence worth knowing: a shard whose attempt is hung re-asserts on the tick
+    *after* its deadline clears, which — the deadline and the interval being equal — is every
+    other tick. Stated rather than tuned away, because `@reconcile_timeout_ms` is derived
+    from `@call_timeout` for reasons unrelated to this timer.
+  - A deadline now names the **attempt** rather than the tag it ran under. The timeout
+    message carries the attempt's monitor ref and is ignored unless the tag still holds it,
+    so a timer can only ever tear down what it was armed for. This also covers `{:link_up,
+    _}` and `{:background, _}`, where a supersede is legitimate.
+
+  Relatedly, `spawn_reconcile/3` now tears an attempt down when it supersedes one instead of
+  orphaning it. An orphan's monitor ref belonged to nothing, so its `:DOWN` reached
+  `drop_dead_subscriber/2` as though a subscriber had died; and if it later answered, the
+  `{:reconcile_done, tag, _}` clause forgot its successor and handed that successor's callers
+  a stale result.
+
+  No change to any error shape a caller sees.
+
+### Changed
+
+- The test named "the resubscribe timer reschedules itself" now drives the feed's own timer
+  instead of hand-sending `:resubscribe` twice. The hand-sent version tested that the handler
+  can run twice — not what it was named for — and passed only by racing the first attempt's
+  reply back to the mailbox, which is the overlap issue #3 turned out to be about.
+
 ## [0.4.28] - 2026-09-12
 
 ### Fixed
