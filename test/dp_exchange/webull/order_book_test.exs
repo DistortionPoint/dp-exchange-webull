@@ -121,6 +121,41 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
+    test "bids come back highest first and asks lowest first, whatever the venue sent" do
+      # `Core.Types.OrderBook`: "The ordering is part of the contract, not a convenience: a
+      # caller reading `hd(bids)` as the best bid is reading it correctly, and a venue
+      # package that returns venue-order without re-sorting has broken the contract even
+      # though every value in it is true."
+      #
+      # `dp_exchange_coinbase` was the only package in the family sorting. This one passed
+      # the venue's rows through, so `hd(bids)` was whatever row arrived first — a wrong best
+      # bid made entirely of real numbers.
+      row =
+        depth_row(%{
+          "bids" => [
+            %{"price" => "13.89", "size" => "12"},
+            %{"price" => "13.90", "size" => "5"},
+            %{"price" => "13.88", "size" => "7"}
+          ],
+          "asks" => [
+            %{"price" => "13.95", "size" => "4"},
+            %{"price" => "13.92", "size" => "9"}
+          ]
+        })
+
+      assert {:ok, book} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(book.bids, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["13.90", "13.89", "13.88"]
+
+      assert Enum.map(book.asks, fn {price, _size} -> Decimal.to_string(price) end) ==
+               ["13.92", "13.95"]
+    end
+
     test "an undated book keeps its levels, and its venue_time is nil not the local clock" do
       # "Not stamped with the local clock" is the guarantee and it holds; the refusal was
       # not part of it. `Core.Types.OrderBook` enforces `[:symbol, :bids, :asks,

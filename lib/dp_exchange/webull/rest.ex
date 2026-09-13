@@ -1257,8 +1257,8 @@ defmodule DpExchange.Webull.Rest do
     {:ok,
      %OrderBook{
        symbol: symbol,
-       bids: book_levels(value(row, ["bids"])),
-       asks: book_levels(value(row, ["asks"])),
+       bids: book_levels(value(row, ["bids"]), :desc),
+       asks: book_levels(value(row, ["asks"]), :asc),
        venue_time: top_of_book_time(row),
        observed_at: DateTime.utc_now(),
        # No sequence on this endpoint. `nil` means the venue did not say, so a caller
@@ -1270,15 +1270,29 @@ defmodule DpExchange.Webull.Rest do
 
   # The level's own size, not a sum over its `order` array. Those are different numbers when
   # the venue reports partial attribution, and the level size is the one it stands behind.
-  defp book_levels(rows) when is_list(rows) do
-    for row <- rows,
-        price = decimal(value(row, ["price"])),
-        size = decimal(value(row, ["size"])),
-        not is_nil(price),
-        do: {price, size}
+  # Sorted here, not passed through in the venue's row order. `Core.Types.OrderBook` makes
+  # the ordering part of the contract in as many words — "a caller reading `hd(bids)` as the
+  # best bid is reading it correctly, and a venue package that returns venue-order without
+  # re-sorting has broken the contract even though every value in it is true" — and this
+  # returned whatever row the venue sent first.
+  #
+  # `{direction, Decimal}` rather than term order, matching `dp_exchange_coinbase`'s
+  # `sorted/2` — the only package in the family that was already doing this — because
+  # `Decimal` structs do not compare correctly as plain terms.
+  #
+  # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
+  defp book_levels(rows, direction) when is_list(rows) do
+    rows
+    |> Enum.flat_map(fn row ->
+      case decimal(value(row, ["price"])) do
+        nil -> []
+        price -> [{price, decimal(value(row, ["size"]))}]
+      end
+    end)
+    |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})
   end
 
-  defp book_levels(_absent), do: []
+  defp book_levels(_absent, _direction), do: []
 
   # The venue's footprint granularities. **Deliberately narrower than `timeframes/0`** —
   # the footprint endpoint serves five widths and the bars endpoint serves more, and a
