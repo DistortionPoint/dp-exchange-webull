@@ -22,6 +22,36 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A row the venue did not identify was published with an empty id or symbol.**
+  `Core.Types.Watchlist`, `NewsItem` and `ScreenerResult` each enforce their identifying
+  field and `new/1` refuses a `nil` there, but these build the struct literally — as
+  everywhere in this family — so `|| ""` satisfied the requirement while saying nothing.
+
+  An empty string is worse than the `nil` it replaced. A `nil` is detectable; `""` is a
+  value, so a consumer keying coverage by symbol gets a live entry named `""`, and one
+  deduplicating by id collapses every unidentified row into a single entry.
+
+  The news fallback was the worst of the three: `value(row, ["id", "news_id"]) ||
+  value(row, ["symbol"]) || ""` published a **ticker symbol** as an item id. That looks like
+  an id and collides for every item about the same symbol, so a consumer deduplicating by id
+  silently kept one story per ticker.
+
+  All three now drop the row — the rule `dp_exchange_robinhood` already states for the same
+  situation: "a row missing `symbol` entirely is dropped rather than published under a
+  fabricated one … a nil key there is worse than one fewer row this cycle". The screener
+  drops **after** `Enum.with_index/2`, so a survivor keeps the position the venue returned it
+  in; closing the gap would re-rank the list, which that field's own comment rules out.
+
+  `get_watchlist/3`'s `value(row, ["watchlist_id"]) || watchlist_id` is unchanged and is not
+  the same shape: it falls back to the id the caller asked for, which is neither absent nor
+  fabricated.
+
+  Found by a mechanical audit of every literal struct construction in the family against the
+  fields its Core type requires non-nil — the check `new/1` performs and 85 literal
+  constructions bypass.
+
 ## [0.4.37] - 2026-09-13
 
 ### Fixed

@@ -356,7 +356,9 @@ defmodule DpExchange.Webull.WatchlistsTest do
       base = [credentials: @credentials, retry_attempts: 0]
 
       assert {:ok, [_watchlist]} =
-               DpExchange.Webull.list_watchlists(base ++ [plug: responding([%{}])])
+               DpExchange.Webull.list_watchlists(
+                 base ++ [plug: responding([%{"watchlist_id" => "wl-1"}])]
+               )
 
       assert {:ok, _read} =
                DpExchange.Webull.get_watchlist("wl-1", base ++ [plug: responding([%{}])])

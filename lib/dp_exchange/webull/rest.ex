@@ -1870,7 +1870,7 @@ defmodule DpExchange.Webull.Rest do
           {:ok, [Watchlist.t()]} | {:error, term()} | {:refused, term()}
   def list_watchlists(credentials, opts) do
     with {:ok, body} <- get("/market-data/watchlists/list", %{}, credentials, opts) do
-      {:ok, body |> rows() |> Enum.map(&to_watchlist(&1, nil))}
+      {:ok, body |> rows() |> Enum.map(&to_watchlist(&1, nil)) |> Enum.reject(&is_nil/1)}
     end
   end
 
@@ -2098,9 +2098,29 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # A row that cannot supply its own identity is dropped rather than published under an
+  # empty one. `Core.Types.Watchlist`, `NewsItem` and `ScreenerResult` each enforce their
+  # identifying field, and `new/1` refuses a `nil` there — but these build the struct
+  # literally, as everywhere in this family, so `|| ""` satisfied the requirement while
+  # saying nothing.
+  #
+  # An empty string is worse than the `nil` it replaced. A `nil` is detectable; `""` is a
+  # value, so a consumer keying coverage by symbol gets a live entry named "" and a
+  # consumer deduplicating by id collapses every unidentified row into one.
+  #
+  # `dp_exchange_robinhood` states the rule this follows, for the same reason:
+  # "a row missing `symbol` entirely is dropped rather than published under a fabricated
+  # one ... a nil key there is worse than one fewer row this cycle".
   defp to_watchlist(row, symbols) do
+    case value(row, ["watchlist_id"]) do
+      nil -> nil
+      id -> build_watchlist(id, row, symbols)
+    end
+  end
+
+  defp build_watchlist(id, row, symbols) do
     %Watchlist{
-      id: value(row, ["watchlist_id"]) || "",
+      id: id,
       name: value(row, ["name"]),
       # `nil`, not `[]`: this endpoint does not list membership, and an empty list would say
       # the watchlist is empty.
@@ -2376,7 +2396,8 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("lang", Keyword.get(opts, :lang))
 
       with {:ok, response} <- post("/market-data/news/summaries/get", body, credentials, opts) do
-        {:ok, response |> rows() |> Enum.map(&to_news_item(&1, symbols))}
+        {:ok,
+         response |> rows() |> Enum.map(&to_news_item(&1, symbols)) |> Enum.reject(&is_nil/1)}
       end
     end
   end
@@ -2396,9 +2417,19 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # The old fallback was `... || value(row, ["symbol"]) || ""`. A ticker as an item id is the
+  # worst of the three: it looks like an id, and it collides for every item about the same
+  # symbol, so a consumer deduplicating by id silently keeps one story per ticker.
   defp to_news_item(row, asked_for) do
+    case value(row, ["id", "news_id"]) do
+      nil -> nil
+      id -> build_news_item(id, row, asked_for)
+    end
+  end
+
+  defp build_news_item(id, row, asked_for) do
     %NewsItem{
-      id: value(row, ["id", "news_id"]) || value(row, ["symbol"]) || "",
+      id: id,
       headline: value(row, ["title", "headline"]),
       summary: value(row, ["summary", "content"]),
       url: value(row, ["url", "link"]),
@@ -2456,7 +2487,12 @@ defmodule DpExchange.Webull.Rest do
           |> screener_defaults(name)
 
         with {:ok, body} <- get(path, params, credentials, opts) do
-          {:ok, body |> rows() |> Enum.with_index(1) |> Enum.map(&to_screener_result(&1, name))}
+          {:ok,
+           body
+           |> rows()
+           |> Enum.with_index(1)
+           |> Enum.map(&to_screener_result(&1, name))
+           |> Enum.reject(&is_nil/1)}
         end
 
       :error ->
@@ -2477,9 +2513,19 @@ defmodule DpExchange.Webull.Rest do
 
   defp screener_defaults(params, _name), do: params
 
+  # Dropped AFTER `Enum.with_index/2`, so a survivor keeps the position the venue returned it
+  # in. Closing the gap would re-rank the list, which is the same thing the `rank` comment
+  # below rules out for a different reason.
   defp to_screener_result({row, rank}, name) do
+    case value(row, ["symbol", "sector_name", "name"]) do
+      nil -> nil
+      symbol -> build_screener_result(symbol, row, rank, name)
+    end
+  end
+
+  defp build_screener_result(symbol, row, rank, name) do
     %ScreenerResult{
-      symbol: value(row, ["symbol", "sector_name", "name"]) || "",
+      symbol: symbol,
       screener: name,
       # The venue's returned order. It publishes no rank field, and the position it chose to
       # return a row in is the ranking — inventing one from a metric would re-rank the list.

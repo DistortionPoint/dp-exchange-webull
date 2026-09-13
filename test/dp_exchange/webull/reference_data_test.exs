@@ -327,12 +327,77 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
-                 plug: responding([%{"title" => "x", "summary" => "y"}]),
+                 plug: responding([%{"id" => "n-1", "title" => "x", "summary" => "y"}]),
                  retry_attempts: 0
                )
 
       assert item.source == "webull"
       assert item.symbols == ["AAPL"]
+    end
+  end
+
+  describe "a row that cannot supply its own identity is dropped, never given an empty one" do
+    # `|| ""` satisfied the contract's non-nil requirement while saying nothing. It is worse
+    # than a `nil`: a `nil` is detectable and an empty string is a value, so a consumer
+    # keying coverage by symbol gets a live entry named "". `dp_exchange_robinhood` states
+    # the rule this follows — "a row missing `symbol` entirely is dropped rather than
+    # published under a fabricated one".
+
+    test "a screener row with no symbol is dropped" do
+      rows = [%{"symbol" => "AAPL"}, %{"close" => "1"}, %{"symbol" => "MSFT"}]
+
+      assert {:ok, results} =
+               Rest.get_screener("gainers_losers", @credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(results, & &1.symbol) == ["AAPL", "MSFT"]
+      refute Enum.any?(results, &(&1.symbol == ""))
+    end
+
+    test "dropping a screener row does not re-rank the ones that survive" do
+      # `rank` is the venue's own returned order — "inventing one from a metric would
+      # re-rank the list", and so would closing the gap left by a dropped row.
+      rows = [%{"symbol" => "AAPL"}, %{"close" => "1"}, %{"symbol" => "MSFT"}]
+
+      assert {:ok, [first, second]} =
+               Rest.get_screener("gainers_losers", @credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert first.rank == 1
+      assert second.rank == 3, "the survivor keeps the position the venue returned it in"
+    end
+
+    test "a news row with no id is dropped rather than published under the ticker" do
+      # The old fallback was `value(row, ["id", "news_id"]) || value(row, ["symbol"]) || ""`.
+      # A ticker as an item id is the worst of the three: it looks like an id, and it
+      # collides for every item about the same symbol, so a consumer deduplicating by id
+      # silently keeps one story per ticker.
+      rows = [
+        %{"id" => "n-1", "title" => "real"},
+        %{"symbol" => "AAPL", "title" => "no id of its own"}
+      ]
+
+      assert {:ok, [item]} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert item.id == "n-1"
+    end
+
+    test "a watchlist row with no id is dropped" do
+      rows = [%{"watchlist_id" => "w-1", "name" => "Mine"}, %{"name" => "nameless"}]
+
+      assert {:ok, [list]} =
+               Rest.list_watchlists(@credentials, plug: responding(rows), retry_attempts: 0)
+
+      assert list.id == "w-1"
     end
   end
 
@@ -505,7 +570,9 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                DpExchange.Webull.get_filings("AAPL", base ++ [plug: responding([%{}])])
 
       assert {:ok, [_item]} =
-               DpExchange.Webull.get_news(base ++ [symbols: ["AAPL"], plug: responding([%{}])])
+               DpExchange.Webull.get_news(
+                 base ++ [symbols: ["AAPL"], plug: responding([%{"id" => "n-1"}])]
+               )
 
       assert {:ok, [_row]} =
                DpExchange.Webull.get_screener(
