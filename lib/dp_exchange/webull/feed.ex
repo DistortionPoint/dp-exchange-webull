@@ -131,6 +131,17 @@ defmodule DpExchange.Webull.Feed do
   `{:resubscribe, 2}`, and anything keyed only by the tag — a deadline, a monitor, a reply —
   is keyed to the SLOT rather than to the thing occupying it.
 
+  `Core.PollingFeed` had already answered the first half of this and said why:
+  rescheduling happens in its `finish/3` and nowhere else, "which is what bounds the queue —
+  a symbol cannot have a second tick pending until its first has finished". This module
+  re-arms at the TOP of `handle_info(:resubscribe, _)` instead, which is the opposite, and
+  the two other venues that carry a resubscribe timer are immune only because their re-issue
+  is a synchronous socket send inside the callback rather than an async HTTP call. This feed
+  is the only one in the family whose periodic re-assert is a task tracked by a reusable key
+  with a deadline on it, which is why the defect landed here and nowhere else. Re-arming at
+  the top is kept — the timer must survive a crash in the body — and the in-flight skip in
+  `resubscribe_shard/2` is what supplies the bound instead.
+
   ## The resubscribe timer must never fail-fast
 
   A moduledoc worth carrying from `dp_exchange_robinhood`'s `Feed`, which named this
