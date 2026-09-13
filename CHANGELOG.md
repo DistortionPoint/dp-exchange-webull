@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.29] - 2026-09-13
+
 ### Fixed
 
 - **A blind resubscribe could not complete once a shard needed it, because the next tick
