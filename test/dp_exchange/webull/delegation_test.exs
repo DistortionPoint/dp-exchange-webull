@@ -2,6 +2,11 @@ defmodule DpExchange.Webull.DelegationTest do
   @moduledoc """
   Every facade function reaches the venue.
 
+  That claim was overstated until 2026-09-14: this file covered seventeen of them and said
+  "every". The five it had missed were found by reading which lines of `DpExchange.Webull`
+  the suite never executes, and they are together in their own describe below rather than
+  scattered, so the next person can see what the gap was.
+
   This is not ceremony. The facade threads credentials and the rate limiter into each call,
   and a function wired to the wrong `Rest` arity — or wired without `with_limiter/1` —
   compiles, type-checks and then either loses the credential or bypasses the limiter. Both
@@ -44,6 +49,69 @@ defmodule DpExchange.Webull.DelegationTest do
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
       |> Plug.Conn.resp(200, Jason.encode!(body))
+    end
+  end
+
+  describe "the five this file's own claim had missed" do
+    # The moduledoc above says "every facade function reaches the venue". It said that while
+    # covering seventeen of them, and these five were not among the seventeen — found by
+    # reading which lines of `DpExchange.Webull` the suite never executes.
+    #
+    # Two of them are the reason the claim is worth keeping true rather than just stated:
+    # `get_trades/2` and `quantization/2` thread `credentials/1` and `with_limiter/1` exactly
+    # as the covered calls do, and a delegate wired to the wrong `Rest` function compiles and
+    # type-checks. A refusal-shaped assertion cannot catch that — `get_trades/2` and
+    # `get_price/2` both answer `{:error, {:missing_credentials, :webull}}` before a request
+    # is built, so the swap stays green. Only a happy path whose RESULT differs pins it.
+    test "get_trades/2 reaches the tape, and not some other read" do
+      body = [
+        %{
+          "symbol" => "AAPL",
+          "instrument_id" => "913256409",
+          "result" => [
+            %{"time" => 1_761_182_953_043, "price" => "48.07", "volume" => "1", "side" => "B"}
+          ]
+        }
+      ]
+
+      assert {:ok, [trade]} =
+               Webull.get_trades("AAPL", base(category: "US_STOCK", plug: json(body)))
+
+      assert %DpExchange.Core.Types.Trade{} = trade
+      assert Decimal.equal?(trade.price, Decimal.new("48.07"))
+    end
+
+    test "quantization/2 reaches the instrument profile" do
+      body = [
+        %{
+          "symbol" => "BTCUSD",
+          "price_precision" => "2",
+          "quantity_precision" => "6",
+          "min_quantity" => "0.0001"
+        }
+      ]
+
+      assert {:ok, quantum} = Webull.quantization("BTC-USD", base(plug: json(body)))
+      assert is_map(quantum)
+    end
+
+    test "get_fees/2 answers from the published rate, with no request made" do
+      # The one read here that needs no credentials: this venue's crypto fee is a flat
+      # published rate rather than an account query, so the facade answers from
+      # `@crypto_spread_pct`. Asserted rather than assumed — a first version of this test
+      # expected a credential refusal and was wrong about the package, not the venue.
+      assert {:ok, %{source: :published_rate}} = Webull.get_fees(%{}, [])
+    end
+
+    test "adjusted?/1 and live?/1 answer without a venue at all" do
+      # Pure delegations, so the only thing a test can get wrong is not running them.
+      refute Webull.adjusted?("1m"), "an intraday width carries no split adjustment"
+
+      # `:production` and `:uat` are this venue's two environments. `Environment.validate!/1`
+      # refuses anything else outright rather than defaulting, "because a typo that silently
+      # resolved to :production would send a real order to a real broker".
+      assert Webull.live?(environment: :production)
+      refute Webull.live?(environment: :uat)
     end
   end
 

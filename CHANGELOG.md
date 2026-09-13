@@ -22,6 +22,31 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`delegation_test.exs` claimed "every facade function reaches the venue" while covering
+  seventeen of them.** Five were missing: `get_trades/2`, `quantization/2`, `get_fees/2`,
+  `adjusted?/1` and `live?/1`. The moduledoc now says what it covers, and the five have their
+  own describe so the gap is legible rather than absorbed.
+
+  The file's own reasoning is why this matters: the facade threads credentials and the rate
+  limiter into each call, and "a function wired to the wrong `Rest` arity — or wired without
+  `with_limiter/1` — compiles, type-checks and then either loses the credential or bypasses
+  the limiter".
+
+  **A refusal-shaped assertion cannot catch that**, which is worth recording because it was
+  the first thing tried: `get_trades/2` and `get_price/2` both answer
+  `{:error, {:missing_credentials, :webull}}` before a request is built, so swapping one
+  delegate for the other left the test green. Only a happy path whose *result* differs pins
+  the target. All three wrong-delegate swaps now fail.
+
+  Two of the five corrected a wrong assumption rather than the code: `get_fees/2` answers
+  without credentials, because this venue's crypto fee is a flat published rate rather than
+  an account query; and the environments are `:production` and `:uat`, not `:live`/`:paper`,
+  which `Environment.validate!/1` refuses outright rather than defaulting.
+
+  Coverage 91.87% to 92.14%.
+
 ## [0.4.44] - 2026-09-13
 
 ### Changed
