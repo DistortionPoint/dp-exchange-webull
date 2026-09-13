@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.31] - 2026-09-13
+
 ### Fixed
 
 - **A superseded reconcile's answer could still settle its successor's tag (issue #3,
