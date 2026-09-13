@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST quote or order book the venue did not date was refused outright.** `get_price/3`
+  and `get_order_book/2` gated on `{:ok, timestamp} <- venue_time(row)`, so a row without a
+  readable time discarded a real guarded price, or a whole set of book levels, over a field
+  neither type enforces. `Core.Types.Quote` lists `[:symbol, :price, :observed_at,
+  :provider]`; `Core.Types.OrderBook` lists `[:symbol, :bids, :asks, :observed_at,
+  :provider]` and types `venue_time` as `DateTime.t() | nil`.
+
+  `top_of_book_time/1` in this same module has always answered the other way for
+  `get_top_of_book/3` — the sibling call on the same endpoint — so two calls reading the
+  same rows disagreed about whether an undated one was usable.
+
+  The guarantee those tests were named for ("not stamped with the local clock", "rather than
+  substituting now") is unchanged and is now asserted directly rather than inferred from an
+  `{:error, _}`, which could not tell a `nil` apart from a substitution in the first place.
+
+  **Three paths still refuse, and that is the contract deciding, not inconsistency**:
+  `get_historical_prices/5` builds a `Candle` and `get_volume_profile/4` a `VolumeProfile`,
+  both of which enforce `:opened_at` — an interval at an invented minute is a different kind
+  of wrong from an unstated timestamp — and `get_trades/2` builds a `Trade`, which enforces
+  `:timestamp`.
+
+  Completes the sweep that began in `dp_exchange_gemini` and reached `dp_exchange_schwab`;
+  this was the last venue and the last transport carrying it.
+
 ## [0.4.36] - 2026-09-13
 
 ### Fixed

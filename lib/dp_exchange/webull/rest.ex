@@ -198,14 +198,17 @@ defmodule DpExchange.Webull.Rest do
       with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body),
            {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
-           {:ok, price} <- required_decimal(raw_price, :price),
-           {:ok, timestamp} <- venue_time(row) do
+           {:ok, price} <- required_decimal(raw_price, :price) do
         {:ok,
          %Quote{
            symbol: snapshot_canonical(native, category),
            price: price,
            volume: snapshot_volume(row, category),
-           venue_time: timestamp,
+           # Read, not required — see `top_of_book_time/1`, which has always answered this
+           # way for the sibling call on the same endpoint. `Core.Types.Quote` enforces
+           # `[:symbol, :price, :observed_at, :provider]`; refusing a guarded traded price
+           # over an optional field discards the fact the caller asked for.
+           venue_time: top_of_book_time(row),
            observed_at: DateTime.utc_now(),
            provider: :webull
          }}
@@ -1242,22 +1245,27 @@ defmodule DpExchange.Webull.Rest do
   defp book_category(category) when category in ["US_STOCK", "US_ETF"], do: :ok
   defp book_category(category), do: {:error, {:unsupported_book_category, category}}
 
+  # `venue_time/1` already reads `quote_time`, which is what this endpoint stamps — read,
+  # not required. `Core.Types.OrderBook` enforces `[:symbol, :bids, :asks, :observed_at,
+  # :provider]` and types `venue_time` as `DateTime.t() | nil`, so an undated book is a
+  # shape the contract has a way to say. Refusing threw away the levels themselves, which
+  # are the whole of what the caller asked for.
+  #
+  # The guarantee that mattered is kept and is what the test now asserts directly: an
+  # undated book is `nil` here, never this package's clock.
   defp to_order_book(row, symbol) do
-    # `venue_time/1` already reads `quote_time`, which is what this endpoint stamps.
-    with {:ok, timestamp} <- venue_time(row) do
-      {:ok,
-       %OrderBook{
-         symbol: symbol,
-         bids: book_levels(value(row, ["bids"])),
-         asks: book_levels(value(row, ["asks"])),
-         venue_time: timestamp,
-         observed_at: DateTime.utc_now(),
-         # No sequence on this endpoint. `nil` means the venue did not say, so a caller
-         # cannot use this book to detect a gap in a stream.
-         sequence: nil,
-         provider: :webull
-       }}
-    end
+    {:ok,
+     %OrderBook{
+       symbol: symbol,
+       bids: book_levels(value(row, ["bids"])),
+       asks: book_levels(value(row, ["asks"])),
+       venue_time: top_of_book_time(row),
+       observed_at: DateTime.utc_now(),
+       # No sequence on this endpoint. `nil` means the venue did not say, so a caller
+       # cannot use this book to detect a gap in a stream.
+       sequence: nil,
+       provider: :webull
+     }}
   end
 
   # The level's own size, not a sum over its `order` array. Those are different numbers when

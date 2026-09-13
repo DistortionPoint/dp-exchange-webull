@@ -121,14 +121,24 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
     end
 
-    test "an undated book is REFUSED, not stamped with the local clock" do
+    test "an undated book keeps its levels, and its venue_time is nil not the local clock" do
+      # "Not stamped with the local clock" is the guarantee and it holds; the refusal was
+      # not part of it. `Core.Types.OrderBook` enforces `[:symbol, :bids, :asks,
+      # :observed_at, :provider]` and types `venue_time` as `DateTime.t() | nil`, so an
+      # undated book is a shape the contract can say — and refusing discarded the levels,
+      # which are the whole of what the caller asked for.
       row = depth_row() |> Map.delete("quote_time")
 
-      assert {:error, :missing_venue_timestamp} =
+      assert {:ok, book} =
                Rest.get_order_book("F", @credentials,
                  plug: responding([row]),
                  retry_attempts: 0
                )
+
+      assert book.bids != []
+      assert book.venue_time == nil
+      assert book.observed_at
+      refute book.venue_time == book.observed_at
     end
 
     test "the sequence is nil, because this endpoint publishes none" do

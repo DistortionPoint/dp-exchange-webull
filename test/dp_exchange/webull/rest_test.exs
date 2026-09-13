@@ -122,11 +122,22 @@ defmodule DpExchange.Webull.RestTest do
       end
     end
 
-    test "a response with no venue timestamp FAILS rather than substituting now" do
+    test "a response with no venue timestamp is nil, and never the local clock" do
+      # "Rather than substituting now" is the guarantee, and it is now asserted directly
+      # instead of inferred from an error — which could not tell a `nil` from a substitution
+      # in the first place. `Core.Types.Quote` enforces `[:symbol, :price, :observed_at,
+      # :provider]`, so refusing threw away a real, guarded traded price over an optional
+      # field. `top_of_book_time/1` has always answered this way for the sibling call on the
+      # same endpoint.
       body = [%{"price" => "1"}]
 
-      assert {:error, :missing_venue_timestamp} =
+      assert {:ok, quoted} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(quoted.price, Decimal.new("1"))
+      assert quoted.venue_time == nil
+      assert quoted.observed_at
+      refute quoted.venue_time == quoted.observed_at
     end
 
     test "a response with no price is an unreadable snapshot, not a nil-priced quote" do
@@ -345,11 +356,19 @@ defmodule DpExchange.Webull.RestTest do
       assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
     end
 
-    test "an unparseable timestamp is an error, not a guess" do
+    test "an unparseable timestamp is nil, not a guess" do
+      # Still not a guess: nothing is inferred from a string this package cannot read, and
+      # the venue's field stays empty rather than being filled with an arrival time. What
+      # changed is that an unreadable OPTIONAL field no longer discards the required one
+      # beside it. `get_historical_prices/5` keeps refusing, because `Core.Types.Candle`
+      # enforces `:opened_at` and a bar at an invented minute is a different kind of wrong.
       body = [%{"price" => "1", "time" => "whenever"}]
 
-      assert {:error, {:unparseable_venue_timestamp, "whenever"}} =
+      assert {:ok, quoted} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert quoted.venue_time == nil
+      assert Decimal.equal?(quoted.price, Decimal.new("1"))
     end
   end
 

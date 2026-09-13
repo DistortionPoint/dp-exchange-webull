@@ -194,11 +194,16 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert quote_struct.venue_time.year == 2026
     end
 
-    test "a timestamp of an unexpected TYPE is an error, not a guess" do
+    test "a timestamp of an unexpected TYPE is nil, not a guess" do
+      # See `Rest.to_order_book/2` and `build_quote`'s sibling: unreadable is not a licence
+      # to guess, and it is also not a reason to discard the price the caller asked for.
       body = [%{"price" => "1", "time" => %{"nested" => true}}]
 
-      assert {:error, {:unparseable_venue_timestamp, _value}} =
+      assert {:ok, quoted} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert quoted.venue_time == nil
+      assert Decimal.equal?(quoted.price, Decimal.new("1"))
     end
   end
 
