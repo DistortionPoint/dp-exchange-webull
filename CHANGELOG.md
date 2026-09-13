@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.41] - 2026-09-13
+
 ### Fixed
 
 - **`usage-rules.md` said `venue_time` is never `nil` on this venue and called a `nil` branch
