@@ -3767,8 +3767,20 @@ defmodule DpExchange.Webull.Rest do
   `/orders/historical-orders/list` answer different questions, and a caller asking for
   "orders" without saying which gets the open ones — the set that can still change.
 
-  Requires `opts[:account_id]`. Returns one page; the venue paginates on `client_order_id`
-  as a cursor and this does not follow it.
+  Requires `opts[:account_id]`. **Returns one page**, and `opts[:limit]` is the venue's own
+  `page_size`, so the largest page it allows is the most this returns.
+
+  `get_symbols/2` in this module DOES walk a cursor, bounded, and refuses a key that does
+  not advance — because the venue documents the parameter for that endpoint. It does not
+  document one for these two: `docs/reference/webull/endpoint-inventory.md` lists
+  `/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` and no
+  pagination parameter for either. This doc previously asserted the venue paginates on
+  `client_order_id`, which is not something this repository has evidence for.
+
+  So the walk is not implemented rather than implemented on a guessed parameter name. A
+  wrong one is silently ignored by most APIs, which would turn a limit a caller can see
+  into one they cannot. Stated in `usage-rules.md` too, since the consumer is the one who
+  would reconcile against a short list.
   """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}

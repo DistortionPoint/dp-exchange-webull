@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pagination claim this repository has no evidence for.** `get_orders/2`'s doc said "the
+  venue paginates on `client_order_id` as a cursor". The venue's published endpoint
+  inventory documents `/trading/orders/open-orders/list` and
+  `/trading/orders/historical-orders/list` and **no pagination parameter for either**, so
+  that sentence asserted a mechanism nobody here has seen. It is removed.
+
+  The one-page behaviour is unchanged and is the honest one: `get_symbols/2` walks a cursor
+  because the venue documents the parameter for that endpoint, and guessing one here would
+  be worse than not walking — a wrong parameter is silently ignored by most APIs, turning a
+  limit a caller can see into one they cannot.
+
+### Changed
+
+- **`usage-rules.md` now states that `get_orders/2` returns one page**, why it is not simply
+  fixed, and what to do about it. The limit was recorded only in the module `@doc`; a
+  consuming agent reads `usage-rules.md`, and a caller reconciling positions against a
+  prefix of their orders is exactly who needed to be told.
+
 ## [0.4.52] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

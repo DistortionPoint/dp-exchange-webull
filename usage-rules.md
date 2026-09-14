@@ -409,6 +409,26 @@ DpExchange.Webull.adjusted?("1d")  #=> true
 DpExchange.Webull.adjusted?("1m")  #=> false
 ```
 
+## `get_orders/2` returns ONE page, and cannot yet return more
+
+The venue paginates its order lists. This package does not follow that pagination, so a
+caller with more orders than one page holds gets a prefix of them — **every order in it
+real, and nothing saying which are missing.** Reconciling positions against it would find a
+difference with no explanation in the data.
+
+`opts[:limit]` is passed through as the venue's `page_size`, so the largest page the venue
+allows is the most this returns.
+
+**Why it is not simply fixed.** The venue's published endpoint inventory documents
+`/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` but not the
+parameter that requests the next page. This package walks a cursor wherever the venue
+documents one — `get_symbols/2` does exactly that, bounded, and refuses a key that does not
+advance — and it will not guess a parameter name here, because a wrong one is silently
+ignored by most APIs and would turn a visible limit into an invisible one.
+
+Until that parameter is confirmed against the live venue, treat a full page as "there may be
+more" rather than as the whole set.
+
 ## Timestamps come from the venue, or the call fails
 
 **The local clock is never substituted** — an undated bar stamped with your own clock is
