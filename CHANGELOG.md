@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.46] - 2026-09-14
+
 ### Changed
 
 - **The test suite runs in 10.3s instead of 25.5s, with the same 836 tests.** Nothing was
