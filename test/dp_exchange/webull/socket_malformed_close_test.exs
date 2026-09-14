@@ -68,11 +68,24 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
     # notice, and the pre-fix behaviour is that this callback never fires at all — the
     # process dies with an uncaught `CaseClauseError` first, so this `assert_receive`
     # would time out on the unpatched dependency.
+    #
+    # Ten seconds, not `test_helper.exs`'s 1_000 ms default. That default was chosen for one
+    # extra process hop between a test and a stubbed plug; what this waits on is a TCP
+    # listen, an accepted connection, a real WebSocket handshake over loopback and a frame
+    # parse, in a VM running the other eight hundred tests alongside it. Measured before
+    # changing it: at 1_000 ms this failed 10 runs in 35 with an EMPTY mailbox — nothing had
+    # arrived yet at all, which is patience running out rather than the notice being wrong.
+    #
+    # Raising it costs nothing when the test passes, because `assert_receive` returns the
+    # moment the message lands; the number is only how long the suite waits before calling
+    # it a failure. That is the opposite of a timeout passed INTO the code under test, where
+    # a bigger number changes the behaviour being measured and has to be justified as such.
     assert_receive {:dp_exchange, :webull,
                     %Notice{
                       kind: :link_down,
                       details: %{session_id: "issue-27-malformed-close"} = details
-                    }}
+                    }},
+                   10_000
 
     # Ties this assertion to the actual defect, not just "something disconnected": the
     # reason WebSockex handed to `handle_disconnect/2` names the exact frame error

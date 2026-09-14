@@ -184,7 +184,16 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
         )
 
       send(feed, {:dp_exchange, :webull, link_up("s0")})
-      assert_receive {:replaying, first}, 3_000
+
+      # The attempt's pid is read from the feed's own state, NOT from the plug's message.
+      #
+      # Waiting on the plug meant waiting for a whole HTTP path to be scheduled and entered
+      # inside a two-second deadline that this same test configures — which is a race the
+      # test sets up against itself, and it lost it 6 runs in 35 under the full suite. The
+      # deadline is armed when the attempt is SPAWNED, not when its request reaches the
+      # plug, so nothing about the timing below depends on how fast that path gets going;
+      # only the test's knowledge of the pid did, and the feed already has it.
+      first = reconcile_pid(feed)
       first_ref = Process.monitor(first)
 
       # Long enough that the first attempt's deadline lands INSIDE the refute window below
@@ -193,7 +202,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       Process.sleep(1_200)
 
       send(feed, {:dp_exchange, :webull, link_up("s0")})
-      assert_receive {:replaying, second}, 3_000
+      second = reconcile_pid(feed, first)
       second_ref = Process.monitor(second)
 
       assert_receive {:DOWN, ^first_ref, :process, ^first, _reason}, 1_000
@@ -204,6 +213,25 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
              "one tag, one tracked attempt — the superseded one must not still be counted"
 
       assert Process.alive?(feed)
+    end
+
+    # The pid of the single in-flight reconcile attempt, once one is there and (when
+    # `unless_pid` is given) once it is a DIFFERENT attempt from the one named.
+    #
+    # `:sys.get_state/1` is an ordinary call answered by the feed itself, so this observes
+    # the spawn directly instead of inferring it from something the spawned work later did.
+    defp reconcile_pid(feed, unless_pid \\ nil, waited \\ 0) do
+      pid =
+        case Map.values(:sys.get_state(feed).reconciling) do
+          [%{pid: pid}] when pid != unless_pid -> pid
+          _none_or_stale -> nil
+        end
+
+      cond do
+        pid -> pid
+        waited >= 2_000 -> flunk("no new reconcile attempt after 2000ms")
+        true -> Process.sleep(5) && reconcile_pid(feed, unless_pid, waited + 5)
+      end
     end
   end
 

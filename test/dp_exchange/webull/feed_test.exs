@@ -1178,8 +1178,20 @@ defmodule DpExchange.Webull.FeedTest do
                       ["AAAUSD", "BBBUSD"]}
 
       # ...and resync/1 moving the overflow to shard 1 in the background regardless.
-      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BBBUSD"]}
-      assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["BBBUSD"]}
+      #
+      # Five seconds, not `test_helper.exs`'s 1_000 ms default. Unlike the subscribe above,
+      # which the caller's own reply already ordered, these two are a background chain: the
+      # feed has answered, and resync/1 is still working through an unsubscribe and a
+      # subscribe of its own. That is several process hops and two more stubbed HTTP calls,
+      # and at 1_000 ms it timed out with an empty mailbox under a full-suite run while the
+      # resync was simply still in flight. `assert_receive` returns the moment the message
+      # lands, so the larger number costs nothing when the test passes — it only says how
+      # long the suite waits before calling a slow resync a missing one.
+      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BBBUSD"]},
+                     5_000
+
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["BBBUSD"]},
+                     5_000
     end
   end
 

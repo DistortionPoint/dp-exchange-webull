@@ -638,18 +638,32 @@ defmodule DpExchange.Webull.SocketTest do
       # The healthy-blip path, and the one every other test in this file exercises by
       # calling the callback with a bare `%{reason: ...}`. Timed rather than assumed: a
       # regression that slept here would stall a socket on every ordinary drop.
-      started = System.monotonic_time(:millisecond)
+      #
+      # The BEST of five samples, not a single one. What is being proved is that no backoff
+      # was applied, and the smallest backoff this socket can apply is a full second (attempt
+      # 2); a regression that slept would therefore make EVERY sample slow, while a loaded
+      # `async: true` suite descheduling this process makes only some of them slow. Taking
+      # the minimum keeps the discrimination exact and removes the noise: no regression can
+      # produce a fast sample, and no stall can be mistaken for one.
+      #
+      # This asserted a single sample `< 500`, then a single sample `< 1_000`. Both failed
+      # under a full-suite run while the behaviour was correct — the second one measured
+      # 1452ms — because widening the bound on a single measurement trades discrimination
+      # for luck rather than fixing what is wrong with it.
+      elapsed =
+        Enum.min(
+          for _sample <- 1..5 do
+            started = System.monotonic_time(:millisecond)
 
-      assert {:reconnect, _state} =
-               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
+            assert {:reconnect, _state} =
+                     Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
+
+            System.monotonic_time(:millisecond) - started
+          end
+        )
 
       # Against the smallest possible BACKOFF (1s at attempt 2), not an arbitrary budget.
-      # This asserted `< 500`, which is stricter than the claim needs — the claim is "no
-      # backoff was applied", and any wait under a second proves that. Under a loaded
-      # full-suite run the 500ms version failed while the behaviour was correct, which is the
-      # same timing-assertion-holds-when-quiet shape as the rate-limiter bucket race and
-      # `Core.PollingFeed`'s poll-interval waits.
-      assert System.monotonic_time(:millisecond) - started < 1_000
+      assert elapsed < 1_000
     end
 
     test "handle_disconnect/2 actually waits once reconnects are failing" do
