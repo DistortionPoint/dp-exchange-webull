@@ -22,6 +22,31 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **The test suite runs in 10.3s instead of 25.5s, with the same 836 tests.** Nothing was
+  weakened, removed or retimed — two groups of tests moved into files of their own.
+
+  `feed_test.exs` alone took **24.7 seconds for 94 tests** while this package's other **742
+  tests took 4.5 seconds between them**. ExUnit parallelises across FILES and serialises
+  within one, so roughly eighteen seconds of unavoidable waiting — a tick boundary, a
+  deadline expiring, a call proving it outlasts `GenServer.call/2`'s five-second default —
+  ran end to end in that one file while everything else finished in its shadow.
+
+  Two coherent groups moved out: the issue #3 tick/deadline/answer identity tests
+  (`resubscribe_identity_test.exs`) and the busy-feed timeout test (`busy_feed_test.exs`).
+  Both carry a moduledoc saying why they are separate, so the next person does not fold them
+  back in.
+
+  **The margins were not touched.** Every one of these tests waits on a real timer, and
+  shrinking the waits to buy speed is how a suite becomes flaky under load — which this
+  family has already paid for three times. The saving comes from letting the waiting
+  overlap, not from waiting less.
+
+  Measured rather than assumed: `dp_exchange_coinbase` has the same amount of slow waiting
+  (14.4s of a 17.6s suite) and did not need this, because its slow tests already live in
+  three different files.
+
 ## [0.4.45] - 2026-09-13
 
 ### Changed
