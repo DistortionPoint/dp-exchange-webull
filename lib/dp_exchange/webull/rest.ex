@@ -1277,8 +1277,14 @@ defmodule DpExchange.Webull.Rest do
   # returned whatever row the venue sent first.
   #
   # `{direction, Decimal}` rather than term order, matching `dp_exchange_coinbase`'s
-  # `sorted/2` — the only package in the family that was already doing this — because
-  # `Decimal` structs do not compare correctly as plain terms.
+  # `Socket.sorted/2`, because `Decimal` structs do not compare correctly as plain terms.
+  #
+  # This used to call coinbase "the only package in the family that was already doing
+  # this", and that credited a package for half a job. Coinbase builds a book on two
+  # paths — `Socket`'s snapshot, which sorted, and `Rest.get_order_book/2`, which did not
+  # until 2026-09-14. The attribution was taken from the sorting one and the other went
+  # unexamined for a day. "Does this package sort?" is the wrong question: a package has
+  # one book path per transport and each needs checking.
   #
   # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
   defp book_levels(rows, direction) when is_list(rows) do
