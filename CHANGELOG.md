@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.50] - 2026-09-14
+
 ### Fixed
 
 - **A timestamp of zero or less decoded to 1970 instead of being refused.** `from_epoch/1`
