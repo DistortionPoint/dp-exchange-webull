@@ -26,6 +26,17 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`create_watchlist/4` returned a `Watchlist` with a `nil` id when the venue's create
+  response omitted `watchlist_id`.** `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its
+  `new/1` refuses a `nil` there — and nothing here calls `new/1`, every struct being built
+  literally as across this family, so that check never ran.
+
+  This is the worst moment for a `nil` id: the list now exists at the venue and the caller
+  has no handle to add to, read, or delete it, while `nil` looks like a value. `to_watchlist/2`
+  on the LIST path already refused a row with no `watchlist_id`, citing
+  `dp_exchange_robinhood`'s rule that "a nil key there is worse than one fewer row this
+  cycle". The create path was the one that did not.
+
 - **A timestamp of zero or less decoded to 1970 instead of being refused.** `from_epoch/1`
   already used the non-raising `DateTime.from_unix/2` and already picked seconds or
   milliseconds by threshold, so the out-of-range hazard never applied here — but

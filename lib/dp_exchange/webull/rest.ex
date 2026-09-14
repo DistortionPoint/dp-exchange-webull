@@ -1945,9 +1945,26 @@ defmodule DpExchange.Webull.Rest do
     body = put_present(%{"name" => name}, "sort", Keyword.get(opts, :sort))
 
     with {:ok, response} <- post("/market-data/watchlists/create", body, credentials, opts),
-         {:ok, row} <- first_row(response) do
-      id = value(row, ["watchlist_id"])
+         {:ok, row} <- first_row(response),
+         # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+         # there — and nothing here calls `new/1`, the struct being built literally as
+         # everywhere in this family, so that check never ran. A created watchlist with no
+         # id is the worst moment for one: the list now exists at the venue and the caller
+         # has no handle to add to, read or delete it, and `nil` looks like a value.
+         #
+         # `to_watchlist/2` further down already refuses a row with no `watchlist_id`,
+         # citing `dp_exchange_robinhood`'s rule — "a nil key there is worse than one fewer
+         # row this cycle". This is the same rule on the create path.
+         {:ok, id} <- created_watchlist_id(row) do
       add_created_members(id, name, symbols, credentials, opts)
+    end
+  end
+
+  defp created_watchlist_id(row) do
+    case value(row, ["watchlist_id"]) do
+      nil -> {:error, {:missing_required_field, :id}}
+      "" -> {:error, {:missing_required_field, :id}}
+      id -> {:ok, id}
     end
   end
 

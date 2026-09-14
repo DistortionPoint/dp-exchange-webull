@@ -135,6 +135,25 @@ defmodule DpExchange.Webull.WatchlistsTest do
       refute_receive {:request, "POST", "/market-data/watchlists/instruments/add", _q, _r}
     end
 
+    test "a create response with no watchlist_id is refused, not returned with a nil id" do
+      # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
+      # there — and nothing here calls `new/1`, the struct being built literally as
+      # everywhere in this family, so that check never ran. This is the worst moment for a
+      # `nil` id: the list now exists at the venue and the caller has no handle to add to,
+      # read, or delete it, while `nil` looks like a value.
+      #
+      # `to_watchlist/2` on the LIST path already refuses a row with no `watchlist_id`,
+      # citing `dp_exchange_robinhood`'s rule — "a nil key there is worse than one fewer row
+      # this cycle". The create path was the one that did not.
+      me = self()
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.create_watchlist("Nameless", [], @credentials,
+                 plug: capturing([%{"name" => "Nameless"}], me),
+                 retry_attempts: 0
+               )
+    end
+
     test "members are added by a second request" do
       me = self()
 
