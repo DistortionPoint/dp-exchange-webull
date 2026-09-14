@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A shard whose socket failed to OPEN was never retried — issue #4.** The failed-open
+  branch logged one warning and returned `{:noreply, state}`, so the shard was not merely
+  un-reopened: it was never put in `state.shards` at all, and `handle_info(:resubscribe, _)`
+  reduces over exactly that map. Its symbols were orphaned for the life of the process.
+
+  Reported from a real boot under load average 54: three of four shards timed out their
+  handshake and stayed dark for 28 minutes across **zero** reopen attempts until the node was
+  restarted, with the feed alive and every liveness probe passing. A secondary cost fell on
+  the consumer, whose REST gap-fill saw nothing covered and drew 88 HTTP 429/minute from the
+  venue for the whole 28 minutes.
+
+  The delivery gate added for issue #1 could not have caught this, and should not be widened
+  to: it reopens a shard once **no symbol of its has arrived** for `stale_delivery_ms`, and a
+  shard that never opened has never delivered anything to age. **"Never worked" is not
+  "stopped working"** — two conditions that look alike and want opposite recoveries.
+
+  A failed open is now retried on its own backoff — one second, doubling, capped at a minute
+  — until it opens or a resubscribe fills the slot by its own route. It is also audible: a
+  `:coverage_change` warning naming the shard fires once when it first fails, and a matching
+  `:info` once when it opens, rather than a WARN line at boot that nothing revisits.
+  `open_retry_base_ms:` and `open_retry_max_ms:` tune it.
+
 ## [0.4.48] - 2026-09-14
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

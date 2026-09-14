@@ -790,6 +790,26 @@ data. Both are tunable: `resubscribe_failure_limit:` and `stale_delivery_ms:` on
 
 A success resets the failure count, so only *consecutive* failures count toward the limit.
 
+### A shard that never OPENED is a different case, and retries on its own backoff
+
+Everything above is about a shard whose socket is up and has stopped delivering. A shard
+whose socket never opened at all — a handshake that timed out, a venue refusing connections
+— cannot be judged that way: it has never delivered anything, so there is no last-delivery
+instant to age, and **"never worked" is not "stopped working"**.
+
+Such a shard is retried on its own schedule: one second, doubling, capped at a minute, until
+it opens or the slot is filled by a resubscribe of its own. A `:coverage_change` warning
+naming the shard fires once when it first fails to open, and a matching `:info` fires once
+when it opens — so a shard going dark at boot is something you hear about rather than
+something you find by grepping. `open_retry_base_ms:` and `open_retry_max_ms:` on
+`start_link/1` tune it.
+
+Until 0.4.30 this case was not handled at all. A failed open logged one WARN line and
+returned, leaving the shard untracked — not merely un-reopened, absent — and its symbols
+were orphaned for the life of the process. Reported from a real boot under load: three of
+four shards timed out their handshake, and stayed dark for 28 minutes across zero reopen
+attempts until the node was restarted, with the feed alive and healthy-looking throughout.
+
 ## `{:reconcile_timeout, ms, :no_venue_response}` says which of two opposite actions applies
 
 A reconcile that never came back now reports `{:reconcile_timeout, 60_000, :no_venue_response}`

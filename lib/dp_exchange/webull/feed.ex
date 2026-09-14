@@ -356,6 +356,26 @@ defmodule DpExchange.Webull.Feed do
   # have — see DpCryptoManagement's issue #17.
   @resubscribe_interval_ms 60_000
 
+  # How long to wait before trying again to OPEN a shard whose socket refused to open, and
+  # the ceiling that backoff climbs to. Issue #4.
+  #
+  # A shard that never opened is a different state from a shard that went quiet, and only
+  # the second was being watched. `handle_info(:resubscribe, _)` reduces over
+  # `state.shards`, and a failed open never put an entry there — so its symbols were
+  # orphaned with nothing in the system that would ever revisit them. Reported from a real
+  # boot: three of four shards timed out their handshake under load average 54, and stayed
+  # dark for 28 minutes across 0 reopen attempts until the node was restarted. The delivery
+  # gate that correctly stopped the over-eager reopens of issue #1 cannot help here —
+  # **"never worked" is not "stopped working"**, and a shard with no delivery history has no
+  # last-delivery instant to age.
+  #
+  # Backed off rather than retried on a fixed tick because the two failure causes want
+  # opposite cadences: a transient handshake timeout on a loaded host clears in seconds, and
+  # a venue genuinely refusing connections must not be hammered. Doubling from one second to
+  # a minute reaches the first quickly and settles at the second's own resubscribe cadence.
+  @open_retry_base_ms 1_000
+  @open_retry_max_ms 60_000
+
   # How many consecutive blind resubscribes one shard may fail before this `Feed` stops
   # repeating the identical call and reopens that shard's socket instead. See
   # `count_resubscribe_failure/2` for the incident (dp-exchange-webull issue #1) and why the
@@ -574,7 +594,16 @@ defmodule DpExchange.Webull.Feed do
        # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
        # deletes and rebuilds a shard's entry wholesale on a crash, and this latch's own
        # lifecycle is deliberately independent of that — see the comment there.
-       resubscribe_failed: %{}
+       resubscribe_failed: %{},
+       # Shard indices whose socket failed to OPEN and are being retried — issue #4. Kept
+       # apart from `resubscribe_failed` above: "never opened" and "opened but its blind
+       # resubscribe is failing" are different conditions with different recoveries, and one
+       # latch for both would let either one's recovery notice clear the other.
+       open_failed: MapSet.new(),
+       # Overridable for the same reason every other cadence here is: a test proving the
+       # retry actually recurs should not have to wait out a real second to see it.
+       open_retry_base_ms: Keyword.get(opts, :open_retry_base_ms, @open_retry_base_ms),
+       open_retry_max_ms: Keyword.get(opts, :open_retry_max_ms, @open_retry_max_ms)
      }}
   end
 
@@ -913,6 +942,43 @@ defmodule DpExchange.Webull.Feed do
     {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
   end
 
+  # The retry arm of `{:open_shard, _, _, _}` — issue #4. Deliberately a message of its own
+  # rather than a fifth element on that one: every existing sender of `:open_shard` means
+  # "first attempt", and giving them all an attempt number to carry would put the retry
+  # count in the hands of code that has nothing to do with retrying.
+  #
+  # Answers nothing if the slot has since been filled. A `reshard/4` or a `subscribe/2`
+  # arriving between two attempts opens the shard by its own route, and the guard below is
+  # the same one the first attempt uses.
+  def handle_info({:reopen_shard, index, symbols, opts, attempt}, state) do
+    case Map.get(state.shards, index) do
+      nil ->
+        case open_socket(state, opts) do
+          {:ok, session_id, socket} ->
+            shard = %{
+              session_id: session_id,
+              socket: socket,
+              connected?: false,
+              symbols: symbols,
+              reply_to: nil
+            }
+
+            Logger.info(
+              "[Webull Feed] shard #{index} opened on attempt #{attempt + 1} — its " <>
+                "#{length(symbols)} symbol(s) are covered again"
+            )
+
+            {:noreply, clear_open_failure(put_in(state.shards[index], shard), index)}
+
+          {:error, reason} ->
+            {:noreply, retry_shard_open(state, index, symbols, opts, attempt + 1, reason)}
+        end
+
+      _opened_by_something_else ->
+        {:noreply, clear_open_failure(state, index)}
+    end
+  end
+
   def handle_info({:open_shard, index, symbols, opts}, state) do
     case Map.get(state.shards, index) do
       nil ->
@@ -929,12 +995,7 @@ defmodule DpExchange.Webull.Feed do
             {:noreply, put_in(state.shards[index], shard)}
 
           {:error, reason} ->
-            Logger.warning(
-              "[Webull Feed] shard #{index} did not open (#{inspect(reason)}) — its " <>
-                "#{length(symbols)} symbol(s) are not covered until a later reshard opens it"
-            )
-
-            {:noreply, state}
+            {:noreply, retry_shard_open(state, index, symbols, opts, 1, reason)}
         end
 
       _already_open ->
@@ -1891,6 +1952,65 @@ defmodule DpExchange.Webull.Feed do
   # `Logger.warning` above keeps firing with it, unchanged, by design) but short-circuits
   # here rather than notifying again — a notice per tick on a sustained outage is still a
   # storm, just a slower one.
+  # Logs every failed open, notifies on the FIRST one, and schedules the next attempt.
+  #
+  # The log keeps firing on every attempt by design — a sustained outage should stay visible
+  # in the log — while the notice fires once per outage, which is the same split
+  # `latch_resubscribe_failure/4` below already makes and for the same reason: a notice per
+  # attempt on a venue that is down is a storm, just a slower one.
+  defp retry_shard_open(state, index, symbols, opts, attempt, reason) do
+    delay = min(state.open_retry_base_ms * 2 ** (attempt - 1), state.open_retry_max_ms)
+
+    Logger.warning(
+      "[Webull Feed] shard #{index} did not open (#{inspect(reason)}) on attempt " <>
+        "#{attempt} — its #{length(symbols)} symbol(s) are not covered; retrying in " <>
+        "#{delay}ms"
+    )
+
+    Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt}, delay)
+    latch_open_failure(state, index, symbols, reason)
+  end
+
+  # Same latch shape as `latch_resubscribe_failure/4`, and deliberately a SEPARATE map: a
+  # shard that never opened and a shard whose blind resubscribe is failing are different
+  # conditions with different recoveries, and folding them into one latch would make the
+  # recovery notice for either one clear the other's.
+  defp latch_open_failure(state, index, symbols, reason) do
+    if MapSet.member?(state.open_failed, index) do
+      state
+    else
+      notice =
+        Notice.new(:coverage_change, :webull,
+          severity: :warning,
+          message:
+            "shard #{index} could not be opened (#{inspect(reason)}) — " <>
+              "#{length(symbols)} symbol(s) are not covered at all until it opens",
+          details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
+        )
+
+      fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
+      %{state | open_failed: MapSet.put(state.open_failed, index)}
+    end
+  end
+
+  # The crossing back out, fired once. A consumer told a shard went dark has to be told when
+  # it comes back, or the only way to find out is to notice notices stopping.
+  defp clear_open_failure(state, index) do
+    if MapSet.member?(state.open_failed, index) do
+      notice =
+        Notice.new(:coverage_change, :webull,
+          severity: :info,
+          message: "shard #{index} opened after failing to — its symbols are covered again",
+          details: %{shard: index}
+        )
+
+      fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
+      %{state | open_failed: MapSet.delete(state.open_failed, index)}
+    else
+      state
+    end
+  end
+
   defp latch_resubscribe_failure(state, index, symbols, reason) do
     if Map.has_key?(state.resubscribe_failed, index) do
       state
