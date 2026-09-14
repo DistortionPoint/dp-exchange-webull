@@ -3245,7 +3245,26 @@ defmodule DpExchange.Webull.Rest do
   defp stringify(params), do: Map.new(params, fn {k, v} -> {to_string(k), to_string(v)} end)
 
   defp put_present(map, _key, nil), do: map
+
+  defp put_present(map, key, %Decimal{} = value),
+    do: Map.put(map, key, wire_number(value))
+
   defp put_present(map, key, value), do: Map.put(map, key, to_string(value))
+
+  # **`Decimal.to_string/1` defaults to SCIENTIFIC notation**, and `to_string/1` on a
+  # `%Decimal{}` reaches the same default through `String.Chars`. So a quantity or price
+  # carrying an exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this
+  # venue reads, and a different order if it read one at all.
+  #
+  # An exponent is not exotic. `Decimal.normalize/1` — the ordinary way to strip trailing
+  # zeros — turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+  # construction: `Decimal.new("0.00000001")` is `1E-8`.
+  #
+  # `option_decimal_param/1` in this same module already said `:normal` and the ORDER path
+  # did not. Guarding `put_present/3` as well as the two size fields means a money field
+  # added to a map later cannot reintroduce it.
+  defp wire_number(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+  defp wire_number(value), do: to_string(value)
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
@@ -3592,7 +3611,7 @@ defmodule DpExchange.Webull.Rest do
         {:error, :missing_order_size}
 
       {quantity, nil} ->
-        {:ok, "QTY", %{"qty" => to_string(quantity)}}
+        {:ok, "QTY", %{"qty" => wire_number(quantity)}}
 
       {nil, amount} ->
         amount_entrust(order_type, instrument, amount)
@@ -3617,7 +3636,7 @@ defmodule DpExchange.Webull.Rest do
     do: {:error, :cash_sizing_not_supported_for_stop}
 
   defp amount_entrust(_order_type, _instrument, amount),
-    do: {:ok, "AMOUNT", %{"amount" => to_string(amount)}}
+    do: {:ok, "AMOUNT", %{"amount" => wire_number(amount)}}
 
   # Only the two order types the venue documents `limit_price` for actually take it — see
   # the field table on `replace_order/4`'s own moduledoc, read from the same vendor

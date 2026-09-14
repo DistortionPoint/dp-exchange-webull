@@ -432,6 +432,44 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
   end
 
+  test "a normalized or very small quantity is sent in full notation, never scientific" do
+    # `Decimal.to_string/1` defaults to SCIENTIFIC, and `to_string/1` on a `%Decimal{}`
+    # reaches that same default through `String.Chars`. So a quantity or price carrying an
+    # exponent went onto the wire as `"1.5E+2"` or `"1E-8"` — not a number this venue
+    # reads, and a different order if it read one at all.
+    #
+    # An exponent is not exotic: `Decimal.normalize/1`, the ordinary way to strip trailing
+    # zeros, turns `150.00` into `1.5E+2`, and anything below a millionth carries one by
+    # construction. `option_decimal_param/1` in this module already said `:normal`; the
+    # order path did not.
+    me = self()
+
+    plug = fn conn ->
+      {:ok, raw, conn} = Plug.Conn.read_body(conn)
+      send(me, {:sent, Jason.decode!(raw)})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+    end
+
+    request =
+      limit_request(%{
+        quantity: Decimal.new("0.00000001"),
+        price: Decimal.normalize(Decimal.new("150.00"))
+      })
+
+    place(request, plug: plug, account_id: @account)
+
+    assert_receive {:sent, body}
+    leaf = body |> Map.get("new_orders") |> List.first()
+
+    assert leaf["qty"] == "0.00000001"
+    assert leaf["limit_price"] == "150"
+    refute String.contains?(leaf["qty"], "E")
+    refute String.contains?(to_string(leaf["limit_price"]), "E")
+  end
+
   describe "a retried order carries the SAME idempotency key" do
     test "every attempt sends the client_order_id generated for the first" do
       # `Core.HttpClient` retries anything that is not a 4xx, including a timeout and a
