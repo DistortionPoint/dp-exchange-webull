@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.53] - 2026-09-14
+
 ### Fixed
 
 - **A pagination claim this repository has no evidence for.** `get_orders/2`'s doc said "the
