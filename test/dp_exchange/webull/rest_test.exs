@@ -277,6 +277,32 @@ defmodule DpExchange.Webull.RestTest do
                )
     end
 
+    test "a bar dated zero or earlier is refused, not opened in 1970" do
+      # `DateTime.from_unix/2` answers `{:ok, ~U[1970-01-01 00:00:00Z]}` for 0 and a 1969
+      # instant for negatives. Both are valid `DateTime`s, which is why they are the
+      # dangerous case: `from_epoch/1`'s own comment called 1970 "loud", and it is not — a
+      # consumer that logs or charts the timestamp shows 1970 and calls it data, and `0` is a
+      # common venue sentinel for "unknown". The family settled this for level timestamps
+      # ("an unreadable level timestamp does not become the epoch") and it holds here too.
+      for bad <- [0, -1, "0"] do
+        body = [
+          %{
+            "symbol" => "BTCUSD",
+            "result" => [
+              %{"open" => "1", "high" => "2", "low" => "1", "close" => "1", "time" => bad}
+            ]
+          }
+        ]
+
+        assert {:error, _reason} =
+                 Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 ),
+               "a bar dated #{inspect(bad)} must be refused"
+      end
+    end
+
     test "bars carry no volume" do
       assert {:ok, [bar | _rest]} =
                Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,

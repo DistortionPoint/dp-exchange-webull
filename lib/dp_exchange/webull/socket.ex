@@ -590,6 +590,12 @@ defmodule DpExchange.Webull.Socket do
   # TYPE being built, and `venue_time_or_nil/1` below is the other answer.
   defp venue_time(%{timestamp: raw}) when is_binary(raw) do
     case Integer.parse(raw) do
+      # Non-positive is refused before the unit question is asked. `DateTime.from_unix/2`
+      # answers `{:ok, ~U[1970-01-01 00:00:00Z]}` for 0 and a 1969 instant for negatives —
+      # valid `DateTime`s, which is why they are the dangerous case rather than the obvious
+      # one. `0` is a common venue sentinel for "unknown", and a frame dated 1970 is a real
+      # timestamp to everything downstream. Same rule as `Rest.from_epoch/1`.
+      {epoch, ""} when epoch <= 0 -> {:error, :missing_venue_timestamp}
       {epoch, ""} when epoch > 100_000_000_000 -> DateTime.from_unix(epoch, :millisecond)
       {epoch, ""} -> DateTime.from_unix(epoch)
       _not_an_epoch -> {:error, :missing_venue_timestamp}

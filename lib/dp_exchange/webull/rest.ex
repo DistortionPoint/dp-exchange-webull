@@ -3068,6 +3068,20 @@ defmodule DpExchange.Webull.Rest do
   # seconds until roughly the year 2286; thirteen is milliseconds. Guessing the wrong one
   # puts a 2026 bar in 1970 or in 58,000 — both loud, which is why this is a threshold
   # rather than a fallback.
+  # Non-positive is refused before the unit question is even asked.
+  #
+  # `DateTime.from_unix/2` answers `{:ok, ~U[1970-01-01 00:00:00Z]}` for 0 and a 1969 instant
+  # for negatives — valid `DateTime`s, which is exactly why they are the dangerous case.
+  # `0` is a common venue sentinel for "unknown", and the comment below calls 1970 "loud"
+  # while it is not: a consumer computing an age gets fifty-six years and may well skip the
+  # row, but one that logs or charts the timestamp shows 1970 and calls it data. The family
+  # settled this for level timestamps — "an unreadable level timestamp does not become the
+  # epoch" — and the same answer applies wherever an epoch is converted.
+  #
+  # `{:error, :invalid_unix_time}` is the shape an out-of-range value already produces here,
+  # so every caller handles it unchanged.
+  defp from_epoch(value) when value <= 0, do: {:error, :invalid_unix_time}
+
   defp from_epoch(value) when value > 100_000_000_000, do: DateTime.from_unix(value, :millisecond)
   defp from_epoch(value), do: DateTime.from_unix(value)
 
