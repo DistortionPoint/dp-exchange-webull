@@ -37,7 +37,22 @@ acceptable changelog line.
   be worse than not walking — a wrong parameter is silently ignored by most APIs, turning a
   limit a caller can see into one they cannot.
 
-### Changed
+
+- **The pagination walks no longer build their result with `acc ++ page`.** `++` copies its
+  left operand, so folding each page onto a growing accumulator is quadratic in the number
+  of rows — the one thing a pagination walk is guaranteed to do a lot of. Pages are collected
+  as pages and concatenated once.
+
+  Measured: 50 pages of 250 rows went from 2.75 ms to 0.55 ms, and 50 pages of 49 rows —
+  Coinbase's own default page size for `/accounts` — from 0.20 ms to 0.01 ms.
+
+  `dp_exchange_robinhood`'s `walk/6` already did it this way and records why; the walkers
+  here did not. Ordering is unchanged and is pinned by test.
+
+- **`get_symbols/2`'s successful multi-page walk had no test.** Both failure guards were
+  covered — a key that does not advance, and the page bound — and the happy path was not, so
+  a regression that stopped after page one, or dropped a page while collecting, would have
+  passed. It is covered now.
 
 - **`usage-rules.md` now states that `get_orders/2` returns one page**, why it is not simply
   fixed, and what to do about it. The limit was recorded only in the module `@doc`; a

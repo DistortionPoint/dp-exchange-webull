@@ -938,6 +938,29 @@ defmodule DpExchange.Webull.OrderBookTest do
                )
     end
 
+    test "every page's symbols come back, not just the first" do
+      # The two guards below cover the walk going WRONG. Nothing covered it going right: a
+      # regression that stopped after page one, or dropped a page while collecting, would
+      # have passed — and a truncated catalogue is what this endpoint's own doc calls "the
+      # worst shape of failure this family has: every symbol in it is real, so nothing looks
+      # wrong, and the ones missing are simply never traded."
+      plug = fn conn ->
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=page2") do
+            %{"data" => [%{"symbol" => "ETHUSD"}]}
+          else
+            %{"data" => [%{"symbol" => "BTCUSD"}], "pagination_key" => "page2"}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, symbols} = Rest.get_symbols(@credentials, plug: plug, retry_attempts: 0)
+      assert symbols == ["BTC-USD", "ETH-USD"]
+    end
+
     test "a key echoed back unchanged is caught before the page bound" do
       # The more precise of the two guards, and it fires first: a venue repeating its key is
       # a different fault from one that genuinely has many pages.
