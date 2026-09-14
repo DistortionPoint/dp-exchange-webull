@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.49] - 2026-09-14
+
 ### Fixed
 
 - **A shard whose socket failed to OPEN was never retried — issue #4.** The failed-open
