@@ -431,4 +431,65 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert history_path =~ "historical-orders"
     end
   end
+
+  describe "a retried order carries the SAME idempotency key" do
+    test "every attempt sends the client_order_id generated for the first" do
+      # `Core.HttpClient` retries anything that is not a 4xx, including a timeout and a
+      # connection reset — exactly the failures where the venue may have received and acted
+      # on the request. That is only safe because a `client_order_id` is generated when the
+      # caller gives none and travels with the body, so a retry asks the venue about the
+      # SAME order rather than placing another.
+      #
+      # The property that makes it true is that the key is generated once, while the body is
+      # built, and `Core.HttpClient`'s retry loop re-sends that body unchanged. Nothing
+      # pinned it: generate it per attempt and each becomes a distinct order, with the suite
+      # still green. `dp_exchange_schwab` and `dp_exchange_gemini` have no such key for their
+      # order writes and therefore do not retry them at all.
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        decoded = if raw == "", do: %{}, else: Jason.decode!(raw)
+        send(me, {:attempt, decoded})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(503, Jason.encode!(%{"msg" => "unavailable"}))
+      end
+
+      place(limit_request(),
+        plug: plug,
+        account_id: @account,
+        retry_attempts: 3,
+        retry_delay: 1
+      )
+
+      bodies = drain_attempts([])
+      ids = Enum.map(bodies, &client_order_id_of/1)
+
+      assert length(ids) > 1,
+             "the retry loop must actually have retried for this to mean anything"
+
+      assert Enum.all?(ids, &is_binary/1),
+             "every attempt must carry a client_order_id: #{inspect(bodies)}"
+
+      assert length(Enum.uniq(ids)) == 1, "a retry must not mint a new key: got #{inspect(ids)}"
+    end
+
+    defp client_order_id_of(body) do
+      case body do
+        %{"new_orders" => [%{"client_order_id" => id} | _rest]} -> id
+        %{"client_order_id" => id} -> id
+        _other -> nil
+      end
+    end
+
+    defp drain_attempts(acc) do
+      receive do
+        {:attempt, body} -> drain_attempts([body | acc])
+      after
+        300 -> Enum.reverse(acc)
+      end
+    end
+  end
 end
