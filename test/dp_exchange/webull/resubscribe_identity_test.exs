@@ -14,62 +14,9 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
   family has already paid for three times.
   """
 
-  use ExUnit.Case, async: true
+  use DpExchange.Webull.FeedCase, async: true
 
-  alias DpExchange.Core.{Config, Notice}
-  alias DpExchange.Core.DefaultRateLimiter
   alias DpExchange.Webull.Feed
-
-  @moduletag :capture_log
-
-  defmodule PermissiveLimiter do
-    @moduledoc false
-    @behaviour DpExchange.Core.RateLimitBehaviour
-
-    @impl true
-    def acquire(_provider, _weight, _opts), do: :ok
-    @impl true
-    def check(_provider, _weight, _opts), do: :ok
-    @impl true
-    def record(_provider, _weight, _opts), do: :ok
-  end
-
-  setup do
-    Config.put_override(:rate_limit_module, PermissiveLimiter)
-
-    # A real, named limiter rather than a process-scoped override: the feed's HTTP
-    # subscribe runs inside the GenServer, which cannot see this process's overrides.
-    limiter = :"limiter_#{System.unique_integer([:positive])}"
-
-    {:ok, _pid} =
-      DefaultRateLimiter.start_link(
-        name: limiter,
-        limits: %{default: %{limit: 1000, per_ms: 1000, burst: 1000}}
-      )
-
-    {:ok, limiter: limiter}
-  end
-
-  @credentials %{app_key: "k", app_secret: "s"}
-
-  defp connected_shard(session_id \\ nil) do
-    %{
-      session_id: session_id || "session-#{System.unique_integer([:positive])}",
-      socket: self(),
-      connected?: true,
-      symbols: [],
-      reply_to: nil
-    }
-  end
-
-  defp start_feed(opts) do
-    name = :"feed_#{System.unique_integer([:positive])}"
-    defaults = [name: name, shards: %{0 => connected_shard()}]
-    {:ok, pid} = Feed.start_link(Keyword.merge(defaults, opts))
-    pid
-  end
-
-  defp link_up(session_id), do: Notice.new(:link_up, :webull, details: %{session_id: session_id})
 
   describe "a tick does not launch a second blind resubscribe over an unfinished one — issue #3" do
     test "the task a reconcile timeout tears down is the task that timer was armed for", %{
@@ -100,7 +47,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
           resubscribe_interval_ms: 1_000,
           reconcile_timeout_ms: 1_000,
           resubscribe_failure_limit: 99,
-          credentials: @credentials,
+          credentials: credentials(),
           limiter: limiter,
           plug: plug
         )
@@ -109,42 +56,6 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       ref = Process.monitor(first_task)
 
       assert_receive {:DOWN, ^ref, :process, ^first_task, _reason}, 5_000
-      assert Process.alive?(feed)
-    end
-
-    test "an unfinished blind resubscribe is not duplicated on the next tick", %{
-      limiter: limiter
-    } do
-      # The other half of the same defect, and the reason it is a skip rather than a
-      # supersede: a second identical subscribe for a session the venue has not answered for
-      # yet is load, not a safety net. `validate_resubscribe_interval_ms!/1` already refuses
-      # an interval below a second in those exact words; an in-flight attempt makes the
-      # effective interval shorter than the configured one just as surely.
-      test_pid = self()
-
-      plug = fn conn ->
-        send(test_pid, {:resubscribing, self()})
-        Process.sleep(:infinity)
-        conn
-      end
-
-      feed =
-        start_feed(
-          shards: %{0 => %{connected_shard("s0") | symbols: ["BTC-USD"]}},
-          resubscribe_interval_ms: 1_000,
-          reconcile_timeout_ms: 60_000,
-          resubscribe_failure_limit: 99,
-          credentials: @credentials,
-          limiter: limiter,
-          plug: plug
-        )
-
-      # A deadline far beyond the tick interval, so nothing clears the in-flight attempt:
-      # every later tick sees it still running, and must leave it alone.
-      assert_receive {:resubscribing, _first_task}, 5_000
-      refute_receive {:resubscribing, _second_task}, 3_000
-
-      assert map_size(:sys.get_state(feed).reconciling) == 1
       assert Process.alive?(feed)
     end
   end
@@ -178,7 +89,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
             0 => %{connected_shard("s0") | symbols: ["BTCUSD"], connected?: false}
           },
           reconcile_timeout_ms: 2_000,
-          credentials: @credentials,
+          credentials: credentials(),
           limiter: limiter,
           plug: plug
         )

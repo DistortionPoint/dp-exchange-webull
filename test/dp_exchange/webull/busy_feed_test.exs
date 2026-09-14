@@ -9,46 +9,9 @@ defmodule DpExchange.Webull.BusyFeedTest do
   meant those six seconds ran end to end instead of alongside them.
   """
 
-  use ExUnit.Case, async: true
+  use DpExchange.Webull.FeedCase, async: true
 
-  alias DpExchange.Core.Config
   alias DpExchange.Webull.Feed
-
-  @moduletag :capture_log
-
-  defmodule PermissiveLimiter do
-    @moduledoc false
-    @behaviour DpExchange.Core.RateLimitBehaviour
-
-    @impl true
-    def acquire(_provider, _weight, _opts), do: :ok
-    @impl true
-    def check(_provider, _weight, _opts), do: :ok
-    @impl true
-    def record(_provider, _weight, _opts), do: :ok
-  end
-
-  setup do
-    Config.put_override(:rate_limit_module, PermissiveLimiter)
-    :ok
-  end
-
-  defp connected_shard do
-    %{
-      session_id: "session-#{System.unique_integer([:positive])}",
-      socket: self(),
-      connected?: true,
-      symbols: [],
-      reply_to: nil
-    }
-  end
-
-  defp start_feed(opts \\ []) do
-    name = :"feed_#{System.unique_integer([:positive])}"
-    defaults = [name: name, shards: %{0 => connected_shard()}]
-    {:ok, pid} = Feed.start_link(Keyword.merge(defaults, opts))
-    pid
-  end
 
   describe "subscribe_notices/2 survives a busy feed" do
     @describetag timeout: 60_000
