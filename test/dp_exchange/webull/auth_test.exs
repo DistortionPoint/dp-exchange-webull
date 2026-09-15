@@ -208,4 +208,54 @@ defmodule DpExchange.Webull.AuthTest do
       assert Auth.timestamp(~U[2022-01-04 03:55:31.123456Z]) == "2022-01-04T03:55:31Z"
     end
   end
+
+  describe "a blank credential is a missing one, not one to sign with" do
+    # `""` satisfies `is_binary/1`, and `is_binary/1` was the whole gate. An empty secret is
+    # not a secret — it is the commonest misconfiguration there is, `.env` carrying
+    # `NAME=` with nothing after it, which `System.get_env/1` hands back as `""` and not as
+    # `nil`. Every module here documents that it refuses to sign a partial credential
+    # precisely so the venue's answer does not send the reader to the signing code, which
+    # is correct, instead of to the credential, which was never set.
+    #
+    # Webull's own case: an empty `app_secret` produces the signing key `"&"`, which HMACs
+    # as happily as a real one, so nothing local failed.
+    @request %{
+      path: "/api/quotes",
+      query_params: %{},
+      body: "",
+      host: "api.webull.com",
+      timestamp: "2022-01-04T03:55:31Z",
+      nonce: "abc123"
+    }
+
+    test "an empty or blank app_key or app_secret refuses by name" do
+      for credentials <- [
+            %{app_key: "k", app_secret: ""},
+            %{app_key: "k", app_secret: "   "},
+            %{app_key: "", app_secret: "s"},
+            %{app_key: "   ", app_secret: "s"}
+          ] do
+        assert Auth.headers(@request, credentials) ==
+                 {:error, {:missing_credentials, :webull}},
+               "#{inspect(credentials)} was signed with"
+      end
+    end
+
+    test "present?/1 agrees with headers/2, which is its entire contract" do
+      # It answered `:ok` for a blank pair while `headers/2` went on to sign with it. That
+      # is the drift this function exists to prevent: `get_fees/2` has no request to hang
+      # the real gate on and uses this instead, and so does the fake.
+      for credentials <- [
+            %{app_key: "", app_secret: ""},
+            %{app_key: "k", app_secret: "  "},
+            %{app_key: "  ", app_secret: "s"}
+          ] do
+        assert Auth.present?(credentials) == {:error, {:missing_credentials, :webull}}
+        assert {:error, {:missing_credentials, :webull}} = Auth.headers(@request, credentials)
+      end
+
+      assert Auth.present?(%{app_key: "k", app_secret: "s"}) == :ok
+      assert {:ok, _headers} = Auth.headers(@request, %{app_key: "k", app_secret: "s"})
+    end
+  end
 end

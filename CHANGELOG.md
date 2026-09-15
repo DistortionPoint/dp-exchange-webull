@@ -26,6 +26,27 @@ acceptable changelog line.
 
 ### Fixed
 
+- **An empty or blank `app_key` or `app_secret` was signed with rather than refused.**
+  `is_binary/1` was the whole gate and `""` satisfies it. An empty secret produces the
+  signing key `"&"`, which HMACs as happily as a real one, so nothing local failed: the
+  request went out and came back refused for a reason naming signatures — sending the reader
+  to the six-step signing scheme, which is correct and verified against the venue's own
+  worked example, instead of to the credential, which was never set. That is precisely the
+  outcome `headers/2`'s own `@doc` says it refuses. Reachable by
+  the commonest misconfiguration there is: a `.env` line reading `NAME=` with nothing after
+  it. `System.get_env/1` returns `""` for that, not `nil`, so every `nil`-shaped guard
+  upstream passes it through intact. Blank is now trimmed and treated as absent, which is the
+  answer `{:missing_credentials, _}` already existed to give. Two venues in this family were
+  already safe from this, and both by accident rather than by check — their credential
+  formats are structured (base64 key material, a trimmed token), so the blank failed a format
+  test rather than a presence test. The fields that are opaque strings had nothing to fail.
+  `present?/1` had the same hole, and that one propagated: its entire contract is "the shape
+  `headers/2` accepts", it answered `:ok` for a blank pair while `headers/2` went on to sign
+  with it, and it is what `Rest.get_fees/2` (no request to hang the real gate on) and
+  `DpExchange.Webull.Fake` both use. Both now agree, asserted together.
+
+### Fixed
+
 - **An order price or size could go onto the wire in scientific notation.**
   `Decimal.to_string/1` defaults to `:scientific`, and `to_string/1` on a `%Decimal{}`
   reaches that same default through `String.Chars` — so a value carrying an exponent was

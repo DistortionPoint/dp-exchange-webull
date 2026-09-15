@@ -122,6 +122,14 @@ without a credential: `{:error, {:missing_credentials, :webull}}`, never `{:ok, 
 (`Core.Venue`'s `:refused` is the venue's own permanent word about a request it
 *received*), so this is `Auth.headers/2`'s own return value, not an invented one.
 
+**A blank credential counts as a missing one.** An `:app_key` or `:app_secret` that is `""`, or only
+whitespace, is refused locally with `{:error, {:missing_credentials, :webull}}` — it is
+never signed with. This matters because the usual way a credential goes missing is not a
+`nil`: it is a `.env` line reading `NAME=` with nothing after it, and `System.get_env/1`
+hands that back as `""`. Signing with it produced a well-formed request the venue refused
+for a reason naming signatures, which points at the signing code rather than at the
+credential.
+
 **`DpExchange.Webull.Fake` enforces this too, and it did not before.** Before this
 fix, `Fake.get_accounts/2`, `Fake.get_balances/2`,
 `Fake.get_transfers/2`, `Fake.get_transactions/2`, `Fake.place_order/3`,

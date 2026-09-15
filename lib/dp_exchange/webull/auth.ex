@@ -91,6 +91,16 @@ defmodule DpExchange.Webull.Auth do
 
   def headers(%{} = request, %{app_key: app_key, app_secret: app_secret} = credentials)
       when is_binary(app_key) and is_binary(app_secret) do
+    if blank?(app_key) or blank?(app_secret) do
+      {:error, {:missing_credentials, :webull}}
+    else
+      signed_headers(request, credentials, app_key, app_secret)
+    end
+  end
+
+  def headers(_request, _credentials), do: {:error, {:missing_credentials, :webull}}
+
+  defp signed_headers(request, credentials, app_key, app_secret) do
     %{
       path: path,
       query_params: query_params,
@@ -123,7 +133,21 @@ defmodule DpExchange.Webull.Auth do
     {:ok, with_access_token(base, Map.get(credentials, :access_token))}
   end
 
-  def headers(_request, _credentials), do: {:error, {:missing_credentials, :webull}}
+  # `is_binary/1` is not a presence check, and the `@doc` above promises one: "rather than
+  # signing with a partial credential — a request signed with an absent secret fails at the
+  # venue with an error about signatures, which sends the reader looking in the wrong
+  # place." `""` satisfies `is_binary/1`. An empty secret produced the signing key `"&"`,
+  # which HMACs as happily as a real one, so the request went out and came back refused for
+  # a reason naming signatures — sending the reader to the six-step scheme above, which is
+  # correct and verified against the venue's own worked example, instead of to the
+  # credential, which was never set.
+  #
+  # Reachable by the commonest misconfiguration there is: `.env` carrying
+  # `WEBULL_APP_SECRET=` with nothing after it. `System.get_env/1` returns `""` for that,
+  # not `nil`, so every `nil`-shaped guard upstream passes it through intact. Trimmed
+  # rather than compared to `""`, because a trailing space in a `.env` line produces `" "`
+  # and means the same thing.
+  defp blank?(value), do: String.trim(value) == ""
 
   @doc """
   Whether `credentials` has the shape `headers/2` accepts — checked without building a
@@ -140,8 +164,17 @@ defmodule DpExchange.Webull.Auth do
   """
   @spec present?(credentials() | term()) :: :ok | {:error, {:missing_credentials, :webull}}
   def present?(%{app_key: app_key, app_secret: app_secret})
-      when is_binary(app_key) and is_binary(app_secret),
-      do: :ok
+      when is_binary(app_key) and is_binary(app_secret) do
+    # The same blank check as `headers/2`, and it has to be the same one: this function's
+    # whole contract is "the shape `headers/2` accepts", and it answered `:ok` for
+    # `%{app_key: "", app_secret: ""}` while `headers/2` went on to sign with it. That made
+    # `get_fees/2` — the endpoint that has no request to hang the real gate on — and
+    # `DpExchange.Webull.Fake` both claim a credential the package does not have, which is
+    # exactly the drift this function exists to prevent.
+    if blank?(app_key) or blank?(app_secret),
+      do: {:error, {:missing_credentials, :webull}},
+      else: :ok
+  end
 
   def present?(_credentials), do: {:error, {:missing_credentials, :webull}}
 
