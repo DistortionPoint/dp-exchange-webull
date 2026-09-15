@@ -207,6 +207,113 @@ defmodule DpExchange.Webull.QuoteProtoTest do
     end
   end
 
+  describe "a wrong wire type on a field the SCHEMA uses" do
+    # The compatibility tests above all put the unknown field at a field number the schema
+    # does not use — 99, 50, 51, 52. That is the easy half. The hard half is the same
+    # unknown wire type arriving at a number the schema DOES use, because then the junk and
+    # the real value accumulate into one list under one key, and whichever reader takes that
+    # key has to cope with a list that is not all binaries.
+    #
+    # `scalar/1` and `decode_nested/1` both filtered for `is_binary/1` already.
+    # `first_repeated/2` took `[first | _rest]` unfiltered and handed the junk to a function
+    # with clauses for a binary and for `nil` and none for an integer. The result was a
+    # `FunctionClauseError` raised inside the socket process — no `rescue` between there and
+    # `handle_frame/2` — so the connection dropped and reconnected to be handed the same
+    # frame again. This module's moduledoc promises the opposite in as many words: "one
+    # malformed frame must not cost the connection".
+    defp varint_field(number, value) do
+      varint(Bitwise.bsl(number, 3) ||| 0) <> varint(value)
+    end
+
+    test "a varint at the asks field number does not raise, and the real level survives" do
+      ask = field(1, "77846.48") <> field(2, "0.014")
+      bid = field(1, "77845.79") <> field(2, "0.045")
+
+      payload =
+        field(1, basic("BTCUSD")) <> varint_field(2, 7) <> field(2, ask) <> field(3, bid)
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.ask == "77846.48"
+      assert quote_msg.ask_size == "0.014"
+      assert quote_msg.bid == "77845.79"
+    end
+
+    test "a 32-bit at the bids field number still yields the level behind it" do
+      bid = field(1, "77845.79") <> field(2, "0.045")
+      fixed32 = varint(Bitwise.bsl(3, 3) ||| 5) <> <<0::32>>
+
+      payload = field(1, basic("BTCUSD")) <> fixed32 <> field(3, bid)
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.bid == "77845.79"
+      assert quote_msg.bid_size == "0.045"
+    end
+
+    test "junk at a schema field number never fabricates a level" do
+      # The other direction: refusing to raise must not turn into inventing. With nothing
+      # but junk under the asks number, there is no ask, and `nil` is the answer.
+      payload = field(1, basic("BTCUSD")) <> varint_field(2, 7) <> field(3, field(1, "1.00"))
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.ask == nil
+      assert quote_msg.ask_size == nil
+    end
+  end
+
+  describe "wire order survives the accumulator" do
+    # `accumulate/3` prepends and `decode_message/1` reverses once at the end, rather than
+    # appending with `existing ++ [value]` — which is O(n) per entry and O(n²) per message.
+    # Measured on a synthetic book before the change: 5 levels a side 2.8us, 50 levels
+    # 12.7us, 100 levels 33.6us, 200 levels 120.1us. After: 2.7us, 8.2us and 35.4us — and
+    # `AskBid` carries `repeated Order` and `repeated Broker`, so a level binary runs the
+    # same accumulator again for every market maker quoted at that price.
+    #
+    # Both readers depend on the order, in OPPOSITE directions, which is why the reversal is
+    # load-bearing rather than tidiness: `first_repeated/2` wants the first entry on the wire
+    # and `scalar/1` wants the last. A reversal applied to one and not the other, or dropped
+    # entirely, would leave each of them reading the far end of the book.
+    test "a repeated field still reads FIRST-on-the-wire" do
+      payload =
+        field(1, basic("BTCUSD")) <>
+          field(2, field(1, "1.00")) <>
+          field(2, field(1, "2.00")) <> field(2, field(1, "3.00"))
+
+      assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
+      assert quote_msg.ask == "1.00"
+    end
+
+    test "a scalar field still reads LAST-on-the-wire" do
+      payload =
+        field(1, basic("BTCUSD")) <>
+          field(3, "111.00") <> field(3, "222.00") <> field(3, "333.00")
+
+      assert {:ok, snapshot} = QuoteProto.decode_snapshot(payload)
+      assert snapshot.price == "333.00"
+    end
+
+    test "decode_message/1 hands back repeats in wire order" do
+      assert %{7 => ["a", "b", "c"]} =
+               QuoteProto.decode_message(field(7, "a") <> field(7, "b") <> field(7, "c"))
+    end
+
+    test "a stepped-over field holds its place in the repeat rather than being replaced" do
+      # `accumulate/3` reads with `Map.fetch/2`, because `decode_value/2` stores `nil` as the
+      # value of a 64-bit or 32-bit field it stepped over and `Map.get/2` cannot tell that
+      # from an absent key — under `Map.get/2` the `"a"` REPLACED the placeholder and this
+      # map came back as `%{7 => "a"}`.
+      #
+      # Stated precisely, because the first version of this test claimed more than it could
+      # show: **no decoded field changes value either way.** Every reader in the module
+      # filters for `is_binary/1`, so the placeholder is invisible to all of them, and the
+      # difference surfaces only here, through the public `decode_message/1`. This is the
+      # assertion that the conflation is gone; it is not evidence that a level was being
+      # dropped, because it was not.
+      fixed32 = varint(Bitwise.bsl(7, 3) ||| 5) <> <<0::32>>
+
+      assert %{7 => [nil, "a"]} = QuoteProto.decode_message(fixed32 <> field(7, "a"))
+    end
+  end
+
   describe "scalar/2" do
     test "reads a single value" do
       assert QuoteProto.scalar(%{1 => "x"}, 1) == "x"

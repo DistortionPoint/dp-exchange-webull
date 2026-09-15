@@ -117,13 +117,22 @@ defmodule DpExchange.Webull.QuoteProto do
 
     case present(basic, 1) do
       symbol when is_binary(symbol) ->
+        # Each side's best level is decoded ONCE and read twice, rather than decoded twice
+        # and read once. `level_price/1` and `level_size/1` each ran `decode_message/1` over
+        # the whole level binary — and an `AskBid` is not a two-field message: the venue's
+        # schema gives it `repeated Order order = 3` and `repeated Broker broker = 4`, so on
+        # an MPID-level book that binary carries every market maker at the price, and all of
+        # it was walked twice to read two strings out of it.
+        {ask_price, ask_size} = fields |> first_repeated(2) |> level()
+        {bid_price, bid_size} = fields |> first_repeated(3) |> level()
+
         {:ok,
          %{
            symbol: symbol,
-           ask: fields |> first_repeated(2) |> level_price(),
-           ask_size: fields |> first_repeated(2) |> level_size(),
-           bid: fields |> first_repeated(3) |> level_price(),
-           bid_size: fields |> first_repeated(3) |> level_size(),
+           ask: ask_price,
+           ask_size: ask_size,
+           bid: bid_price,
+           bid_size: bid_size,
            timestamp: present(basic, 3)
          }}
 
@@ -138,7 +147,7 @@ defmodule DpExchange.Webull.QuoteProto do
 
   @doc "Field number to value, repeats in wire order. Exposed for tests and for `Socket`."
   @spec decode_message(binary()) :: field_map()
-  def decode_message(binary), do: decode_message(binary, %{})
+  def decode_message(binary), do: binary |> decode_message(%{}) |> reverse_repeats()
 
   defp decode_message(<<>>, acc), do: acc
 
@@ -181,12 +190,42 @@ defmodule DpExchange.Webull.QuoteProto do
 
   defp decode_varint(_truncated, _acc, _shift), do: :error
 
+  # `Map.fetch/2`, not `Map.get/2`. `decode_value/2` returns `nil` as the VALUE of a 64-bit
+  # or 32-bit field it stepped over, and `Map.get/2` cannot tell that stored `nil` from an
+  # absent key — so the next occurrence of the same field number REPLACED the placeholder
+  # instead of accumulating beside it.
+  #
+  # **No decoded field changes value because of this, and that was checked rather than
+  # assumed.** Every reader in this module — `scalar/1`, `decode_nested/1`,
+  # `first_repeated/2` — filters for `is_binary/1`, so a lost `nil` is a lost nothing; the
+  # difference is visible only through `decode_message/1` itself, which is public. It is
+  # fixed as a latent trap, not as a live defect: the conflation holds only while every
+  # stepped-over wire type decodes to `nil`, and the first `decode_value/2` clause to return
+  # a meaningful value for a field number the schema also uses would turn it into a silent
+  # drop with nothing in the tests pointing at it.
   defp accumulate(acc, field_number, value) do
-    case Map.get(acc, field_number) do
-      nil -> Map.put(acc, field_number, value)
-      existing when is_list(existing) -> Map.put(acc, field_number, existing ++ [value])
-      existing -> Map.put(acc, field_number, [existing, value])
+    case Map.fetch(acc, field_number) do
+      :error -> Map.put(acc, field_number, value)
+      {:ok, existing} when is_list(existing) -> Map.put(acc, field_number, [value | existing])
+      {:ok, existing} -> Map.put(acc, field_number, [value, existing])
     end
+  end
+
+  # Repeats accumulate by PREPENDING and the whole map is reversed once, rather than
+  # appending with `existing ++ [value]` — which is O(n) per level and so O(n²) per message.
+  # Measured on a synthetic book before the change: 5 levels a side 2.8us, 50 levels 12.7us,
+  # 100 levels 33.6us, 200 levels 120.1us — the shape of a quadratic, and `AskBid`'s own
+  # `repeated Order` and `repeated Broker` mean the level binaries walk the same accumulator
+  # again for every market maker quoted at the price.
+  #
+  # Wire order is what `scalar/1` (last occurrence) and `first_repeated/2` (first entry)
+  # both read by, so the reversal is not optional bookkeeping — it is the thing that keeps
+  # those two reading what they say they read.
+  defp reverse_repeats(fields) do
+    Map.new(fields, fn
+      {field_number, value} when is_list(value) -> {field_number, Enum.reverse(value)}
+      {field_number, value} -> {field_number, value}
+    end)
   end
 
   # --- reading ------------------------------------------------------------
@@ -234,18 +273,28 @@ defmodule DpExchange.Webull.QuoteProto do
 
   defp decode_nested(_absent), do: %{}
 
+  # The first binary, not simply the first element — filtered exactly as `scalar/1` and
+  # `decode_nested/1` already filter, and for the reason this module's own moduledoc gives:
+  # "A truncated or unparseable tail ends the walk with whatever was read rather than
+  # raising. This runs in the socket process, and one malformed frame must not cost the
+  # connection."
+  #
+  # It took `[first | _rest]` unfiltered, so a field number arriving once with a wire type
+  # this schema never uses and once as the real level accumulated as `[7, <<level>>]`, and
+  # the `7` went to `level_price/1`, which has clauses for a binary and for `nil` and none
+  # for an integer. `FunctionClauseError` — raised inside the socket process, with no
+  # `rescue` anywhere between here and `handle_frame/2`, so the connection went down and
+  # came back to be handed the same frame again. The two sibling readers in this module were
+  # already defensive; this one was not, which is the whole of the difference.
+  #
+  # Skipping a non-binary rather than stopping at it is also what keeps the *good* level:
+  # `Enum.find/2` walks past the junk to the entry that really is an `AskBid`.
   defp first_repeated(fields, field_number) do
     case Map.get(fields, field_number) do
-      [first | _rest] -> first
+      list when is_list(list) -> Enum.find(list, &is_binary/1)
       value when is_binary(value) -> value
       _absent -> nil
     end
-  end
-
-  defp level_price(nil), do: nil
-
-  defp level_price(binary) when is_binary(binary) do
-    binary |> decode_message() |> present(1)
   end
 
   # `AskBid { string price = 1; string size = 2; }` — the venue's own schema, verbatim in
@@ -259,9 +308,13 @@ defmodule DpExchange.Webull.QuoteProto do
   # `Core.Types.TopOfBook` insists on: `nil` is "not published", and is not a zero. A level
   # that really does state `"0"` reaches a caller as a zero, because that is what the venue
   # said.
-  defp level_size(nil), do: nil
+  #
+  # Both are read from ONE decode of the level. They used to be `level_price/1` and
+  # `level_size/1`, each walking the same binary separately.
+  defp level(nil), do: {nil, nil}
 
-  defp level_size(binary) when is_binary(binary) do
-    binary |> decode_message() |> present(2)
+  defp level(binary) when is_binary(binary) do
+    decoded = decode_message(binary)
+    {present(decoded, 1), present(decoded, 2)}
   end
 end

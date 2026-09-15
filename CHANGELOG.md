@@ -22,6 +22,59 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A wrong wire type on a field the schema uses crashed the socket.** `QuoteProto`'s
+  compatibility handling covered an unknown field at an unknown field NUMBER — the case its
+  tests exercised, at numbers 99, 50, 51 and 52. The other case is the same unknown wire type
+  arriving at a number the schema does use, where the junk and the real value accumulate into
+  one list under one key. `scalar/1` and `decode_nested/1` both filtered that list for
+  `is_binary/1`; `first_repeated/2` took `[first | _rest]` unfiltered and handed the junk to
+  a reader with clauses for a binary and for `nil` and none for an integer.
+
+  `FunctionClauseError`, raised inside the socket process, with no `rescue` between there and
+  `handle_frame/2`. The connection dropped, reconnected, and was handed the same frame again.
+  The module's own moduledoc promises the opposite in as many words: "one malformed frame
+  must not cost the connection." `first_repeated/2` now finds the first entry that is
+  actually a level, which both stops the crash and keeps the good level rather than stopping
+  at the junk in front of it.
+
+- **`accumulate/3` could not tell a stepped-over field from an absent one.** `decode_value/2`
+  stores `nil` as the value of a 64-bit or 32-bit field it walked past, and `Map.get/2` reads
+  that stored `nil` as "no such key", so the next occurrence of the same field number
+  replaced the placeholder instead of accumulating beside it. Now read with `Map.fetch/2`.
+
+  **No decoded field changes value because of this, and that was checked rather than
+  assumed** — every reader in the module filters for `is_binary/1`, so a lost `nil` is a lost
+  nothing, and the difference is visible only through the public `decode_message/1`. It is
+  fixed as a latent trap: the conflation holds only while every stepped-over wire type
+  decodes to `nil`, and the first clause to return a meaningful value at a field number the
+  schema also uses would turn it into a silent drop.
+
+### Performance
+
+- **`decode_quote/1` walked each book level twice and accumulated repeats quadratically.**
+  `level_price/1` and `level_size/1` each ran `decode_message/1` over the whole level binary
+  to read one string out of it — and an `AskBid` is not a two-field message: the venue's
+  schema gives it `repeated Order order = 3` and `repeated Broker broker = 4`, so on an
+  MPID-level book that binary carries every market maker at the price and all of it was
+  walked twice. One decode now serves both reads.
+
+  `accumulate/3` appended with `existing ++ [value]`, which is O(n) per entry and O(n²) per
+  message; it now prepends and `decode_message/1` reverses once at the end. Measured per
+  `decode_quote/1` call on a synthetic book, before and after:
+
+  | levels per side | before | after |
+  | --- | --- | --- |
+  | 5 | 2.78us | 2.70us |
+  | 50 | 12.70us | 8.22us |
+  | 100 | 33.57us | — |
+  | 200 | 120.13us | 35.40us |
+
+  The reversal is load-bearing rather than tidiness, and is asserted as such: `first_repeated/2`
+  reads the FIRST entry on the wire and `scalar/1` reads the LAST, so a reversal applied to
+  one and not the other would leave each of them reading the far end of the book.
+
 ## [0.4.57] - 2026-09-15
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
