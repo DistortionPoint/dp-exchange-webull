@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.59] - 2026-09-15
+
 ### Fixed
 
 - **`Fake.subscribe/2` replaced the live subscription instead of adding to it.** It was the
