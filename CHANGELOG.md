@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.58] - 2026-09-15
+
 ### Fixed
 
 - **A wrong wire type on a field the schema uses crashed the socket.** `QuoteProto`'s
