@@ -65,13 +65,20 @@ fi
 echo "  CHANGED"
 if [ -n "$added" ]; then
   echo "    APPEARED since the committed capture was taken:"
-  printf '      %s\n' $added
+  # `sed`, not `printf '      %s\n' $var`. That variable was UNQUOTED, so bash word-split
+  # it. Latent here — this vendor's page slugs carry no spaces — and live in the sibling
+  # checker in `dp_exchange_gemini`, whose entries are `METHOD /path`: a vanished
+  # `GET /v1/feepromos` was reported there as two entries, `GET` and `/v1/feepromos`, as
+  # though the verb had disappeared from the venue. Fixed in both rather than in the one
+  # where it happened to show, since the two scripts are the same shape and a slug with a
+  # space or a glob character would surface it here as well.
+  printf '%s\n' "$added" | sed 's/^/      /'
   echo "      -> a capabilities/0 :unsupported declaration may now be FALSE, and a new page"
   echo "         may carry limits or field tables this package's claims should rest on."
 fi
 if [ -n "$removed" ]; then
   echo "    VANISHED since the committed capture was taken:"
-  printf '      %s\n' $removed
+  printf '%s\n' "$removed" | sed 's/^/      /'
   echo "      -> a claim this package makes may now rest on nothing."
 fi
 

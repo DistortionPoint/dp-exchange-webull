@@ -22,6 +22,60 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every frame on the `notice` topic was classified `:degraded`, so a healthy keepalive
+  logged a WARN 184 times an hour** (issue #5). The kind was a constant — nothing inspected
+  the frame — and `:degraded` defaults to `:warning`, so a consumer mapping severity to a
+  log level (the mapping `Core.Notice` documents) warned on every frame whatever it said.
+
+  Measured by the reporter over eight hours on a live host: **336 WARN/hour, 184 of them
+  `%{"drop" => 0, "rtt" => 0, "sent" => 1878, "type" => "1001"}`** — a keepalive reporting
+  ZERO drops, rendered `webull degraded: (no message)` because it carries no `content`. The
+  feed was healthy throughout (4,400-4,600 rows/60s, zero reconnects). Those notices were
+  the #1 and #2 entries in that host's warning log by volume and buried 1,331 genuinely
+  serious warnings underneath them.
+
+  Severity is now read from the frame. Two things count as adverse and nothing else does:
+  the venue sent **words** (it only writes `content` when it has something to say — the
+  issue #33 frame, "Permission grabbed by other session", is that shape), or it reported a
+  **non-zero `drop`**. Absence of an adverse indicator is not evidence of degradation, so
+  everything else is `:info`. `Core.Notice` calls its default severity "a default, not a
+  rule: a caller with better information overrides it", and the frame is better information.
+
+  **Keyed on evidence, not on the `type` code the report suggested.** The vendor publishes no
+  field schema for this topic at all, so a `"1001" => :info` table would be one consumer's
+  observation hardcoded as a venue fact, and a renumbering would silently get it wrong.
+  `content` and `drop` are the fields that carry the claim, and they are what the reporter's
+  own evidence discriminates on.
+
+  The notice is still delivered, and still whole — the fix is the claim it makes, not the
+  dropping of venue telemetry a consumer may want. The **kind** stays `:degraded`, which is
+  a known imperfection rather than an oversight: `Core.Notice`'s kinds are "deliberately a
+  closed set" with no slot for "the venue reported on itself and nothing is wrong", and
+  widening it is a change to the shared contract, not this package's to make unilaterally.
+
+- **`script/check_endpoint_inventory.sh` word-split its own diff output.**
+  `printf '      %s\n' $added` was unquoted, so an entry containing a space was reported as
+  several. Latent here — this vendor's page slugs carry no spaces — and live in the sibling
+  checker, where a vanished `GET /v1/feepromos` was reported as two entries, `GET` and
+  `/v1/feepromos`, as though the verb had disappeared from the venue. Fixed in both, since
+  the two scripts are the same shape and a slug with a space or a glob character would
+  surface it here too.
+
+### Documentation
+
+- **Two vendor pages appeared** since the 2026-09-13 capture — `list-transfer-activities`
+  and `get-transfer-activity-detail` — and both were read before the capture was refreshed.
+  **No claim this package makes is falsified**, and the reason is recorded in
+  `docs/reference/webull/endpoint-pages.txt` because the obvious reading is the wrong one:
+  they document ACATS and crypto *asset* transfers, while `get_transfers/2` is the
+  contract's "deposit and withdrawal history". Different facts, so `cash-activities` remains
+  the right source and a future reader reaching for `transfer-activities` because the name
+  matches would be answering a different question. `{:get_transfers, 2}` was already
+  `:experimental`, so there was no false `:unsupported` to correct either, and neither page
+  states a rate limit.
+
 ## [0.4.59] - 2026-09-15
 
 ### Fixed

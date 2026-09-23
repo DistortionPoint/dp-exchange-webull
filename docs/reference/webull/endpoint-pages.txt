@@ -11,6 +11,24 @@
 # `capabilities/0` `:unsupported` declaration is now false; one vanishing may mean a claim
 # this package makes has gone stale.
 #
+# Re-diffed 2026-09-23 by the same script. TWO pages appeared since the 2026-09-13 capture:
+# `list-transfer-activities` and `get-transfer-activity-detail`
+# (`GET /trading/activities/transfer-activities/list` and `.../get`). Both were read before
+# this file was touched.
+#
+# **No claim this package makes is falsified by them, and the reason is worth writing down
+# because the obvious reading is the wrong one.** They document ACATS and crypto *asset*
+# transfers — securities and coins moving between brokers, "one record represents one
+# physical transfer", aggregated by `acats_associated_number`. `get_transfers/2` is the
+# contract's "deposit and withdrawal history": money into and out of an account. Those are
+# different facts, so `/trading/activities/cash-activities/list` filtered to
+# `DEPOSIT,WITHDRAW,TRANSFER` remains the right source for it, and a future reader reaching
+# for `transfer-activities` because the name matches would be answering a different question.
+#
+# `{:get_transfers, 2}` was already `:experimental`, not `:unsupported`, so there was no
+# false refusal to correct either. Neither page states a rate limit, so nothing this package
+# declares about ceilings rests on them.
+#
 # Why this venue gets a captured list rather than a spec diff: Webull publishes no
 # machine-readable specification. `dp_exchange_gemini` does, and its checker diffs the
 # OpenAPI/AsyncAPI documents directly. This is the same mechanism against the only index
@@ -257,6 +275,7 @@ get-market-sectors-detail
 get-noii-bars
 get-noii-snapshot
 get-top-active
+get-transfer-activity-detail
 get-watchlist
 get-watchlist-instruments
 get-week-52-high-low
@@ -264,6 +283,7 @@ historical-bars
 industry-comparison
 instrument-list
 instruments
+list-transfer-activities
 market-data-streaming
 news
 news-summary

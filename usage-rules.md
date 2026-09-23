@@ -479,6 +479,23 @@ and collides for every story about that symbol.
 screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
 the position the venue returned the row in and closing the gap would re-rank the list.
 
+## A `:degraded` notice carries its severity from the frame — read `severity`, not only `kind`
+
+The venue publishes telemetry on its `notice` topic, and most of it says nothing is wrong. A
+keepalive reporting `drop: 0` arrives as `severity: :info`. A notice is `:warning` only when
+the venue sent **words**, or reported a **non-zero `drop`** — absence of an adverse indicator
+is not evidence of degradation.
+
+Every frame used to be `:warning`, which on one live host meant 184 WARN an hour announcing
+that nothing had been dropped, crowding out 1,331 genuinely serious warnings underneath. If
+you map `Notice.severity` straight to a log level — the honest reading of a field whose own
+docs call it "not a log level — a call to action" — this is the distinction you want.
+
+If you route on `kind` alone you will still see `:degraded` for both, and that is a known
+limit rather than an oversight: `Core.Notice`'s kinds are a deliberately closed set with no
+slot for "the venue reported on itself and nothing is wrong", and widening a shared
+vocabulary is not one venue package's call.
+
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
 If your process falls far enough behind that its mailbox reaches **10,000 queued

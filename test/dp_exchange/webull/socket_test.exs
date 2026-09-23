@@ -301,6 +301,82 @@ defmodule DpExchange.Webull.SocketTest do
       assert notice.details.venue_notice["type"] == "1003"
     end
 
+    test "a healthy keepalive frame is :info, not a WARN 184 times an hour (issue #5)" do
+      # The reporter's own frame, verbatim. `drop: 0` is the venue stating that nothing was
+      # lost — the opposite of degraded — and it carries no `content`, so it rendered as
+      # `webull degraded: (no message)` at WARN. Measured over eight hours on a live host:
+      # 184 of these an hour, out of 336 WARN/hour total, while the feed was healthy
+      # throughout (4,400-4,600 rows/60s, zero reconnects). They were the #1 entry in that
+      # host's warning log by volume and buried 1,331 genuinely serious warnings under them.
+      body = %{"drop" => 0, "rtt" => 0, "sent" => 1878, "type" => "1001"}
+      frame = publish("notice", Jason.encode!(body))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+      assert notice.severity == :info
+
+      # Still delivered, and still whole. The fix is the claim the notice makes, not the
+      # dropping of venue telemetry a consumer may want.
+      assert notice.details.venue_notice == body
+    end
+
+    test "a frame the venue sent words with stays :warning" do
+      # The issue #33 frame. The venue only writes `content` when it has something to say,
+      # and this line is not noise — it is the one the same reporter had to go looking for.
+      body = %{
+        "content" => "Permission grabbed by other session, category : us-crypto",
+        "type" => "1002"
+      }
+
+      frame = publish("notice", Jason.encode!(body))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+      assert notice.severity == :warning
+    end
+
+    test "a non-zero drop count is :warning even with no words attached" do
+      # Frames lost IS the venue answering from a worse path, which is what :degraded means.
+      # Keyed on the count itself rather than on the `type` code: the vendor publishes no
+      # field schema for this topic, so a "1001 is always fine" table would be one
+      # consumer's observation hardcoded as a venue fact.
+      frame = publish("notice", Jason.encode!(%{"drop" => 7, "sent" => 1878, "type" => "1001"}))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+      assert notice.severity == :warning
+    end
+
+    test "a drop count sent as a string is read, and an unreadable one claims nothing" do
+      # The vendor documents neither the field nor its type, so both spellings are accepted.
+      # An unreadable count is not evidence that frames were dropped — absence of an adverse
+      # indicator is not an adverse indicator.
+      for {drop, expected} <- [{"0", :info}, {"7", :warning}, {"lots", :info}, {nil, :info}] do
+        frame = publish("notice", Jason.encode!(%{"drop" => drop, "type" => "1001"}))
+
+        assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+        assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+
+        assert notice.severity == expected,
+               "drop #{inspect(drop)} should be #{expected}, got #{notice.severity}"
+      end
+    end
+
+    test "a textless frame with no health indicator at all is :info" do
+      # Absence of evidence is not evidence of degradation. This is the shape that made the
+      # constant `:degraded` wrong in the first place.
+      frame = publish("notice", Jason.encode!(%{"1" => "a", "2" => "b", "type" => "1003"}))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+      assert notice.severity == :info
+    end
+
     test "a notice that is not JSON at all is still delivered, with its text kept" do
       # Dropping it silently is the same defect one level down: the venue said something and
       # the package threw it away.

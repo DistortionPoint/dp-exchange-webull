@@ -460,7 +460,8 @@ defmodule DpExchange.Webull.Socket do
           state,
           Notice.new(:degraded, :webull,
             message: venue_notice_text(body),
-            details: %{venue_notice: body}
+            details: %{venue_notice: body},
+            severity: venue_notice_severity(body)
           )
         )
 
@@ -491,6 +492,66 @@ defmodule DpExchange.Webull.Socket do
 
     :ok
   end
+
+  # **Severity is read from the frame; it used to be a constant.** Every frame on the
+  # `notice` topic was `Notice.new(:degraded, :webull, ...)`, and `:degraded` defaults to
+  # `:warning`, so a consumer mapping severity to a log level — the mapping `Core.Notice`
+  # itself documents — logged a WARN per frame whatever the frame said.
+  #
+  # dp-exchange-webull issue #5, measured over eight hours on a live host: **336 WARN/hour,
+  # of which 184/hour were `%{"drop" => 0, "rtt" => 0, "sent" => 1878, "type" => "1001"}`** —
+  # a keepalive reporting ZERO drops, rendered as `webull degraded: (no message)` because it
+  # carries no `content`. The feed was healthy throughout: 4,400-4,600 rows/60s, zero
+  # reconnects. Those two notices were the #1 and #2 entries in that host's warning log by
+  # volume and buried 1,331 genuinely serious warnings underneath them.
+  #
+  # `Core.Notice` calls severity "not a log level — a call to action", and its
+  # `default_severity/1` is explicitly "a default, not a rule: a caller with better
+  # information overrides it". The frame IS better information, so it is read rather than
+  # assumed.
+  #
+  # **Keyed on evidence, not on the `type` code the reporter suggested.** The vendor
+  # publishes no field schema for this topic at all — `venue_notice_text/1` below already
+  # records that `"content"` is observed rather than documented — so a `"1001" => :info`
+  # table would be one consumer's observation hardcoded as a venue fact, and a venue that
+  # renumbered or added a code would silently get the wrong answer. `content` and `drop` are
+  # the fields that actually carry the claim, and they are what the reporter's own evidence
+  # discriminates on.
+  #
+  # Two things count as adverse, and nothing else does:
+  #
+  #   * the venue sent WORDS — it only writes `content` when it has something to say, and
+  #     the frame that prompted issue #33 ("Permission grabbed by other session") is exactly
+  #     that shape. Still `:warning`.
+  #   * a non-zero `drop`. Frames lost is the venue answering from a worse path than usual,
+  #     which is what `:degraded` means.
+  #
+  # Absence of an adverse indicator is not evidence of degradation, so everything else is
+  # `:info`. That is the whole fix: `drop: 0` no longer claims a human should look.
+  #
+  # The KIND stays `:degraded`, and that is a known imperfection rather than an oversight.
+  # `Core.Notice`'s kinds are "deliberately a closed set. An open one would let each venue
+  # package invent its own vocabulary" — and the set has no slot for "the venue reported on
+  # itself and nothing is wrong". Widening it is a change to the shared contract and not
+  # this package's to make unilaterally. Severity is the field the reported harm actually
+  # runs through, and it is now correct.
+  defp venue_notice_severity(body) do
+    if venue_notice_text(body) || dropped_frames?(body), do: :warning, else: :info
+  end
+
+  # A count the venue states. Accepted as an integer or as a numeric string, because the
+  # vendor documents neither; anything else is no statement at all, and an absent or
+  # unreadable count is not evidence that frames were dropped.
+  defp dropped_frames?(%{"drop" => drop}) when is_integer(drop), do: drop > 0
+
+  defp dropped_frames?(%{"drop" => drop}) when is_binary(drop) do
+    case Integer.parse(String.trim(drop)) do
+      {count, ""} -> count > 0
+      _unreadable -> false
+    end
+  end
+
+  defp dropped_frames?(_no_count), do: false
 
   defp venue_notice_text(%{"content" => content}) when is_binary(content) do
     case String.trim(content) do
