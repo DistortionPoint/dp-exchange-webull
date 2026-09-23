@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.61] - 2026-09-23
+
 ### Fixed
 
 - **`create_watchlist/4` retried a create the venue could not tell apart from the first.**
