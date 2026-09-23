@@ -413,4 +413,45 @@ defmodule DpExchange.Webull.WatchlistsTest do
   end
 
   defp ok_body, do: [%{"success" => true}]
+
+  describe "create_watchlist/4 is sent once" do
+    # A retried create is the orphan this module's own comment calls "the worst moment for
+    # one": the list exists at the venue and the caller has no handle to it. Nothing in the
+    # body — a name and an optional sort — lets the venue tell a second create from the
+    # first, and `HttpClient` retries three times by default. This test does NOT pin
+    # `retry_attempts: 0`, because the real default is what is under test.
+    defp counting_failure(counter) do
+      fn conn ->
+        :counters.add(counter, 1, 1)
+        Plug.Conn.resp(conn, 500, "upstream is having a bad day")
+      end
+    end
+
+    test "a failing create is attempted exactly once" do
+      counter = :counters.new(1, [])
+
+      assert {:error, _reason} =
+               Rest.create_watchlist("desk", [], @credentials,
+                 plug: counting_failure(counter),
+                 retry_delay: 1
+               )
+
+      assert :counters.get(counter, 1) == 1
+    end
+
+    test "a caller can still ask for retries" do
+      # `put_new`, not `put`. The control: proves the harness sees retries at all, so the
+      # "exactly once" above is this function's choice and not a transport that never retries.
+      counter = :counters.new(1, [])
+
+      assert {:error, _reason} =
+               Rest.create_watchlist("desk", [], @credentials,
+                 plug: counting_failure(counter),
+                 retry_delay: 1,
+                 retry_attempts: 3
+               )
+
+      assert :counters.get(counter, 1) > 1
+    end
+  end
 end

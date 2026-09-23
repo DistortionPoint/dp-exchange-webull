@@ -22,6 +22,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`create_watchlist/4` retried a create the venue could not tell apart from the first.**
+  `Core.HttpClient` retries a timeout or a 5xx three times by default, and the body — a name
+  and an optional sort — carries nothing the venue could dedupe on. This module's own
+  comment on that function names the result: "the list now exists at the venue and the
+  caller has no handle to add to, read or delete it". A retried create makes exactly that
+  orphan. It is now sent once, via `put_new`, so a caller can still ask for retries; the
+  control test proves the harness sees retries at all.
+
+  The last instance of a sweep across all five packages asking every write the question
+  `dp_exchange_gemini`'s `post_once/4` states — can the venue tell the second attempt from
+  the first? Orders here were already safe: `client_order_id/1` generates a key when absent,
+  for single and batch orders alike.
+
 ## [0.4.60] - 2026-09-23
 
 ### Fixed

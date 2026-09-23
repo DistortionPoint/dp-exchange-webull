@@ -1957,7 +1957,19 @@ defmodule DpExchange.Webull.Rest do
   def create_watchlist(name, symbols, credentials, opts) when is_binary(name) do
     body = put_present(%{"name" => name}, "sort", Keyword.get(opts, :sort))
 
-    with {:ok, response} <- post("/market-data/watchlists/create", body, credentials, opts),
+    # Sent ONCE (`put_new`, so a caller can still ask for retries). `Core.HttpClient` retries
+    # a timeout or a 5xx three times by default, and nothing in this body — a name and an
+    # optional sort — lets the venue tell a second create from the first. The comment just
+    # below names the outcome that produces: "the list now exists at the venue and the caller
+    # has no handle to add to, read or delete it". A retried create makes precisely that
+    # orphan, with a second one the caller does get an id for sitting beside it.
+    with {:ok, response} <-
+           post(
+             "/market-data/watchlists/create",
+             body,
+             credentials,
+             Keyword.put_new(opts, :retry_attempts, 1)
+           ),
          {:ok, row} <- first_row(response),
          # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
          # there — and nothing here calls `new/1`, the struct being built literally as
