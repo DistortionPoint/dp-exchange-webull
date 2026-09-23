@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.60] - 2026-09-23
+
 ### Fixed
 
 - **Every frame on the `notice` topic was classified `:degraded`, so a healthy keepalive
