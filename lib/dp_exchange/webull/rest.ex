@@ -47,7 +47,7 @@ defmodule DpExchange.Webull.Rest do
   for three other refusals. Fixed alongside `historical_timeframes` below.
   """
 
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
 
   alias DpExchange.Core.Types.{
     AuctionImbalance,
@@ -189,7 +189,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_price(String.t(), map(), keyword()) ::
           {:ok, Quote.t()} | {:error, term()} | {:refused, term()}
   def get_price(symbol, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_CRYPTO")
+    category = Config.opt(opts, :category, "US_CRYPTO")
 
     with {:ok, path} <- snapshot_path(category) do
       native = snapshot_symbol(symbol, category)
@@ -240,7 +240,7 @@ defmodule DpExchange.Webull.Rest do
     # Crypto, stocks, options, futures and event contracts are five different endpoints —
     # and crypto is a different HTTP verb. `opts[:category]` picks, defaulting to crypto,
     # which is what this package served before its asset classes widened.
-    case Keyword.get(opts, :category, "US_CRYPTO") do
+    case Config.opt(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
       "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
       "US_FUTURES" -> futures_bars(symbol, timeframe, credentials, opts)
@@ -262,7 +262,7 @@ defmodule DpExchange.Webull.Rest do
           # The venue marks `count` REQUIRED and documents 200 as its default; sending it
           # explicitly keeps the page size this package asked for rather than one that can
           # change under it.
-          "count" => to_string(Keyword.get(opts, :limit, 200)),
+          "count" => to_string(Config.opt(opts, :limit, 200)),
           "timespan" => timespan
         }
 
@@ -364,7 +364,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_CRYPTO")
+    category = Config.opt(opts, :category, "US_CRYPTO")
 
     with {:ok, path} <- snapshot_path(category) do
       native = snapshot_symbol(symbol, category)
@@ -481,7 +481,7 @@ defmodule DpExchange.Webull.Rest do
     do: {:error, :too_many_instrument_pages}
 
   defp all_instrument_rows(key, credentials, opts, acc, page) do
-    category = Keyword.get(opts, :category, "US_CRYPTO")
+    category = Config.opt(opts, :category, "US_CRYPTO")
     params = put_present(%{"category" => category}, "pagination_key", key)
 
     with {:ok, path} <- instruments_path(category),
@@ -948,7 +948,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_transfers(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transfers(credentials, opts) do
-    types = Keyword.get(opts, :activity_types, @transfer_activity_types)
+    types = Config.opt(opts, :activity_types, @transfer_activity_types)
 
     with {:ok, account_id} <- account_id(opts),
          :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
@@ -1122,8 +1122,8 @@ defmodule DpExchange.Webull.Rest do
   @spec replace_order(map(), String.t(), map(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, client_order_id, changes, opts) do
-    instrument = Keyword.get(opts, :instrument_type, :equity)
-    order_type = Keyword.get(opts, :order_type, :limit)
+    instrument = Config.opt(opts, :instrument_type, :equity)
+    order_type = Config.opt(opts, :order_type, :limit)
 
     with :ok <- previewable(instrument),
          :ok <- amendable(order_type, changes),
@@ -1212,7 +1212,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_order_book(String.t(), map(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
   def get_order_book(symbol, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_STOCK")
+    category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- book_path(category) do
       params =
@@ -1221,7 +1221,7 @@ defmodule DpExchange.Webull.Rest do
           "category" => category,
           # `10` is generalised from the event-contracts endpoint's documented default,
           # NOT confirmed for this endpoint — see this function's own @doc.
-          "depth" => to_string(Keyword.get(opts, :depth, 10))
+          "depth" => to_string(Config.opt(opts, :depth, 10))
         }
         |> put_present("overnight_required", book_overnight(category, opts))
 
@@ -1341,7 +1341,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_volume_profile(String.t(), String.t(), map(), keyword()) ::
           {:ok, [VolumeProfile.t()]} | {:error, term()} | {:refused, term()}
   def get_volume_profile(symbol, timeframe, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_STOCK")
+    category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- footprint_path(category),
          {:ok, span} <- footprint_span(timeframe),
@@ -1562,14 +1562,14 @@ defmodule DpExchange.Webull.Rest do
   @spec get_trades(String.t(), map(), keyword()) ::
           {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
   def get_trades(symbol, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_STOCK")
+    category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- tick_path(category) do
       params =
         %{
           "symbol" => symbol,
           "category" => category,
-          "count" => to_string(Keyword.get(opts, :limit, 30))
+          "count" => to_string(Config.opt(opts, :limit, 30))
         }
         |> put_present("trading_sessions", tick_sessions(category, opts))
 
@@ -1600,7 +1600,7 @@ defmodule DpExchange.Webull.Rest do
   # rest of this package's price data comes from. Neither the option nor the futures tape
   # takes it, and sending it would assert a session model they did not offer.
   defp tick_sessions(category, _opts) when category in ["US_OPTION", "US_FUTURES"], do: nil
-  defp tick_sessions(_category, opts), do: sessions_param(Keyword.get(opts, :sessions, ["RTH"]))
+  defp tick_sessions(_category, opts), do: sessions_param(Config.opt(opts, :sessions, ["RTH"]))
 
   defp sessions_param(sessions) when is_list(sessions), do: Enum.join(sessions, ",")
   defp sessions_param(session), do: to_string(session)
@@ -1684,7 +1684,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_stock_bars(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
   def get_stock_bars(symbol, timeframe, range, credentials, opts) do
-    category = Keyword.get(opts, :category, "US_STOCK")
+    category = Config.opt(opts, :category, "US_STOCK")
 
     with :ok <- book_category(category),
          {:ok, timespan} <- stock_timespan(timeframe) do
@@ -1836,7 +1836,7 @@ defmodule DpExchange.Webull.Rest do
           grant
         )
 
-      url = Keyword.get(opts, :oauth_url, oauth_url(opts)) <> "/oauth2/tokens/create"
+      url = Config.opt(opts, :oauth_url, oauth_url(opts)) <> "/oauth2/tokens/create"
       headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
       case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
@@ -2262,7 +2262,7 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp fundamental_category(opts), do: Keyword.get(opts, :category, "US_STOCK")
+  defp fundamental_category(opts), do: Config.opt(opts, :category, "US_STOCK")
 
   defp put_allowed(params, allowed, opts) do
     Enum.reduce(allowed, params, fn key, acc ->

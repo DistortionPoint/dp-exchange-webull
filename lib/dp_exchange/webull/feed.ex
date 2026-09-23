@@ -309,7 +309,7 @@ defmodule DpExchange.Webull.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Fanout, Notice}
+  alias DpExchange.Core.{Config, Fanout, Notice}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{Credentials, Environment, Socket, Subscription}
 
@@ -426,7 +426,7 @@ defmodule DpExchange.Webull.Feed do
   def subscribe(feed, symbols, opts) do
     GenServer.call(
       feed,
-      {:subscribe, symbols, Keyword.get(opts, :to, self()), opts},
+      {:subscribe, symbols, Config.opt(opts, :to, self()), opts},
       @call_timeout
     )
   end
@@ -476,7 +476,7 @@ defmodule DpExchange.Webull.Feed do
   # calling process for asking during exactly the conditions it exists to report.
   @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
   def subscribe_notices(feed, opts),
-    do: GenServer.call(feed, {:subscribe_notices, Keyword.get(opts, :to, self())}, @call_timeout)
+    do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
 
   # --- server -------------------------------------------------------------
 
@@ -575,20 +575,19 @@ defmodule DpExchange.Webull.Feed do
        # An init option, not just internal state, for the same reason Coinbase's Feed
        # accepts an `injected_socket` — a test standing up an already-connected shard
        # needs to say so without driving a real MQTT handshake to get there.
-       shards: Keyword.get(opts, :shards, %{}),
+       shards: Config.opt(opts, :shards, %{}),
        # index => capacity, present only once a shard has been measured (by the venue's
        # own refusal) to hold fewer than @pairs_per_socket. Absent means the venue's
        # stated ceiling applies unmodified. See handle_subscribe_result/3. Also an init
        # option, so a test can exercise rebalancing without needing @pairs_per_socket
        # real symbols to do it.
-       shard_capacity: Keyword.get(opts, :shard_capacity, %{}),
+       shard_capacity: Config.opt(opts, :shard_capacity, %{}),
        # symbol => expiry (`:os.system_time(:millisecond)`). Excluded from
        # `plan_reshard/1`'s effective wanted set while unexpired — see the moduledoc's "A
        # venue-rejected symbol is excluded, timed, and reported". Never removed from
        # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
        rejected: %{},
-       rejected_symbol_ttl_ms:
-         Keyword.get(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms),
+       rejected_symbol_ttl_ms: Config.opt(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms),
        # Shard indices currently latched into a generic blind-resubscribe failure — see the
        # moduledoc's "A generic resubscribe failure is reported too, latched per shard".
        # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
@@ -602,8 +601,8 @@ defmodule DpExchange.Webull.Feed do
        open_failed: MapSet.new(),
        # Overridable for the same reason every other cadence here is: a test proving the
        # retry actually recurs should not have to wait out a real second to see it.
-       open_retry_base_ms: Keyword.get(opts, :open_retry_base_ms, @open_retry_base_ms),
-       open_retry_max_ms: Keyword.get(opts, :open_retry_max_ms, @open_retry_max_ms)
+       open_retry_base_ms: Config.opt(opts, :open_retry_base_ms, @open_retry_base_ms),
+       open_retry_max_ms: Config.opt(opts, :open_retry_max_ms, @open_retry_max_ms)
      }}
   end
 

@@ -83,7 +83,7 @@ defmodule DpExchange.Webull do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.{Capabilities, Config, Venue}
   alias DpExchange.Webull.{Environment, Feed, Rest, SymbolFormat}
 
   # Not implemented in this release. None of them is about authentication — the host
@@ -830,7 +830,7 @@ defmodule DpExchange.Webull do
 
   # --- internals ---------------------------------------------------------
 
-  defp feed(opts), do: Keyword.get(opts, :feed, DpExchange.Webull.Supervisor.feed_name(opts))
+  defp feed(opts), do: Config.opt(opts, :feed, DpExchange.Webull.Supervisor.feed_name(opts))
 
   defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)

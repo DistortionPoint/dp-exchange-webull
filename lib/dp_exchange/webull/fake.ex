@@ -72,7 +72,7 @@ defmodule DpExchange.Webull.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{FakeInjection, Notice, Types, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
   alias DpExchange.Webull.{Auth, Environment, Rest}
 
   @symbols ~w(BTC-USD ETH-USD SOL-USD)
@@ -194,7 +194,7 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_order_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      category = Keyword.get(opts, :category, "US_STOCK")
+      category = Config.opt(opts, :category, "US_STOCK")
 
       cond do
         category not in ["US_STOCK", "US_ETF"] ->
@@ -430,7 +430,7 @@ defmodule DpExchange.Webull.Fake do
         # A dividend alongside a deposit, because that is the distinction a consumer must
         # handle: both credit cash and neither is the other. The fake filters the same way
         # the real package does.
-        types = Keyword.get(opts, :activity_types, ~w(DEPOSIT WITHDRAW TRANSFER))
+        types = Config.opt(opts, :activity_types, ~w(DEPOSIT WITHDRAW TRANSFER))
 
         rows = [
           %{
@@ -563,8 +563,8 @@ defmodule DpExchange.Webull.Fake do
   end
 
   defp do_replace_order(credentials, client_order_id, changes, opts) do
-    instrument = Keyword.get(opts, :instrument_type, :equity)
-    order_type = Keyword.get(opts, :order_type, :limit)
+    instrument = Config.opt(opts, :instrument_type, :equity)
+    order_type = Config.opt(opts, :order_type, :limit)
 
     cond do
       instrument == :crypto ->
@@ -662,7 +662,7 @@ defmodule DpExchange.Webull.Fake do
     environment = Environment.resolve(opts)
 
     if Environment.streaming?(environment) do
-      target = Keyword.get(opts, :to, self())
+      target = Config.opt(opts, :to, self())
 
       for symbol <- symbols, symbol in @symbols do
         case get_price(symbol, credentials: %{app_key: "fake", app_secret: "fake"}) do
@@ -720,7 +720,7 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(Keyword.get(opts, :to, self()), {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
+    send(Config.opt(opts, :to, self()), {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
     :ok
   end
 

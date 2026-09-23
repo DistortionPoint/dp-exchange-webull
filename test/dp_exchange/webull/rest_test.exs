@@ -199,6 +199,49 @@ defmodule DpExchange.Webull.RestTest do
     end
   end
 
+  describe "get_historical_prices/5 with a forwarded `category: nil`" do
+    # `case Keyword.get(opts, :category, "US_CRYPTO")` — `Keyword.get/3` only substitutes its
+    # default for an ABSENT key, so a forwarded `category: nil` reached the `case` itself,
+    # matched none of the named categories, and fell through to the `_stock` clause. A
+    # caller who said nothing, on a package whose documented default is crypto, got EQUITY
+    # bars for the same ticker.
+    #
+    # That is the substitution this family names first — a plausible value where the answer
+    # should have been the default — and it does not surface as a failure: a stock and a
+    # coin can share a symbol, and the bars that come back are real bars.
+    defp path_recording(test_pid) do
+      fn conn ->
+        send(test_pid, {:path, conn.request_path})
+        Req.Test.json(conn, [])
+      end
+    end
+
+    test "is crypto, the documented default — not the stock branch" do
+      Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
+        category: nil,
+        plug: path_recording(self()),
+        retry_attempts: 0
+      )
+
+      assert_receive {:path, path}
+      assert path =~ "/crypto/", "category: nil was routed to #{path}"
+    end
+
+    test "an unknown category still means stocks — only `nil` changed" do
+      # The `_stock` catch-all is the package's own answer for a named category it does not
+      # recognise, and that stays as it was. The fix is about "nothing was said", not about
+      # what an unrecognised word means.
+      Rest.get_historical_prices("AAPL", "1m", [], @credentials,
+        category: "US_STOCK",
+        plug: path_recording(self()),
+        retry_attempts: 0
+      )
+
+      assert_receive {:path, path}
+      assert path =~ "/stocks/"
+    end
+  end
+
   describe "get_historical_prices/5 — the nesting that once returned all-nil bars" do
     @groups [
       %{

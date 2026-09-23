@@ -62,7 +62,7 @@ defmodule DpExchange.Webull.Subscription do
   is the one interpretation this response never supports.
   """
 
-  alias DpExchange.Core.HttpClient
+  alias DpExchange.Core.{Config, HttpClient}
   alias DpExchange.Webull.{Auth, Environment, SymbolFormat}
 
   @subscribe_path "/market-data/streaming/subscribe"
@@ -101,7 +101,7 @@ defmodule DpExchange.Webull.Subscription do
         # venue actually accepted for months from the prior in-repo client; `TICK` is
         # read from the vendor's own topic table and not yet measured live — see the
         # moduledoc.
-        "sub_types" => Keyword.get(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
+        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
       })
 
     request = %{
