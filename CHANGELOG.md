@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.64] - 2026-09-24
+
 ### Fixed
 
 - **Every reconnect left another keep-alive ping chain running, and none ever stopped.**
