@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every reconnect left another keep-alive ping chain running, and none ever stopped.**
+  `WebSockex` reconnects inside the same process, and `Socket.handle_connect/2` runs on each
+  reconnect. Each `CONNECT` started a bare `:ping` timer that re-armed itself forever, so a
+  socket that had reconnected N times sent N+1 `PINGREQ`s per keep-alive interval. On a
+  venue measured dropping this socket 117 times in seven minutes, that is a `PINGREQ` every
+  quarter-second where the protocol asks for one every thirty. A surviving chain's ping,
+  queued during a reconnect, could also reach the new connection before its `CONNECT`, and
+  MQTT 3.1.1 requires `CONNECT` to be a client's first packet. Each connection's timer now
+  carries its own reference in `state.ping`. A ping that does not match it is dropped
+  without re-arming, which ends that chain, and `handle_disconnect/2` clears the
+  reference. Break-verified: both keep-alive tests fail on the previous code.
+
 ## [0.4.63] - 2026-09-24
 
 ### Fixed

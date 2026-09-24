@@ -13,7 +13,14 @@ defmodule DpExchange.Webull.SocketTest do
   # opened and no venue is reached — a tier-1 test that dials a venue is a tier-2 test
   # wearing the wrong tag.
   defp state,
-    do: %{subscriber: self(), session_id: "s1", app_key: "k", buffer: <<>>, connected?: false}
+    do: %{
+      subscriber: self(),
+      session_id: "s1",
+      app_key: "k",
+      buffer: <<>>,
+      connected?: false,
+      ping: nil
+    }
 
   defp varint(value) when value < 0x80, do: <<value>>
   defp varint(value), do: <<1::1, band(value, 0x7F)::7, varint(bsr(value, 7))::binary>>
@@ -466,7 +473,35 @@ defmodule DpExchange.Webull.SocketTest do
     end
 
     test "a ping goes out on the keep-alive schedule" do
-      assert {:reply, {:binary, <<12::4, 0::4, 0>>}, _state} = Socket.handle_info(:ping, state())
+      ping = make_ref()
+
+      assert {:reply, {:binary, <<12::4, 0::4, 0>>}, %{ping: ^ping}} =
+               Socket.handle_info({:ping, ping}, %{state() | ping: ping})
+    end
+
+    test "a reconnect ends the old ping chain instead of running a second one beside it" do
+      # `WebSockex` reconnects inside the same process, so each CONNECT used to start another
+      # `:ping` chain and none ever stopped — see the moduledoc's "Keep-alive" section.
+      assert {:reply, _connect, first} = Socket.handle_info(:send_connect, state())
+      old = first.ping
+      assert is_reference(old)
+
+      assert {:reconnect, dropped} = Socket.handle_disconnect(%{reason: :closed}, first)
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+
+      # Queued during the reconnect, this reaches the new connection before its CONNECT.
+      # A PINGREQ there would be the first packet on the connection, which MQTT forbids.
+      assert {:ok, ^dropped} = Socket.handle_info({:ping, old}, dropped)
+
+      assert {:reply, _connect, second} = Socket.handle_info(:send_connect, dropped)
+      assert is_reference(second.ping) and second.ping != old
+
+      # The old chain stays dead after the new one starts. Only the new ref pings and
+      # re-arms itself.
+      assert {:ok, ^second} = Socket.handle_info({:ping, old}, second)
+
+      assert {:reply, {:binary, <<12::4, 0::4, 0>>}, _state} =
+               Socket.handle_info({:ping, second.ping}, second)
     end
 
     test "disconnecting clears the buffer, because a half packet cannot span a reconnect" do

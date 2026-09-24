@@ -26,6 +26,23 @@ defmodule DpExchange.Webull.Socket do
   something within it. `PINGREQ` goes out at half that interval — early enough that one
   lost ping is not a disconnect.
 
+  **Exactly one ping chain per connection.** `WebSockex` reconnects inside the SAME
+  process, and `handle_connect/2` runs on every reconnect. The chain used to be a bare
+  `:ping` timer started by each `CONNECT` and re-armed by every `:ping` forever, so each
+  reconnect started another chain beside the old one, and nothing ever stopped either. This
+  venue drops this socket in bursts (the "issue #27" section below measured 117 crashes in
+  seven minutes), which leaves about 118 chains running: a `PINGREQ` every quarter-second
+  where the protocol asks for one every thirty. Worse, a surviving chain's `:ping`, queued
+  while the socket reconnected, could reach the NEW connection ahead of its `CONNECT`.
+  MQTT 3.1.1 requires `CONNECT` to be the first packet a client sends (§3.1), and a server
+  closes a connection that sends anything else first — so a stale ping could cause the next
+  drop itself.
+
+  Each `CONNECT` now arms a timer carrying a fresh reference, kept in `state.ping`. A
+  `{:ping, ref}` that does not match it belongs to a dead connection: it is dropped and NOT
+  re-armed, so its chain ends there. `handle_disconnect/2` clears the reference, so no ping
+  from the old connection can reach the new one before its `CONNECT`.
+
   ## What it does not do
 
   It does not subscribe. Subscriptions on this venue are **HTTP calls**, made by `Feed`
@@ -169,7 +186,8 @@ defmodule DpExchange.Webull.Socket do
       session_id: Keyword.fetch!(opts, :session_id),
       app_key: Keyword.fetch!(opts, :app_key),
       buffer: <<>>,
-      connected?: false
+      connected?: false,
+      ping: nil
     }
 
     WebSockex.start_link(url, __MODULE__, state, connection_opts(opts))
@@ -283,7 +301,7 @@ defmodule DpExchange.Webull.Socket do
     # the same trade `dp_exchange_schwab.Socket` already makes.
     if delay > 0, do: Process.sleep(delay)
 
-    {:reconnect, %{state | buffer: <<>>, connected?: false}}
+    {:reconnect, %{state | buffer: <<>>, connected?: false, ping: nil}}
   end
 
   @impl true
@@ -291,16 +309,24 @@ defmodule DpExchange.Webull.Socket do
     # The password is documented as "any value" — authorisation happens on the signed HTTP
     # subscribe, so this is sent to satisfy the protocol flag rather than to authenticate.
     packet = MqttPacket.connect(state.session_id, state.app_key, "x", @keep_alive_s)
-    Process.send_after(self(), :ping, div(@keep_alive_s, 2) * 1_000)
-    {:reply, {:binary, packet}, state}
+    ping = make_ref()
+    schedule_ping(ping)
+    {:reply, {:binary, packet}, %{state | ping: ping}}
   end
 
-  def handle_info(:ping, state) do
-    Process.send_after(self(), :ping, div(@keep_alive_s, 2) * 1_000)
+  def handle_info({:ping, ping}, %{ping: ping} = state) when is_reference(ping) do
+    schedule_ping(ping)
     {:reply, {:binary, MqttPacket.pingreq()}, state}
   end
 
+  # A ping from a connection that has since dropped. It is not re-armed, so its chain ends
+  # here — see the moduledoc's "Keep-alive" section.
+  def handle_info({:ping, _stale}, state), do: {:ok, state}
+
   def handle_info(_other, state), do: {:ok, state}
+
+  defp schedule_ping(ping),
+    do: Process.send_after(self(), {:ping, ping}, div(@keep_alive_s, 2) * 1_000)
 
   @impl true
   def handle_frame({:binary, data}, state) do
