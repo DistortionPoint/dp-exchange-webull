@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.63] - 2026-09-24
+
 ### Fixed
 
 - **An empty response envelope became a phantom order.** `rows/1` has a clause for endpoints
