@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An empty response envelope became a phantom order.** `rows/1` has a clause for endpoints
+  that answer with a bare object, `%{} = body -> [body]`, and it caught envelopes too:
+  `{"code": "200", "msg": "ok", "data": null}` failed the `is_list/1` guard and came back as a
+  one-row list whose row WAS the envelope. Measured against that body: `get_orders/2`
+  answered **`{:ok, [%Order{id: nil, symbol: nil, side: nil, …}]}`** — an order that does not
+  exist — `get_transfers/2`, which returns rows as sent, handed the envelope back as a
+  transfer, and `get_positions/2` refused it as a malformed position, reporting "no
+  positions" as corrupt data.
+
+  A `"data"` key now decides the shape whatever it holds: a list is the rows, an object is one
+  row (the object, not its wrapper), anything else — `null` above all — is none. All three now
+  answer `{:ok, []}`.
+
+  Separately, an order row with no `client_order_id` is dropped from `get_orders/2` and refused
+  by `get_order/3` as `{:missing_required_field, :id}`, rather than filled in from the
+  caller's own argument. A caller cannot cancel, amend or look up an order with no identity;
+  this package's own `to_watchlist/2` already holds "a nil key there is worse than one fewer
+  row this cycle". `Core.Types.Order` admits `id: nil` for acknowledgements that carry little
+  else — a list of orders is not that case.
+
 ## [0.4.62] - 2026-09-23
 
 ### Fixed

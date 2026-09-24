@@ -3144,8 +3144,21 @@ defmodule DpExchange.Webull.Rest do
   defp before_end?(_bar, nil), do: true
   defp before_end?(bar, finish), do: DateTime.compare(bar.opened_at, finish) != :gt
 
+  # **An envelope is never a row.** The third clause exists for endpoints that answer with a
+  # bare object, and it used to catch envelopes too: `%{"code" => "200", "msg" => "ok",
+  # "data" => nil}` failed the `is_list/1` guard above, landed on `%{} = body`, and came back
+  # as a one-row list whose row was the envelope itself. Measured against that body:
+  # `get_orders/2` answered `{:ok, [%Order{id: nil, symbol: nil, side: nil, …}]}` — a phantom
+  # order — and `get_transfers/2`, which returns rows as the venue sends them, handed the
+  # envelope back as a transfer. `get_positions/2` refused the envelope as a malformed
+  # position, which fails closed but reports "no positions" as corrupt data.
+  #
+  # So a `"data"` key decides the shape whatever it holds: a list is the rows, an object is
+  # one row (the object, not its wrapper), and anything else — `null` above all — is none.
   defp rows(body) when is_list(body), do: body
   defp rows(%{"data" => rows}) when is_list(rows), do: rows
+  defp rows(%{"data" => %{} = row}), do: [row]
+  defp rows(%{"data" => _nothing}), do: []
   defp rows(%{} = body), do: [body]
   defp rows(_other), do: []
 
@@ -3792,8 +3805,14 @@ defmodule DpExchange.Webull.Rest do
       params = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, body} <- get("/trading/orders/get", params, credentials, opts),
-           {:ok, row} <- first_row(body) do
-        {:ok, to_order(row)}
+           {:ok, row} <- first_row(body),
+           # Refused rather than filled in from `client_order_id`: that would be publishing
+           # the caller's own argument as though the venue had confirmed it.
+           %Order{id: id} = order when is_binary(id) <- to_order(row) do
+        {:ok, order}
+      else
+        %Order{id: nil} -> {:error, {:missing_required_field, :id}}
+        other -> other
       end
     end
   end
@@ -3832,7 +3851,12 @@ defmodule DpExchange.Webull.Rest do
       params = put_present(%{"account_id" => account_id}, "page_size", Keyword.get(opts, :limit))
 
       with {:ok, body} <- get(path, params, credentials, opts) do
-        {:ok, body |> rows() |> Enum.map(&to_order/1)}
+        # An order with no `client_order_id` is one a caller cannot cancel, amend or look up
+        # again, and the envelope bug above produced exactly that — so it is dropped here,
+        # by the same rule `to_watchlist/2` already applies: "a nil key there is worse than
+        # one fewer row this cycle". `Core.Types.Order` admits `id: nil` for acknowledgements
+        # that carry an id and little else; a LIST of orders is not that case.
+        {:ok, body |> rows() |> Enum.map(&to_order/1) |> Enum.reject(&is_nil(&1.id))}
       end
     end
   end

@@ -538,4 +538,58 @@ defmodule DpExchange.Webull.RestTest do
       assert quantum.max_quote_size == nil
     end
   end
+
+  describe "an envelope is never a row" do
+    # `rows/1`'s bare-object clause caught envelopes too: `{"code": "200", "data": null}`
+    # failed the list guard, landed on `%{} = body`, and came back as a one-row list whose
+    # row WAS the envelope. Measured: `get_orders/2` answered a phantom
+    # `%Order{id: nil, symbol: nil, …}`, `get_transfers/2` returned the envelope as a
+    # transfer, and `get_positions/2` refused it as a malformed position.
+    @empty_envelope %{"code" => "200", "msg" => "ok", "data" => nil}
+
+    defp answering(body), do: fn conn -> Req.Test.json(conn, body) end
+
+    test "data: null is no rows, on every endpoint that reads rows" do
+      opts = [plug: answering(@empty_envelope), retry_attempts: 0, account_id: "acct"]
+
+      assert {:ok, []} = Rest.get_orders(@credentials, opts)
+      assert {:ok, []} = Rest.get_transfers(@credentials, opts)
+      assert {:ok, []} = Rest.get_positions(@credentials, opts)
+    end
+
+    test "data: {object} is that object as one row, not its wrapper" do
+      order = %{"client_order_id" => "c-1", "symbol" => "AAPL", "side" => "BUY"}
+      envelope = %{"code" => "200", "data" => order}
+
+      assert {:ok, [%{id: "c-1", symbol: "AAPL"}]} =
+               Rest.get_orders(@credentials,
+                 plug: answering(envelope),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "an order row with no id is dropped from a list, and refused on its own" do
+      # A caller cannot cancel, amend or look up an order with no identity. Webull's own rule,
+      # from `to_watchlist/2`: "a nil key there is worse than one fewer row this cycle".
+      rows = [
+        %{"symbol" => "AAPL", "side" => "BUY"},
+        %{"client_order_id" => "c-2", "side" => "SELL"}
+      ]
+
+      assert {:ok, [%{id: "c-2"}]} =
+               Rest.get_orders(@credentials,
+                 plug: answering(rows),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.get_order(@credentials, "c-1",
+                 plug: answering(%{"symbol" => "AAPL"}),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+  end
 end
