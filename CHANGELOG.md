@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.66] - 2026-09-25
+
 ### Fixed
 
 - **A slow venue subscribe crashed the caller.** On an already-connected shard,
