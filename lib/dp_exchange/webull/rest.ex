@@ -1627,7 +1627,8 @@ defmodule DpExchange.Webull.Rest do
       end
     end)
     |> case do
-      {:ok, trades} -> {:ok, Enum.reverse(trades)}
+      # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
+      {:ok, trades} -> {:ok, trades |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
       error -> error
     end
   end

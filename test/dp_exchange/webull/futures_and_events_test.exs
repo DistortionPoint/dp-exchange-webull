@@ -153,6 +153,27 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
       refute query =~ "trading_sessions"
     end
 
+    test "the tape comes back oldest first, whatever order the venue sent it in" do
+      # See `Core.Venue`'s `get_trades` doc. Prices mark each tick so the order is visible.
+      ticks =
+        for {price, time} <- [
+              {"3", 1_761_131_409_300},
+              {"1", 1_761_131_409_100},
+              {"2", 1_761_131_409_200}
+            ] do
+          %{"price" => price, "volume" => "1", "side" => "BUY", "time" => time}
+        end
+
+      assert {:ok, trades} =
+               Rest.get_trades("ESZ5", @credentials,
+                 category: "US_FUTURES",
+                 plug: capturing([%{"symbol" => "ESZ5", "result" => ticks}], self()),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(trades, &Decimal.to_string(&1.price)) == ["1", "2", "3"]
+    end
+
     test "the book reaches the futures depths endpoint without overnight_required" do
       me = self()
 
