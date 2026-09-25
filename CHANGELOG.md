@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A subscribe during a shard's reconnect could crash the caller.** A caller whose
+  symbols landed on a shard that was reconnecting (not being opened for the first time)
+  was parked with no `:connack_timeout`. The socket's reconnect backoff reaches 30s, so the
+  caller waited out its 15s `@call_timeout` and EXITED. A shard also held only one parked
+  caller, so a second caller silently replaced the first, who was then never answered.
+  `reply_to` is now a list, every path that answers a parked caller answers all of them,
+  and every park arms its own timeout. Break-verified: both new tests fail on the previous
+  code.
+
 ## [0.4.64] - 2026-09-24
 
 ### Fixed

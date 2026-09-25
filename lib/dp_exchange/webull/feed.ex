@@ -91,6 +91,23 @@ defmodule DpExchange.Webull.Feed do
   reconnect already did, so the session id it names is one the venue has actually
   registered.
 
+  ## A caller parked on a connecting shard is always answered
+
+  A `subscribe/2`, `unsubscribe/2` or `update_symbols/2` whose symbols land on a shard that
+  is not yet connected waits for that shard's `link_up` (`shard.reply_to`). Two things
+  could leave such a caller unanswered until its `@call_timeout` ran out, at which point it
+  EXITED and took its own process down:
+
+  - Only the branch that OPENS a shard armed a `:connack_timeout`. A caller that arrived
+    while an existing shard was reconnecting parked with no timer at all, and
+    `Socket.handle_disconnect/2` backs off for up to 30s, twice `@call_timeout`.
+  - `reply_to` held ONE caller, and a second caller parking on the same shard overwrote
+    the first, who then got no answer from anything.
+
+  `reply_to` is now a list, and every path that answers a parked caller answers all of
+  them, each with its own capacity overflow. Every park arms its own `:connack_timeout`,
+  so no caller waits past `@connack_timeout_ms`, two thirds of `@call_timeout`.
+
   ## A subscribed, connected session can still go quiet on its own
 
   Not a reconnect, not an error, not an unsubscribe — the venue simply stops pushing to
@@ -566,7 +583,8 @@ defmodule DpExchange.Webull.Feed do
        # same arriving payloads — never from `wanted` or from what was subscribed. See
        # the moduledoc's "Coverage by kind" and `kind_for/1`.
        delivering_by_kind: %{},
-       # index => %{session_id:, socket:, connected?:, symbols:, reply_to:}. `symbols` is
+       # index => %{session_id:, socket:, connected?:, symbols:, reply_to:}, where `reply_to`
+       # is `nil` or the list of callers parked on this shard. `symbols` is
        # what this shard is meant to carry as of the last reshard, independent of whether
        # the HTTP call that asks the venue for it has actually gone out yet. `reply_to`
        # is set only while this shard is the primary of a call still waiting on this
@@ -863,12 +881,8 @@ defmodule DpExchange.Webull.Feed do
   # connection may still come good, and what must not persist is the caller's wait.
   def handle_info({:connack_timeout, index, session_id}, state) do
     case Map.get(state.shards, index) do
-      %{session_id: ^session_id, connected?: false, reply_to: {from, overflow}} ->
-        GenServer.reply(
-          from,
-          combine_overflow({:error, {:connack_timeout, state.connack_timeout_ms}}, overflow)
-        )
-
+      %{session_id: ^session_id, connected?: false, reply_to: [_first | _rest] = waiters} ->
+        reply_all(waiters, {:error, {:connack_timeout, state.connack_timeout_ms}})
         {:noreply, put_in(state.shards[index].reply_to, nil)}
 
       _connected_refused_or_replaced ->
@@ -1376,11 +1390,25 @@ defmodule DpExchange.Webull.Feed do
           fn -> reconcile_now(shard, added, removed, opts) end
         )
 
-      _still_connecting ->
+      %{session_id: session_id} = still_connecting ->
         # A fresh open or a reconnect is already in flight for this index. Defer to
         # on_link_up/2, exactly as the single-connection design did — see issue #9.
+        #
+        # Joined to whoever is already waiting, never written over them, and bounded by a
+        # CONNACK timer of its own. See the moduledoc's "A caller parked on a connecting
+        # shard is always answered".
         state = put_in(state.shards[index].symbols, wanted_symbols)
-        put_in(state.shards[index].reply_to, {from, overflow})
+
+        Process.send_after(
+          self(),
+          {:connack_timeout, index, session_id},
+          state.connack_timeout_ms
+        )
+
+        put_in(
+          state.shards[index].reply_to,
+          (still_connecting.reply_to || []) ++ [{from, overflow}]
+        )
     end
   end
 
@@ -1392,7 +1420,7 @@ defmodule DpExchange.Webull.Feed do
           socket: socket,
           connected?: false,
           symbols: symbols,
-          reply_to: {from, overflow}
+          reply_to: [{from, overflow}]
         }
 
         # The caller is now parked until a CONNACK arrives, and nothing else bounds that
@@ -1486,12 +1514,8 @@ defmodule DpExchange.Webull.Feed do
   # shard cannot reply twice to a `from` that has already been answered.
   defp answer_refused_shard(state, index, details) do
     case Map.get(state.shards, index) do
-      %{reply_to: {from, overflow}} ->
-        GenServer.reply(
-          from,
-          combine_overflow({:error, {:connection_refused, details}}, overflow)
-        )
-
+      %{reply_to: [_first | _rest] = waiters} ->
+        reply_all(waiters, {:error, {:connection_refused, details}})
         put_in(state.shards[index].reply_to, nil)
 
       _no_one_waiting ->
@@ -1507,8 +1531,8 @@ defmodule DpExchange.Webull.Feed do
       %{reply_to: nil} ->
         state
 
-      %{reply_to: {from, overflow}} ->
-        GenServer.reply(from, combine_overflow(result, overflow))
+      %{reply_to: [_first | _rest] = waiters} ->
+        reply_all(waiters, result)
         put_in(state.shards[index].reply_to, nil)
 
       nil ->
@@ -2175,9 +2199,15 @@ defmodule DpExchange.Webull.Feed do
   # here too.
   defp answer_parked_caller(%{reply_to: nil}, _result), do: :ok
 
-  defp answer_parked_caller(%{reply_to: {from, overflow}}, result) do
-    GenServer.reply(from, combine_overflow(result, overflow))
-    :ok
+  defp answer_parked_caller(%{reply_to: waiters}, result) when is_list(waiters),
+    do: reply_all(waiters, result)
+
+  # Every caller parked on one shard gets the same outcome, each with its OWN overflow:
+  # what one call could not place is not another call's failure.
+  defp reply_all(waiters, result) do
+    Enum.each(waiters, fn {from, overflow} ->
+      GenServer.reply(from, combine_overflow(result, overflow))
+    end)
   end
 
   defp combine_overflow(:ok, []), do: :ok

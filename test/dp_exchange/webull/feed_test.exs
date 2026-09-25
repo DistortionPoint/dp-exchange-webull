@@ -59,7 +59,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
       end)
 
       send(
@@ -94,7 +94,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
       end)
 
       send(
@@ -125,7 +125,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
       end)
 
       send(
@@ -161,7 +161,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
       end)
 
       send(feed, {:connack_timeout, 0, "s0"})
@@ -188,7 +188,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, fn state ->
         state
         |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], {{test_pid, make_ref()}, []})
+        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
       end)
 
       send(feed, {:connack_timeout, 0, "a-previous-session"})
@@ -1878,7 +1878,7 @@ defmodule DpExchange.Webull.FeedTest do
       ref = make_ref()
 
       :sys.replace_state(feed, fn state ->
-        put_in(state.shards[0].reply_to, {{test_pid, ref}, []})
+        put_in(state.shards[0].reply_to, [{{test_pid, ref}, []}])
       end)
 
       send(feed, {:reconcile_done, {:link_up, 0}, {:error, {:invalid_session, "s0"}}})
@@ -1886,6 +1886,70 @@ defmodule DpExchange.Webull.FeedTest do
 
       assert_receive {^ref, {:error, {:invalid_session, "s0"}}}, 1_000
       assert Process.alive?(feed)
+    end
+
+    test "callers parked on a reconnecting shard are all answered, before the call timeout",
+         %{limiter: limiter} do
+      # The still-connecting branch parked with no timer of its own, and a second caller
+      # overwrote the first. During a reconnect backoff (up to 30s) that left callers waiting
+      # past `@call_timeout`, then EXITING. See the moduledoc's "A caller parked on a
+      # connecting shard is always answered".
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("s0") | connected?: false, socket: socket}},
+          connack_timeout_ms: 200
+        )
+
+      callers =
+        for symbol <- ["BTC-USD", "ETH-USD"] do
+          Task.async(fn -> Feed.subscribe(feed, [symbol], subscribe_opts(limiter)) end)
+        end
+
+      for caller <- callers do
+        assert {:error, {:connack_timeout, 200}} = Task.await(caller, 2_000)
+      end
+
+      assert :sys.get_state(feed).shards[0].reply_to == nil
+    end
+
+    test "callers parked on a connecting shard all get the link-up's answer",
+         %{limiter: limiter} do
+      socket = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
+
+      feed =
+        start_feed(shards: %{0 => %{connected_shard("s0") | connected?: false, socket: socket}})
+
+      callers =
+        for symbol <- ["BTC-USD", "ETH-USD"] do
+          Task.async(fn -> Feed.subscribe(feed, [symbol], subscribe_opts(limiter)) end)
+        end
+
+      wait_for_parked(feed, 2)
+      send(feed, {:reconcile_done, {:link_up, 0}, :ok})
+
+      for caller <- callers, do: assert(:ok = Task.await(caller, 2_000))
+    end
+
+    # Polled rather than slept: the callers park from their own processes, and only the
+    # feed's state says when both have.
+    defp wait_for_parked(feed, count, waited \\ 0) do
+      parked = :sys.get_state(feed).shards[0].reply_to || []
+
+      cond do
+        length(parked) == count ->
+          :ok
+
+        waited >= 2_000 ->
+          flunk("#{length(parked)} caller(s) parked, not #{count}")
+
+        true ->
+          Process.sleep(10)
+          wait_for_parked(feed, count, waited + 10)
+      end
     end
 
     test "the caller's capacity overflow still travels with that answer" do
@@ -1904,7 +1968,7 @@ defmodule DpExchange.Webull.FeedTest do
       ref = make_ref()
 
       :sys.replace_state(feed, fn state ->
-        put_in(state.shards[0].reply_to, {{test_pid, ref}, ["ETH-USD"]})
+        put_in(state.shards[0].reply_to, [{{test_pid, ref}, ["ETH-USD"]}])
       end)
 
       send(feed, {:reconcile_done, {:link_up, 0}, {:error, {:invalid_session, "s0"}}})
