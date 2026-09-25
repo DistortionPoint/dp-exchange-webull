@@ -796,6 +796,20 @@ A `Balance`'s own `balance` field may still be `nil`, and that is a different st
 venue named the asset and did not state a quantity for it. Read that as unknown, never as
 zero.
 
+## A subscribe that is still in progress answers before it times out
+
+`subscribe/2`, `unsubscribe/2` and `update_symbols/2` wait for the venue's HTTP subscribe,
+or for a connecting shard's CONNACK. Either can be slower than the call's own 15-second
+timeout, and a call that times out EXITS the calling process. So after about ten seconds
+the call is answered anyway, with one of these:
+
+- `{:error, {:reconcile_pending, ms}}`: the HTTP subscribe is still running.
+- `{:error, {:connack_timeout, ms}}`: the shard has not finished connecting.
+
+**Neither needs a retry.** Your symbols are already recorded. The subscribe finishes or
+the shard connects, and your symbols go out with it. `coverage/1` tells you when they
+start arriving.
+
 ## Every negative here is audited
 
 `docs/reference/webull/negative-claims.md` lists each one with the source and date consulted.

@@ -221,6 +221,59 @@ defmodule DpExchange.Webull.FeedTest do
     # its own reconcile and a lost task strands exactly one caller rather than every future
     # one. Bounded — and still a caller that never gets an answer.
 
+    test "a slow reconcile answers its caller before the call times out, and the late " <>
+           "reply lands nowhere",
+         %{limiter: limiter} do
+      # The reconcile may run 60s and the caller's `GenServer.call` gives up at 15s. See
+      # `Feed`'s moduledoc, "A caller waiting on a reconcile is answered before its call
+      # times out".
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:reconciling, self()})
+
+        receive do
+          :release -> Req.Test.json(conn, %{"code" => "200"})
+        end
+      end
+
+      feed = start_feed(shards: %{0 => connected_shard("s0")}, connack_timeout_ms: 200)
+
+      caller =
+        spawn(fn ->
+          result = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))
+          send(test_pid, {:subscribed, result})
+
+          receive do
+            :report_mailbox -> send(test_pid, {:mailbox, Process.info(self(), :messages)})
+          end
+        end)
+
+      assert_receive {:reconciling, request}, 2_000
+      assert_receive {:subscribed, {:error, {:reconcile_pending, 200}}}, 2_000
+
+      # The reconcile finishes after the caller was answered. Its own reply to the same
+      # `from` must not surface as a stray message in the caller's mailbox.
+      send(request, :release)
+      wait_until_reconciled(feed)
+      send(caller, :report_mailbox)
+      assert_receive {:mailbox, {:messages, []}}, 1_000
+    end
+
+    defp wait_until_reconciled(feed, waited \\ 0) do
+      cond do
+        :sys.get_state(feed).reconciling == %{} ->
+          :ok
+
+        waited >= 2_000 ->
+          flunk("the reconcile never finished")
+
+        true ->
+          Process.sleep(10)
+          wait_until_reconciled(feed, waited + 10)
+      end
+    end
+
     test "a killed reconcile task answers its caller instead of stranding it", %{
       limiter: limiter
     } do

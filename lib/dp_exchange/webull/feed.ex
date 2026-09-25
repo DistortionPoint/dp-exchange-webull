@@ -108,6 +108,23 @@ defmodule DpExchange.Webull.Feed do
   them, each with its own capacity overflow. Every park arms its own `:connack_timeout`,
   so no caller waits past `@connack_timeout_ms`, two thirds of `@call_timeout`.
 
+  ## A caller waiting on a reconcile is answered before its call times out
+
+  On a shard that is already connected, `subscribe/2`, `unsubscribe/2` and
+  `update_symbols/2` wait for the HTTP subscribe their call started (a `:primary`
+  reconcile). That reconcile is allowed `@reconcile_timeout_ms` (60s), because
+  `Core.HttpClient` retries inside it. The caller's own `GenServer.call` gives up at
+  `@call_timeout` (15s), so a slow venue made the caller EXIT and take its process down.
+  The comment on `@reconcile_timeout_ms` said as much ("a reconcile that outlives the
+  caller waiting on it has already lost that caller") and left it there.
+
+  Each primary reconcile now arms `{:primary_reply_due, index, from}` at
+  `@connack_timeout_ms`, the same two-thirds-of-`@call_timeout` budget a parked caller gets.
+  If the reconcile is still running then, the caller is answered
+  `{:error, {:reconcile_pending, ms}}`. The reconcile carries on and its result is applied.
+  Its own later reply to that `from` is dropped by `gen`, because the call has already
+  returned.
+
   ## A subscribed, connected session can still go quiet on its own
 
   Not a reconnect, not an error, not an unsubscribe — the venue simply stops pushing to
@@ -742,6 +759,33 @@ defmodule DpExchange.Webull.Feed do
   # that, and only a timer tells it apart from one about to succeed. A timer for a tag that
   # already answered finds nothing tracked and is ignored, so a slow-but-successful reconcile
   # is never torn down by its own deadline arriving late.
+  # A caller is still waiting on its primary reconcile, and would outlive its own
+  # `GenServer.call` if it went on waiting. It is answered now, and the reconcile carries on:
+  # its result is applied when it lands, and its own reply to this `from` then finds a call
+  # that has already returned. `gen` drops a reply to a completed call's alias, so it reaches
+  # no mailbox. See the moduledoc's "A caller waiting on a reconcile is answered before its
+  # call times out".
+  def handle_info({:primary_reply_due, index, from}, state) do
+    pending =
+      Enum.find(
+        Map.keys(state.reconciling),
+        &match?({:primary, ^index, ^from, _overflow, _retries, _opts}, &1)
+      )
+
+    case pending do
+      {:primary, _index, _from, overflow, _retries_left, _opts} ->
+        GenServer.reply(
+          from,
+          combine_overflow({:error, {:reconcile_pending, state.connack_timeout_ms}}, overflow)
+        )
+
+      nil ->
+        :ok
+    end
+
+    {:noreply, state}
+  end
+
   def handle_info({:reconcile_timeout, tag, attempt}, state) do
     case Map.fetch(state.reconciling, tag) do
       {:ok, %{pid: pid, attempt: ^attempt}} ->
@@ -1384,11 +1428,18 @@ defmodule DpExchange.Webull.Feed do
         removed = shard.symbols -- wanted_symbols
         state = put_in(state.shards[index].symbols, wanted_symbols)
 
-        spawn_reconcile(
-          state,
-          {:primary, index, from, overflow, retries_left, opts},
-          fn -> reconcile_now(shard, added, removed, opts) end
-        )
+        state =
+          spawn_reconcile(
+            state,
+            {:primary, index, from, overflow, retries_left, opts},
+            fn -> reconcile_now(shard, added, removed, opts) end
+          )
+
+        # The caller is waiting on an HTTP round trip that may legitimately outlast its own
+        # `GenServer.call`. See the moduledoc's "A caller waiting on a reconcile is answered
+        # before its call times out".
+        Process.send_after(self(), {:primary_reply_due, index, from}, state.connack_timeout_ms)
+        state
 
       %{session_id: session_id} = still_connecting ->
         # A fresh open or a reconnect is already in flight for this index. Defer to

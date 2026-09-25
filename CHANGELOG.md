@@ -22,6 +22,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A slow venue subscribe crashed the caller.** On an already-connected shard,
+  `subscribe/2`, `unsubscribe/2` and `update_symbols/2` wait for the HTTP subscribe their
+  call started. That is allowed 60s (`HttpClient` retries inside it), while the caller's
+  `GenServer.call` gives up at 15s, so a slow venue made the caller EXIT. Each such call
+  now arms a reply deadline at two thirds of the call timeout, the same budget a caller
+  parked on a connecting shard gets, and is answered `{:error, {:reconcile_pending, ms}}`
+  if the subscribe is still running. The subscribe carries on and its result is applied.
+  Its own late reply is dropped by `gen`, and a test proves it lands in no mailbox.
+  `usage-rules.md` gains a section on both pending replies. Break-verified: the new test
+  fails on the previous code.
+
 ## [0.4.65] - 2026-09-25
 
 ### Fixed
