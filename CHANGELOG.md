@@ -22,6 +22,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PINGREQ nobody answered went unnoticed.** MQTT requires a PINGRESP to every
+  PINGREQ, and `Socket` sent PINGREQs every 30s without looking for the answers. A
+  half-open connection therefore stayed "connected", delivering nothing, until TCP gave up.
+  Every frame, a PINGRESP included, now counts as being heard from. A ping that falls due
+  after 90s with nothing heard raises a `:degraded` notice (`:silent_connection`, with the
+  `session_id`) and closes, taking the ordinary reconnect path. Break-verified: both new
+  tests fail on the previous code.
+
 ## [0.4.68] - 2026-09-25
 
 ### Fixed

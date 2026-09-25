@@ -19,7 +19,8 @@ defmodule DpExchange.Webull.SocketTest do
       app_key: "k",
       buffer: <<>>,
       connected?: false,
-      ping: nil
+      ping: nil,
+      last_heard_at: nil
     }
 
   defp varint(value) when value < 0x80, do: <<value>>
@@ -474,9 +475,33 @@ defmodule DpExchange.Webull.SocketTest do
 
     test "a ping goes out on the keep-alive schedule" do
       ping = make_ref()
+      heard = %{state() | ping: ping, last_heard_at: System.monotonic_time(:millisecond)}
 
       assert {:reply, {:binary, <<12::4, 0::4, 0>>}, %{ping: ^ping}} =
-               Socket.handle_info({:ping, ping}, %{state() | ping: ping})
+               Socket.handle_info({:ping, ping}, heard)
+    end
+
+    test "PINGREQs nobody answered end the connection, so it reconnects" do
+      # MQTT requires a PINGRESP to every PINGREQ; this socket never looked for them. See
+      # the moduledoc's "A PINGREQ nobody answers ends the connection".
+      ping = make_ref()
+      long_ago = System.monotonic_time(:millisecond) - 100_000
+      silent = %{state() | ping: ping, last_heard_at: long_ago}
+
+      assert {:close, _state} = Socket.handle_info({:ping, ping}, silent)
+
+      assert_received {:dp_exchange, :webull,
+                       %Notice{kind: :degraded, details: %{reason: :silent_connection}}}
+    end
+
+    test "any frame, a PINGRESP included, counts as being heard from" do
+      long_ago = System.monotonic_time(:millisecond) - 100_000
+      pingresp = <<13::4, 0::4, 0>>
+
+      assert {:ok, heard} =
+               Socket.handle_frame({:binary, pingresp}, %{state() | last_heard_at: long_ago})
+
+      assert heard.last_heard_at > long_ago
     end
 
     test "a reconnect ends the old ping chain instead of running a second one beside it" do

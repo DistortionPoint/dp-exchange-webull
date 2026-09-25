@@ -43,6 +43,18 @@ defmodule DpExchange.Webull.Socket do
   re-armed, so its chain ends there. `handle_disconnect/2` clears the reference, so no ping
   from the old connection can reach the new one before its `CONNECT`.
 
+  ## A PINGREQ nobody answers ends the connection
+
+  MQTT 3.1.1 requires the server to answer every PINGREQ with a PINGRESP (§3.12). This
+  socket sent the PINGREQs and never looked for the answers. A network path that died
+  without either end being told therefore left a "connected" socket delivering nothing
+  for as long as the operating system's own timeouts allowed, since TCP notices a dead peer
+  only after its retransmissions give up. Every frame, a PINGRESP included, now counts as
+  being heard from. When a ping falls due after `@silence_ms` (three PINGREQ intervals,
+  90s) with nothing heard, the socket raises a `:degraded` notice
+  (`details.reason: :silent_connection`, with the `session_id`) and closes. That takes the
+  ordinary `handle_disconnect/2` path: `:link_down`, reconnect, CONNECT, resubscribe.
+
   ## What it does not do
 
   It does not subscribe. Subscriptions on this venue are **HTTP calls**, made by `Feed`
@@ -106,6 +118,10 @@ defmodule DpExchange.Webull.Socket do
   # 30s PINGREQ half-interval below it) — see the CHANGELOG's "Why the venue closes the
   # connection at all" entry.
   @keep_alive_s 60
+
+  # Three missed PINGRESPs at the half-keep-alive cadence. See the moduledoc's "A PINGREQ
+  # nobody answers ends the connection".
+  @silence_ms div(@keep_alive_s, 2) * 3 * 1_000
 
   # Chosen against `Feed`'s own `@call_timeout` (15s), not inherited.
   #
@@ -187,7 +203,10 @@ defmodule DpExchange.Webull.Socket do
       app_key: Keyword.fetch!(opts, :app_key),
       buffer: <<>>,
       connected?: false,
-      ping: nil
+      ping: nil,
+      # When the last frame of any kind, a PINGRESP included, arrived. See the moduledoc's
+      # "A PINGREQ nobody answers ends the connection".
+      last_heard_at: nil
     }
 
     WebSockex.start_link(url, __MODULE__, state, connection_opts(opts))
@@ -311,12 +330,32 @@ defmodule DpExchange.Webull.Socket do
     packet = MqttPacket.connect(state.session_id, state.app_key, "x", @keep_alive_s)
     ping = make_ref()
     schedule_ping(ping)
-    {:reply, {:binary, packet}, %{state | ping: ping}}
+    {:reply, {:binary, packet}, %{state | ping: ping, last_heard_at: now_ms()}}
   end
 
   def handle_info({:ping, ping}, %{ping: ping} = state) when is_reference(ping) do
-    schedule_ping(ping)
-    {:reply, {:binary, MqttPacket.pingreq()}, state}
+    silent_for = now_ms() - state.last_heard_at
+
+    if silent_for >= @silence_ms do
+      notify(
+        state,
+        Notice.new(:degraded, :webull,
+          message:
+            "nothing heard, not even a PINGRESP, for #{silent_for}ms — closing the " <>
+              "connection and reconnecting",
+          details: %{
+            reason: :silent_connection,
+            silent_for_ms: silent_for,
+            session_id: state.session_id
+          }
+        )
+      )
+
+      {:close, %{state | ping: nil}}
+    else
+      schedule_ping(ping)
+      {:reply, {:binary, MqttPacket.pingreq()}, state}
+    end
   end
 
   # A ping from a connection that has since dropped. It is not re-armed, so its chain ends
@@ -328,8 +367,11 @@ defmodule DpExchange.Webull.Socket do
   defp schedule_ping(ping),
     do: Process.send_after(self(), {:ping, ping}, div(@keep_alive_s, 2) * 1_000)
 
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
   @impl true
   def handle_frame({:binary, data}, state) do
+    state = %{state | last_heard_at: now_ms()}
     # Counted per WEBSOCKET frame, which on this venue is not the same as per MQTT packet:
     # `drain/1` reassembles packets out of a buffer, so one frame can carry several and a
     # packet can span two. The frame is the honest unit for a link event — it is what the
