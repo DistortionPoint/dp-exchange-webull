@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.67] - 2026-09-25
+
 ### Fixed
 
 - **`replace_order/4` was retried.** The `client_order_id` names the order being changed,
