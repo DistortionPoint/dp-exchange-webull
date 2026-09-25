@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.68] - 2026-09-25
+
 ### Fixed
 
 - **`get_trades/3` returned ticks in the venue's order.** They are now oldest first by
