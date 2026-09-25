@@ -577,6 +577,26 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert order.id == "abc"
     end
 
+    test "a replace that times out is not sent again" do
+      # The `client_order_id` names the order, not this change, so the venue cannot tell a
+      # repeated replace from a second one. `Core.HttpClient` would otherwise retry it.
+      me = self()
+
+      timing_out = fn conn ->
+        send(me, {:sent, conn.request_path})
+        Req.Test.transport_error(conn, :timeout)
+      end
+
+      Rest.replace_order(@credentials, "abc", %{price: Decimal.new("191")},
+        plug: timing_out,
+        account_id: @account,
+        retry_delay: 1
+      )
+
+      assert_receive {:sent, "/trading/orders/replace"}
+      refute_receive {:sent, "/trading/orders/replace"}, 100
+    end
+
     test "a trailing stop takes only its step" do
       exploding = fn _conn -> raise "must not amend a trailing stop's price" end
 

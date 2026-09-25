@@ -1136,7 +1136,18 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("trailing_stop_step", Map.get(changes, :trailing_stop_step))
         |> put_present("time_in_force", changes |> Map.get(:time_in_force) |> tif_name())
 
-      with {:ok, _response} <- post("/trading/orders/replace", body, credentials, opts) do
+      # Sent once (`put_new`, so a caller can still ask for retries), as `create_watchlist/4`
+      # is. `Core.HttpClient` retries a timeout or a 5xx, and a replace that already took
+      # effect, sent again, is at best refused, telling the caller a success failed. The
+      # `client_order_id` names the order being changed, not this change, so the venue cannot
+      # tell a repeat from a second replace.
+      with {:ok, _response} <-
+             post(
+               "/trading/orders/replace",
+               body,
+               credentials,
+               Keyword.put_new(opts, :retry_attempts, 1)
+             ) do
         get_order(credentials, client_order_id, opts)
       end
     end

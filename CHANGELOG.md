@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`replace_order/4` was retried.** The `client_order_id` names the order being changed,
+  not the change, so the venue cannot tell a repeated replace from a second one, and a
+  replace that already took effect comes back refused. It is now sent once unless the
+  caller raises `:retry_attempts`, as `create_watchlist/4` is. Break-verified: the new test
+  fails on the previous code.
+
 ## [0.4.66] - 2026-09-25
 
 ### Fixed
