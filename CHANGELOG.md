@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.69] - 2026-09-25
+
 ### Fixed
 
 - **A PINGREQ nobody answered went unnoticed.** MQTT requires a PINGRESP to every
