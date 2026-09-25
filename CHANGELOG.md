@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.65] - 2026-09-25
+
 ### Fixed
 
 - **A subscribe during a shard's reconnect could crash the caller.** A caller whose
