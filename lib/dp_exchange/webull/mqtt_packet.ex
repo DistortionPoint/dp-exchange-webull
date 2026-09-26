@@ -69,6 +69,19 @@ defmodule DpExchange.Webull.MqttPacket do
   @protocol_name "MQTT"
   @protocol_level 4
 
+  # The largest remaining length this decoder will wait for. **Chosen, not measured**: the
+  # venue documents no message size limit, and the snapshots, quotes and ticks this socket
+  # decodes are a few hundred bytes each, so 1 MiB is over a thousand times any real message.
+  #
+  # Without a bound, a corrupted length byte that still formed a valid varint declared up
+  # to MQTT's 256 MB maximum. `decode/1` answered `:incomplete`, the socket waited, and
+  # every later valid frame was appended behind the bad header and never parsed. The
+  # connection stayed up, delivered nothing, and grew its buffer, and the silence check
+  # never fired because frames kept arriving. Measured 2026-09-26: after one such header,
+  # 50 valid snapshots delivered 0 messages. Past this bound the stream is out of sync, which
+  # the socket already knows how to answer: drop the buffer and say so.
+  @max_packet_bytes 1_048_576
+
   @doc """
   `CONNECT` with a clean session.
 
@@ -125,6 +138,10 @@ defmodule DpExchange.Webull.MqttPacket do
           {:ok, term(), binary()} | {:error, :incomplete} | {:error, :malformed_length}
   def decode(<<type::4, flags::4, rest::binary>>) do
     case decode_remaining_length(rest) do
+      # A length no message on this stream comes near. See `@max_packet_bytes`.
+      {:ok, length, _after_length} when length > @max_packet_bytes ->
+        {:error, :malformed_length}
+
       {:ok, length, after_length} when byte_size(after_length) >= length ->
         <<body::binary-size(length), remainder::binary>> = after_length
         {:ok, decode_body(type, flags, body), remainder}

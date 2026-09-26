@@ -461,6 +461,21 @@ defmodule DpExchange.Webull.SocketTest do
       assert notice.details.dropped == :malformed_frame
       assert state.buffer == <<>>
     end
+
+    test "a header declaring an impossible length does not swallow every frame after it" do
+      # A valid varint declaring ~200 MB used to make the socket wait for it, appending
+      # every later frame behind it unparsed: 50 good snapshots, 0 delivered, measured
+      # 2026-09-26. See `MqttPacket`'s `@max_packet_bytes`.
+      bad_header = <<3::4, 0::4>> <> varint(200_000_000)
+
+      assert {:ok, after_bad} = Socket.handle_frame({:binary, bad_header}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{details: %{dropped: :malformed_frame}}}
+      assert after_bad.buffer == <<>>
+
+      good = publish("snapshot", snapshot_payload("BTCUSD", "77845.79"))
+      assert {:ok, _state} = Socket.handle_frame({:binary, good}, after_bad)
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+    end
   end
 
   describe "connection lifecycle" do

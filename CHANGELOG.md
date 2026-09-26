@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One corrupted length byte could silence a shard indefinitely.** A header whose
+  remaining length decoded as a valid varint but declared far more than any real message,
+  up to MQTT's 256 MB maximum, made `MqttPacket.decode/1` answer `:incomplete`. The socket
+  waited, and every later valid frame was appended behind the bad header and never parsed:
+  measured at 50 good snapshots, 0 delivered. The connection stayed up and its buffer
+  grew, and the silence check never fired because frames kept arriving. A declared length
+  over 1 MiB (chosen, not measured, and over a thousand times any real message on this
+  stream) is now malformed, so the socket drops the buffer and raises the existing
+  `:data_quality` notice. A byte-level fuzz of real packets, every byte set to several
+  values and every truncation, raised nothing either before or after. Break-verified: the
+  new test fails on the previous code.
+
 ## [0.4.69] - 2026-09-25
 
 ### Fixed
