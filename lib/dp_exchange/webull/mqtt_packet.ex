@@ -132,23 +132,33 @@ defmodule DpExchange.Webull.MqttPacket do
   Decodes one inbound packet from the front of a buffer.
 
   Returns `{:ok, packet, rest}`, `{:error, :incomplete}` when more bytes are needed, or
-  `{:error, :malformed_length}` when the stream cannot be resynchronised.
+  `{:error, :malformed_length}` / `{:error, :malformed_header}` when the stream cannot be
+  resynchronised.
+
+  **A fixed header is checked the moment its length is known, before waiting for its
+  body.** MQTT 3.1.1 §2.2 fixes the flags, and for most types the exact length, of every
+  packet a server may send, and says a receiver that gets invalid ones MUST close the
+  connection. This decoder used to accept any header. So a corrupted byte that turned the
+  front of the stream into, say, a PINGRESP declaring a 26-byte body made it swallow the
+  next 26 bytes of real packets as that body. The stream was then out of step with nothing
+  to say so. A byte-level fuzz (2026-09-26) found 99 of 1,045 mutated packets left it
+  silently wedged that way. See `valid_header?/3`.
   """
   @spec decode(binary()) ::
-          {:ok, term(), binary()} | {:error, :incomplete} | {:error, :malformed_length}
+          {:ok, term(), binary()}
+          | {:error, :incomplete}
+          | {:error, :malformed_length}
+          | {:error, :malformed_header}
   def decode(<<type::4, flags::4, rest::binary>>) do
     case decode_remaining_length(rest) do
       # A length no message on this stream comes near. See `@max_packet_bytes`.
       {:ok, length, _after_length} when length > @max_packet_bytes ->
         {:error, :malformed_length}
 
-      {:ok, length, after_length} when byte_size(after_length) >= length ->
-        <<body::binary-size(length), remainder::binary>> = after_length
-        {:ok, decode_body(type, flags, body), remainder}
-
-      # The length decoded but the body has not all arrived yet.
-      {:ok, _length, _partial_body} ->
-        {:error, :incomplete}
+      {:ok, length, after_length} ->
+        if valid_header?(type, flags, length),
+          do: decode_checked(type, flags, length, after_length),
+          else: {:error, :malformed_header}
 
       :incomplete ->
         {:error, :incomplete}
@@ -167,6 +177,28 @@ defmodule DpExchange.Webull.MqttPacket do
   end
 
   def decode(_too_short), do: {:error, :incomplete}
+
+  # MQTT 3.1.1 §2.2, the packets a SERVER may send: the flags each must carry, and the
+  # length where the spec fixes one. A client-only or reserved type (CONNECT, SUBSCRIBE,
+  # UNSUBSCRIBE, PINGREQ, DISCONNECT, 0, 15) never comes from a broker.
+  defp valid_header?(@connack, 0, 2), do: true
+  defp valid_header?(@publish, flags, length), do: band(flags, 0b0110) != 0b0110 and length >= 2
+  defp valid_header?(type, 0, 2) when type in [4, 5, 7, 11], do: true
+  defp valid_header?(6, 2, 2), do: true
+  defp valid_header?(9, 0, length), do: length >= 3
+  defp valid_header?(@pingresp, 0, 0), do: true
+  defp valid_header?(_type, _flags, _length), do: false
+
+  defp decode_checked(type, flags, length, after_length) do
+    case after_length do
+      <<body::binary-size(length), remainder::binary>> ->
+        {:ok, decode_body(type, flags, body), remainder}
+
+      # The length decoded but the body has not all arrived yet.
+      _partial_body ->
+        {:error, :incomplete}
+    end
+  end
 
   # CONNACK: a session-present flag then a return code. 0 is accepted; the rest are the
   # spec's refusal reasons, surfaced verbatim because "unauthorized" and "bad protocol

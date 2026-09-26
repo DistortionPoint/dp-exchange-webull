@@ -22,6 +22,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A corrupted packet header could leave the stream silently out of step.**
+  `MqttPacket.decode/1` accepted any fixed header, so a corrupted byte that turned the
+  front of the stream into, for example, a PINGRESP declaring a 26-byte body made it
+  swallow the next 26 bytes of real packets as that body. Everything after was misread,
+  with no notice. A recovery fuzz (after each mutated real packet, do later valid frames
+  still get through or does the socket say it resynced?) found 99 of 1,045 mutants left
+  the stream wedged. MQTT 3.1.1 §2.2 fixes the flags, and for most types the exact length,
+  of every packet a server may send, and says a receiver must close on invalid ones.
+  `decode/1` now checks the header as soon as its length is known, and a violation is
+  `{:error, :malformed_header}`, which the socket answers as it does a malformed length:
+  drop the buffer and raise `:data_quality`. Afterwards 0 of 1,045 mutants wedge the
+  stream within ten following frames. The test that decoded a client-only CONNECT is
+  rewritten to check the encoder and the decoder separately. Break-verified: the new
+  header test fails on the previous code.
+
 ## [0.4.70] - 2026-09-26
 
 ### Fixed

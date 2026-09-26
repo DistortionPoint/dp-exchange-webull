@@ -394,7 +394,7 @@ defmodule DpExchange.Webull.Socket do
       {:error, :incomplete} ->
         {:ok, state}
 
-      {:error, :malformed_length} ->
+      {:error, reason} when reason in [:malformed_length, :malformed_header] ->
         # Unrecoverable: no future byte repairs an invalid length. Dropping the buffer and
         # saying so beats a live socket that silently delivers nothing.
         notify(state, Notice.new(:data_quality, :webull, details: %{dropped: :malformed_frame}))

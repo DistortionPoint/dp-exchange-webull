@@ -110,19 +110,46 @@ defmodule DpExchange.Webull.MqttPacketTest do
   end
 
   describe "remaining length" do
-    test "round-trips a multi-byte length" do
+    test "encodes and decodes a multi-byte length" do
       # 300 bytes needs two length bytes; the boundary at 128 is where naive encoders
-      # break. `connect/4` is the real encoder path: a client id long enough pushes the
-      # encoded packet's remaining length past the one-byte boundary. CONNECT decodes to
-      # `:unhandled` (this module never needs to decode one — it only ever sends them),
-      # which is fine here: the point is that the fixed header, the multi-byte length
-      # and the body all round-trip intact.
+      # break. This used to decode the CONNECT it encoded, which `decode/1` now rightly
+      # refuses: a broker never sends one (see `valid_header?/3`). So the two halves are
+      # checked on their own: `connect/4` writes the two-byte length, and a server-sent
+      # PUBLISH carrying one decodes.
       long_client_id = String.duplicate("t", 300)
-      packet = MqttPacket.connect(long_client_id, "app-key", "pw")
+      <<1::4, 0::4, low, high, body::binary>> = MqttPacket.connect(long_client_id, "k", "pw")
 
-      assert {:ok, {:unhandled, 1, body}, ""} = MqttPacket.decode(packet)
-      assert byte_size(body) > 300
-      assert body =~ long_client_id
+      assert low >= 0x80 and high < 0x80
+      assert Bitwise.band(low, 0x7F) + Bitwise.bsl(high, 7) == byte_size(body)
+
+      payload = String.duplicate("p", 300)
+      publish_body = <<5::16>> <> "quote" <> payload
+      len = byte_size(publish_body)
+      header = <<3::4, 0::4, 1::1, Bitwise.band(len, 0x7F)::7, Bitwise.bsr(len, 7)>>
+
+      assert {:ok, {:publish, "quote", ^payload}, ""} = MqttPacket.decode(header <> publish_body)
+    end
+
+    test "a header no broker may send is malformed, not waited on" do
+      # MQTT 3.1.1 §2.2. A PINGRESP declaring a body used to swallow that many bytes of the
+      # real packets after it. See `decode/1`'s doc.
+      for bad <- [
+            <<13::4, 0::4, 26>>,
+            <<2::4, 0::4, 3, 0, 0, 0>>,
+            <<2::4, 1::4, 2, 0, 0>>,
+            <<3::4, 6::4, 10>>,
+            <<8::4, 2::4, 5>>,
+            <<1::4, 0::4, 2>>,
+            <<0::4, 0::4, 0>>
+          ] do
+        assert MqttPacket.decode(bad) == {:error, :malformed_header}, "#{inspect(bad)}"
+      end
+    end
+
+    test "every header a broker may send still decodes" do
+      assert {:ok, {:connack, 0}, ""} = MqttPacket.decode(<<2::4, 0::4, 2, 0, 0>>)
+      assert {:ok, :pingresp, ""} = MqttPacket.decode(<<13::4, 0::4, 0>>)
+      assert {:ok, {:publish, "t", "x"}, ""} = MqttPacket.decode(<<3::4, 0::4, 4, 0, 1, ?t, ?x>>)
     end
 
     test "a FIFTH continuation byte is malformed, not incomplete" do
