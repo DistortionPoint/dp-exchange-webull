@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.71] - 2026-09-26
+
 ### Fixed
 
 - **A corrupted packet header could leave the stream silently out of step.**
