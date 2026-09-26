@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.70] - 2026-09-26
+
 ### Fixed
 
 - **One corrupted length byte could silence a shard indefinitely.** A header whose
