@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.73] - 2026-09-27
+
 ### Fixed
 
 - **A REST response carrying a value of the wrong type no longer raises in the caller's
