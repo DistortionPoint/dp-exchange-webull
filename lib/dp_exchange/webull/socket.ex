@@ -137,6 +137,11 @@ defmodule DpExchange.Webull.Socket do
   # 3s + 2s leaves real room for the CONNACK and the HTTP subscribe that follow. Both stay
   # overridable, and setting them changes no failure semantics: `start_link/1` still returns
   # `{:error, reason}` synchronously exactly as before.
+  #
+  # Their sum is also the whole handshake's deadline. `socket_recv_timeout` alone bounds
+  # each `recv` of the upgrade response, not the response, so a peer that trickled it kept
+  # a start or a reconnect open indefinitely. The vendored `WebSockex` now ends the
+  # handshake at connect plus recv. See its moduledoc, item 3.
   @socket_connect_timeout_ms 3_000
   @socket_recv_timeout_ms 2_000
 

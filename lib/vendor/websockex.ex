@@ -16,7 +16,7 @@
 # a caller. Scanning this file with `Core.UnwiredCheck` would report five to seven
 # permanent false positives that are not this package's own dead code or an unwired
 # mechanism; they are `websockex`'s own public shape, unchanged, carried here because the
-# two-line fix this file exists for could not be made any other way. See the vendored
+# fixes this file exists for could not be made any other way. See the vendored
 # module's own moduledoc below for the fix itself.
 #
 # MIT License
@@ -84,7 +84,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly two things**, both marked `## VENDORED FIX` at their call site below:
+  **Exactly three things**, each marked `## VENDORED FIX` at its call site below:
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -101,12 +101,20 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
      "What stayed a dependency, and why" below) use `__MODULE__` instead, so a process
      started via this vendored copy's `start_link/4` actually enters *this* module's
      `init/5,6`, not the real, unpatched one.
+  3. `open_loop/3` gains an `after`: the whole opening handshake has a deadline, the
+     connection's `socket_connect_timeout` plus its `socket_recv_timeout`. Upstream bounds
+     each `recv` of the upgrade response separately, and every chunk restarts that timer,
+     so a peer that trickled the response held a start or a reconnect open indefinitely
+     (measured 2026-09-27: still connecting at 12 s). Past the deadline the handshake
+     task is killed and the attempt ends as `%WebSockex.ConnError{original: :timeout}`, the
+     error a timed-out `recv` already produces, so the existing start and reconnect paths
+     handle it unchanged. Added 2026-09-27.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: two clauses, plus the `spawn_process/5`/`do_spawn/2` glue above. A handful
-  of doc comments were additionally edited, never behaviour: the two self-referential
-  examples in this moduledoc's closing section (`use WebSockex` → `use
+  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
+  deadline. A handful of doc comments were additionally edited, never behaviour: the two
+  self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Webull.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
   own `mix docs` flagged a reference into the real dependency's own hidden/undocumented
@@ -159,7 +167,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex.start_link` / `WebSockex.send_frame` in `DpExchange.Webull.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own two marked changes.
+  diffed here for anything beyond this file's own three marked changes.
 
   ---
 
@@ -553,7 +561,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   def start(conn_info, module, state, opts \\ [])
 
   def start(%WebSockex.Conn{} = conn, module, state, opts) do
-    # ## VENDORED FIX (2 of 2) — `spawn_process/5` below, not `Utils.spawn/5`. See the
+    # ## VENDORED FIX (2 of 3) — `spawn_process/5` below, not `Utils.spawn/5`. See the
     # moduledoc's "What stayed a dependency, and why".
     spawn_process(:no_link, conn, module, state, opts)
   end
@@ -585,7 +593,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   def start_link(conn_info, module, state, opts \\ [])
 
   def start_link(conn = %WebSockex.Conn{}, module, state, opts) do
-    # ## VENDORED FIX (2 of 2) — see the moduledoc's "What stayed a dependency, and why".
+    # ## VENDORED FIX (2 of 3) — see the moduledoc's "What stayed a dependency, and why".
     spawn_process(:link, conn, module, state, opts)
   end
 
@@ -600,7 +608,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
     end
   end
 
-  # ## VENDORED FIX (2 of 2) — inlined from the real `WebSockex.Utils.spawn/5` and
+  # ## VENDORED FIX (2 of 3) — inlined from the real `WebSockex.Utils.spawn/5` and
   # `WebSockex.Utils`'s private `do_spawn/2`, changed in exactly one place: the
   # `:proc_lib` entry module is `__MODULE__` here, not the literal atom `WebSockex` those
   # functions hardcode. See the moduledoc's "What stayed a dependency, and why" — this is
@@ -841,17 +849,51 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
         Process.demonitor(ref, [:flush])
 
         new_state =
-          Map.delete(state, :task)
+          Map.drop(state, [:task, :handshake_deadline])
           |> Map.put(:conn, new_conn)
 
         {:ok, new_state}
 
       {^ref, {:error, reason}} ->
         Process.demonitor(ref, [:flush])
-        new_state = Map.delete(state, :task)
+        new_state = Map.drop(state, [:task, :handshake_deadline])
         {:error, reason, new_state}
+    after
+      # ## VENDORED FIX (3 of 3) — upstream 0.5.1's `receive` has no `after`, and nothing
+      # below it has an overall deadline either. `WebSockex.Conn`'s `wait_for_response/2`
+      # reads the upgrade response with `socket_recv_timeout` per `recv`, and every chunk
+      # restarts it. So a peer that trickles the response, never finishing its headers,
+      # kept this process here indefinitely: the buffer grew, `recv` never timed out, and
+      # the start or reconnect never ended. Measured 2026-09-27 against a local server that
+      # sends one byte every 200 ms: a start that its own connect-plus-recv timeouts budget
+      # at a few seconds was still connecting at 12 s. On a start, that blocks the caller of
+      # `start_link/4`, which is `Feed` inside a `handle_call/3`, so every other consumer
+      # queues behind it. On a reconnect, the socket delivers nothing and its silence
+      # check cannot run, because that only runs in `websocket_loop/3`.
+      #
+      # The deadline is the connect timeout plus the recv timeout: the two budgets the
+      # caller already gave each half, now enforced across the whole handshake. When it
+      # passes, the task is killed, which closes the socket it owns, and the handshake
+      # ends as `%WebSockex.ConnError{original: :timeout}`. That is the same error a
+      # recv that times out already produces, so every existing failure path, the start
+      # reply and the reconnect with backoff, handles it unchanged. A task that finished
+      # just as the deadline passed is taken at its word: `Task.shutdown/2` returns its reply.
+      remaining_ms(state.handshake_deadline) ->
+        case Task.shutdown(state.task, :brutal_kill) do
+          {:ok, {:ok, new_conn}} ->
+            {:ok, state |> Map.drop([:task, :handshake_deadline]) |> Map.put(:conn, new_conn)}
+
+          {:ok, {:error, reason}} ->
+            {:error, reason, Map.drop(state, [:task, :handshake_deadline])}
+
+          _timed_out ->
+            {:error, %WebSockex.ConnError{original: :timeout},
+             Map.drop(state, [:task, :handshake_deadline])}
+        end
     end
   end
+
+  defp remaining_ms(deadline), do: max(deadline - System.monotonic_time(:millisecond), 0)
 
   defp websocket_loop(parent, debug, state) do
     case WebSockex.Frame.parse_frame(state.buffer) do
@@ -862,7 +904,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
 
         handle_frame(frame, parent, debug, %{state | buffer: buffer})
 
-      # ## VENDORED FIX (1 of 2) — dp-exchange-core issue #27. Upstream 0.5.1 has no
+      # ## VENDORED FIX (1 of 3) — dp-exchange-core issue #27. Upstream 0.5.1 has no
       # clause for this even though `WebSockex.Frame.parse_frame/1`'s own `@spec` names
       # it as a real return value; an unguarded `case` here means a peer sending a
       # frame `WebSockex.Frame` correctly rejects (Webull's malformed close frame,
@@ -1297,6 +1339,11 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
     my_pid = self()
     debug = Utils.sys_debug(debug, :connect, state)
 
+    # ## VENDORED FIX (3 of 3) — the handshake has a deadline. See `open_loop/3`.
+    deadline =
+      System.monotonic_time(:millisecond) + conn.socket_connect_timeout +
+        conn.socket_recv_timeout
+
     task =
       Task.async(fn ->
         with {:ok, conn} <- WebSockex.Conn.open_socket(conn),
@@ -1311,7 +1358,11 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
         end
       end)
 
-    open_loop(parent, debug, Map.put(state, :task, task))
+    open_loop(
+      parent,
+      debug,
+      state |> Map.put(:task, task) |> Map.put(:handshake_deadline, deadline)
+    )
   end
 
   # Other State Functions

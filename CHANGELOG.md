@@ -22,6 +22,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The WebSocket opening handshake now has a deadline: `socket_connect_timeout` plus
+  `socket_recv_timeout`.** websockex bounds each `recv` of the HTTP upgrade response
+  separately, and every chunk restarts that timer. So a peer that trickled the response
+  held a start or a reconnect open indefinitely. A start blocks `Feed` inside a
+  `handle_call/3`, so every other consumer's call queued behind it. On a reconnect, the
+  shard delivered nothing and its silence check could not run. Measured 2026-09-27 against
+  a local server sending one byte every 200 ms: still connecting at 12 s. The vendored
+  `WebSockex` now ends the attempt at the deadline with
+  `%WebSockex.ConnError{original: :timeout}`, the error a timed-out `recv` already
+  produced, so the existing start error and reconnect backoff handle it unchanged.
+
 ## [0.4.73] - 2026-09-27
 
 ### Fixed
