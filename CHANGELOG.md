@@ -370,8 +370,6 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   with it, and it is what `Rest.get_fees/2` (no request to hang the real gate on) and
   `DpExchange.Webull.Fake` both use. Both now agree, asserted together.
 
-### Fixed
-
 - **An order price or size could go onto the wire in scientific notation.**
   `Decimal.to_string/1` defaults to `:scientific`, and `to_string/1` on a `%Decimal{}`
   reaches that same default through `String.Chars` — so a value carrying an exponent was
@@ -1012,6 +1010,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   A consumer matching only `{:ok, _}` needs no change. One that enumerates error reasons now
   has them, each with whether retrying is worth anything — which is the part that decides
   what a caller does next, and the part a bare list of atoms would leave out.
+
 ## [0.4.23] - 2026-09-12
 
 ### Fixed
@@ -1326,6 +1325,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   Worth recording because of where it showed: green on every local run, red in CI, where
   fewer cores and `max_cases: 8` change the interleaving. Reproduced locally by passing
   `--max-cases 8`, then six clean runs at that concurrency.
+
 ## [0.4.12] - 2026-09-11
 
 ### Fixed
@@ -1396,6 +1396,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
 
   No vendor drift: every cited documentation source resolves exactly as recorded, and the
   committed endpoint inventories match the vendors' current indexes.
+
 ## [0.4.10] - 2026-09-11
 
 ### Changed
