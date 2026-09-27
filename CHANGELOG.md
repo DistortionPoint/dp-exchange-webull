@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.76] - 2026-09-27
+
 ### Security
 
 - **The WebSocket now verifies the venue's TLS certificate.** websockex defaults to
