@@ -229,6 +229,12 @@ the shard delivering nothing on reconnect. A handshake that misses the deadline 
 with `%WebSockex.ConnError{original: :timeout}`, the error a plain read timeout gives, and
 takes the ordinary failed-open or reconnect-with-backoff path.
 
+**The WebSocket verifies the venue's TLS certificate** (2026-09-27). websockex's own
+default is not to (`verify: :verify_none`), and until then this package connected with
+that default, accepting any certificate. It now uses the operating system's trust store and
+HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
+error rather than connecting unverified. Pass your own `:ssl_options` to override.
+
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the per-shard crash path, or anything that kills the `Feed` pid directly.
 `DpExchange.Webull.Supervisor` restarts `Feed` under `:one_for_one`, but from the
