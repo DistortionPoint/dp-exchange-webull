@@ -483,4 +483,52 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert :ok = Fake.subscribe_notices()
     end
   end
+
+  # A REST mutation fuzz (2026-09-27) replaced every nested value of real bodies with the wrong
+  # JSON type, one at a time, across 23 endpoints. 54 mutations raised, all from two places: a
+  # symbol that is not a string reaching `SymbolFormat.to_canonical_symbol/1`, and an
+  # auction-imbalance side code that `to_string/1` could not convert.
+  describe "a value of the wrong JSON type inside a response" do
+    defp wrong_type_opts(body) do
+      [
+        plug: fn conn -> Req.Test.json(conn, body) end,
+        retry_attempts: 0,
+        account_id: "acct"
+      ]
+    end
+
+    test "a catalogue row whose symbol is not a string is skipped" do
+      body = [%{"symbol" => "BTCUSD"}, %{"symbol" => %{"a" => nil}}, %{"symbol" => [1]}]
+
+      assert {:ok, ["BTC-USD"]} = Rest.get_symbols(@credentials, wrong_type_opts(body))
+    end
+
+    test "an order whose symbol is not a string carries nil; a position refuses it" do
+      order = %{"client_order_id" => "abc", "symbol" => %{"a" => nil}, "side" => "BUY"}
+
+      assert {:ok, %{symbol: nil}} =
+               Rest.get_order(@credentials, "abc", wrong_type_opts([order]))
+
+      assert {:ok, [%{symbol: nil}]} = Rest.get_orders(@credentials, wrong_type_opts([order]))
+
+      position = %{"symbol" => [%{}], "quantity" => "1", "instrument_type" => "CRYPTO"}
+
+      assert {:error, _unreadable} = Rest.get_positions(@credentials, wrong_type_opts([position]))
+    end
+
+    test "an auction side code that is not a code is nil" do
+      row = %{
+        "symbol" => "AAPL",
+        "imbalance_side" => %{"a" => nil},
+        "imbalance_time" => 1_774_272_599_000
+      }
+
+      assert {:ok, [%{side: nil} | _rest]} =
+               Rest.get_auction_imbalance(
+                 "AAPL",
+                 @credentials,
+                 [auction: :closing] ++ wrong_type_opts([row])
+               )
+    end
+  end
 end

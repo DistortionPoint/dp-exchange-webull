@@ -22,6 +22,19 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A REST response carrying a value of the wrong type no longer raises in the caller's
+  process.** A mutation fuzz (2026-09-27) replaced every nested value of real response
+  bodies with the wrong shape (`nil`, `true`, `[]`, `[%{}]`, a map, a string, out-of-range
+  numbers), one value at a time, across 23 endpoints. 54 of those mutations raised, from
+  two places:
+  - **A symbol that is not a string.** In `get_symbols/2` the row is skipped, the same way
+    an absent symbol already was. In `get_order/3` and `get_orders/2` the symbol is `nil`.
+    In `get_positions/2` the position is refused, as one with no symbol already was.
+  - **An auction-imbalance side code that is not a code.** In `get_auction_imbalance/3`
+    it is now `nil`. Before, `to_string/1` raised on it.
+
 ## [0.4.72] - 2026-09-27
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

@@ -470,7 +470,9 @@ defmodule DpExchange.Webull.Rest do
       {:ok,
        rows
        |> Enum.map(&value(&1, ["symbol", "disSymbol", "name"]))
-       |> Enum.reject(&is_nil/1)
+       # Only a string names an instrument. `is_nil/1` let a map or a list through to
+       # `to_canonical_symbol/1`, which raised (REST mutation fuzz, 2026-09-27).
+       |> Enum.filter(&is_binary/1)
        |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
        |> Enum.sort()
        |> Enum.uniq()}
@@ -1545,7 +1547,13 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp to_string_or_nil(nil), do: nil
-  defp to_string_or_nil(value), do: to_string(value)
+  defp to_string_or_nil(value) when is_binary(value), do: value
+  defp to_string_or_nil(value) when is_integer(value), do: Integer.to_string(value)
+
+  # A map or a list is not a side code, and `to_string/1` raised on it out of
+  # `get_auction_imbalance/3` (REST mutation fuzz, 2026-09-27). `nil` is what an absent
+  # side already answers.
+  defp to_string_or_nil(_not_a_code), do: nil
 
   @doc """
   Tick-by-tick public trades — `/market-data/stocks/ticks/list`.
@@ -3902,7 +3910,14 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp canonical_or_nil(nil), do: nil
-  defp canonical_or_nil(native), do: SymbolFormat.to_canonical_symbol(native)
+  # Only a string is a symbol. A map or a list used to reach
+  # `SymbolFormat.to_canonical_symbol/1` and raise out of `get_order/3`, `get_orders/2` and
+  # `get_positions/2` (REST mutation fuzz, 2026-09-27). It is now the same absent symbol as
+  # `nil`: an order carries it as `nil` and a position refuses it.
+  defp canonical_or_nil(native) when is_binary(native),
+    do: SymbolFormat.to_canonical_symbol(native)
+
+  defp canonical_or_nil(_absent), do: nil
 
   defp side_atom("BUY"), do: :buy
   defp side_atom("SELL"), do: :sell
