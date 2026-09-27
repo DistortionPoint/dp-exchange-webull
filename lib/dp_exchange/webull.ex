@@ -715,19 +715,29 @@ defmodule DpExchange.Webull do
   # unavailable" on every call. Measured: `DpExchange.Webull.Feed.subscribe/3` called with
   # no `:limiter` against a connected shard returned exactly that error.
   @impl true
-  def subscribe(symbols, opts), do: Feed.subscribe(feed(opts), symbols, with_limiter(opts))
+  def subscribe(symbols, opts) do
+    feed_call(
+      fn -> Feed.subscribe(feed(opts), symbols, with_limiter(opts)) end,
+      {:error, :feed_not_started}
+    )
+  end
 
   @impl true
-  def unsubscribe(symbols, opts), do: Feed.unsubscribe(feed(opts), symbols, with_limiter(opts))
+  def unsubscribe(symbols, opts),
+    do: feed_call(fn -> Feed.unsubscribe(feed(opts), symbols, with_limiter(opts)) end, :ok)
 
   @impl true
   def update_symbols(symbols, opts),
-    do: Feed.update_symbols(feed(opts), symbols, with_limiter(opts))
+    do:
+      feed_call(
+        fn -> Feed.update_symbols(feed(opts), symbols, with_limiter(opts)) end,
+        {:error, :feed_not_started}
+      )
 
   @impl true
   def coverage(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.coverage(feed), else: %{}
+    if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
   end
 
   @doc """
@@ -765,11 +775,12 @@ defmodule DpExchange.Webull do
         }
   def coverage_by_kind(opts \\ []) do
     feed = feed(opts)
-    if alive?(feed), do: Feed.coverage_by_kind(feed), else: %{}
+    if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
 
   @impl true
-  def subscribe_notices(opts), do: Feed.subscribe_notices(feed(opts), opts)
+  def subscribe_notices(opts),
+    do: feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
 
   # --- health ------------------------------------------------------------
 
@@ -834,6 +845,34 @@ defmodule DpExchange.Webull do
 
   defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
   defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+
+  # **A streaming call answers; it does not exit in the caller's process.** Every
+  # streaming callback's spec is a value (`:ok | {:error, term()}`, or a map). A bare
+  # `GenServer.call/3` into `Feed` exits the caller instead: with `:noproc` when no
+  # `Feed` is running, and with `:timeout` when one is too busy to answer within its call
+  # budget. Measured 2026-09-27: `subscribe/2`, `unsubscribe/2`, `update_symbols/2` and
+  # `subscribe_notices/1` all exited `:noproc` here with no `Feed` started, where
+  # `dp_exchange_schwab` and `dp_exchange_robinhood` answered
+  # `{:error, :feed_not_started}`. An `alive?/1` check first, which `coverage/1` had, still
+  # races a `Feed` that dies between the check and the call, and does nothing for a busy
+  # one. So the exit is caught at the call itself. A reply that arrives after a timeout is
+  # dropped by OTP's call aliases, so it cannot reach the caller's mailbox later.
+  defp feed_call(call, not_running) do
+    call.()
+  catch
+    :exit, {:noproc, _call} -> not_running
+    :exit, {:timeout, _call} -> {:error, :feed_timeout}
+    :exit, {reason, _call} -> {:error, {:feed_exited, reason}}
+  end
+
+  # `coverage/1` and `coverage_by_kind/1` return a map, with no room for an error. Any
+  # failure is the empty answer, which says "not observed" and never claims delivery nobody
+  # confirmed.
+  defp feed_read(call, empty) do
+    call.()
+  catch
+    :exit, _reason -> empty
+  end
 
   # Credentials are an argument on this venue's market data too, because it has no
   # anonymous endpoints. An absent map reaches `Auth` and is refused there with
