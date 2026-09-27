@@ -212,7 +212,7 @@ package's own reconnect logic runs at all — which is indistinguishable from an
 crash from where you sit, except that it can repeat every few seconds under sustained
 conditions, holding a shard's coverage down well below its symbol count even though
 nothing alarms (each crash is caught and reopened, so supervision "works"). This package
-now vendors a two-line fix ahead of upstream — see `DpExchange.Webull.Vendor.WebSockex`'s
+now vendors a fix ahead of upstream — see `DpExchange.Webull.Vendor.WebSockex`'s
 own moduledoc if you want the mechanism — so this specific cause no longer crashes the
 shard: it is an ordinary `:link_down` / reconnect-and-resubscribe cycle, the same as any
 other disconnect reason. If you were seeing elevated shard-crash `:link_down` notices or
@@ -220,6 +220,14 @@ a Webull coverage ceiling well below your symbol count before this fix, that is 
 likely explanation; if it persists after upgrading, the venue is closing the connection
 for a different, still-open reason — see this package's own CHANGELOG entry for what was
 and was not established about why.
+
+**The same vendored fork gives the opening handshake a deadline** (2026-09-27):
+`socket_connect_timeout` plus `socket_recv_timeout`. Upstream bounds each read of the
+upgrade response separately, so a peer that trickled the response held a shard's open,
+or its reconnect, indefinitely. That kept `Feed` waiting inside a call on open, and kept
+the shard delivering nothing on reconnect. A handshake that misses the deadline now fails
+with `%WebSockex.ConnError{original: :timeout}`, the error a plain read timeout gives, and
+takes the ordinary failed-open or reconnect-with-backoff path.
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the per-shard crash path, or anything that kills the `Feed` pid directly.
