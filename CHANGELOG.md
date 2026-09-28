@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.79] - 2026-09-28
+
 ### Changed
 
 - **`decimal` may now resolve to 3.x** (`~> 2.0 or ~> 3.0`), alongside `dp_exchange_core`
