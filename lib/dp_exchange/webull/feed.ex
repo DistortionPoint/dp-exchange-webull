@@ -969,34 +969,18 @@ defmodule DpExchange.Webull.Feed do
   # `delivering` is recorded whether or not the payload reached anybody — see `deliver/2`.
   # `coverage/1` reports what the VENUE delivered to this package, not what this package
   # forwarded.
+  #
+  # **A payload for a symbol no longer wanted is dropped, not delivered or counted.** A venue
+  # keeps sending for a moment after an unsubscribe, and those frames used to reach the
+  # subscribers who had just asked to stop. Worse, they re-entered delivery tracking, which
+  # `unsubscribe/2` had just pruned, and a streaming route has no staleness window. So one
+  # late frame left `coverage/1` answering `:stream` for an unsubscribed symbol
+  # indefinitely. Found 2026-09-27 by reading the path, the same shape `Core.PollingFeed`
+  # had for an in-flight fetch.
   def handle_info({:dp_exchange, :webull, quote_struct} = message, state) do
-    state = deliver(state, message)
-
-    now = :os.system_time(:millisecond)
-    symbol = quote_struct.symbol
-    delivering = Map.put(state.delivering, symbol, now)
-
-    delivering_by_kind =
-      case kind_for(quote_struct) do
-        {:ok, kind} ->
-          Map.update(state.delivering_by_kind, kind, %{symbol => now}, &Map.put(&1, symbol, now))
-
-        :error ->
-          # `coverage/1` above still counts this arrival — it is truthful about *any*
-          # payload. This struct just cannot be named as one of `Capabilities.data_kind()`,
-          # which means `coverage_by_kind/1` cannot report it under any kind without
-          # guessing one. Logged loudly rather than silently dropped or folded into an
-          # existing kind — see the moduledoc's "Coverage by kind".
-          Logger.warning(
-            "DpExchange.Webull.Feed: #{inspect(quote_struct.__struct__)} for #{symbol} " <>
-              "has no known data_kind mapping in kind_for/1 — coverage/1 counts it, " <>
-              "coverage_by_kind/1 cannot"
-          )
-
-          state.delivering_by_kind
-      end
-
-    {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
+    if unwanted?(quote_struct, state.wanted),
+      do: {:noreply, state},
+      else: record_quote(state, message, quote_struct)
   end
 
   # The retry arm of `{:open_shard, _, _, _}` — issue #4. Deliberately a message of its own
@@ -2429,5 +2413,41 @@ defmodule DpExchange.Webull.Feed do
 
   defp take_symbols_by_kind(delivering_by_kind, symbols) do
     Map.new(delivering_by_kind, fn {kind, per_symbol} -> {kind, Map.take(per_symbol, symbols)} end)
+  end
+
+  # See the `{:dp_exchange, :webull, quote_struct}` clause of `handle_info/2`.
+  defp unwanted?(%{symbol: symbol}, wanted) when is_binary(symbol),
+    do: not MapSet.member?(wanted, symbol)
+
+  defp unwanted?(_payload, _wanted), do: false
+
+  defp record_quote(state, message, quote_struct) do
+    state = deliver(state, message)
+
+    now = :os.system_time(:millisecond)
+    symbol = quote_struct.symbol
+    delivering = Map.put(state.delivering, symbol, now)
+
+    delivering_by_kind =
+      case kind_for(quote_struct) do
+        {:ok, kind} ->
+          Map.update(state.delivering_by_kind, kind, %{symbol => now}, &Map.put(&1, symbol, now))
+
+        :error ->
+          # `coverage/1` above still counts this arrival — it is truthful about *any*
+          # payload. This struct just cannot be named as one of `Capabilities.data_kind()`,
+          # which means `coverage_by_kind/1` cannot report it under any kind without
+          # guessing one. Logged loudly rather than silently dropped or folded into an
+          # existing kind — see the moduledoc's "Coverage by kind".
+          Logger.warning(
+            "DpExchange.Webull.Feed: #{inspect(quote_struct.__struct__)} for #{symbol} " <>
+              "has no known data_kind mapping in kind_for/1 — coverage/1 counts it, " <>
+              "coverage_by_kind/1 cannot"
+          )
+
+          state.delivering_by_kind
+      end
+
+    {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
   end
 end

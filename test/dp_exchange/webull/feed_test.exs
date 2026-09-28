@@ -502,6 +502,7 @@ defmodule DpExchange.Webull.FeedTest do
       slow = stalled_subscriber()
       feed = start_feed(max_queue_len: 3)
       :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+      want(feed, ["BTC-USD"])
 
       for _each <- 1..10, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
       # A call is answered only after every send above has been handled.
@@ -516,6 +517,7 @@ defmodule DpExchange.Webull.FeedTest do
       slow = stalled_subscriber()
       feed = start_feed(max_queue_len: 1)
       :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+      want(feed, ["BTC-USD"])
       :ok = Feed.subscribe_notices(feed, to: self())
 
       for _each <- 1..2, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
@@ -542,6 +544,7 @@ defmodule DpExchange.Webull.FeedTest do
       slow = stalled_subscriber()
       feed = start_feed(max_queue_len: 1)
       :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([slow])})
+      want(feed, ["BTC-USD"])
 
       for _each <- 1..5, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
 
@@ -582,6 +585,26 @@ defmodule DpExchange.Webull.FeedTest do
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
 
+    test "a frame arriving after unsubscribe neither delivers nor restores coverage" do
+      # The venue keeps sending for a moment after an unsubscribe. Such a frame used to
+      # reach subscribers and re-enter delivery tracking, and a streaming route has no
+      # staleness window, so `coverage/1` answered `:stream` for it indefinitely.
+      feed = start_feed()
+      want(feed, ["BTC-USD"])
+      me = self()
+      :sys.replace_state(feed, &%{&1 | subscribers: MapSet.new([me])})
+
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+      assert_receive {:dp_exchange, :webull, %{symbol: "BTC-USD"}}
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
+
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(), delivering: %{}})
+      send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
+
+      assert Feed.coverage(feed) == %{}
+      refute_received {:dp_exchange, :webull, %{symbol: "BTC-USD"}}
+    end
+
     test "a link drop clears what that shard's dead connection had been delivering" do
       # `Socket.handle_disconnect/2` returns `{:reconnect, …}`, so a transport drop leaves
       # the socket PROCESS alive and no `:EXIT` reaches `isolate_crashed_shard/3`. Before
@@ -594,6 +617,7 @@ defmodule DpExchange.Webull.FeedTest do
       dropping = %{connected_shard("session-dropping") | symbols: ["BTC-USD"]}
       surviving = %{connected_shard("session-surviving") | symbols: ["ETH-USD"]}
       feed = start_feed(shards: %{0 => dropping, 1 => surviving})
+      want(feed, ["BTC-USD", "ETH-USD"])
 
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
       send(feed, {:dp_exchange, :webull, top_of_book_for("ETH-USD")})
@@ -1184,6 +1208,8 @@ defmodule DpExchange.Webull.FeedTest do
           url: "ws://127.0.0.1:1/nowhere"
         )
 
+      want(feed, ["BTC-USD", "ETH-USD"])
+
       # `:sys.replace_state/2` runs its function *inside* the target process, so
       # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
 
@@ -1297,7 +1323,7 @@ defmodule DpExchange.Webull.FeedTest do
           retry_attempts: 0
         )
 
-      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
+      :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD", "ETH-USD"])})
 
       send(feed, :resubscribe)
       assert_receive {:blocked, blocked_pid}, 3_000

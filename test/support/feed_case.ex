@@ -98,6 +98,15 @@ defmodule DpExchange.Webull.FeedCase do
     }
   end
 
+  @doc """
+  Marks `symbols` wanted, as a subscribe would. A payload for a symbol nobody wants is
+  dropped (see `Feed`'s `{:dp_exchange, :webull, quote_struct}` clause), so a test that
+  injects one straight into the feed has to want it first.
+  """
+  @spec want(pid(), [String.t()]) :: term()
+  def want(feed, symbols),
+    do: :sys.replace_state(feed, &%{&1 | wanted: MapSet.union(&1.wanted, MapSet.new(symbols))})
+
   @doc "An unnamed feed with one pre-connected shard, unless `opts` says otherwise."
   @spec start_feed(keyword()) :: pid()
   def start_feed(opts \\ []) do
