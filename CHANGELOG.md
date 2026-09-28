@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.88] - 2026-09-28
+
 ### Fixed
 
 - A retried request is signed again, with its own `x-signature-nonce`. Every retry replayed
