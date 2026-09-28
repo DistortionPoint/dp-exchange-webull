@@ -90,7 +90,8 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
       assert_receive {:dp_exchange, :webull, %Notice{severity: :warning}}
 
       # The same retry message the scheduler sends, with opts that can actually open. The
-      # socket is this venue's real `Socket`, which connects lazily, so no server is needed.
+      # socket is this venue's real `Socket`. It connects at once, and until 2026-09-27 that
+      # meant the live venue. It now reaches the quiet local venue `test_helper.exs` starts.
       send(feed, {:reopen_shard, 0, ["BTCUSD"], [credentials: credentials()], 2})
 
       assert_receive {:dp_exchange, :webull, %Notice{severity: :info} = recovery}

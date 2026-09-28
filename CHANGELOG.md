@@ -22,6 +22,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`config :dp_exchange_webull, websocket_url: ...` overrides the endpoint a socket dials
+  when no `:url` is passed.** The default is still the venue. It exists because this
+  package's tier-1 test suite had been opening live connections to the venue on every run
+  (measured 2026-09-27), from tests that never meant to reach it. `config/test.exs` now
+  points it at loopback, and the suite opens no connection off the machine. It also works
+  for a proxy. See `DpExchange.Webull.Feed`.
+
 ## [0.4.81] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

@@ -1798,7 +1798,7 @@ defmodule DpExchange.Webull.Feed do
 
         socket_opts =
           state.socket_opts
-          |> Keyword.put_new(:url, Environment.streaming_url(environment(state, opts)))
+          |> Keyword.put_new(:url, streaming_url(state, opts))
           |> Keyword.merge(subscriber: self(), session_id: session_id, app_key: app_key)
 
         case Socket.start_link(socket_opts) do
@@ -2352,6 +2352,17 @@ defmodule DpExchange.Webull.Feed do
   end
 
   defp environment(state, opts), do: Environment.resolve(Keyword.merge(state.socket_opts, opts))
+
+  # The venue's own endpoint, unless the application config names another with
+  # `:websocket_url`. The seam exists for tests. A tier-1 run sets it in `config/test.exs` to
+  # a closed local port, so a socket that no test aimed elsewhere fails at once instead of
+  # dialling the venue. Measured 2026-09-27: this package's suite had been opening live
+  # connections to the venue on every run, from tests that never meant to. A consumer can
+  # use it for a proxy. `config/` does not ship, so a consumer's default is still the venue.
+  defp streaming_url(state, opts) do
+    Config.get(:dp_exchange_webull, :websocket_url, nil) ||
+      Environment.streaming_url(environment(state, opts))
+  end
 
   # The venue's data stream, bounded — see `Core.Fanout`. Only a subscriber under its
   # mailbox bound is sent to; one past it is skipped and reported once, in a `:degraded`
