@@ -589,33 +589,23 @@ defmodule DpExchange.Webull.Rest do
     environment = Environment.resolve(opts)
     host = Environment.host(environment)
 
-    request = %{
-      path: path,
-      query_params: stringify(params),
-      body: "",
-      host: host,
-      timestamp: Auth.timestamp(),
-      nonce: Auth.nonce()
-    }
+    request = %{path: path, query_params: stringify(params), body: "", host: host}
+    url = Environment.rest_url(environment) <> path <> query(params)
 
-    with {:ok, headers} <- Auth.headers(request, credentials) do
-      url = Environment.rest_url(environment) <> path <> query(params)
+    case HttpClient.request(:get, url, signer(request, credentials), nil, request_opts(opts)) do
+      {:ok, %{status: status, body: body}} when status in 200..299 ->
+        decoded_body(body)
 
-      case HttpClient.request(:get, url, headers, nil, request_opts(opts)) do
-        {:ok, %{status: status, body: body}} when status in 200..299 ->
-          decoded_body(body)
+      # Permanent for the request as sent. A caller whose token expired refreshes and
+      # calls again, which is a different request rather than a retry of this one.
+      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        {:refused, refusal(status, body)}
 
-        # Permanent for the request as sent. A caller whose token expired refreshes and
-        # calls again, which is a different request rather than a retry of this one.
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-          {:refused, refusal(status, body)}
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(body)}"}}
 
-        {:ok, %{status: status, body: body}} ->
-          {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(body)}"}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -631,33 +621,48 @@ defmodule DpExchange.Webull.Rest do
     host = Environment.host(environment)
     encoded = Jason.encode!(body)
 
-    request = %{
-      path: path,
-      query_params: %{},
-      body: encoded,
-      host: host,
-      timestamp: Auth.timestamp(),
-      nonce: Auth.nonce()
-    }
+    request = %{path: path, query_params: %{}, body: encoded, host: host}
+    url = Environment.rest_url(environment) <> path
+    headers = signer(request, credentials)
 
-    with {:ok, headers} <- Auth.headers(request, credentials) do
-      url = Environment.rest_url(environment) <> path
+    case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
+      {:ok, %{status: status, body: response}} when status in 200..299 ->
+        decoded_body(response)
 
-      case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
-        {:ok, %{status: status, body: response}} when status in 200..299 ->
-          decoded_body(response)
+      {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
+        {:refused, refusal(status, response)}
 
-        {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-          {:refused, refusal(status, response)}
+      {:ok, %{status: status, body: response}} ->
+        {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
 
-        {:ok, %{status: status, body: response}} ->
-          {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
+
+  # Signed per attempt, not once per call. `Core.HttpClient` retries a timeout or a 5xx,
+  # and a retry carrying the first attempt's `x-signature-nonce` is a replay the venue is
+  # built to refuse — so before this, every retry of a signed request was a wasted call
+  # that failed with a misleading authentication error. `Core.HttpClient` calls this
+  # function again for each attempt, so each carries its own timestamp and nonce.
+  #
+  # The consequence is that a retried write can now take effect twice. Every write whose
+  # repeat is not harmless is therefore sent once — see `send_once/1`.
+  defp signer(request, credentials) do
+    fn ->
+      request
+      |> Map.merge(%{timestamp: Auth.timestamp(), nonce: Auth.nonce()})
+      |> Auth.headers(credentials)
+    end
+  end
+
+  # A write that must not be repeated on a retry: an order placed, cancelled, or a
+  # watchlist or token changed. The venue documents no idempotency key — `client_order_id`
+  # names the order, and nothing in the reference says a repeated place is deduplicated
+  # rather than refused or placed again — so a 5xx whose request in fact landed, retried,
+  # would at best tell the caller a success failed and at worst act twice. `put_new`, so a
+  # caller that has its own reason can still ask for retries.
+  defp send_once(opts), do: Keyword.put_new(opts, :retry_attempts, 1)
 
   # `:rate_limit_blocking` was absent from this allowlist entirely — the same
   # family-wide gap traced and fixed on `Subscription`'s copy of this function while
@@ -1148,7 +1153,7 @@ defmodule DpExchange.Webull.Rest do
                "/trading/orders/replace",
                body,
                credentials,
-               Keyword.put_new(opts, :retry_attempts, 1)
+               send_once(opts)
              ) do
         get_order(credentials, client_order_id, opts)
       end
@@ -1802,7 +1807,7 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec create_token(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_token(credentials, opts) do
-    with {:ok, response} <- post("/auth/tokens/create", %{}, credentials, opts),
+    with {:ok, response} <- post("/auth/tokens/create", %{}, credentials, send_once(opts)),
          {:ok, row} <- first_row(response) do
       {:ok, row}
     end
@@ -1988,7 +1993,7 @@ defmodule DpExchange.Webull.Rest do
              "/market-data/watchlists/create",
              body,
              credentials,
-             Keyword.put_new(opts, :retry_attempts, 1)
+             send_once(opts)
            ),
          {:ok, row} <- first_row(response),
          # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
@@ -2054,7 +2059,8 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("name", Keyword.get(opts, :name))
         |> put_present("sort", Keyword.get(opts, :sort))
 
-      with {:ok, _response} <- post("/market-data/watchlists/update", body, credentials, opts) do
+      with {:ok, _response} <-
+             post("/market-data/watchlists/update", body, credentials, send_once(opts)) do
         {:ok,
          %Watchlist{
            id: watchlist_id,
@@ -2081,7 +2087,8 @@ defmodule DpExchange.Webull.Rest do
   def delete_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
     body = %{"watchlist_id" => watchlist_id}
 
-    with {:ok, response} <- post("/market-data/watchlists/delete", body, credentials, opts),
+    with {:ok, response} <-
+           post("/market-data/watchlists/delete", body, credentials, send_once(opts)),
          :ok <- watchlist_success(response) do
       {:ok, :ok}
     end
@@ -2156,7 +2163,7 @@ defmodule DpExchange.Webull.Rest do
     body = %{"watchlist_id" => watchlist_id, "instruments" => instruments}
     path = "/market-data/watchlists/instruments/#{action}"
 
-    with {:ok, response} <- post(path, body, credentials, opts),
+    with {:ok, response} <- post(path, body, credentials, send_once(opts)),
          :ok <- watchlist_success(response) do
       {:ok, %{"success" => true}}
     end
@@ -3391,7 +3398,7 @@ defmodule DpExchange.Webull.Rest do
         "new_orders" => [Map.put(leaf, "client_order_id", client_order_id(request))]
       }
 
-      with {:ok, response} <- post("/trading/orders/place", body, credentials, opts) do
+      with {:ok, response} <- post("/trading/orders/place", body, credentials, send_once(opts)) do
         to_placed_order(response, request, order_type, tif)
       end
     end
@@ -3429,7 +3436,8 @@ defmodule DpExchange.Webull.Rest do
          {:ok, orders} <- batch_orders(requests) do
       body = %{"account_id" => account_id, "batch_orders" => orders}
 
-      with {:ok, response} <- post("/trading/orders/batch-place", body, credentials, opts) do
+      with {:ok, response} <-
+             post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
         {:ok, rows(response)}
       end
     end
@@ -3807,7 +3815,7 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, account_id} <- account_id(opts) do
       body = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
-      with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, opts) do
+      with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, send_once(opts)) do
         {:ok, :cancelled}
       end
     end

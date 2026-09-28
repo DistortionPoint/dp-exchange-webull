@@ -22,6 +22,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A retried request is signed again, with its own `x-signature-nonce`. Every retry replayed
+  the first attempt's nonce, a replay the venue refuses, so a retry of any REST call or
+  subscribe could never succeed. Headers are now a function `Core.HttpClient` calls per
+  attempt. Requires `dp_exchange_core` 0.3.46.
+- Because a retry can now take effect, writes whose repeat is not harmless are sent once
+  unless the caller passes `:retry_attempts`: `place_order`, `place_orders`, `cancel_order`,
+  `create_token`, `update_watchlist`, `delete_watchlist` and the watchlist instrument
+  writes, joining `replace_order` and `create_watchlist`. The venue documents no idempotency
+  key that would make a repeated order safe.
+
 ## [0.4.87] - 2026-09-28
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

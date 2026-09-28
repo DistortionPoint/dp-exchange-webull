@@ -787,6 +787,16 @@ each has a different remedy.
 **Two expiries come back and they are not the same clock** — `rt_expires_in` is the one that
 ends the session.
 
+## A write is sent once; a read is retried
+
+Every request is signed afresh for each attempt, so a retry after a timeout or a 5xx is a
+real second request rather than a replay the venue refuses. That makes a retried write able
+to take effect twice, and the venue documents no idempotency key that would deduplicate a
+repeated order. So `place_order`, `place_orders`, `replace_order`, `cancel_order`,
+`create_token` and every watchlist write are **sent once**. A timeout on one of them means
+"unknown": read the order or watchlist back before sending it again. Pass `:retry_attempts`
+yourself only if you have your own reason to believe a repeat is harmless.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

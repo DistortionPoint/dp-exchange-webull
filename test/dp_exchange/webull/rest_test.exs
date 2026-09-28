@@ -592,4 +592,53 @@ defmodule DpExchange.Webull.RestTest do
                )
     end
   end
+
+  describe "a retried request" do
+    # A retry that replayed the first attempt's `x-signature-nonce` was a replay the venue is
+    # built to refuse — every retry of a signed call wasted itself on an authentication error.
+    test "is signed again, with its own nonce" do
+      test_pid = self()
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        send(test_pid, {:nonce, Plug.Conn.get_req_header(conn, "x-signature-nonce")})
+
+        case :counters.get(counter, 1) do
+          1 -> Req.Test.json(%{conn | status: 503}, %{})
+          _later -> Req.Test.json(conn, [%{"price" => "1", "time" => 1_787_936_147_000}])
+        end
+      end
+
+      assert {:ok, _price} =
+               Rest.get_price("BTC-USD", @credentials, plug: plug, retry_attempts: 2)
+
+      assert_received {:nonce, [first]}
+      assert_received {:nonce, [second]}
+      refute first == second
+    end
+
+    test "is not made for an order, which is sent once unless the caller asks otherwise" do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        Req.Test.json(%{conn | status: 503}, %{})
+      end
+
+      request = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        quantity: Decimal.new("0.5"),
+        price: Decimal.new("40000"),
+        order_type: :limit,
+        time_in_force: :gtc
+      }
+
+      assert {:error, _reason} =
+               Rest.place_order(@credentials, request, plug: plug, account_id: "acct")
+
+      assert :counters.get(counter, 1) == 1
+    end
+  end
 end

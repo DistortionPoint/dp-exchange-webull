@@ -104,71 +104,70 @@ defmodule DpExchange.Webull.Subscription do
         "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
       })
 
-    request = %{
-      path: path,
-      query_params: %{},
-      body: body,
-      host: host,
-      timestamp: Auth.timestamp(),
-      nonce: Auth.nonce()
-    }
+    request = %{path: path, query_params: %{}, body: body, host: host}
+    url = Environment.rest_url(environment) <> path
 
-    with {:ok, headers} <- Auth.headers(request, credentials) do
-      url = Environment.rest_url(environment) <> path
+    # Signed per attempt: a `Core.HttpClient` retry carrying the first attempt's nonce is a
+    # replay the venue refuses. A repeated subscribe of the same symbols to the same session
+    # is harmless, so this call keeps its retries — see `Rest`'s `signer/2`.
+    headers = fn ->
+      request
+      |> Map.merge(%{timestamp: Auth.timestamp(), nonce: Auth.nonce()})
+      |> Auth.headers(credentials)
+    end
 
-      case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
-        {:ok, %{status: status}} when status in 200..299 ->
-          :ok
+    case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
+      {:ok, %{status: status}} when status in 200..299 ->
+        :ok
 
-        {:ok, %{status: 417, body: %{"error_code" => "TOO_MANY_SYMBOLS_SUBSCRIPTION"}}} ->
-          # Named separately from the generic exchange_error below: this is the venue's
-          # per-session subscription ceiling, a capacity answer this package's own Feed
-          # can act on (move the symbols to another shard), not a caller-visible failure
-          # in the making — collapsing it into an opaque string would leave the caller
-          # with nothing to pattern-match to recover automatically.
-          {:error, :oversubscribed}
+      {:ok, %{status: 417, body: %{"error_code" => "TOO_MANY_SYMBOLS_SUBSCRIPTION"}}} ->
+        # Named separately from the generic exchange_error below: this is the venue's
+        # per-session subscription ceiling, a capacity answer this package's own Feed
+        # can act on (move the symbols to another shard), not a caller-visible failure
+        # in the making — collapsing it into an opaque string would leave the caller
+        # with nothing to pattern-match to recover automatically.
+        {:error, :oversubscribed}
 
-        {:ok, %{status: 417, body: %{"error_code" => "INVALID_SESSION"} = response_body}} ->
-          # The session this subscribe is addressed to no longer exists venue-side. Named
-          # separately from the generic `exchange_error` below for the same reason
-          # `:oversubscribed` and `:invalid_symbols` are: it is an answer `Feed` can ACT on,
-          # and it is the one answer where retrying the identical call is guaranteed never
-          # to work.
-          #
-          # dp-exchange-core issue #30: it collapsed into the opaque string below, `Feed`
-          # retried the same dead session id every 60 seconds, and four shards stayed dark
-          # for fourteen hours — 1,479 identical warnings — until a human restarted the
-          # feed. The venue was handing out working sessions the whole time; only the code
-          # path to ask for one was missing.
-          #
-          # The session id is carried out of the message so a caller can tell WHICH session
-          # died, which matters on a sharded venue where three of four may be fine. When it
-          # cannot be parsed the error still says `:invalid_session` — the recovery does not
-          # depend on the id, and refusing to name the failure because one detail is missing
-          # would put us straight back in the fourteen-hour loop.
-          {:error, {:invalid_session, session_id_from(response_body)}}
+      {:ok, %{status: 417, body: %{"error_code" => "INVALID_SESSION"} = response_body}} ->
+        # The session this subscribe is addressed to no longer exists venue-side. Named
+        # separately from the generic `exchange_error` below for the same reason
+        # `:oversubscribed` and `:invalid_symbols` are: it is an answer `Feed` can ACT on,
+        # and it is the one answer where retrying the identical call is guaranteed never
+        # to work.
+        #
+        # dp-exchange-core issue #30: it collapsed into the opaque string below, `Feed`
+        # retried the same dead session id every 60 seconds, and four shards stayed dark
+        # for fourteen hours — 1,479 identical warnings — until a human restarted the
+        # feed. The venue was handing out working sessions the whole time; only the code
+        # path to ask for one was missing.
+        #
+        # The session id is carried out of the message so a caller can tell WHICH session
+        # died, which matters on a sharded venue where three of four may be fine. When it
+        # cannot be parsed the error still says `:invalid_session` — the recovery does not
+        # depend on the id, and refusing to name the failure because one detail is missing
+        # would put us straight back in the fourteen-hour loop.
+        {:error, {:invalid_session, session_id_from(response_body)}}
 
-        {:ok, %{status: 417, body: %{"error_code" => "INVALID_SYMBOL"} = response_body}} ->
-          # See the moduledoc's "`INVALID_SYMBOL` names the offending symbols" —
-          # DpCryptoManagement's issue #24.
-          case invalid_symbols(response_body) do
-            {:ok, native_symbols} ->
-              {:error,
-               {:invalid_symbols, Enum.map(native_symbols, &SymbolFormat.to_canonical_symbol/1)}}
+      {:ok, %{status: 417, body: %{"error_code" => "INVALID_SYMBOL"} = response_body}} ->
+        # See the moduledoc's "`INVALID_SYMBOL` names the offending symbols" —
+        # DpCryptoManagement's issue #24.
+        case invalid_symbols(response_body) do
+          {:ok, native_symbols} ->
+            {:error,
+             {:invalid_symbols, Enum.map(native_symbols, &SymbolFormat.to_canonical_symbol/1)}}
 
-            :error ->
-              {:error, {:exchange_error, :webull, "HTTP 417: #{inspect(response_body)}"}}
-          end
+          :error ->
+            {:error, {:exchange_error, :webull, "HTTP 417: #{inspect(response_body)}"}}
+        end
 
-        {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-          {:error, {:refused, status, response}}
+      {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
+        {:error, {:refused, status, response}}
 
-        {:ok, %{status: status, body: response}} ->
-          {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
+      {:ok, %{status: status, body: response}} ->
+        {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
