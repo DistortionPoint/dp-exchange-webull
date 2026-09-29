@@ -258,20 +258,18 @@ by a session identifier this package generates and gives to both.
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
 the credentials you supplied — at start, or on the subscribe call.
 
-### Three kinds arrive on the same subscription, not one
+### Two kinds arrive on the same subscription, and crypto has no trade tape
 
-A subscribe asks the venue for its `SNAPSHOT`, `QUOTE` and `TICK` topics, and all three
-are forwarded to you: `%DpExchange.Core.Types.Quote{}` (a traded price),
-`%DpExchange.Core.Types.TopOfBook{}` (bid/ask) and `%DpExchange.Core.Types.Trade{}` (one
-print — the tape). Match on the struct, not on having subscribed once — a handler that
-only matches `%Quote{}` silently drops every top-of-book message and every trade rather
-than erroring.
+A subscribe asks the venue for its `SNAPSHOT` and `QUOTE` topics, and both are forwarded to
+you: `%DpExchange.Core.Types.Quote{}` (a traded price) and
+`%DpExchange.Core.Types.TopOfBook{}` (bid/ask). Match on the struct, not on having
+subscribed once. A handler that only matches `%Quote{}` silently drops every top-of-book
+message rather than erroring.
 
 ```elixir
 receive do
   {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{} = q} -> handle_price(q)
   {:dp_exchange, :webull, %DpExchange.Core.Types.TopOfBook{} = t} -> handle_book(t)
-  {:dp_exchange, :webull, %DpExchange.Core.Types.Trade{} = t} -> handle_trade(t)
 end
 ```
 
@@ -282,15 +280,14 @@ off the wire and discarding it. A `nil` there still means what `Core.Types.TopOf
 it means — "not published", never "none available" — so a level the venue sends without a
 size is `nil`, and one that states `"0"` is a zero.
 
-`capabilities/0` declares `streamable: [:quotes, :top_of_book, :trades]` for exactly this
-reason. **`Trade.id` is always `nil` on this venue** — the streamed tape carries no
-per-print identifier, on this topic or on `get_trades/2`'s REST tape, and `nil` says that
-truthfully rather than inventing one.
-
-Unlike `SNAPSHOT`/`QUOTE`, `TICK`'s presence in the default subscribe is read from the
-venue's own documentation and has not been confirmed against the live venue — see
-`capabilities/0`'s `measured_against`. If the venue answers `TICK` differently than
-documented, that surfaces the same way any other subscribe refusal does.
+`capabilities/0` declares `streamable: [:quotes, :top_of_book]`. **There is no `:trades`
+stream for crypto.** It was declared from the streaming page's topic table, which lists
+`TICK` for "Stocks, Futures and Crypto", and a consumer measured otherwise: on ~325
+us-crypto symbols, no `Trade` and no drop notice (dp-exchange-core issue #40). So `TICK` is
+no longer requested by default, and a Webull crypto symbol has no streamed volume. Plan
+volume-based work for this venue around that. `sub_types: ["SNAPSHOT", "QUOTE", "TICK"]`
+still asks for it, and `Socket` decodes a `tick` into a `Trade` (with `id: nil`: the tape
+carries no per-print identifier) if one ever arrives.
 
 ### Coverage means delivering, not accepted
 
@@ -979,7 +976,7 @@ by accident, and it is equally usable for a proxy.
 
 ## A print that cannot be delivered says so
 
-`:trades` comes from the venue's `tick` topic, which the vendor's streaming page lists for
+`:trades`, where a caller opts into `TICK`, comes from the `tick` topic, which the vendor lists for
 stocks, futures and crypto. A tick this package cannot turn into a `Trade` (undecodable, or
 missing a readable time, price or volume) raises a `:data_quality` `Notice` once per reason
 per connection, with the raw field strings in `details` (`dropped`, `symbol`, `time`,

@@ -325,7 +325,16 @@ defmodule DpExchange.Webull do
       # documented venue capability that was built and never wired end to end. All three
       # are fixed now (`Subscription`, `Socket`, `Feed.kind_for/1`). See `measured_against`
       # below for what is and is not confirmed live about it.
-      streamable: [:quotes, :top_of_book, :trades],
+      #
+      # `:trades` REMOVED 2026-09-29, measured (dp-exchange-core issue #40). It was declared
+      # from the streaming page's topic table alone. With 0.4.96 reporting every way a tick
+      # can be dropped, a consumer on ~325 us-crypto symbols saw no `Trade` and no drop notice
+      # at all: the venue publishes no `TICK` for the `US_CRYPTO` category, which is the only
+      # category `Subscription` streams. Declaring it told consumers a trade tape existed, so
+      # every volume-based indicator sat empty with nothing saying why. `TICK` is no longer
+      # in the default `sub_types` either; the `tick` decoder stays for a caller that asks for
+      # it with `:sub_types`.
+      streamable: [:quotes, :top_of_book],
 
       # **Every streamed kind needs a credential here, so this is the whole of
       # `streamable`.** `authenticated_streamable` is the subset of `streamable` that
@@ -338,7 +347,7 @@ defmodule DpExchange.Webull do
       # every kind. Found by a cross-package audit; `dp_exchange_robinhood` had the
       # identical `[]` on the same reasoning, and `dp_exchange_coinbase` had it for
       # `:order_book` alone.
-      authenticated_streamable: [:quotes, :top_of_book, :trades],
+      authenticated_streamable: [:quotes, :top_of_book],
 
       # **Ten widths, not eight — `1y` is a real, served, twelfth width this package
       # cannot declare.** `Rest.timeframes/0`'s eight are the crypto and event-contract
@@ -458,11 +467,9 @@ defmodule DpExchange.Webull do
           "read from this package's own delivery path, `Subscription`'s default sub_types " <>
           "and `Socket`'s `quote`-topic decode clause, both already live; streamable's " <>
           "SNAPSHOT and QUOTE default sub_types are likewise confirmed live " <>
-          "(DpCryptoManagement issue #19); its :trades entry (2026-09-06) is NOT confirmed " <>
-          "live — TICK's inclusion in the default sub_types is read from " <>
-          "streaming-api.md's topic table only, and a live probe of this venue's crypto " <>
-          "sockets has not been retaken to confirm the venue answers a TICK subscribe the " <>
-          "way the table says it should; historical_timeframes' two added widths (1w, " <>
+          "(DpCryptoManagement issue #19); :trades was withdrawn 2026-09-29, measured: the venue " <>
+          "publishes no TICK for us-crypto (dp-exchange-core issue #40, zero trades and zero " <>
+          "drop notices across ~325 symbols on 0.4.96); historical_timeframes' two added widths (1w, " <>
           "1M — 2026-09-06) and reports_trade_volume flipping to true (2026-09-06) are " <>
           "both read from this package's own equity endpoints, not a fresh venue probe: " <>
           "Rest.get_stock_bars/5's @stock_timespans map and Rest.get_price/3's " <>

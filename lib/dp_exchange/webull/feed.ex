@@ -32,11 +32,12 @@ defmodule DpExchange.Webull.Feed do
 
   ## Coverage by kind, because this venue's streamed kinds really are independent
 
-  Every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK` (see `Subscription`),
-  and the three arrive on separate MQTT topics decoded by `Socket` into three different
-  structs: `snapshot` becomes `Core.Types.Quote` (kind `:quotes`, a traded price), `quote`
+  Every subscribe asks the venue for `SNAPSHOT` and `QUOTE` (see `Subscription`; `TICK` only
+  when a caller asks, since us-crypto publishes none). The topics arrive separately and
+  `Socket` decodes each into its own struct:
+  `snapshot` becomes `Core.Types.Quote` (kind `:quotes`, a traded price), `quote`
   becomes `Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask), `tick` becomes
-  `Core.Types.Trade` (kind `:trades`, one print). `coverage/1` folds all three into one
+  `Core.Types.Trade` (kind `:trades`, one print). `coverage/1` folds every kind into one
   `:stream` per symbol, so a symbol whose `snapshot` topic goes dark while its `quote`
   topic keeps arriving — or any other combination — is invisible there;
   `coverage_by_kind/1` exists to split exactly that apart, one kind map per struct type

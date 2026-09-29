@@ -171,14 +171,16 @@ defmodule DpExchange.WebullTest do
       assert Webull.coverage_by_kind(feed: :no_such_feed_process) == %{}
     end
 
-    test "declares :top_of_book and :trades alongside :quotes" do
+    test "declares :quotes and :top_of_book, and not :trades" do
       # `Socket`'s `quote`-topic clause has decoded to `Core.Types.TopOfBook` since the
       # bid/ask-as-price fix, and `Subscription`'s default `sub_types` has always asked
-      # for both `SNAPSHOT` and `QUOTE` — both kinds have always reached a subscriber.
-      # `:trades` is newer: `Subscription`'s default now asks for `TICK` too and
-      # `Socket`'s `tick`-topic clause decodes it to `Core.Types.Trade` — see both
-      # modules' moduledocs.
-      assert Webull.capabilities().streamable == [:quotes, :top_of_book, :trades]
+      # for both `SNAPSHOT` and `QUOTE`, so both kinds reach a subscriber.
+      #
+      # `:trades` was declared from the streaming page's topic table and withdrawn when a
+      # consumer measured it: no `Trade` and no drop notice across ~325 us-crypto symbols
+      # (dp-exchange-core issue #40). Declaring it told consumers a trade tape existed.
+      assert Webull.capabilities().streamable == [:quotes, :top_of_book]
+      refute :trades in Webull.capabilities().authenticated_streamable
     end
   end
 

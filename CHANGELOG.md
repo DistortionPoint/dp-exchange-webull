@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **`:trades` is no longer declared streamable, and `TICK` is no longer requested by
+  default** (dp-exchange-core issue #40). The declaration came from the streaming page's topic
+  table alone. Measured on 0.4.96, which reports every way a tick can be dropped: across ~325
+  us-crypto symbols, no `Trade` arrived and no drop notice was raised. So the venue publishes
+  no `TICK` for `US_CRYPTO`, the only category this package streams. `capabilities/0` now
+  declares `streamable: [:quotes, :top_of_book]` (and the same `authenticated_streamable`),
+  and the default `sub_types` is `["SNAPSHOT", "QUOTE"]`. A caller can still ask for `TICK`
+  with `sub_types:`, and a tick that arrives is still decoded or reported.
+
 ## [0.4.96] - 2026-09-29
 
 ### Fixed

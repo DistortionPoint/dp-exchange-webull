@@ -27,15 +27,17 @@ defmodule DpExchange.Webull.Subscription do
   rejected `HTTP 417 UNSUPPORTED_SUB_TYPE` — DpCryptoManagement's issue #19, filed right
   after #18 unblocked the request enough to reach this validation for the first time.
 
-  `["SNAPSHOT", "QUOTE"]` is **confirmed live** — the same pair the prior in-repo client
-  accepted for months and issue #19 measured directly. `TICK` joined the default so a
-  plain `subscribe/2` delivers `Core.Types.Trade` the same way it already delivers
-  `Quote` and `TopOfBook`, with no venue-shaped option a consumer has to learn — but
-  its inclusion here is **read from `streaming-api.md`'s topic table, not yet measured
-  against the live venue** the way the other two were. If the venue answers `TICK`
-  differently from what the table promises, that will surface as `Feed`'s existing
-  generic-subscribe-failure handling — see its moduledoc — the same as any other
-  refusal this module hands back.
+  `["SNAPSHOT", "QUOTE"]` is **confirmed live**, the same pair the prior in-repo client
+  accepted for months and issue #19 measured directly, and it is the whole default.
+
+  **`TICK` is not requested for crypto, because the venue publishes none.** It joined the
+  default on 2026-09-06, read from `streaming-api.md`'s topic table ("Stocks, Futures and
+  Crypto"), so a plain `subscribe/2` would deliver `Core.Types.Trade`. It never did. On
+  2026-09-29, with `Socket` reporting every way a tick can be dropped, a consumer on ~325
+  us-crypto symbols measured no `Trade` and no drop notice (dp-exchange-core issue #40): the
+  venue sends no `TICK` for this category, whatever the table says. It left the default and
+  `:trades` left `capabilities/0`. A caller can still ask for it with
+  `sub_types: ["SNAPSHOT", "QUOTE", "TICK"]`; `Socket` decodes a `tick` if one ever arrives.
 
   ## `INVALID_SYMBOL` names the offending symbols, and this module hands them back
 
@@ -124,10 +126,10 @@ defmodule DpExchange.Webull.Subscription do
         # `snapshot`, `tick` — see streaming-api.md). Confirmed live by
         # DpCryptoManagement's issue #19: lowercase values here get every subscribe
         # rejected `HTTP 417 UNSUPPORTED_SUB_TYPE`. `SNAPSHOT` and `QUOTE` are what the
-        # venue actually accepted for months from the prior in-repo client; `TICK` is
-        # read from the vendor's own topic table and not yet measured live — see the
-        # moduledoc.
-        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
+        # venue actually accepted for months from the prior in-repo client. `TICK` was the
+        # default until 2026-09-29, when a consumer measured that us-crypto publishes none
+        # (dp-exchange-core issue #40) — see the moduledoc.
+        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE"])
       })
 
     request = %{path: path, query_params: %{}, body: body, host: host}
