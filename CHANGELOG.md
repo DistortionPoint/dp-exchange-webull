@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.94] - 2026-09-29
+
 ### Fixed
 
 - **`get_orders/2` refuses a list it cannot read in full, instead of thinning it.** A group
