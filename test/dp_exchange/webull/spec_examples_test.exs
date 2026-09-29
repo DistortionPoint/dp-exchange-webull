@@ -53,7 +53,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
   import Bitwise
 
-  alias DpExchange.Core.{Config, Types}
+  alias DpExchange.Core.{Config, Instrument, Types}
   alias DpExchange.Webull.{QuoteProto, Rest, Subscription, SymbolFormat}
 
   @moduletag :capture_log
@@ -393,6 +393,52 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       decoded2 = URI.decode_query(query2)
       # The vendor's own example key (`crypto-instrument-list.md:279`), echoed back exactly.
       assert decoded2["pagination_key"] == "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+    end
+  end
+
+  # `crypto-instrument-list.md:27,56,61-72,198-270,276-280` — same endpoint and pagination
+  # as `get_symbols/2` above; see `test/fixtures/spec_examples/README.md` for the fixtures'
+  # own provenance, including why the `CO`/`NT` rows substitute the schema's own other
+  # enum members into its one worked-example row rather than inventing a second one.
+  describe "list_instruments/2" do
+    test "walks pagination_key, maps OC/CO/NT and derives base/quote from currency" do
+      me = self()
+      page1 = fixture!("list_instruments_page1.json")
+      page2 = fixture!("list_instruments_page2.json")
+
+      plug = fn conn ->
+        {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:request, conn.query_string})
+
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=") do
+            page2
+          else
+            page1
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, instruments} =
+               Rest.list_instruments(@credentials, plug: plug, retry_attempts: 0)
+
+      assert [
+               %Instrument{symbol: "BTC-USD", base: "BTC", quote: "USD", status: :tradable},
+               %Instrument{symbol: "ALT-USD", base: "ALT", quote: "USD", status: :unknown},
+               %Instrument{symbol: "BTC-USD", base: "BTC", quote: "USD", status: :unknown}
+             ] = instruments
+
+      assert Enum.all?(instruments, &(&1.instrument == :spot))
+
+      assert_receive {:request, first_query}
+      refute String.contains?(first_query || "", "pagination_key=")
+      assert_receive {:request, second_query}
+      # The vendor's own example key (`crypto-instrument-list.md:279`), echoed back exactly.
+      decoded = URI.decode_query(second_query)
+      assert decoded["pagination_key"] == "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
     end
   end
 

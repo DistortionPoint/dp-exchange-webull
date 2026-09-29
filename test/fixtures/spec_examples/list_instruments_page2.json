@@ -1,0 +1,19 @@
+{
+  "data": [
+    {
+      "name": "BTCUSD",
+      "instrument_id": "951007842",
+      "exchange_code": "CCC",
+      "category": "US_CRYPTO",
+      "symbol": "BTCUSD",
+      "status": "NT",
+      "min_trade_amt": "2.0",
+      "max_trade_amt": "2.0",
+      "min_trade_qty": "2.0",
+      "max_trade_qty": "2.0",
+      "price_step": "2.0",
+      "lot_size": "1.0",
+      "currency": "USD"
+    }
+  ]
+}

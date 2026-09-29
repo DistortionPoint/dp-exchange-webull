@@ -72,12 +72,22 @@ defmodule DpExchange.Webull.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Config, FakeInjection, Notice, Types, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Instrument, Notice, Types, Venue}
   alias DpExchange.Webull.{Auth, Environment, Rest}
 
-  @symbols ~w(BTC-USD ETH-USD SOL-USD)
+  # `XRP-USD` is a real member of `@symbols` (so `get_symbols/1` lists it — this fake
+  # would be lying about the venue if it silently dropped a non-tradable row, and the
+  # real bug this fixes is exactly a consumer unable to tell it apart from the other
+  # three) but its `list_instruments/1` row carries `status: :unknown` rather than
+  # `:tradable` — this fake's one modeled `NT` ("Non-Tradable") listing.
+  @symbols ~w(BTC-USD ETH-USD SOL-USD XRP-USD)
 
-  @price %{"BTC-USD" => "77845.79", "ETH-USD" => "2951.40", "SOL-USD" => "121.66"}
+  @price %{
+    "BTC-USD" => "77845.79",
+    "ETH-USD" => "2951.40",
+    "SOL-USD" => "121.66",
+    "XRP-USD" => "0.58"
+  }
 
   # Fixed, not `utc_now/0`.
   @at ~U[2026-08-28 12:00:00Z]
@@ -348,8 +358,47 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
+
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(opts \\ []) do
+    with_injection(fn ->
+      category = Config.opt(opts, :category, "US_CRYPTO")
+
+      with :ok <- fake_instrument_category(category),
+           :ok <- authenticated(opts) do
+        {:ok,
+         [
+           fake_instrument("BTC-USD", "BTC", "USD", :tradable),
+           fake_instrument("ETH-USD", "ETH", "USD", :tradable),
+           fake_instrument("SOL-USD", "SOL", "USD", :tradable),
+           # `status: "NT"` on the real venue — still returned by `get_symbols/1` (see
+           # `@symbols`'s own comment) but `:unknown` here, never `:tradable`. This is the
+           # one row a consumer's test can use to prove it checks `status` before trading
+           # a symbol `get_symbols/1` handed it.
+           fake_instrument("XRP-USD", "XRP", "USD", :unknown)
+         ]}
+      end
+    end)
+  end
+
+  # Matches `Rest.list_instruments/2`'s own refusal — see that function's moduledoc for
+  # why `US_STOCK`/`US_ETF` are refused by name rather than served with an invented
+  # instrument type and quote.
+  defp fake_instrument_category("US_CRYPTO"), do: :ok
+
+  defp fake_instrument_category(category),
+    do: {:error, {:unsupported_instrument_category, category}}
+
+  defp fake_instrument(symbol, base, quote_asset, status) do
+    Instrument.new(
+      symbol: symbol,
+      base: base,
+      quote: quote_asset,
+      instrument: :spot,
+      status: status
+    )
+  end
+
   @impl true
   def get_balances(credentials, opts) do
     with_injection(fn ->

@@ -11,7 +11,7 @@ defmodule DpExchange.Webull.FakeTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.Types
+  alias DpExchange.Core.{Instrument, Types}
   alias DpExchange.Webull.Fake
 
   @credentials %{app_key: "key", app_secret: "secret"}
@@ -27,6 +27,7 @@ defmodule DpExchange.Webull.FakeTest do
       assert {:error, {:missing_credentials, :webull}} = Fake.get_price("BTC-USD", [])
       assert {:error, {:missing_credentials, :webull}} = Fake.get_top_of_book("BTC-USD", [])
       assert {:error, {:missing_credentials, :webull}} = Fake.get_symbols([])
+      assert {:error, {:missing_credentials, :webull}} = Fake.list_instruments([])
 
       assert {:error, {:missing_credentials, :webull}} =
                Fake.get_historical_prices("BTC-USD", "1m", [], [])
@@ -124,6 +125,33 @@ defmodule DpExchange.Webull.FakeTest do
     test "get_symbols returns the fake's catalogue" do
       assert {:ok, symbols} = Fake.get_symbols(@opts)
       assert "BTC-USD" in symbols
+    end
+
+    test "list_instruments carries base, quote, instrument type and status" do
+      assert {:ok, instruments} = Fake.list_instruments(@opts)
+
+      by_symbol = Map.new(instruments, &{&1.symbol, &1})
+
+      assert %Instrument{base: "BTC", quote: "USD", instrument: :spot, status: :tradable} =
+               by_symbol["BTC-USD"]
+
+      # The fake's one modeled `NT` ("Non-Tradable") row — still listed by `get_symbols/1`
+      # (it is `in` @symbols, same as the other three) but NOT `:tradable` here, which is
+      # exactly the gap a consumer needs `list_instruments/1` to close: `get_symbols/1`
+      # alone cannot tell this apart from `"BTC-USD"`.
+      assert {:ok, symbols} = Fake.get_symbols(@opts)
+      assert "XRP-USD" in symbols
+
+      assert %Instrument{base: "XRP", quote: "USD", instrument: :spot, status: :unknown} =
+               by_symbol["XRP-USD"]
+    end
+
+    test "list_instruments refuses US_STOCK and US_ETF by name" do
+      assert Fake.list_instruments(Keyword.put(@opts, :category, "US_STOCK")) ==
+               {:error, {:unsupported_instrument_category, "US_STOCK"}}
+
+      assert Fake.list_instruments(Keyword.put(@opts, :category, "US_ETF")) ==
+               {:error, {:unsupported_instrument_category, "US_ETF"}}
     end
 
     test "market_status/1 is not supported — this venue is not crypto-only and " <>

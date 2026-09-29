@@ -399,6 +399,7 @@ defmodule DpExchange.WebullTest do
       # That is why these are safe to call with no options at all.
       assert Webull.get_price("BTC-USD") == {:error, {:missing_credentials, :webull}}
       assert Webull.get_symbols() == {:error, {:missing_credentials, :webull}}
+      assert Webull.list_instruments() == {:error, {:missing_credentials, :webull}}
 
       assert Webull.get_historical_prices("BTC-USD", "1m") ==
                {:error, {:missing_credentials, :webull}}
@@ -424,7 +425,7 @@ defmodule DpExchange.WebullTest do
       # this venue publishes no crypto depth — which is a different answer from "not
       # implemented" and is asserted in the order book tests.
       assert Fake.get_market_overview([]) == {:error, :not_supported}
-      assert Fake.list_instruments([]) == {:error, :not_supported}
+      # list_instruments/1 is implemented now — see `fake_test.exs` and `rest_test.exs`.
       # get_balances/2, get_accounts/2 and get_positions/1 are implemented now.
       # get_balances and get_positions refuse without an `account_id`, which is the venue's
       # requirement rather than a missing implementation; get_accounts takes none.

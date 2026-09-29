@@ -55,7 +55,7 @@ defmodule DpExchange.Webull.Rest do
   for three other refusals. Fixed alongside `historical_timeframes` below.
   """
 
-  alias DpExchange.Core.{Config, HttpClient}
+  alias DpExchange.Core.{Config, HttpClient, Instrument}
 
   alias DpExchange.Core.Types.{
     AuctionImbalance,
@@ -537,6 +537,124 @@ defmodule DpExchange.Webull.Rest do
        |> Enum.uniq()}
     end
   end
+
+  @doc """
+  Every `US_CRYPTO` listing as a `Core.Instrument` — base, quote, instrument type and
+  trading status — from the same paginated `/trading/instruments/crypto/profiles/list`
+  endpoint `get_symbols/2` already walks.
+
+  ## Category is fixed to `US_CRYPTO`, not read from `opts[:category]` the way
+  `get_symbols/2`'s pagination helper does
+
+  `Core.Instrument.instrument_type/0` is `:spot | :perp | :unknown` — no `:equity`
+  member — and `instrument-list.md`'s stock row documents a `currency` field that names
+  the LISTING currency, not one half of a traded pair the way crypto's `currency` does. A
+  `US_STOCK`/`US_ETF` row has no honest quote to put there and no honest instrument type
+  to claim, so this callback refuses both by name rather than reaching for the stock
+  endpoint and inventing either: `{:error, {:unsupported_instrument_category, category}}`.
+
+  ## `base`/`quote` come from the row's own `currency` field, never a parsed suffix list
+
+  `Core.Instrument`'s own moduledoc names the hazard directly: splitting a symbol by
+  scanning a list of known quote codes got Gemini's quote distribution wrong, because
+  `BTCUSDCPERP` cannot be split without the venue's own fields. This does not scan
+  `SymbolFormat`'s quote list for the `base:`/`quote:` fields — it reads `currency` off
+  the SAME row (`crypto-instrument-list.md:266-270`) and strips it from `symbol`
+  (`:221-225`) only when that strip is exact and leaves a non-empty remainder (`"BTCUSD"`
+  minus `"USD"` is `"BTC"`). `symbol:` itself still goes through
+  `SymbolFormat.to_canonical_symbol/1`, same as `get_symbols/2` — the two only need to
+  agree for `currency` values `SymbolFormat.quotes/0` also lists, which is every
+  `currency` this venue has been seen to publish.
+
+  A row whose `symbol` does not literally end in its own `currency` is DROPPED, not
+  guessed at and not made to fail the whole reply — `dp_exchange_robinhood`'s
+  `Rest.list_instruments/2` (`row_symbol/1`/`has_symbol?/1`) is the precedent for
+  dropping one unreadable row from an otherwise-honest catalogue rather than refusing
+  the lot for it.
+
+  ## status: `OC` is `:tradable`; `CO` and `NT` are both `:unknown`
+
+  `Core.Instrument.status_from/1`'s own doc calls `limit_only` tradable "because the
+  venue still matches orders". Webull's `CO` ("Liquidate only") is not that — only a
+  CLOSING order matches; an order that would open or grow a position is refused — so
+  `:tradable` would tell a consumer it can open a position here when the venue will
+  refuse it. `NT` ("Non-Tradable") is not `:delisted` either: the row is still LISTED,
+  only not currently tradable, and `:delisted` claims the venue removed it, which `NT`
+  does not say. `Core.Instrument.status/0` offers exactly `:tradable | :delisted |
+  :unknown`, so both land on `:unknown` — a consumer filtering on `status == :tradable`
+  sees only `OC` rows; neither `CO` nor `NT` is mistaken for a listing the venue dropped.
+  An absent or unrecognised status string is `:unknown` for the same reason: an unseen
+  word must not manufacture a delisting nothing said.
+
+  This is how a consumer tells the symbols `get_symbols/2` must still list (Core's
+  contract: "every symbol the venue lists", not filtered here either) apart from ones
+  the venue will reject at subscribe time — `RENDER-USD`, `SYN-USD`, `XDC-USD`,
+  `TOSHI-USD` and the rest of dp_crypto_management's `INVALID_SYMBOL` rejections are
+  exactly this: listed, but not `OC`.
+  """
+  @spec list_instruments(map(), keyword()) ::
+          {:ok, [Instrument.t()]} | {:error, term()} | {:refused, term()}
+  def list_instruments(credentials, opts) do
+    category = Config.opt(opts, :category, "US_CRYPTO")
+
+    with :ok <- ensure_crypto_category(category),
+         {:ok, rows} <- all_instrument_rows(nil, credentials, opts, [], 0) do
+      {:ok, Enum.flat_map(rows, &to_instrument/1)}
+    end
+  end
+
+  defp ensure_crypto_category("US_CRYPTO"), do: :ok
+
+  defp ensure_crypto_category(category),
+    do: {:error, {:unsupported_instrument_category, category}}
+
+  defp to_instrument(row) do
+    symbol = value(row, ["symbol", "disSymbol", "name"])
+    currency = value(row, ["currency"])
+
+    case instrument_base(symbol, currency) do
+      {:ok, base} ->
+        [
+          Instrument.new(
+            symbol: SymbolFormat.to_canonical_symbol(symbol),
+            base: base,
+            quote: currency,
+            instrument: :spot,
+            status: instrument_status(value(row, ["status"]))
+          )
+        ]
+
+      :error ->
+        []
+    end
+  end
+
+  # `symbol` and `currency` both come from `value/2`, which already refuses anything but a
+  # present, non-empty string — the same guard `row_symbol/1` needed in
+  # `dp_exchange_robinhood`, here reached through this module's own `value/2` instead of a
+  # second implementation of it.
+  defp instrument_base(symbol, currency) when is_binary(symbol) and is_binary(currency) do
+    if String.ends_with?(symbol, currency) do
+      case String.replace_suffix(symbol, currency, "") do
+        "" -> :error
+        base -> {:ok, base}
+      end
+    else
+      :error
+    end
+  end
+
+  defp instrument_base(_symbol, _currency), do: :error
+
+  # This venue's own vocabulary (`crypto-instrument-list.md:59-72`), not
+  # `Core.Instrument.status_from/1`'s — Webull never sends `online`/`closed`/`delisted`
+  # here, so reading it directly is honest where routing through `status_from/1` would
+  # only ever land on `:unknown` anyway (Webull's OC/CO/NT are not that function's
+  # vocabulary) while implying an equivalence that does not hold. See this function's own
+  # moduledoc for why `CO` and `NT` both read `:unknown` rather than `:tradable` or
+  # `:delisted`.
+  defp instrument_status("OC"), do: :tradable
+  defp instrument_status(_co_nt_or_unrecognised), do: :unknown
 
   defp all_instrument_rows(_key, _credentials, _opts, _acc, page) when page >= @max_pages,
     do: {:error, :too_many_instrument_pages}

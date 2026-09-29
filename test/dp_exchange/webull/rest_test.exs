@@ -1,7 +1,7 @@
 defmodule DpExchange.Webull.RestTest do
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.{Config, Types}
+  alias DpExchange.Core.{Config, Instrument, Types}
   alias DpExchange.Webull.Rest
 
   @moduletag :capture_log
@@ -454,6 +454,97 @@ defmodule DpExchange.Webull.RestTest do
 
       assert {:ok, ["BTC-USD"]} =
                Rest.get_symbols(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+  end
+
+  describe "list_instruments/2" do
+    test "OC is :tradable; CO and NT are both :unknown; base/quote come from currency" do
+      body = %{
+        "data" => [
+          %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"},
+          %{"symbol" => "ALTUSD", "status" => "CO", "currency" => "USD"},
+          %{"symbol" => "ETHBTC", "status" => "NT", "currency" => "BTC"}
+        ]
+      }
+
+      assert {:ok, instruments} =
+               Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert [
+               %Instrument{symbol: "BTC-USD", base: "BTC", quote: "USD", status: :tradable},
+               %Instrument{symbol: "ALT-USD", base: "ALT", quote: "USD", status: :unknown},
+               %Instrument{symbol: "ETH-BTC", base: "ETH", quote: "BTC", status: :unknown}
+             ] = instruments
+
+      assert Enum.all?(instruments, &(&1.instrument == :spot))
+    end
+
+    test "an absent status is :unknown, never guessed tradable" do
+      body = %{"data" => [%{"symbol" => "BTCUSD", "currency" => "USD"}]}
+
+      assert {:ok, [%Instrument{status: :unknown}]} =
+               Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a row whose symbol does not end in its own currency is dropped, not guessed" do
+      body = %{
+        "data" => [
+          %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"},
+          # `currency` here does not suffix `symbol` at all — nothing honest to strip.
+          %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "EUR"},
+          # Degenerate: `symbol == currency` would leave an empty `base`.
+          %{"symbol" => "USD", "status" => "OC", "currency" => "USD"}
+        ]
+      }
+
+      assert {:ok, [%Instrument{symbol: "BTC-USD"}]} =
+               Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "a row with no currency at all is dropped rather than left with a nil quote" do
+      body = %{"data" => [%{"symbol" => "BTCUSD", "status" => "OC"}]}
+
+      assert {:ok, []} =
+               Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "US_STOCK and US_ETF are refused by name, not served" do
+      assert {:error, {:unsupported_instrument_category, "US_STOCK"}} =
+               Rest.list_instruments(@credentials, category: "US_STOCK", retry_attempts: 0)
+
+      assert {:error, {:unsupported_instrument_category, "US_ETF"}} =
+               Rest.list_instruments(@credentials, category: "US_ETF", retry_attempts: 0)
+    end
+
+    test "walks pagination_key to the end, across pages" do
+      me = self()
+
+      page1 = %{
+        "data" => [%{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"}],
+        "pagination_key" => "next"
+      }
+
+      page2 = %{"data" => [%{"symbol" => "ALTUSD", "status" => "NT", "currency" => "USD"}]}
+
+      plug = fn conn ->
+        {:ok, _raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:page, conn.query_string})
+
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key="), do: page2, else: page1
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, [%Instrument{symbol: "BTC-USD"}, %Instrument{symbol: "ALT-USD"}]} =
+               Rest.list_instruments(@credentials, plug: plug, retry_attempts: 0)
+
+      assert_receive {:page, first_query}
+      refute String.contains?(first_query || "", "pagination_key=")
+      assert_receive {:page, second_query}
+      assert String.contains?(second_query, "pagination_key=next")
     end
   end
 

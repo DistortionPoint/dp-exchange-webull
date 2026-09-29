@@ -449,6 +449,30 @@ walk (there was no walk). `history: true` accepts `opts[:since]`/`opts[:until]`
 (`DateTime`s) instead, sent as the documented `start_time`/`end_time`; omitted, the venue
 answers the last 7 days, its own default.
 
+## `get_symbols/1` lists everything; `list_instruments/1` says which of it you can trade
+
+`get_symbols/1` is Core's contract, unfiltered: **every** symbol this venue lists, tradable
+or not. Some of what it lists is `"NT"` (Non-Tradable) or `"CO"` (Liquidate only — only a
+CLOSING order matches) on the venue's own instrument catalogue, and `get_symbols/1` has no
+way to say so — this is exactly why a subscribe to one of those symbols can come back
+`INVALID_SYMBOL` even though `get_symbols/1` just handed it to you.
+
+`list_instruments/1` reads the same catalogue and answers `Core.Instrument`s instead of bare
+strings, each with a `status`: `:tradable` for `"OC"`, and `:unknown` for `"CO"`, `"NT"`, and
+anything absent or unrecognised. Filter on `status == :tradable` before you build an order
+book or a strategy universe from a symbol you only got from `get_symbols/1`:
+
+```elixir
+{:ok, instruments} = DpExchange.Webull.list_instruments(credentials: creds)
+tradable = for i <- instruments, i.status == :tradable, do: i.symbol
+```
+
+`:unknown` is not the same claim as `:delisted` — a `"NT"` row is still listed, just not
+currently tradable, and this package does not say the venue removed it. `list_instruments/1`
+only serves `US_CRYPTO`; `US_STOCK`/`US_ETF` refuse by name
+(`{:error, {:unsupported_instrument_category, category}}`) rather than being served with an
+invented instrument type or quote currency — see `DpExchange.Webull.Rest.list_instruments/2`.
+
 ## Timestamps come from the venue, or the call fails
 
 **The local clock is never substituted** — an undated bar stamped with your own clock is

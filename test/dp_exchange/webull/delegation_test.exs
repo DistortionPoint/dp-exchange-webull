@@ -165,6 +165,14 @@ defmodule DpExchange.Webull.DelegationTest do
       assert is_list(symbols)
     end
 
+    test "list_instruments/1" do
+      body = %{"data" => [%{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"}]}
+
+      assert {:ok, [instrument]} = Webull.list_instruments(base(plug: json(body)))
+      assert instrument.symbol == "BTC-USD"
+      assert instrument.status == :tradable
+    end
+
     test "get_order_book/2" do
       body = [
         %{

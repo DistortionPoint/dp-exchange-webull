@@ -23,6 +23,7 @@ each backs.
 | `quote_option_snapshot.json` | `option-snapshot.md:27,171-302` | same |
 | `quote_futures_snapshot.json` | `futures-snapshot.md:27,171-267` | same |
 | `quote_symbols_page1.json`, `quote_symbols_page2.json` | `crypto-instrument-list.md:27` (path), `:198-270` (row fields), `:276-280` (pagination_key) | page 1 is the documented row + `pagination_key` example; page 2 omits the key per the schema's own "if absent, last page" |
+| `list_instruments_page1.json`, `list_instruments_page2.json` | `crypto-instrument-list.md:27` (path), `:198-270` (row fields), `:56` (`symbols` param example `"BTCUSD,ALTUSD"` — `ALTUSD` sourced from there, not invented), `:61-72` (status enum `OC`/`CO`/`NT`), `:276-280` (pagination_key) | backs `Rest.list_instruments/2`; only `status: "OC"` has a full worked-example row on this page, so the `CO` and `NT` rows are the same documented row with the schema's own other two enum members substituted in — never a status this page does not enumerate |
 | `quote_quantization_crypto.json` | `crypto-instrument-list.md:27,236-265` | the six quantization fields |
 | `quote_quantization_stock.json` | `instrument-list.md:27,217-350` (committed) | AAPL row |
 

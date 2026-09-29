@@ -22,6 +22,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`list_instruments/1` for `US_CRYPTO`**, built from the crypto profiles `get_symbols/1`
+  already walks. Each instrument carries the venue's own tradability: `OC` is `:tradable`;
+  `CO` (liquidate only) and `NT` (non-tradable) are `:unknown`, because neither accepts an
+  opening order and neither is delisted. A consumer can now tell a listed-but-untradable pair
+  from a live one. Pairs the streaming subscribe rejects as `INVALID_SYMBOL` were
+  indistinguishable in `get_symbols/1`, which still lists every symbol, as Core's contract
+  requires. `base`/`quote` come from the row's own `symbol` and `currency`; a row they cannot
+  be read from is dropped. Stock and ETF categories are refused with
+  `{:error, {:unsupported_instrument_category, category}}`: Core's `Instrument` has no equity
+  type. The mapping is declared from the vendor page, not measured live.
+- `Fake` lists a fourth pair, `XRP-USD`, which `list_instruments/1` marks `:unknown`, so a
+  consumer's tests meet a listed-but-untradable pair.
+
 ## [0.4.94] - 2026-09-29
 
 ### Fixed

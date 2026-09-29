@@ -186,9 +186,6 @@ defmodule DpExchange.Webull do
     {:rename_account, 3},
     {:get_roles, 1},
     {:get_market_overview, 1},
-    # `/trading/instruments/{crypto,stocks}/profiles/list` already back `get_symbols/1`;
-    # this callback's own shape has not been built against them.
-    {:list_instruments, 1},
     {:get_trade_history, 2},
     {:get_rate_limit_status, 2},
     {:test_connection, 2}
@@ -491,7 +488,13 @@ defmodule DpExchange.Webull do
           "resolved in favour of the stricter, more specific and newer page, NOT a vendor " <>
           "change we detected; the 5 had itself replaced a prior 10 req/s figure carrying " <>
           "no citation at all; the sandbox half is applied by Supervisor.limits/1, which " <>
-          "capabilities/0 cannot express because it takes no arguments"
+          "capabilities/0 cannot express because it takes no arguments; list_instruments/1's " <>
+          "US_CRYPTO-only scope and its base/quote-from-currency and OC/CO/NT-to-Instrument " <>
+          "status mapping (2026-09-29) are declared from crypto-instrument-list.md's own " <>
+          "schema, NOT measured live against a real response — the endpoint requires a " <>
+          "credential this repo does not hold, the same limitation the symbol-count figure " <>
+          "above already carries; Rest.list_instruments/2's own moduledoc has the full " <>
+          "derivation and why US_STOCK/US_ETF are refused rather than served"
     )
   end
 
@@ -608,8 +611,23 @@ defmodule DpExchange.Webull do
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
 
+  @doc """
+  Every `US_CRYPTO` listing — base, quote, instrument type and trading status — from the
+  same paginated catalogue `get_symbols/1` reads.
+
+  `US_STOCK`/`US_ETF` refuse by name (`{:error, {:unsupported_instrument_category,
+  category}}`) rather than being served: see `DpExchange.Webull.Rest.list_instruments/2`
+  for why the stock profile schema has nothing honest to put in `base`/`quote`/
+  `instrument` for either. Each instrument's own `status` field tells a symbol this venue
+  is currently refusing new orders on (`:unknown`) apart from one it will accept
+  (`:tradable`) — `get_symbols/1` keeps listing both, unfiltered, per Core's contract.
+
+  See `DpExchange.Webull.Rest.list_instruments/2` for the full base/quote/status
+  derivation and why each choice is the honest one rather than the flattering one.
+  """
   @impl true
-  def list_instruments(_opts), do: Venue.not_supported()
+  def list_instruments(opts \\ []),
+    do: Rest.list_instruments(credentials(opts), with_limiter(opts))
 
   # --- account and trading -----------------------------------------------
 
