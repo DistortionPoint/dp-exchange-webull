@@ -4604,17 +4604,7 @@ defmodule DpExchange.Webull.Rest do
       end
 
       with {:ok, order_rows} <- paginate(fetch_page) do
-        # A group this package cannot decode into one `Order` — no `orders`, or a
-        # multi-order combo `to_order/1` refuses (see its own comment) — is dropped here,
-        # the same rule `to_watchlist/2` already applies: "a nil key there is worse than
-        # one fewer row this cycle". `Core.Types.Order` admits `id: nil` for
-        # acknowledgements that carry an id and little else; a LIST of orders is not that
-        # case, so a decode failure is dropped rather than surfaced as `id: nil`.
-        {:ok,
-         order_rows
-         |> Enum.map(&to_order/1)
-         |> Enum.filter(&match?({:ok, %Order{id: id}} when is_binary(id), &1))
-         |> Enum.map(fn {:ok, order} -> order end)}
+        collect_orders(order_rows)
       end
     end
   end
@@ -4661,6 +4651,33 @@ defmodule DpExchange.Webull.Rest do
 
   defp to_order(%{"orders" => []}), do: {:error, {:missing_required_field, :orders}}
   defp to_order(_other), do: {:error, :unexpected_response_shape}
+
+  # **An order list is all of the orders or a refusal — never the ones this package could
+  # read.** A group it cannot decode into one `Order` (a multi-leg combo `to_order/1`
+  # refuses, a group with no `orders`, no id) used to be DROPPED, on the precedent of
+  # `to_watchlist/2`. That precedent does not carry over: one fewer watchlist row this cycle
+  # is a cosmetic gap, while an open-orders list missing a working OCO or bracket reads as
+  # "nothing is working there", and a caller reconciling from it may place the order again.
+  # `dp_exchange_robinhood` and `dp_exchange_gemini` already refuse the whole list on one
+  # unreadable row. The refusal names the groups, by `client_order_id` where the venue gave
+  # one, so a caller can see what it holds that this package cannot represent.
+  defp collect_orders(order_rows) do
+    {orders, unreadable} =
+      Enum.reduce(order_rows, {[], []}, fn group, {orders, unreadable} ->
+        case to_order(group) do
+          {:ok, %Order{id: id} = order} when is_binary(id) -> {[order | orders], unreadable}
+          _refused -> {orders, [group_id(group) | unreadable]}
+        end
+      end)
+
+    case unreadable do
+      [] -> {:ok, Enum.reverse(orders)}
+      ids -> {:error, {:unreadable_orders, Enum.reverse(ids)}}
+    end
+  end
+
+  defp group_id(group) when is_map(group), do: value(group, ["client_order_id", "clientOrderId"])
+  defp group_id(_group), do: nil
 
   defp leg_id(leg), do: value(leg, ["client_order_id", "clientOrderId"])
 

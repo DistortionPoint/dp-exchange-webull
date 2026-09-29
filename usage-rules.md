@@ -497,6 +497,13 @@ one, since `Types.NewsItem.id` is required.
 screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
 the position the venue returned the row in and closing the gap would re-rank the list.
 
+**An order list is the exception: it is refused, not thinned.** `get_orders/2` answers
+`{:error, {:unreadable_orders, ids}}` when any group in it cannot be read as one `Order`,
+most often a multi-leg combo (OCO, OTO, bracket), which this package does not represent.
+`ids` are the groups' `client_order_id`s where the venue gave one. Dropping them would
+hand you a list of working orders that is missing some, which reads as "nothing working
+there"; place against that and you may duplicate an order.
+
 ## A `:degraded` notice carries its severity from the frame — read `severity`, not only `kind`
 
 The venue publishes telemetry on its `notice` topic, and most of it says nothing is wrong. A

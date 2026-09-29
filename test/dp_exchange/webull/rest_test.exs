@@ -577,9 +577,10 @@ defmodule DpExchange.Webull.RestTest do
                )
     end
 
-    test "an order row with no id is dropped from a list, and refused on its own" do
-      # A caller cannot cancel, amend or look up an order with no identity. Webull's own rule,
-      # from `to_watchlist/2`: "a nil key there is worse than one fewer row this cycle".
+    test "an order list with a row that cannot be read is refused, and names it" do
+      # This asserted the row was DROPPED, on `to_watchlist/2`'s precedent. For orders that
+      # is the dangerous direction: a list missing a working order reads as "nothing is
+      # working there", and a caller reconciling from it may place the order again.
       rows = [
         %{"combo_type" => "NORMAL", "orders" => [%{"symbol" => "AAPL", "side" => "BUY"}]},
         %{
@@ -588,7 +589,7 @@ defmodule DpExchange.Webull.RestTest do
         }
       ]
 
-      assert {:ok, [%{id: "c-2"}]} =
+      assert {:error, {:unreadable_orders, [nil]}} =
                Rest.get_orders(@credentials,
                  plug: answering(rows),
                  retry_attempts: 0,
@@ -602,6 +603,30 @@ defmodule DpExchange.Webull.RestTest do
                      "combo_type" => "NORMAL",
                      "orders" => [%{"symbol" => "AAPL"}]
                    }),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "a working multi-leg combo is not silently missing from the order list" do
+      rows = [
+        %{
+          "client_order_id" => "oco-1",
+          "combo_type" => "OCO",
+          "orders" => [
+            %{"client_order_id" => "oco-1a", "symbol" => "AAPL", "side" => "SELL"},
+            %{"client_order_id" => "oco-1b", "symbol" => "AAPL", "side" => "SELL"}
+          ]
+        },
+        %{
+          "combo_type" => "NORMAL",
+          "orders" => [%{"client_order_id" => "c-2", "side" => "SELL"}]
+        }
+      ]
+
+      assert {:error, {:unreadable_orders, ["oco-1"]}} =
+               Rest.get_orders(@credentials,
+                 plug: answering(rows),
                  retry_attempts: 0,
                  account_id: "acct"
                )

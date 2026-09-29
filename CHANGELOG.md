@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_orders/2` refuses a list it cannot read in full, instead of thinning it.** A group
+  that cannot be decoded as one `Order`, most often a multi-leg combo (OCO, OTO, bracket),
+  was dropped, so the open-orders list silently lacked working orders and read as "nothing
+  working there". It now answers `{:error, {:unreadable_orders, ids}}`, naming the groups by
+  `client_order_id` where the venue gives one.
+
 ## [0.4.93] - 2026-09-29
 
 ### Fixed
