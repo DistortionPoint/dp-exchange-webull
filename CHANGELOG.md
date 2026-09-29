@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.95] - 2026-09-29
+
 ### Added
 
 - **`list_instruments/1` for `US_CRYPTO`**, built from the crypto profiles `get_symbols/1`
