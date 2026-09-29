@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.91] - 2026-09-29
+
 ### Fixed
 
 - A nested `result` or `instruments` list that is not a list, or a row that is not an
