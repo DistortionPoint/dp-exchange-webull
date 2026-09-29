@@ -95,18 +95,20 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
 
       send(feed, :resubscribe)
-      assert_receive {:subscribe_attempt, "dead-session"}, 1_000
+      # Five seconds, not one: `assert_receive` returns the moment the message lands, so the
+      # bound only matters under load, where one second failed the full suite (2026-09-29).
+      assert_receive {:subscribe_attempt, "dead-session"}, 5_000
 
       # The stale socket is torn down rather than left holding a connection the venue has
       # already discarded. This venue allows five concurrent connections per App Key, so
       # leaking one per dead session would turn a recoverable outage into an unrecoverable
       # one.
-      assert_receive {:DOWN, ^socket_ref, :process, ^socket, _reason}, 1_000
+      assert_receive {:DOWN, ^socket_ref, :process, ^socket, _reason}, 5_000
 
       # Reported as a link_down naming the cause, not latched as an unexplained generic
       # resubscribe failure — a consumer watching notices can now see WHY the shard went
       # dark, which is what fourteen hours of WARN lines never said.
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 1_000
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 5_000
       assert notice.details.session_id == "dead-session"
       assert notice.details.reason =~ "INVALID_SESSION"
 

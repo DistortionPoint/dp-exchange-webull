@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A nested `result` or `instruments` list that is not a list, or a row that is not an
+  object, is refused with `{:error, :unexpected_response_shape}`. `List.wrap/1` turned a
+  string into a one-element list and an object into a one-row list of the wrong thing, and a
+  non-object row read as none, so `get_trades/3`, `get_event_trades/3`, `get_watchlist/3`,
+  stock bars and volume profiles answered no data, or a wrapper as data. Absent is still none.
+
 ## [0.4.90] - 2026-09-29
 
 ### Fixed

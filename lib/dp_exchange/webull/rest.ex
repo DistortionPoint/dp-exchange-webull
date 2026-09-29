@@ -1432,9 +1432,12 @@ defmodule DpExchange.Webull.Rest do
   defp footprint_session(session), do: {:error, {:unsupported_session, session}}
 
   defp decode_profiles(row, symbol, timeframe) do
-    row
-    |> value(["result"])
-    |> List.wrap()
+    with {:ok, entries} <- list_value(row, ["result"]),
+         do: decode_profile_entries(entries, symbol, timeframe)
+  end
+
+  defp decode_profile_entries(entries, symbol, timeframe) do
+    entries
     |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
       case to_profile(entry, symbol, timeframe) do
         {:ok, profile} -> {:cont, {:ok, [profile | acc]}}
@@ -1650,8 +1653,15 @@ defmodule DpExchange.Webull.Rest do
 
   defp decode_ticks(row, symbol) do
     row
-    |> value(["result"])
-    |> List.wrap()
+    |> list_value(["result"])
+    |> case do
+      {:ok, ticks} -> decode_tick_entries(ticks, symbol)
+      error -> error
+    end
+  end
+
+  defp decode_tick_entries(ticks, symbol) do
+    ticks
     |> Enum.reduce_while({:ok, []}, fn tick, {:ok, acc} ->
       case to_trade(tick, symbol) do
         {:ok, trade} -> {:cont, {:ok, [trade | acc]}}
@@ -1786,9 +1796,9 @@ defmodule DpExchange.Webull.Rest do
   defp epoch_ms(other), do: other
 
   defp decode_stock_bars(response, symbol, timeframe, range) do
-    with {:ok, response_rows} <- rows(response) do
-      response_rows
-      |> Enum.flat_map(fn row -> row |> value(["result"]) |> List.wrap() end)
+    with {:ok, response_rows} <- rows(response),
+         {:ok, raw_bars} <- nested_results(response_rows) do
+      raw_bars
       |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
         case decode_bar(bar, symbol, timeframe) do
           {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
@@ -1806,6 +1816,22 @@ defmodule DpExchange.Webull.Rest do
         error ->
           error
       end
+    end
+  end
+
+  # Every row's `result` list, in order; one row whose `result` cannot be read refuses the
+  # lot, rather than leaving that symbol's bars out of a reply that reads as complete.
+  defp nested_results(response_rows) do
+    response_rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case list_value(row, ["result"]) do
+        {:ok, entries} -> {:cont, {:ok, [entries | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> Enum.concat()}
+      error -> error
     end
   end
 
@@ -1963,11 +1989,10 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/market-data/watchlists/instruments/list", params, credentials, opts),
-         {:ok, row} <- first_row(body) do
+         {:ok, row} <- first_row(body),
+         {:ok, instruments} <- list_value(row, ["instruments"]) do
       symbols =
-        row
-        |> value(["instruments"])
-        |> List.wrap()
+        instruments
         |> Enum.map(&value(&1, ["symbol"]))
         |> Enum.reject(&is_nil/1)
 
@@ -2860,7 +2885,7 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
          {:ok, row} <- first_row(body) do
-      {:ok, row |> value(["result"]) |> List.wrap()}
+      list_value(row, ["result"])
     end
   end
 
@@ -3274,6 +3299,22 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp value(_row, _keys), do: nil
+
+  # **A nested list, or a refusal.** `value(row, ["result"]) |> List.wrap()` stood at each of
+  # this function's callers, and `List.wrap/1` turns a string into a one-element list and an
+  # object into a one-row list of the wrong thing, while a row that was not an object read
+  # as `nil` and so as nothing. A reply the tick, profile, bar or watchlist decoder could not
+  # read therefore came back as no ticks, no bars, an empty watchlist, or a single entry
+  # built from a wrapper. Absent or `null` is still none: the venue omits an empty list.
+  defp list_value(row, keys) when is_map(row) do
+    case value(row, keys) do
+      list when is_list(list) -> {:ok, list}
+      nil -> {:ok, []}
+      _unreadable -> {:error, :unexpected_response_shape}
+    end
+  end
+
+  defp list_value(_row, _keys), do: {:error, :unexpected_response_shape}
 
   # A refusal carries the venue's status AND its words. This used to take only the body, so
   # every `4xx` this package refuses on — 400, 401 and 403 — arrived at the caller looking

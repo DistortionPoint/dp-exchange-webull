@@ -737,4 +737,36 @@ defmodule DpExchange.Webull.RestTest do
       assert :counters.get(counter, 1) == 1
     end
   end
+
+  describe "a nested result list that cannot be read is refused, not wrapped" do
+    # `List.wrap/1` turned a string `result` into a one-element list and an object into a
+    # one-row list of the wrong thing, and a row that was not an object read as none.
+    defp nested_opts(body), do: [plug: responding(body), retry_attempts: 0]
+
+    test "get_trades/3" do
+      for body <- [[%{"symbol" => "BTCUSD", "result" => "x"}], ["not a row"]] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_trades("BTC-USD", @credentials, nested_opts(body))
+      end
+    end
+
+    test "get_event_trades/3" do
+      body = [%{"symbol" => "KXCPI", "result" => %{"yes_price" => "0.05"}}]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_event_trades("KXCPI", @credentials, nested_opts(body))
+    end
+
+    test "get_watchlist/3" do
+      body = [%{"watchlist_id" => "wl-1", "instruments" => "AAPL"}]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_watchlist("wl-1", @credentials, nested_opts(body))
+    end
+
+    test "an absent result is still none" do
+      assert {:ok, []} =
+               Rest.get_event_trades("KXCPI", @credentials, nested_opts([%{"symbol" => "KXCPI"}]))
+    end
+  end
 end
