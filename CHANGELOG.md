@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.96] - 2026-09-29
+
 ### Fixed
 
 - **A tick that cannot become a `Trade` is reported, not dropped in silence**
