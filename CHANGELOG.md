@@ -22,6 +22,18 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tick that cannot become a `Trade` is reported, not dropped in silence**
+  (dp-exchange-core issue #40). A consumer subscribed to `:trades` saw no `Trade` for six
+  hours, and nothing distinguished a venue that sends no crypto ticks from a decoder that
+  discards them. Both the drop paths (undecodable, or no readable time, price or volume) now
+  raise a `:data_quality` `Notice` once per reason per connection, with the raw fields.
+- A message on a topic this package does not decode is reported the same way, once per
+  topic per connection. It was dropped with no trace.
+- A tick whose own `time` is present but unreadable falls back to the frame's `Basic`
+  timestamp before being refused. The streaming page gives `time` no format.
+
 ## [0.4.95] - 2026-09-29
 
 ### Added

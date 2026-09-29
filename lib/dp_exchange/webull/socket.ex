@@ -119,6 +119,10 @@ defmodule DpExchange.Webull.Socket do
   # connection at all" entry.
   @keep_alive_s 60
 
+  # The topics `emit/3` decodes, or deliberately ignores (`echo` is the empty heartbeat).
+  # `tick` has its own clause. Anything else is reported, not dropped: see `handle_packet/2`.
+  @known_topics ["snapshot", "quote", "notice", "echo"]
+
   # Three missed PINGRESPs at the half-keep-alive cadence. See the moduledoc's "A PINGREQ
   # nobody answers ends the connection".
   @silence_ms div(@keep_alive_s, 2) * 3 * 1_000
@@ -443,7 +447,8 @@ defmodule DpExchange.Webull.Socket do
     # The metrics channel alongside the notice channel, never instead of it: a `Core.Notice`
     # is a condition a consumer must ACT on, telemetry is aggregate and lossy by design.
     Telemetry.link_up(:webull)
-    %{state | connected?: true}
+    # A new connection gets its own drop reports: see `report_drop/3`.
+    Map.merge(state, %{connected?: true, drops_reported: MapSet.new()})
   end
 
   # The venue's connection error codes mean genuinely different things, and two of them
@@ -489,9 +494,22 @@ defmodule DpExchange.Webull.Socket do
     state
   end
 
-  defp handle_packet(state, {:publish, topic, payload}) do
+  # `tick` and anything unrecognised thread the state through, for `report_drop/3`; the
+  # other topics never drop silently and keep their `:ok`-returning `emit/3`.
+  defp handle_packet(state, {:publish, "tick", payload}),
+    do: emit_trade(state, QuoteProto.decode_tick(payload))
+
+  defp handle_packet(state, {:publish, topic, payload}) when topic in @known_topics do
     emit(state, topic, payload)
     state
+  end
+
+  # dp-exchange-core issue #40. A topic this package does not decode was dropped with no
+  # trace. If the venue ever published a data type under a name the streaming page does not
+  # list, the subscriber saw nothing and was told nothing. It is reported once per topic per
+  # connection, with the payload's size rather than its bytes.
+  defp handle_packet(state, {:publish, topic, payload}) do
+    report_drop(state, {:unrecognised_topic, topic}, %{topic: topic, bytes: byte_size(payload)})
   end
 
   defp handle_packet(state, _other), do: state
@@ -528,7 +546,6 @@ defmodule DpExchange.Webull.Socket do
   # topic the same way it gets `Quote` and `TopOfBook` on the other two, with no extra
   # option to ask for it — the facade hides the venue's `sub_types` vocabulary the same way
   # it hides everything else about how this venue is reached.
-  defp emit(state, "tick", payload), do: emit_trade(state, QuoteProto.decode_tick(payload))
 
   # The venue's own words go in `:message`, which is the field a consumer renders.
   #
@@ -707,7 +724,7 @@ defmodule DpExchange.Webull.Socket do
   # deliberately not used here: it would raise on the very absence this comment and the
   # moduledoc both document as real rather than accidental.
   defp emit_trade(state, {:ok, decoded}) do
-    with {:ok, timestamp} <- venue_time(decoded),
+    with {:ok, timestamp} <- tick_time(decoded),
          {:ok, price} <- required_decimal(decoded[:price], :price),
          {:ok, quantity} <- required_decimal(decoded[:volume], :quantity) do
       send(
@@ -724,12 +741,58 @@ defmodule DpExchange.Webull.Socket do
            provider: :webull
          }}
       )
-    end
 
-    :ok
+      state
+    else
+      {:error, reason} ->
+        report_drop(state, {:tick, reason}, %{
+          symbol: decoded[:symbol],
+          time: decoded[:timestamp],
+          basic_timestamp: decoded[:basic_timestamp],
+          price: decoded[:price],
+          volume: decoded[:volume]
+        })
+    end
   end
 
-  defp emit_trade(_state, :error), do: :ok
+  defp emit_trade(state, :error),
+    do: report_drop(state, {:tick, :undecodable}, %{})
+
+  # The print's own `time` (field 2) first, then the `Basic` message's `timestamp` (field 3).
+  # It used to take whichever was PRESENT, so a `time` in a form this package cannot read
+  # (the streaming page gives the field no format) dropped the print even when the frame
+  # carried a readable `timestamp` beside it.
+  defp tick_time(decoded) do
+    case venue_time(decoded) do
+      {:ok, at} -> {:ok, at}
+      {:error, _unreadable} -> venue_time(%{timestamp: decoded[:basic_timestamp]})
+    end
+  end
+
+  # **A dropped print is reported, once per reason per connection.** dp-exchange-core issue
+  # #40: a consumer subscribed to `:trades` saw no `Trade` in six hours, and this package
+  # could not say whether the venue sent none or this module discarded them, because both
+  # answered `:ok` in silence. A `:data_quality` notice names the reason and carries the raw
+  # fields (strings from the frame, never credentials), which is what a consumer needs to
+  # tell "the venue publishes no crypto ticks" from "this decoder cannot read them". Once per
+  # reason per connection, so a steady stream of unreadable prints is one line, not thousands.
+  defp report_drop(state, key, details) do
+    reported = Map.get(state, :drops_reported, MapSet.new())
+
+    if MapSet.member?(reported, key) do
+      state
+    else
+      notify(
+        state,
+        Notice.new(:data_quality, :webull,
+          message: "dropped #{inspect(key)} (first on this connection)",
+          details: Map.put(details, :dropped, key)
+        )
+      )
+
+      Map.put(state, :drops_reported, MapSet.put(reported, key))
+    end
+  end
 
   # Undocumented on the streaming schema (`docs/reference/webull/streaming-api.md` gives
   # the field no value list) — matched against the same `"B"`/`"S"` the venue's REST tape

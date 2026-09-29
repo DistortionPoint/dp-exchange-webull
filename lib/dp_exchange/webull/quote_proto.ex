@@ -94,7 +94,10 @@ defmodule DpExchange.Webull.QuoteProto do
          price: price,
          volume: present(fields, 4),
          side: present(fields, 5),
-         timestamp: present(fields, 2) || present(basic, 3)
+         timestamp: present(fields, 2) || present(basic, 3),
+         # Carried separately so `Socket` can fall back to it when field 2 is present but
+         # unreadable; `timestamp` above keeps its existing meaning for every other reader.
+         basic_timestamp: present(basic, 3)
        }}
     else
       _missing_required -> :error

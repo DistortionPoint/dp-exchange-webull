@@ -251,6 +251,63 @@ defmodule DpExchange.Webull.SocketTest do
       assert Decimal.equal?(trade.price, Decimal.new("77845.79"))
     end
 
+    test "a dropped tick is reported once per reason per connection, never in silence" do
+      # dp-exchange-core issue #40: six hours without a single `Trade`, and no way to tell a
+      # venue that sends no crypto ticks from a decoder that discards them.
+      undated =
+        proto_field(1, proto_field(1, "BTCUSD")) <>
+          proto_field(3, "77845.79") <> proto_field(4, "0.5")
+
+      assert {:ok, state} = Socket.handle_frame({:binary, publish("tick", undated)}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:tick, :missing_venue_timestamp}
+      assert details.symbol == "BTCUSD"
+      assert details.price == "77845.79"
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", undated)}, state)
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 50
+    end
+
+    test "a tick whose own time is unreadable falls back to the frame's timestamp" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      frame =
+        proto_field(1, basic) <>
+          proto_field(2, "12:00:01") <> proto_field(3, "77845.79") <> proto_field(4, "0.5")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", frame)}, state())
+      assert_receive {:dp_exchange, :webull, %Trade{} = trade}
+      assert trade.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+    end
+
+    test "a tick with no volume is reported, not silently dropped" do
+      frame =
+        proto_field(1, proto_field(1, "BTCUSD")) <>
+          proto_field(2, "1787936147000") <> proto_field(3, "77845.79")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", frame)}, state())
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert {:tick, _reason} = details.dropped
+    end
+
+    test "a topic this package does not decode is reported once, not dropped in silence" do
+      frame = publish("crypto-tick", <<1, 2, 3>>)
+
+      assert {:ok, state} = Socket.handle_frame({:binary, frame}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:unrecognised_topic, "crypto-tick"}
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state)
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+    end
+
+    test "the empty heartbeat topic is not reported" do
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("echo", "")}, state())
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+    end
+
     test "a book with no levels at all delivers nothing" do
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
       frame = publish("quote", proto_field(1, basic))

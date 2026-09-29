@@ -976,3 +976,15 @@ Treat the other two as a feed your supervision tree has to bring back.
 this package opens, unless a call passes its own `:url`, to that address instead of the
 venue. Unset, the venue is the default. It exists so a test suite never dials the live venue
 by accident, and it is equally usable for a proxy.
+
+## A print that cannot be delivered says so
+
+`:trades` comes from the venue's `tick` topic, which the vendor's streaming page lists for
+stocks, futures and crypto. A tick this package cannot turn into a `Trade` (undecodable, or
+missing a readable time, price or volume) raises a `:data_quality` `Notice` once per reason
+per connection, with the raw field strings in `details` (`dropped`, `symbol`, `time`,
+`basic_timestamp`, `price`, `volume`). So does a message on a topic this package does not
+decode (`details.dropped == {:unrecognised_topic, topic}`). No `Trade` and no such notice
+means the venue sent no ticks for those symbols. A notice means it did, and says why each
+kind was dropped (dp-exchange-core issue #40). A tick whose own `time` is unreadable falls
+back to the frame's `timestamp` before being refused.
