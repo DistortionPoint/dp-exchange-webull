@@ -245,6 +245,22 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
                )
     end
 
+    test "get_top_of_book/3 refuses US_EVENT too, the same way and for the same reason" do
+      # `event-snapshot.md:170-181,221-256` publishes `yes_bid`/`yes_ask`/`no_bid`/`no_ask`
+      # (and their sizes) — no single bid/ask. Picking the YES side to BE the top of book
+      # would answer about one of the two instruments a binary market actually has, and the
+      # numbers would still look right (a YES ask of 0.13 is real). Points at
+      # `get_event_order_book/3` instead, which names both sides.
+      exploding = fn _conn -> raise "must not pick a side of an event's two-instrument quote" end
+
+      assert {:error, {:use_get_event_order_book, "US_EVENT"}} =
+               Rest.get_top_of_book("KXCPI-26JAN-T0.3", @credentials,
+                 category: "US_EVENT",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
     test "get_event_trades/3 keeps both prices and the venue's own side" do
       body = [
         %{
@@ -310,6 +326,36 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
 
       assert_receive {:request, "/market-data/event-contracts/bars/list", query}
       assert query =~ "real_time_required=false"
+    end
+
+    # `event-bars.md:236` documents `volume` required, the same as the stock, option and
+    # futures bar endpoints — `decode_bar/3` used to hard-code `nil` for every caller,
+    # which understated this one along with the other three.
+    test "an event bar carries the venue's own volume, not a hard-coded nil" do
+      body = [
+        %{
+          "symbol" => "KXCPI-26JAN-T0.3",
+          "result" => [
+            %{
+              "time" => 1_772_730_554_000,
+              "open" => "0.10",
+              "high" => "0.12",
+              "low" => "0.09",
+              "close" => "0.11",
+              "volume" => "500"
+            }
+          ]
+        }
+      ]
+
+      assert {:ok, [candle]} =
+               Rest.get_historical_prices("KXCPI-26JAN-T0.3", "1m", [], @credentials,
+                 category: "US_EVENT",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(candle.volume, Decimal.new("500"))
     end
 
     test "a width the event endpoint does not serve is an error, not the nearest one" do

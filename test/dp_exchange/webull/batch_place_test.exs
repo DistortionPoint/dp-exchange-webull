@@ -50,7 +50,10 @@ defmodule DpExchange.Webull.BatchPlaceTest do
         time_in_force: :day,
         quantity: Decimal.new("10"),
         price: Decimal.new("180"),
-        instrument_type: :equity
+        instrument_type: :equity,
+        # `order-batch-place.md:195-199` marks this required, with no documented default —
+        # every fixture in this file supplies it for that reason.
+        support_trading_session: :core
       },
       overrides
     )
@@ -93,6 +96,32 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert body["account_id"] == "acct-1"
       assert length(body["batch_orders"]) == 2
       assert Enum.map(body["batch_orders"], & &1["symbol"]) == ["AAPL", "MSFT"]
+    end
+
+    # `order-batch-place.md:157-244`'s own field names — `quantity` (not `qty`),
+    # `support_trading_session` (required here, unlike on `place_order/3`) and
+    # `time_in_force: "DAY"`, the one member of this endpoint's own enum.
+    test "each leaf carries the batch schema's own fields" do
+      me = self()
+
+      assert {:ok, _results} =
+               Rest.place_orders(@credentials, [order()],
+                 account_id: "acct-1",
+                 plug: capturing([%{"order_id" => "1"}], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, _path, raw}
+      leaf = Jason.decode!(raw) |> Map.get("batch_orders") |> List.first()
+
+      assert leaf["entrust_type"] == "QTY"
+      assert leaf["quantity"] == "10"
+      assert leaf["support_trading_session"] == "CORE"
+      assert leaf["time_in_force"] == "DAY"
+      assert leaf["instrument_type"] == "EQUITY"
+      assert leaf["market"] == "US"
+      assert leaf["combo_type"] == "NORMAL"
+      refute Map.has_key?(leaf, "qty")
     end
 
     test "each order carries its own client order id" do
@@ -160,14 +189,45 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     end
 
     test "an order outside the venue's matrix is refused by index too" do
-      # The reason names both the position and the venue's own objection — fill-or-kill is
-      # not in this venue's equity matrix, and a caller with fifty orders needs to know which.
+      # The reason names both the position and the venue's own objection. `order-batch-
+      # place.md:236-243` marks `time_in_force` `DAY` and nothing else — a narrower matrix
+      # than `place_order/3`'s (which allows FOK on other instruments and refuses this
+      # combination differently, `{:unsupported_order_combination, ...}`), and a caller
+      # with fifty orders needs to know which of them asked for the wrong one.
       orders = [order(), order(%{time_in_force: :fok})]
 
       assert {:error, {:batch_order_rejected, 1, reason}} =
                Rest.place_orders(@credentials, orders, account_id: "acct-1")
 
-      assert reason == {:unsupported_order_combination, :equity, :limit, :fok}
+      assert reason == {:unsupported_batch_time_in_force, :fok}
+    end
+
+    test "order_type outside MARKET/LIMIT is refused by index" do
+      # `order-batch-place.md:227-234`'s `order_type` enum is MARKET and LIMIT only — the
+      # STOP_LOSS/STOP_LOSS_LIMIT/TRAILING_STOP_LOSS types real for `place_order/3` are not
+      # offered on this endpoint at all.
+      orders = [order(), order(%{order_type: :stop, stop_price: Decimal.new("170")})]
+
+      assert {:error, {:batch_order_rejected, 1, reason}} =
+               Rest.place_orders(@credentials, orders, account_id: "acct-1")
+
+      assert reason == {:unsupported_batch_order_type, :stop}
+    end
+
+    test "AMOUNT sizing is refused by index — this endpoint's entrust_type is QTY only" do
+      orders = [order(), order(%{quantity: nil, amount: Decimal.new("1000")})]
+
+      assert {:error, {:batch_order_rejected, 1, reason}} =
+               Rest.place_orders(@credentials, orders, account_id: "acct-1")
+
+      assert reason == :cash_sizing_not_supported_for_batch
+    end
+
+    test "support_trading_session is required — no documented default" do
+      orders = [order(%{support_trading_session: nil})]
+
+      assert {:error, {:batch_order_rejected, 0, :support_trading_session_required}} =
+               Rest.place_orders(@credentials, orders, account_id: "acct-1")
     end
 
     test "the account id is required, as it is on the single-order call" do

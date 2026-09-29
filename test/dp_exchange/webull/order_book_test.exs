@@ -659,23 +659,54 @@ defmodule DpExchange.Webull.OrderBookTest do
   end
 
   describe "stock bars are a POST, and the adjustment differs by width" do
+    # `historical-bars.md:234-238` wraps the per-symbol groups in an OBJECT —
+    # `{"result": [...]}`, `"required": ["result"]` — not the bare array this fixture used
+    # to be. Both shapes decode through `bar_groups/1` now, but the object wrapper is what
+    # the stock endpoint actually documents; the bare array is `crypto-bars.md`'s own shape
+    # (and `futures-historical-bars.md`'s and `event-bars.md`'s), not this one's.
     defp bars_response do
-      [
-        %{
-          "symbol" => "AAPL",
-          "instrument_id" => "913256135",
-          "result" => [
-            %{
-              "time" => "2021-12-28T09:00:09.945+0000",
-              "open" => "1.3362",
-              "close" => "1.3400",
-              "high" => "1.3450",
-              "low" => "1.3300",
-              "volume" => "10"
-            }
-          ]
-        }
-      ]
+      %{
+        "result" => [
+          %{
+            "symbol" => "AAPL",
+            "instrument_id" => "913256135",
+            "result" => [
+              %{
+                "time" => "2021-12-28T09:00:09.945+0000",
+                "open" => "1.3362",
+                "close" => "1.3400",
+                "high" => "1.3450",
+                "low" => "1.3300",
+                "volume" => "10"
+              }
+            ]
+          }
+        ]
+      }
+    end
+
+    test "a bar's fields, including volume, decode from the object-wrapped envelope" do
+      # Before the fix, `rows/1` saw no `data` key on this object envelope and fell back
+      # to treating the WHOLE body as one row; `nested_results/1` then read that row's
+      # `"result"` key and got back the array of per-symbol GROUPS, not bars — each one a
+      # `%{"symbol" => …, "result" => [...]}` with no `"open"`/`"close"`/`"time"` of its
+      # own, so `decode_bar/3` failed on every stock bars call. `volume` used to be
+      # hard-coded `nil` regardless of what the venue sent (see `decode_bar/3`'s own
+      # comment); `historical-bars.md:298` documents it required.
+      assert {:ok, [candle]} =
+               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                 category: "US_STOCK",
+                 plug: responding(bars_response()),
+                 retry_attempts: 0
+               )
+
+      assert candle.symbol == "AAPL"
+      assert Decimal.equal?(candle.open, Decimal.new("1.3362"))
+      assert Decimal.equal?(candle.high, Decimal.new("1.3450"))
+      assert Decimal.equal?(candle.low, Decimal.new("1.3300"))
+      assert Decimal.equal?(candle.close, Decimal.new("1.3400"))
+      assert Decimal.equal?(candle.volume, Decimal.new("10"))
+      assert candle.opened_at.year == 2021
     end
 
     test "a stock category posts a JSON body, where crypto sends a query" do
@@ -780,6 +811,9 @@ defmodule DpExchange.Webull.OrderBookTest do
       # the stock endpoint by name and refuses, which is not the venue lacking the data.
       me = self()
 
+      # `option-historical-bars.md:210-214` wraps its groups in `{"result": [...]}`, the
+      # same object shape `historical-bars.md` documents for stocks — not a bare array,
+      # and not a `"bars"` key (which no page defines; the documented key is `"result"`).
       plug = fn conn ->
         send(me, {:path, conn.request_path, conn.method})
 
@@ -787,7 +821,9 @@ defmodule DpExchange.Webull.OrderBookTest do
         |> Plug.Conn.put_resp_content_type("application/json")
         |> Plug.Conn.resp(
           200,
-          Jason.encode!([%{"symbol" => "AAPL250321C00100000", "bars" => []}])
+          Jason.encode!(%{
+            "result" => [%{"symbol" => "AAPL250321C00100000", "result" => []}]
+          })
         )
       end
 
@@ -809,6 +845,52 @@ defmodule DpExchange.Webull.OrderBookTest do
                  plug: exploding,
                  retry_attempts: 0
                )
+    end
+
+    test "a range is refused on option bars — the endpoint defines no start_time/end_time" do
+      # `option-historical-bars.md:34-93` names exactly `symbols`, `category`, `timespan`,
+      # `count` and `real_time_required` — no range. Silently dropping a caller's range
+      # would return the venue's most recent `count` bars filtered by `within?/2`, which
+      # for a range outside that window is a complete-looking response with every bar then
+      # discarded.
+      exploding = fn _conn -> raise "must not send a range the option bars endpoint refuses" end
+
+      assert {:error, {:unsupported_bar_range, :option}} =
+               Rest.get_historical_prices(
+                 "AAPL250321C00100000",
+                 "1d",
+                 [start: ~U[2026-01-01 00:00:00Z]],
+                 @credentials,
+                 category: "US_OPTION",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "no range at all still reaches the venue, without start_time/end_time" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"result" => [%{"symbol" => "AAPL250321C00100000", "result" => []}]})
+        )
+      end
+
+      assert {:ok, []} =
+               Rest.get_historical_prices("AAPL250321C00100000", "1d", [], @credentials,
+                 category: "US_OPTION",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      refute query =~ "start_time"
+      refute query =~ "end_time"
     end
 
     test "a width neither endpoint serves is an error" do
@@ -910,6 +992,35 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert path == "/trading/instruments/stocks/profiles/list"
       assert query =~ "category=US_STOCK"
       assert is_list(symbols)
+    end
+
+    test "US_ETF is translated to category=US_STOCK&sub_category=ETF" do
+      # `instrument-list.md:36-43`'s own `category` enum has exactly one member,
+      # `US_STOCK` — `US_ETF` is not a value this endpoint accepts. ETFs are reached on
+      # the same endpoint through `sub_category=ETF` (`:75-89`), one of six sub-categories
+      # of `US_STOCK`.
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => [%{"symbol" => "SPY"}]}))
+      end
+
+      assert {:ok, _symbols} =
+               Rest.get_symbols(@credentials,
+                 category: "US_ETF",
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path, query}
+      assert path == "/trading/instruments/stocks/profiles/list"
+      assert query =~ "category=US_STOCK"
+      assert query =~ "sub_category=ETF"
+      refute query =~ "category=US_ETF"
     end
 
     test "the default is still crypto" do

@@ -37,9 +37,17 @@ defmodule DpExchange.Webull.Rest do
   `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` therefore
   declares `reports_trade_volume: true` — the venue does report one, on a real, active
   path — with `measured_against` carrying the crypto/equity split so a caller does not
-  read the boolean as "every quote has a number." Bars carry no volume on any category —
-  `get_volume_profile/3` is the separate equity endpoint that splits traded volume by
-  price and side.
+  read the boolean as "every quote has a number."
+
+  **Bars are the same split, not a blanket "no volume."** Stock, option, futures and event
+  bars each document a required `volume` on their own `"result"` row
+  (`historical-bars.md:269,298`, `option-historical-bars.md`,
+  `futures-historical-bars.md:214`, `event-bars.md:236`); only the crypto bar schema
+  (`crypto-bars.md`) carries none. `decode_bar/3` previously hard-coded `nil` for every
+  caller, which understated the four documented cases the same way the old
+  `reports_trade_volume: false` understated the venue as a whole. `get_volume_profile/3`
+  remains the separate equity endpoint that splits traded volume by price and side — this
+  note is about the bars' own `volume` column, not that endpoint.
 
   This package previously declared `reports_trade_volume: false` unconditionally, which
   was true of crypto and a false claim about the venue as a whole — the same
@@ -311,8 +319,22 @@ defmodule DpExchange.Webull.Rest do
   # Options have their own bars endpoint and take the same `timespan` vocabulary the stock
   # one does. It is a GET where the stock bars are a POST — the venue's own split, not a
   # simplification here.
+  #
+  # **No `start_time`/`end_time` on this endpoint.** `option-historical-bars.md:34-93`
+  # names exactly five parameters — `symbols`, `category`, `timespan`, `count`,
+  # `real_time_required` — and no range. This package's own `get_historical_prices/5`
+  # accepts a `range`, and sending it as `start_time`/`end_time` before this asked a
+  # parameter the venue does not read; the venue would either ignore it silently or
+  # (undocumented either way) reject the call for an unrecognised field. `refuse_bar_range/1`
+  # below refuses instead: the venue serves only its most recent `count` bars here, and
+  # letting `decode_stock_bars/4`'s client-side `within?/2` filter run against a caller's
+  # range would, for any range outside that most-recent window, produce a real, complete-
+  # looking response with every bar then discarded — a truncation that reads as "no data in
+  # that range" rather than "count did not reach back far enough", the family's own named
+  # failure shape.
   defp option_bars(symbol, timeframe, range, credentials, opts) do
-    with {:ok, timespan} <- stock_timespan(timeframe) do
+    with :ok <- refuse_bar_range(range, :option),
+         {:ok, timespan} <- stock_timespan(timeframe) do
       params =
         %{
           "symbols" => symbol,
@@ -320,12 +342,19 @@ defmodule DpExchange.Webull.Rest do
           "timespan" => timespan
         }
         |> put_present("count", Keyword.get(opts, :limit))
-        |> put_present("start_time", epoch_ms(Keyword.get(range, :start)))
-        |> put_present("end_time", epoch_ms(Keyword.get(range, :end)))
 
       with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts) do
-        decode_stock_bars(body, symbol, timeframe, range)
+        decode_stock_bars(body, symbol, timeframe, [])
       end
+    end
+  end
+
+  defp refuse_bar_range([], _kind), do: :ok
+
+  defp refuse_bar_range(range, kind) do
+    case {Keyword.get(range, :start), Keyword.get(range, :end)} do
+      {nil, nil} -> :ok
+      _bounded -> {:error, {:unsupported_bar_range, kind}}
     end
   end
 
@@ -337,6 +366,23 @@ defmodule DpExchange.Webull.Rest do
       # `real_time_required` is **required** where the old path had no such parameter.
       # `false` asks for completed bars only: an in-progress bar has a boundary that has
       # not happened yet, and this package will not store one (see the `@timespans` note).
+      #
+      # **The vendor's own description of this parameter contradicts itself, and the wire
+      # value below is not changed to match either half on its own.** `crypto-bars.md:95`
+      # reads: "Whether to include the most recent in-progress bar.<br/>• true: Only
+      # completed historical bars are returned<br/>• false: Includes the latest
+      # in-progress bar" — the bullets say `true` means completed-only and `false` means
+      # include-in-progress, which is the OPPOSITE of what the parameter's own name and
+      # default (`"default": "true"`, same page) suggest, and the opposite of what every
+      # comment in this codebase about this field has said. Sending `"false"`, as this does,
+      # is the choice this package makes under that contradiction: a candle whose boundary
+      # has not happened yet is not a bar this package will store (`@timespans`'s own
+      # note), so "completed bars only" is the safer of the two readings regardless of
+      # which bullet is the typo — and if the bullets are the accurate half rather than the
+      # name/default, this sends the WRONG value and gets in-progress bars back, which is
+      # recorded here rather than silently assumed correct. Settling it needs a
+      # credentialed tier-3 probe comparing `"true"` and `"false"` against a bar still
+      # forming; this repository holds no credentials to run one.
       params =
         %{
           "symbols" => native,
@@ -360,13 +406,23 @@ defmodule DpExchange.Webull.Rest do
   the book together, and this splits them. The documented schema carries `bid`, `ask`,
   `bid_size` and `ask_size`, so unlike some venues in this family the sizes are real here
   rather than `nil`.
+
+  **`US_EVENT` is refused here on purpose, the same way `tick_path/1` refuses it for
+  `get_trades/3`.** The event snapshot has no single `bid`/`ask` — it publishes
+  `yes_bid`/`yes_ask`/`no_bid`/`no_ask` and their sizes (`event-snapshot.md:170-181,221-256`),
+  because a binary market has two instruments' worth of quotes, not one. Picking the YES
+  side to be "the" bid and ask would answer about only one of the two contracts and, per
+  `get_event_order_book/3`'s own moduledoc, the numbers would still look right — a YES ask
+  of 0.13 is real and is not "the" ask the way a stock's is. Use
+  `get_event_order_book/3` instead, which returns both sides under their own names.
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
   def get_top_of_book(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_CRYPTO")
 
-    with {:ok, path} <- snapshot_path(category) do
+    with :ok <- refuse_event_top_of_book(category),
+         {:ok, path} <- snapshot_path(category) do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
 
@@ -386,6 +442,9 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  defp refuse_event_top_of_book("US_EVENT"), do: {:error, {:use_get_event_order_book, "US_EVENT"}}
+  defp refuse_event_top_of_book(_category), do: :ok
 
   # The book's own stamp where the row carries one. `nil` rather than the local clock —
   # `observed_at` already holds that, and says which it is.
@@ -484,7 +543,7 @@ defmodule DpExchange.Webull.Rest do
 
   defp all_instrument_rows(key, credentials, opts, acc, page) do
     category = Config.opt(opts, :category, "US_CRYPTO")
-    params = put_present(%{"category" => category}, "pagination_key", key)
+    params = instrument_params(category, key)
 
     with {:ok, path} <- instruments_path(category),
          {:ok, body} <- get(path, params, credentials, opts),
@@ -502,6 +561,51 @@ defmodule DpExchange.Webull.Rest do
         nil -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
         ^key -> {:error, :pagination_key_did_not_advance}
         next -> all_instrument_rows(next, credentials, opts, collected, page + 1)
+      end
+    end
+  end
+
+  defp instrument_params(category, key) do
+    {wire_category, sub_category} = instrument_category_params(category)
+
+    %{"category" => wire_category}
+    |> put_present("sub_category", sub_category)
+    |> put_present("pagination_key", key)
+  end
+
+  # `/trading/instruments/stocks/profiles/list`'s own `category` parameter has exactly one
+  # enum member, `US_STOCK` (instrument-list.md:36-43) — `US_ETF` was never a value it
+  # accepts, so every ETF-category call this package made was sent an undefined category
+  # rather than filtered to ETFs. The venue reaches ETFs on this same endpoint through
+  # `sub_category=ETF` (instrument-list.md:75-89, one of six sub-categories of `US_STOCK`),
+  # so a caller asking this package for `"US_ETF"` is translated to that pair rather than
+  # passed through unchanged.
+  defp instrument_category_params("US_ETF"), do: {"US_STOCK", "ETF"}
+  defp instrument_category_params(category), do: {category, nil}
+
+  # A cursor follow shared by every endpoint that documents `pagination_key`, bounded by
+  # `@max_pages` for the same reason `all_instrument_rows/5` is — a server that always
+  # returns a key must not loop this call forever. `fetch_page` takes the current key
+  # (`nil` for the first page) and returns `{:ok, {page_rows, next_key}}`, `next_key` being
+  # `nil` on the last page; pages are collected and concatenated once at the end, for the
+  # same reason `all_instrument_rows/5`'s own comment gives.
+  #
+  # `{:error, {:too_many_pages, n}}` on the bound and `{:error, :pagination_key_did_not_advance}`
+  # on a repeated key — fail closed on both, rather than returning the pages collected so
+  # far as though they were the whole list.
+  defp paginate(fetch_page), do: paginate(fetch_page, nil, [], 0)
+
+  defp paginate(_fetch_page, _key, _acc, page) when page >= @max_pages,
+    do: {:error, {:too_many_pages, page}}
+
+  defp paginate(fetch_page, key, acc, page) do
+    with {:ok, {page_rows, next_key}} <- fetch_page.(key) do
+      collected = [page_rows | acc]
+
+      case next_key do
+        nil -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        ^key -> {:error, :pagination_key_did_not_advance}
+        next -> paginate(fetch_page, next, collected, page + 1)
       end
     end
   end
@@ -629,6 +733,38 @@ defmodule DpExchange.Webull.Rest do
     case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
       {:ok, %{status: status, body: response}} when status in 200..299 ->
         decoded_body(response)
+
+      {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
+        {:refused, refusal(status, response)}
+
+      {:ok, %{status: status, body: response}} ->
+        {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # A POST whose response is **not JSON** — the one shape `post/4` above cannot serve.
+  # `post/4`'s `decoded_body/1` runs every 2xx body through `Jason.decode/1` and refuses
+  # with `{:error, {:undecodable_response, :webull}}` on anything that fails to parse, so
+  # calling it against an endpoint whose response is Server-Sent Events (`news-summary.md:195`
+  # — `event:message\ndata:{...}` frames, `Content-Type: text/event-stream`) always refused,
+  # not just sometimes: the body is never valid JSON on that endpoint. This is the same
+  # signing and status handling `post/4` gives every other write, minus the JSON decode,
+  # so `get_news/2` can read the frames itself.
+  defp post_sse(path, body, credentials, opts) do
+    environment = Environment.resolve(opts)
+    host = Environment.host(environment)
+    encoded = Jason.encode!(body)
+
+    request = %{path: path, query_params: %{}, body: encoded, host: host}
+    url = Environment.rest_url(environment) <> path
+    headers = signer(request, credentials)
+
+    case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
+      {:ok, %{status: status, body: response}} when status in 200..299 ->
+        {:ok, response}
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
         {:refused, refusal(status, response)}
@@ -967,6 +1103,14 @@ defmodule DpExchange.Webull.Rest do
   Rows come back as the venue sends them. `activity_sub_type` alone has 60-odd values
   carrying the distinction between an ACH deposit and a wire, a reversal and a payment —
   and no struct in this contract has anywhere to put them.
+
+  ## Pagination follows `pagination_key`, bounded — not `page_size`/`last_activity_id`
+
+  `trade-cash-activity-by-type.md:90` names `account_id`, `activity_types`, `start_time`,
+  `end_time` and `pagination_key`; there is no `page_size` and no `last_activity_id`. Both
+  were sent before this fix and neither is a parameter the venue reads, so `opts[:limit]`
+  and `opts[:after]` did nothing — the whole first page always came back, cursor or not.
+  This now walks `pagination_key` to the end (or `@max_pages`, fail closed) instead.
   """
   @spec get_transfers(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -975,17 +1119,12 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, account_id} <- account_id(opts),
          :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
-      params =
+      base_params =
         %{"account_id" => account_id, "activity_types" => Enum.join(types, ",")}
         |> put_present("start_time", iso_millis(Keyword.get(opts, :start)))
         |> put_present("end_time", iso_millis(Keyword.get(opts, :end)))
-        |> put_present("page_size", Keyword.get(opts, :limit))
-        |> put_present("last_activity_id", Keyword.get(opts, :after))
 
-      with {:ok, body} <-
-             get("/trading/activities/cash-activities/list", params, credentials, opts) do
-        rows(body)
-      end
+      paginate(cash_activities_page(base_params, credentials, opts))
     end
   end
 
@@ -1010,24 +1149,32 @@ defmodule DpExchange.Webull.Rest do
 
   The venue's two constraints hold here as they do there: without a time range it answers
   the last **7 days**, and a range spanning two calendar years is refused up front rather
-  than silently truncated.
+  than silently truncated. Pagination follows `pagination_key`, bounded — see
+  `get_transfers/2`'s own note; this endpoint is the same one.
   """
   @spec get_transactions(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_transactions(credentials, opts) do
     with {:ok, account_id} <- account_id(opts),
          :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)) do
-      params =
+      base_params =
         %{"account_id" => account_id}
         |> put_present("activity_types", transaction_types(opts))
         |> put_present("start_time", iso_millis(Keyword.get(opts, :start)))
         |> put_present("end_time", iso_millis(Keyword.get(opts, :end)))
-        |> put_present("page_size", Keyword.get(opts, :limit))
-        |> put_present("last_activity_id", Keyword.get(opts, :after))
+
+      paginate(cash_activities_page(base_params, credentials, opts))
+    end
+  end
+
+  defp cash_activities_page(base_params, credentials, opts) do
+    fn key ->
+      params = put_present(base_params, "pagination_key", key)
 
       with {:ok, body} <-
-             get("/trading/activities/cash-activities/list", params, credentials, opts) do
-        rows(body)
+             get("/trading/activities/cash-activities/list", params, credentials, opts),
+           {:ok, page_rows} <- rows(body) do
+        {:ok, {page_rows, next_pagination_key(body)}}
       end
     end
   end
@@ -1143,6 +1290,21 @@ defmodule DpExchange.Webull.Rest do
 
   Keyed on `client_order_id`, like every other order call on this venue.
 
+  ## The body is `account_id` plus a `modify_orders` array, not a flat object
+
+  `common-order-replace.md:141,150` marks both `account_id` and `modify_orders` required
+  on the outer body, and `client_order_id` required on each entry of that array — there is
+  no top-level `client_order_id`. A flat body with `client_order_id` beside `account_id`,
+  which is what this sent before, is not this endpoint's shape at all; the venue's schema
+  has no field there to receive it.
+
+  `order_type` is sent too, when the caller's `changes` include it: the `@amendable` table
+  below already let `:order_type` through its check for `limit`, `stop` and `stop_limit`
+  — a caller changing a limit order to a market one, which the venue's own futures rules
+  describe as the one destination each amendable type may switch to — but the field never
+  reached the wire, so that change was silently dropped from every replace this package
+  sent while the check that was supposed to gate it kept passing.
+
   The venue's response carries no order, so **the order is read back**: reporting the change
   a caller asked for as though the venue had confirmed it is a different claim from
   reporting what the venue did.
@@ -1156,13 +1318,16 @@ defmodule DpExchange.Webull.Rest do
     with :ok <- previewable(instrument),
          :ok <- amendable(order_type, changes),
          {:ok, account_id} <- account_id(opts) do
-      body =
-        %{"account_id" => account_id, "client_order_id" => client_order_id}
+      modification =
+        %{"client_order_id" => client_order_id}
+        |> put_present("order_type", changes |> Map.get(:order_type) |> order_type_name())
         |> put_present("quantity", Map.get(changes, :quantity))
         |> put_present("limit_price", Map.get(changes, :price))
         |> put_present("stop_price", Map.get(changes, :stop_price))
         |> put_present("trailing_stop_step", Map.get(changes, :trailing_stop_step))
         |> put_present("time_in_force", changes |> Map.get(:time_in_force) |> tif_name())
+
+      body = %{"account_id" => account_id, "modify_orders" => [modification]}
 
       # Sent once (`put_new`, so a caller can still ask for retries), as `create_watchlist/4`
       # is. `Core.HttpClient` retries a timeout or a 5xx, and a replace that already took
@@ -1220,20 +1385,25 @@ defmodule DpExchange.Webull.Rest do
 
   ## `depth`'s default of `10` is this package's own choice, not a confirmed venue default
 
-  Unlike `overnight_required`, the stocks depth endpoint's own parameter table has never
-  been captured — `endpoint-inventory.md` has its path and nothing else (the vendor's
-  reference pages build parameter tables in JavaScript; a plain fetch returns only the
-  method, path and one-line description, same limitation `negative-claims.md` already
-  records for other endpoints). `10` is inherited from a sibling endpoint that IS
-  documented — `/market-data/event-contracts/depths/list` states "`depth` (default 10)"
-  (`docs/reference/webull/futures-and-event-contracts.md`) — generalised here without
-  confirmation that the stock endpoint shares it. On `US_FUTURES` specifically, the
-  venue's own page states `depth` is **`1–10, required`** with no default at all
-  (same file), so supplying `10` there is this package filling a required parameter with
-  a value known to be in range, not a venue default being honoured.
+  Unlike `overnight_required`, this endpoint's own reference page has not been pulled into
+  `docs/reference/webull/` — `endpoint-inventory.md` has its path and nothing else. **That
+  is not because the vendor's pages need a browser.** `negative-claims.md`'s "pages had to
+  be rendered" note is itself stale: it was written against a capture method that fetched
+  only HTML, and every page pulled for the 2026-09-29 order/market-data audit
+  (`docs/reference/webull/openapi/`) came back from a plain fetch of the page's `.md` form
+  with the full OpenAPI parameter table embedded as JSON — no browser involved. The stock
+  depths page simply was not among the pages that audit needed and so was not fetched;
+  the gap is a page not yet pulled, not a page this package cannot read. `10` is inherited
+  from a sibling endpoint that IS documented — `/market-data/event-contracts/depths/list`
+  states "`depth` (default 10)" (`docs/reference/webull/futures-and-event-contracts.md`)
+  — generalised here without confirmation that the stock endpoint shares it. On
+  `US_FUTURES` specifically, the venue's own page states `depth` is **`1–10, required`**
+  with no default at all (same file), so supplying `10` there is this package filling a
+  required parameter with a value known to be in range, not a venue default being
+  honoured.
 
-  Settling the stock case needs either a browser-rendered read of this endpoint's own
-  parameter table (the same way `futures-and-event-contracts.md` was captured) or a
+  Settling the stock case needs this endpoint's own `.md` page pulled into
+  `docs/reference/webull/openapi/` the same way the 2026-09-29 pages were, or a
   credentialed consumer's tier-3 probe of what an omitted `depth` actually returns.
 
   ## What is dropped, and why that is stated rather than silent
@@ -1795,9 +1965,24 @@ defmodule DpExchange.Webull.Rest do
   defp epoch_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
   defp epoch_ms(other), do: other
 
+  # **Two envelope shapes across this decoder's four callers, and neither is "one level of
+  # `result`" the way the old code (and this package's own moduledoc) assumed.**
+  # `historical-bars.md:234-238` (stock) and `option-historical-bars.md:210-214` wrap their
+  # per-symbol groups in an object — `{"result": [...]}`, `"required": ["result"]` — while
+  # `futures-historical-bars.md:180-188` and `event-bars.md:203-209` return the bare array
+  # of groups directly (`"type": "array"` at the response root), the same top-level shape
+  # `crypto-bars.md:209` documents and `decode_bars/3` already handles correctly for
+  # crypto. `rows/1` reads a bare array correctly on its own; it is the object-wrapped
+  # stock/option shape it cannot see, because it only unwraps a `"data"` key. Before this,
+  # a stock or option response fell into `rows/1`'s bare-object fallback clause — the
+  # WHOLE body became one "row" — and `nested_results/1` then read that row's `"result"`
+  # key, getting back the array of per-symbol GROUPS (`%{"symbol" => …, "result" => [...]}`)
+  # with no `"open"`/`"close"`/`"time"` of their own. `decode_bar/3` was asked to decode
+  # each group as though it were a bar and failed (or, before `required_decimal` existed,
+  # produced an all-nil candle) for every stock and option request this package made.
   defp decode_stock_bars(response, symbol, timeframe, range) do
-    with {:ok, response_rows} <- rows(response),
-         {:ok, raw_bars} <- nested_results(response_rows) do
+    with {:ok, groups} <- bar_groups(response),
+         {:ok, raw_bars} <- nested_results(groups) do
       raw_bars
       |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
         case decode_bar(bar, symbol, timeframe) do
@@ -1819,10 +2004,14 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # Every row's `result` list, in order; one row whose `result` cannot be read refuses the
-  # lot, rather than leaving that symbol's bars out of a reply that reads as complete.
-  defp nested_results(response_rows) do
-    response_rows
+  defp bar_groups(%{"result" => groups}) when is_list(groups), do: {:ok, groups}
+  defp bar_groups(groups) when is_list(groups), do: {:ok, groups}
+  defp bar_groups(_other), do: {:error, :unexpected_response_shape}
+
+  # Every group's `result` list, in order; one group whose `result` cannot be read refuses
+  # the lot, rather than leaving that symbol's bars out of a reply that reads as complete.
+  defp nested_results(groups) do
+    groups
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
       case list_value(row, ["result"]) do
         {:ok, entries} -> {:cont, {:ok, [entries | acc]}}
@@ -1830,7 +2019,7 @@ defmodule DpExchange.Webull.Rest do
       end
     end)
     |> case do
-      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> Enum.concat()}
+      {:ok, pages} -> {:ok, pages |> Enum.reverse() |> Enum.concat()}
       error -> error
     end
   end
@@ -2290,13 +2479,20 @@ defmodule DpExchange.Webull.Rest do
     forecast_eps: {"/market-data/fundamentals/forecast-eps/get", []},
     fund_allocations: {"/market-data/fundamentals/fund-allocations/get", []},
     fund_brief: {"/market-data/fundamentals/fund-brief/get", []},
-    fund_dividends: {"/market-data/fundamentals/fund-dividends/get", [:count]},
-    fund_files: {"/market-data/fundamentals/fund-files/get", [:count]},
-    fund_holdings: {"/market-data/fundamentals/fund-holdings/get", [:count]},
+    # `fund-dividends.md:36-73` documents `symbol`, `category` and `pagination_key` —
+    # no `count` — and this is the one fundamentals endpoint (besides `filings`, which has
+    # its own envelope handling) that paginates; `get_fundamental/4` follows `pagination_key`
+    # bounded, internally, so it is not in the caller-suppliable list below.
+    fund_dividends: {"/market-data/fundamentals/fund-dividends/get", []},
+    # `fund-files.md`, `fund-holdings.md` and `fund-splits.md` each document only `symbol`
+    # and `category` — no `count`, on any of the three, unlike `capital_flows` and the
+    # statement endpoints above, which do define it.
+    fund_files: {"/market-data/fundamentals/fund-files/get", []},
+    fund_holdings: {"/market-data/fundamentals/fund-holdings/get", []},
     fund_net_values: {"/market-data/fundamentals/fund-net-values/get", [:count]},
     fund_performances: {"/market-data/fundamentals/fund-performances/get", []},
     fund_ratings: {"/market-data/fundamentals/fund-ratings/get", []},
-    fund_splits: {"/market-data/fundamentals/fund-splits/get", [:count]},
+    fund_splits: {"/market-data/fundamentals/fund-splits/get", []},
     income_statement: {"/market-data/fundamentals/income-statements/get", [:type, :count]},
     indicators: {"/market-data/fundamentals/indicators/get", [:type, :count]},
     industry_comparisons: {"/market-data/fundamentals/industry-comparisons/get", []}
@@ -2322,7 +2518,12 @@ defmodule DpExchange.Webull.Rest do
   `opts[:type]` (`ANNUAL` or `QUARTERLY`) and `opts[:count]` are accepted **only on the
   endpoints that document them**, and are dropped elsewhere rather than sent — a parameter
   an endpoint does not know is at best ignored and at worst a refusal, and neither tells the
-  caller which happened.
+  caller which happened. `fund_files`, `fund_holdings` and `fund_splits` are three such
+  endpoints for `:count` specifically — none of their own pages define it.
+
+  `:fund_dividends` is the one kind (besides `:filings`, which `get_filings/2` reaches
+  through its own envelope) whose page documents `pagination_key`
+  (`fund-dividends.md:60-73`), and this follows it bounded rather than returning one page.
 
   Rows come back as the venue sends them. A balance sheet has ninety-odd line items under
   the venue's own names, and a normalised schema would either drop most of them or invent a
@@ -2333,15 +2534,32 @@ defmodule DpExchange.Webull.Rest do
   def get_fundamental(kind, symbol, credentials, opts) do
     case Map.fetch(@fundamentals, kind) do
       {:ok, {path, allowed}} ->
-        params =
+        base_params =
           %{"symbol" => symbol, "category" => fundamental_category(opts)}
           |> put_allowed(allowed, opts)
 
-        with {:ok, body} <- get(path, params, credentials, opts), do: rows(body)
+        fundamental_rows(kind, path, base_params, credentials, opts)
 
       :error ->
         {:error, {:unknown_fundamental, kind}}
     end
+  end
+
+  defp fundamental_rows(:fund_dividends, path, base_params, credentials, opts) do
+    fetch_page = fn key ->
+      params = put_present(base_params, "pagination_key", key)
+
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, page_rows} <- rows(body) do
+        {:ok, {page_rows, next_pagination_key(body)}}
+      end
+    end
+
+    paginate(fetch_page)
+  end
+
+  defp fundamental_rows(_kind, path, params, credentials, opts) do
+    with {:ok, body} <- get(path, params, credentials, opts), do: rows(body)
   end
 
   defp fundamental_category(opts), do: Config.opt(opts, :category, "US_STOCK")
@@ -2457,14 +2675,29 @@ defmodule DpExchange.Webull.Rest do
   defp calendar_endpoint(:dividend), do: :dividend_calendar
   defp calendar_endpoint(:earnings), do: :earnings_calendar
 
-  defp to_corporate_event(row, symbol, kind) do
+  # Dividend and earnings calendars name their dates differently, so this branches on
+  # `kind` rather than trying one shared set of keys against both.
+  #
+  # **Dividend**: `ex_div_date` and `declare_date` (`dividend-calendar.md:202,207`), not
+  # `ex_dividend_date`/`announce_date` — neither of those two is a field either page
+  # defines, so `ex_date` and `announced_date` were `nil` on every dividend row before this.
+  #
+  # **Earnings**: `expected_publish_date` (`earnings-calendar.md:185`) is the one date this
+  # calendar publishes, and it is carried under `:announced_date` — `Core.Types.CorporateEvent`
+  # has no earnings-specific date field, `:ex_date`/`:record_date`/`:pay_date` are dividend
+  # vocabulary an earnings row has no business populating, and the type's own moduledoc
+  # discusses an earnings date's uncertainty in the same breath as introducing
+  # `:announced_date`, right before `:confirmed`. Before this, an earnings row's only
+  # chance at a date was `announce_date`/`announcement_date`, which this calendar does not
+  # publish either, so every earnings event came back dateless.
+  defp to_corporate_event(row, symbol, :dividend) do
     %CorporateEvent{
       symbol: symbol,
-      kind: kind,
-      ex_date: statement_date(value(row, ["ex_dividend_date", "ex_date"])),
+      kind: :dividend,
+      ex_date: statement_date(value(row, ["ex_div_date"])),
       record_date: statement_date(value(row, ["record_date"])),
       pay_date: statement_date(value(row, ["pay_date", "payment_date"])),
-      announced_date: statement_date(value(row, ["announce_date", "announcement_date"])),
+      announced_date: statement_date(value(row, ["declare_date"])),
       amount: decimal(value(row, ["amount", "dividend"])),
       currency: value(row, ["currency"]),
       ratio: nil,
@@ -2476,19 +2709,54 @@ defmodule DpExchange.Webull.Rest do
     }
   end
 
+  defp to_corporate_event(row, symbol, :earnings) do
+    %CorporateEvent{
+      symbol: symbol,
+      kind: :earnings,
+      ex_date: nil,
+      record_date: nil,
+      pay_date: nil,
+      announced_date: statement_date(value(row, ["expected_publish_date"])),
+      amount: nil,
+      currency: value(row, ["currency"]),
+      ratio: nil,
+      confirmed: nil,
+      details: row,
+      provider: :webull
+    }
+  end
+
   @doc """
   Regulatory filings this venue indexes — `Types.Filing`.
 
   **This points at filings; it does not fetch them.** The `url` on each row is the venue's
   own link and nothing here follows it.
+
+  ## The list is under `filings`, not `data`
+
+  `filings.md:176` documents `GET /market-data/fundamentals/filings/list` as returning a
+  single object — `{symbol, category, filings: [{title, url, publish_date}]}` — with the
+  array under its own key, `filings`, not the `data` key `get_fundamental/4`'s generic
+  `rows/1` unwraps. Before this, `rows/1` saw no `data` key and fell back to its
+  bare-object clause, treating the WHOLE envelope as one row; every field this decoder
+  reads off an individual filing (`title`, `url`, `publish_date`) is absent on that
+  envelope, so `get_filings/2` returned a single all-`nil` filing rather than the venue's
+  actual list. `filings_from_envelope/1` below reaches into the right key instead.
   """
   @spec get_filings(String.t(), map(), keyword()) ::
           {:ok, [Filing.t()]} | {:error, term()} | {:refused, term()}
   def get_filings(symbol, credentials, opts) do
-    with {:ok, rows} <- get_fundamental(:filings, symbol, credentials, opts) do
-      {:ok, Enum.map(rows, &to_filing(&1, symbol))}
+    with {:ok, envelope_rows} <- get_fundamental(:filings, symbol, credentials, opts),
+         {:ok, filing_rows} <- filings_from_envelope(envelope_rows) do
+      {:ok, Enum.map(filing_rows, &to_filing(&1, symbol))}
     end
   end
+
+  defp filings_from_envelope([envelope]) when is_map(envelope),
+    do: list_value(envelope, ["filings"])
+
+  defp filings_from_envelope([]), do: {:ok, []}
+  defp filings_from_envelope(_other), do: {:error, :unexpected_response_shape}
 
   defp to_filing(row, symbol) do
     %Filing{
@@ -2503,10 +2771,15 @@ defmodule DpExchange.Webull.Rest do
     }
   end
 
+  # `publish_date` is a bare `YYYY-MM-DD` (`filings.md:192`) with no time of day — the
+  # venue never states one. `Core.Types.Filing.filed_at` is a `DateTime`, so midnight UTC
+  # on the venue's own date is used to satisfy the type: the DATE is the venue's, the TIME
+  # is not, and that split is recorded here rather than presented as a moment the venue
+  # gave.
   defp filing_time(row) do
-    case venue_time(row) do
-      {:ok, at} -> at
-      _other -> nil
+    case statement_date(value(row, ["publish_date"])) do
+      nil -> nil
+      date -> DateTime.new!(date, ~T[00:00:00], "Etc/UTC")
     end
   end
 
@@ -2514,12 +2787,32 @@ defmodule DpExchange.Webull.Rest do
   News summaries — `POST /market-data/news/summaries/get`.
 
   **This one is generated, not reported.** The vendor's own description is "Invokes LLM to
-  generate news summaries", so the `summary` on each row is a model's paraphrase and not the
-  publisher's text. That is recorded here because a caller quoting it is quoting a summary,
-  and `source` names the venue rather than a wire.
+  generate news summaries", so the `summary` on the item this returns is a model's
+  paraphrase and not any publisher's text. That is recorded here because a caller quoting
+  it is quoting a summary, and `source` names the venue rather than a wire.
 
   `opts[:symbols]` is required — the endpoint summarises a watchlist, not the market —
   and takes a list. `opts[:lang]` is the venue's own enum and is sent only when given.
+
+  ## The response is Server-Sent Events, not JSON — and one generated reply, not a list
+
+  `news-summary.md:195` documents `200` as `"Server-Sent Events stream. Each message
+  contains JSON data"`, with example frames `event:message
+  data:{"type":"meta","args":{"sessionId":"1","convId":451107711450219}}` followed by a
+  run of `event:message data:{"type":"text","message":"..."}` chunks — Wally, the venue's
+  own assistant, streaming one answer a token or a sentence at a time. That is not a JSON
+  object with a `data` array of news items, which is what this read before: `post/4`'s
+  `decoded_body/1` calls `Jason.decode/1` on every response and refuses anything that is
+  not valid JSON, so every call this package made to this endpoint before returned
+  `{:error, {:undecodable_response, :webull}}` — the endpoint never worked at all.
+
+  There is also no itemised "news list" in this shape to normalise into several
+  `NewsItem`s — there is one generated reply, addressed to the symbols asked for. This
+  returns it as a single-element list holding that one item, concatenating every `"text"`
+  chunk into `:summary` in the order the venue sent them, with `:id` taken from the
+  stream's own `meta` event (`sessionId`/`convId`) — the venue's own identifier for that
+  conversation, not one this package invented, and required because
+  `Core.Types.NewsItem.id` is non-nil.
   """
   @spec get_news(map(), keyword()) ::
           {:ok, [NewsItem.t()]} | {:error, term()} | {:refused, term()}
@@ -2533,9 +2826,9 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("lang", Keyword.get(opts, :lang))
 
-      with {:ok, response} <- post("/market-data/news/summaries/get", body, credentials, opts),
-           {:ok, news_rows} <- rows(response) do
-        {:ok, news_rows |> Enum.map(&to_news_item(&1, symbols)) |> Enum.reject(&is_nil/1)}
+      with {:ok, raw} <- post_sse("/market-data/news/summaries/get", body, credentials, opts),
+           {:ok, events} <- decode_sse(raw) do
+        news_item_from_sse(events, symbols)
       end
     end
   end
@@ -2555,46 +2848,100 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # The old fallback was `... || value(row, ["symbol"]) || ""`. A ticker as an item id is the
-  # worst of the three: it looks like an id, and it collides for every item about the same
-  # symbol, so a consumer deduplicating by id silently keeps one story per ticker.
-  defp to_news_item(row, asked_for) do
-    case value(row, ["id", "news_id"]) do
-      nil -> nil
-      id -> build_news_item(id, row, asked_for)
+  # Every `data:` line is one JSON event (`news-summary.md:195`'s own example frames); a
+  # line the venue did not send as valid JSON is dropped rather than refusing the whole
+  # stream, the same tolerance `HttpClient` gives a body that decoded but was not JSON —
+  # this stream is a live LLM's output and a single malformed frame in the middle of it is
+  # not evidence the rest is unreadable.
+  defp decode_sse(body) when is_binary(body) do
+    events =
+      body
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.filter(&String.starts_with?(&1, "data:"))
+      |> Enum.map(&(&1 |> String.trim_leading("data:") |> String.trim()))
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.flat_map(fn line ->
+        case Jason.decode(line) do
+          {:ok, event} -> [event]
+          {:error, _reason} -> []
+        end
+      end)
+
+    case events do
+      [] -> {:error, :unexpected_response_shape}
+      _some -> {:ok, events}
     end
   end
 
-  defp build_news_item(id, row, asked_for) do
-    %NewsItem{
-      id: id,
-      headline: value(row, ["title", "headline"]),
-      summary: value(row, ["summary", "content"]),
-      url: value(row, ["url", "link"]),
-      # The venue generated this; naming a publisher would attribute a paraphrase to them.
-      source: "webull",
-      symbols: List.wrap(value(row, ["symbols"]) || value(row, ["symbol"]) || asked_for),
-      published_at: filing_time(row),
-      provider: :webull
-    }
+  defp decode_sse(_other), do: {:error, :unexpected_response_shape}
+
+  defp news_item_from_sse(events, asked_for) do
+    case sse_conversation_id(events) do
+      nil ->
+        {:error, {:missing_required_field, :id}}
+
+      id ->
+        {:ok,
+         [
+           %NewsItem{
+             id: id,
+             headline: nil,
+             summary: sse_summary_text(events),
+             url: nil,
+             # The venue generated this; naming a publisher would attribute a paraphrase
+             # to them.
+             source: "webull",
+             symbols: asked_for,
+             # The stream carries no timestamp of its own (`news-summary.md:195`'s frames
+             # are `meta`/`text` only) — `nil` rather than the moment this package
+             # happened to receive the last chunk, which would be this package's clock,
+             # not the venue's.
+             published_at: nil,
+             provider: :webull
+           }
+         ]}
+    end
+  end
+
+  defp sse_conversation_id(events) do
+    Enum.find_value(events, fn
+      %{"type" => "meta", "args" => %{"convId" => conv_id}} -> to_string(conv_id)
+      %{"type" => "meta", "args" => %{"sessionId" => session_id}} -> to_string(session_id)
+      _other -> nil
+    end)
+  end
+
+  defp sse_summary_text(events) do
+    events
+    |> Enum.filter(&match?(%{"type" => "text"}, &1))
+    |> Enum.map_join("", &Map.get(&1, "message", ""))
   end
 
   # The five screeners, each with its own required parameters. `gainers_losers` needs a
   # ranking window and a sort field; the sector ones need an aggregation and a period; the
   # rest need only the category. A shared parameter set would send every screener the union.
+  # `market_sector` (singular, `/get`) takes `sort_by`, not `agg_type` —
+  # `get-market-sectors-detail.md:73-90` documents `sort_by` (default `CHANGE_RATIO`) and
+  # no `agg_type` at all on this endpoint; `agg_type` (default `MARKET_VALUE`) is
+  # `market_sectors` (plural, `/list`)'s own parameter (`get-market-sectors.md:47-60`) and
+  # was sent on the wrong one of the two before this. `pagination_key` is on neither list
+  # any more: both endpoints document it (`get-market-sectors.md:96`,
+  # `get-market-sectors-detail.md`) and `get_screener/3` now follows it bounded instead of
+  # taking a caller-supplied cursor for a single page.
   @screeners %{
     "gainers_losers" =>
       {"/market-data/screeners/gainers-losers/list", [:rank_type, :sort_by, :direction]},
     "high_dividend_ranks" => {"/market-data/screeners/high-dividend-ranks/list", [:direction]},
     "market_sectors" =>
-      {"/market-data/screeners/market-sectors/list",
-       [:agg_type, :period, :direction, :pagination_key]},
+      {"/market-data/screeners/market-sectors/list", [:agg_type, :period, :direction]},
     "market_sector" =>
-      {"/market-data/screeners/market-sectors/get",
-       [:sector_id, :agg_type, :period, :direction, :pagination_key]},
+      {"/market-data/screeners/market-sectors/get", [:sector_id, :sort_by, :period, :direction]},
     "top_actives" => {"/market-data/screeners/top-actives/list", [:rank_type, :direction]},
     "week52_high_low" => {"/market-data/screeners/week52-high-low/list", [:rank_type, :direction]}
   }
+
+  @paginated_screeners ["market_sectors", "market_sector"]
 
   @doc "The screeners this venue publishes, by the identifier `get_screener/4` takes."
   @spec screeners() :: [String.t()]
@@ -2610,7 +2957,15 @@ defmodule DpExchange.Webull.Rest do
   Each screener takes different parameters and this sends **only** the ones its own page
   documents. `gainers_losers` requires `rank_type` and `sort_by`; both default to the
   venue's own documented defaults rather than being omitted, because the venue marks them
-  required and an omitted required parameter is a refusal a caller cannot read.
+  required and an omitted required parameter is a refusal a caller cannot read. `top_actives`
+  defaults `rank_type` to the venue's own documented `VOLUME`
+  (`get-top-active.md:51-57`). `week52_high_low`'s own page documents four `rank_type`
+  values and no default (`get-week-52-high-low.md:44`) — `opts[:rank_type]` is **required**
+  here for that reason, `{:error, :rank_type_required}` when it is missing, rather than a
+  guess at one of the four.
+
+  `market_sectors` and `market_sector` both document `pagination_key`
+  (`get-market-sectors.md:96`) and this follows it to the end, bounded — see `paginate/1`.
 
   An identifier this venue does not publish is `{:error, {:unknown_screener, name}}`.
   """
@@ -2619,18 +2974,20 @@ defmodule DpExchange.Webull.Rest do
   def get_screener(name, credentials, opts) do
     case Map.fetch(@screeners, name) do
       {:ok, {path, allowed}} ->
-        params =
-          %{"category" => fundamental_category(opts)}
-          |> put_allowed(allowed, opts)
-          |> screener_defaults(name)
+        with :ok <- require_rank_type(name, opts) do
+          base_params =
+            %{"category" => fundamental_category(opts)}
+            |> put_allowed(allowed, opts)
+            |> screener_defaults(name)
 
-        with {:ok, body} <- get(path, params, credentials, opts),
-             {:ok, screener_rows} <- rows(body) do
-          {:ok,
-           screener_rows
-           |> Enum.with_index(1)
-           |> Enum.map(&to_screener_result(&1, name))
-           |> Enum.reject(&is_nil/1)}
+          with {:ok, screener_rows} <-
+                 screener_rows(name, path, base_params, credentials, opts) do
+            {:ok,
+             screener_rows
+             |> Enum.with_index(1)
+             |> Enum.map(&to_screener_result(&1, name))
+             |> Enum.reject(&is_nil/1)}
+          end
         end
 
       :error ->
@@ -2638,16 +2995,46 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  defp require_rank_type("week52_high_low", opts) do
+    case Keyword.get(opts, :rank_type) do
+      nil -> {:error, :rank_type_required}
+      _present -> :ok
+    end
+  end
+
+  defp require_rank_type(_name, _opts), do: :ok
+
+  defp screener_rows(name, path, base_params, credentials, opts)
+       when name in @paginated_screeners do
+    fetch_page = fn key ->
+      params = put_present(base_params, "pagination_key", key)
+
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, page_rows} <- rows(body) do
+        {:ok, {page_rows, next_pagination_key(body)}}
+      end
+    end
+
+    paginate(fetch_page)
+  end
+
+  defp screener_rows(_name, path, params, credentials, opts) do
+    with {:ok, body} <- get(path, params, credentials, opts), do: rows(body)
+  end
+
   # The venue's own documented defaults, sent explicitly. `gainers_losers` marks `rank_type`
-  # and `sort_by` REQUIRED; `top_actives` and `week52_high_low` take a ranking window too.
+  # and `sort_by` REQUIRED; `top_actives` names `VOLUME` as its own default
+  # (`get-top-active.md:51-57`) — not `DAY_1`, which is `gainers_losers`'s ranking window
+  # and was never a member of `top_actives`'s `rank_type` enum at all.
+  # `week52_high_low` gets no clause here: `require_rank_type/2` above refuses it instead,
+  # because its page names no default to fall back to.
   defp screener_defaults(params, "gainers_losers") do
     params
     |> Map.put_new("rank_type", "DAY_1")
     |> Map.put_new("sort_by", "CHANGE_RATIO")
   end
 
-  defp screener_defaults(params, name) when name in ["top_actives", "week52_high_low"],
-    do: Map.put_new(params, "rank_type", "DAY_1")
+  defp screener_defaults(params, "top_actives"), do: Map.put_new(params, "rank_type", "VOLUME")
 
   defp screener_defaults(params, _name), do: params
 
@@ -2988,18 +3375,50 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **Four request-side corrections against `option-contract-list.md`.**
+  #
+  #   * `underlying_symbols` (plural, `:60`), not `underlying_symbol` — the singular name
+  #     is not a parameter this endpoint defines at all, so every call before this sent an
+  #     underlying the venue did not read and got back whatever `underlying_symbols`
+  #     omitted returns (everything, or a business error — either way not "this symbol's
+  #     contracts").
+  #   * `start_date` (`:78`, "Exact expiration date"), not `expire_date` — again not a
+  #     parameter this endpoint defines.
+  #   * `strike_price_gte`/`strike_price_lte` (`:127,136`), not `strike_price` — the venue
+  #     takes a strike RANGE and has no exact-match field; an exact strike is expressed
+  #     honestly as `gte == lte == strike`, which is the literal way to say "strike equals
+  #     this" with a range-only pair, not a synthesized bound.
+  #   * `page_size` is undefined here — the venue paginates this endpoint on
+  #     `pagination_key` (`:167`) instead, which `option_contracts/3` now follows bounded.
   defp option_contracts(underlying, credentials, opts) do
-    params =
-      %{"underlying_symbol" => underlying, "category" => "US_OPTION"}
-      |> put_present("expire_date", option_date_param(Keyword.get(opts, :expiry)))
-      |> put_present("strike_price", option_decimal_param(Keyword.get(opts, :strike)))
-      |> put_present("page_size", Keyword.get(opts, :limit))
+    base_params =
+      %{"underlying_symbols" => underlying, "category" => "US_OPTION"}
+      |> put_present("start_date", option_date_param(Keyword.get(opts, :expiry)))
+      |> option_strike_params(Keyword.get(opts, :strike))
 
-    with {:ok, body} <-
-           get("/trading/instruments/options/contracts/list", params, credentials, opts) do
-      with {:ok, contract_rows} <- rows(body),
-           do: decode_option_contracts(contract_rows, underlying)
+    fetch_page = fn key ->
+      params = put_present(base_params, "pagination_key", key)
+
+      with {:ok, body} <-
+             get("/trading/instruments/options/contracts/list", params, credentials, opts),
+           {:ok, contract_rows} <- rows(body) do
+        {:ok, {contract_rows, next_pagination_key(body)}}
+      end
     end
+
+    with {:ok, contract_rows} <- paginate(fetch_page) do
+      decode_option_contracts(contract_rows, underlying)
+    end
+  end
+
+  defp option_strike_params(params, nil), do: params
+
+  defp option_strike_params(params, strike) do
+    wire = option_decimal_param(strike)
+
+    params
+    |> Map.put("strike_price_gte", wire)
+    |> Map.put("strike_price_lte", wire)
   end
 
   defp option_date_param(%Date{} = date), do: Date.to_iso8601(date)
@@ -3024,8 +3443,17 @@ defmodule DpExchange.Webull.Rest do
   # The three addressing fields are required together. A row that yields two of them is a
   # row this package misread, and naming the keys the venue sent is what lets a reader fix
   # it — a `nil` strike would sit in the grid looking like a contract.
+  #
+  # `expiration_date` (`option-contract-list.md:312`), not `expire_date` — the request
+  # parameter and the response field are spelled differently on this endpoint, and reading
+  # the request's own name off the response found nothing on every row: every contract this
+  # package listed had `expiry: nil` and failed the addressing check below. `settlement_type`
+  # and `expiration_type` are `Core.Types.OptionContract`'s own field names — freeform
+  # per-venue strings, not a cross-venue enum — populated here from the venue's
+  # `settlement_method` and `expired_cycle` (`:357,362`), not `settlement_type`/
+  # `expiration_type`, which this endpoint does not define.
   defp to_option_contract(row, underlying) when is_map(row) do
-    with {:ok, expiry} <- option_expiry(value(row, ["expire_date", "expireDate", "expiration"])),
+    with {:ok, expiry} <- option_expiry(value(row, ["expiration_date", "expirationDate"])),
          {:ok, strike} <- option_strike(value(row, ["strike_price", "strikePrice", "strike"])),
          {:ok, right} <- option_right(value(row, ["direction", "option_type", "optionType"])) do
       {:ok,
@@ -3036,8 +3464,8 @@ defmodule DpExchange.Webull.Rest do
          right: right,
          venue_symbol: value(row, ["symbol", "instrument_id", "instrumentId"]),
          multiplier: decimal(value(row, ["multiplier", "unit"])),
-         settlement_type: value(row, ["settlement_type", "settlementType"]),
-         expiration_type: value(row, ["expiration_type", "expirationType"]),
+         settlement_type: value(row, ["settlement_method", "settlementMethod"]),
+         expiration_type: value(row, ["expired_cycle", "expiredCycle"]),
          last_trading_day: option_last_trading_day(row),
          # The venue names none of these three on this endpoint. `nil` says "not published",
          # and `false` would say "the venue told us it is not one".
@@ -3134,6 +3562,14 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **Volume is documented on four of this decoder's five callers.** Stock, option, futures
+  # and event bars all list `volume` as a REQUIRED field of their own `"result"` row
+  # (`historical-bars.md:269,298`, `option-historical-bars.md`, `futures-historical-bars.md:214`,
+  # `event-bars.md:236`) — only `crypto-bars.md`'s own bar schema carries no such field.
+  # Hard-coding `nil` here for every caller, which is what this did before, was correct for
+  # crypto and a false claim about the other four: reading `value(row, ["volume"])` costs
+  # nothing when the field is absent (`decimal(nil)` is already `nil`) and is the honest
+  # value when the venue sent one.
   defp decode_bar(row, symbol, timeframe) do
     with {:ok, timestamp} <- venue_time(row),
          {:ok, open} <- required_decimal(value(row, ["open"]), :open),
@@ -3149,8 +3585,7 @@ defmodule DpExchange.Webull.Rest do
          high: high,
          low: low,
          close: close,
-         # No volume on this venue's crypto bars. `nil`, never `0`.
-         volume: nil,
+         volume: decimal(value(row, ["volume"])),
          provider: :webull
        }}
     end
@@ -3563,22 +3998,106 @@ defmodule DpExchange.Webull.Rest do
 
   # Equities only, by the venue's own note. A crypto order in a batch is refused by index so
   # a caller knows which of fifty it was, rather than reading a venue message about a field.
-  #
-  # The builders never return a refusal — a refusal means the *venue* declined, and nothing
-  # has been sent at this point. Dialyzer proved that clause unreachable and it is gone: a
-  # clause for a shape that never arrives reads as though it had been tested.
   defp batch_order(request, index) do
     case Map.get(request, :instrument_type, :equity) do
       :equity ->
-        with {:ok, order_type, tif} <- combination(request),
-             {:ok, leaf} <- order_leaf(request, order_type, tif) do
-          {:ok, Map.put(leaf, "client_order_id", client_order_id(request))}
-        else
+        case batch_leaf(request) do
+          {:ok, leaf} -> {:ok, Map.put(leaf, "client_order_id", client_order_id(request))}
           {:error, reason} -> {:error, {:batch_order_rejected, index, reason}}
         end
 
       other ->
         {:error, {:batch_instrument_not_supported, index, other}}
+    end
+  end
+
+  @batch_order_types [:market, :limit]
+
+  # **The batch endpoint's own schema, narrower than `place_order/3`'s.**
+  # `order-batch-place.md:157-244` requires `order_type` MARKET or LIMIT — not `STOP_LOSS`,
+  # `STOP_LOSS_LIMIT` or `TRAILING_STOP_LOSS`, all real for the single-order endpoint —
+  # `time_in_force` DAY (its own enum has exactly one member), `entrust_type` QTY (no
+  # `AMOUNT` here at all) and `support_trading_session`, which the single-order schema
+  # leaves optional but this one lists as required. Checked against that schema rather
+  # than discovered from a venue rejection: `order_leaf/3`, which `place_order/3` uses,
+  # builds a wider order than this endpoint accepts, so a batch entry is built separately
+  # here instead of reusing it.
+  defp batch_leaf(request) do
+    with {:ok, order_type} <- batch_order_type(request),
+         :ok <- batch_time_in_force(request),
+         {:ok, sizing} <- batch_entrust(request),
+         {:ok, support_trading_session} <- batch_support_trading_session(request) do
+      leaf =
+        %{
+          "combo_type" => "NORMAL",
+          "instrument_type" => "EQUITY",
+          "market" => "US",
+          "symbol" => order_symbol(request, :equity),
+          "side" => request |> Map.fetch!(:side) |> to_string() |> String.upcase(),
+          "order_type" => order_type,
+          "time_in_force" => "DAY",
+          "support_trading_session" => support_trading_session
+        }
+        |> Map.merge(sizing)
+        |> put_present("limit_price", price_for(request, order_type))
+
+      {:ok, leaf}
+    end
+  end
+
+  # The batch schema's `time_in_force` enum has exactly one member, `DAY`
+  # (order-batch-place.md:236-243). `DAY` is sent explicitly when the caller left it
+  # unset — the same reasoning `get_order_book/3`'s `overnight_required` already states
+  # for a required field with one legal value — but a caller who explicitly asked for
+  # something else (`:gtc`, `:fok`, …) is refused rather than silently switched to `DAY`:
+  # sending the one legal value regardless of what was asked for would be exactly the
+  # substitution `entrust/3` above and `CLAUDE.md`'s fail-closed rule both refuse to make.
+  defp batch_time_in_force(request) do
+    case Map.get(request, :time_in_force, :day) do
+      :day -> :ok
+      other -> {:error, {:unsupported_batch_time_in_force, other}}
+    end
+  end
+
+  defp batch_order_type(request) do
+    case Map.get(request, :order_type, :limit) do
+      type when type in @batch_order_types -> {:ok, order_type_name(type)}
+      other -> {:error, {:unsupported_batch_order_type, other}}
+    end
+  end
+
+  # **`QTY` only.** The batch schema's `entrust_type` enum has one member
+  # (order-batch-place.md:187-194); `AMOUNT` sizing, real for `place_order/3`, is not
+  # offered on this endpoint at all. A caller who supplied `:amount` is refused rather
+  # than silently sized by quantity instead.
+  defp batch_entrust(request) do
+    case {Map.get(request, :quantity), Map.get(request, :amount)} do
+      {nil, nil} -> {:error, :missing_order_size}
+      {quantity, nil} -> {:ok, %{"entrust_type" => "QTY", "quantity" => wire_number(quantity)}}
+      {_quantity, _amount} -> {:error, :cash_sizing_not_supported_for_batch}
+    end
+  end
+
+  @support_trading_sessions ~w(ALL CORE NIGHT)
+
+  # **No documented default.** `order-batch-place.md:195-199` lists `support_trading_session`
+  # required, with three enum members, and states none of them as what the venue applies
+  # when it is absent — unlike `time_in_force` above, whose enum has only the one legal
+  # value `DAY`. A caller who does not say which session is refused rather than a guess at
+  # `CORE`.
+  defp batch_support_trading_session(request) do
+    case Map.get(request, :support_trading_session) do
+      nil ->
+        {:error, :support_trading_session_required}
+
+      session ->
+        wire = session |> to_string() |> String.upcase()
+
+        if wire in @support_trading_sessions do
+          {:ok, wire}
+        else
+          {:error, {:unsupported_support_trading_session, session}}
+        end
     end
   end
 
@@ -3753,6 +4272,16 @@ defmodule DpExchange.Webull.Rest do
   # `QTY` sizes in units, `AMOUNT` in cash. They are different orders and the venue names
   # them separately; a caller that gave neither gets an error rather than a default, and a
   # caller that gave both is asking for two things at once.
+  #
+  # **The size fields are `quantity` and `total_cash_amount`, never `qty`/`amount`.**
+  # `common-order-place.md:287,292` names both: `quantity` ("Transaction quantity...") is
+  # the field for QTY-entrust orders and `total_cash_amount` ("The total order amount...")
+  # is the field for AMOUNT-entrust ones. No page in `docs/reference/webull/` defines a
+  # `qty` or an `amount` field — those were this package's own invented names, and the
+  # venue does not read them: every order this package placed, previewed or batched
+  # carried an `entrust_type` but no size the venue could act on, which is the "every value
+  # stays plausible and only the meaning is wrong" failure shape this family's own
+  # `CLAUDE.md` names, since `entrust_type` alone is a well-formed field the venue accepts.
   defp entrust(request, order_type, instrument) do
     quantity = Map.get(request, :quantity)
     amount = Map.get(request, :amount)
@@ -3762,7 +4291,7 @@ defmodule DpExchange.Webull.Rest do
         {:error, :missing_order_size}
 
       {quantity, nil} ->
-        {:ok, "QTY", %{"qty" => wire_number(quantity)}}
+        {:ok, "QTY", %{"quantity" => wire_number(quantity)}}
 
       {nil, amount} ->
         amount_entrust(order_type, instrument, amount)
@@ -3787,7 +4316,7 @@ defmodule DpExchange.Webull.Rest do
     do: {:error, :cash_sizing_not_supported_for_stop}
 
   defp amount_entrust(_order_type, _instrument, amount),
-    do: {:ok, "AMOUNT", %{"amount" => wire_number(amount)}}
+    do: {:ok, "AMOUNT", %{"total_cash_amount" => wire_number(amount)}}
 
   # Only the two order types the venue documents `limit_price` for actually take it — see
   # the field table on `replace_order/4`'s own moduledoc, read from the same vendor
@@ -3923,6 +4452,15 @@ defmodule DpExchange.Webull.Rest do
   One order by its client order id.
 
   Requires `opts[:account_id]`.
+
+  ## The response is a combo GROUP, not a flat order row
+
+  `/trading/orders/get` returns `{client_order_id, combo_order_id, combo_type, orders:
+  [...]}` (`order-detail.md:163,182`) — the group's OWN fields (side, status, quantity,
+  price, …) live on each entry of `orders`, not on the envelope. Reading them off the
+  group itself, which is what this did before, finds nothing at every key and returns an
+  `Order` every field of which is `nil` except `provider` — a response that looks like an
+  order and answers no question about one. See `to_order/1`.
   """
   @spec get_order(map(), String.t(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
@@ -3931,13 +4469,14 @@ defmodule DpExchange.Webull.Rest do
       params = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, body} <- get("/trading/orders/get", params, credentials, opts),
-           {:ok, row} <- first_row(body),
+           {:ok, group} <- first_row(body),
            # Refused rather than filled in from `client_order_id`: that would be publishing
            # the caller's own argument as though the venue had confirmed it.
-           %Order{id: id} = order when is_binary(id) <- to_order(row) do
+           {:ok, %Order{id: id} = order} when is_binary(id) <- to_order(group) do
         {:ok, order}
       else
-        %Order{id: nil} -> {:error, {:missing_required_field, :id}}
+        {:ok, %Order{id: nil}} -> {:error, {:missing_required_field, :id}}
+        {:error, _reason} = error -> error
         other -> other
       end
     end
@@ -3950,71 +4489,111 @@ defmodule DpExchange.Webull.Rest do
   `/orders/historical-orders/list` answer different questions, and a caller asking for
   "orders" without saying which gets the open ones — the set that can still change.
 
-  Requires `opts[:account_id]`. **Returns one page**, and `opts[:limit]` is the venue's own
-  `page_size`, so the largest page it allows is the most this returns.
+  Requires `opts[:account_id]`. **Follows `pagination_key`, bounded** —
+  `order-open.md:46,554` and `order-history.md:66` both document it on the request and the
+  response, which the venue's own `page_size` never was: nothing in either page names a
+  `page_size` parameter, so the `page_size` this sent before was undefined on both
+  endpoints. `opts[:limit]` is no longer sent for that reason.
 
-  `get_symbols/2` in this module DOES walk a cursor, bounded, and refuses a key that does
-  not advance — because the venue documents the parameter for that endpoint. It does not
-  document one for these two: `docs/reference/webull/endpoint-inventory.md` lists
-  `/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` and no
-  pagination parameter for either. This doc previously asserted the venue paginates on
-  `client_order_id`, which is not something this repository has evidence for.
-
-  So the walk is not implemented rather than implemented on a guessed parameter name. A
-  wrong one is silently ignored by most APIs, which would turn a limit a caller can see
-  into one they cannot. Stated in `usage-rules.md` too, since the consumer is the one who
-  would reconcile against a short list.
+  `history: true` also accepts `opts[:since]`/`opts[:until]` (`DateTime`s), sent as the
+  documented `start_time`/`end_time` in the venue's own `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`
+  format (`order-history.md:47,58`). **Omitted, the venue defaults to the last 7 days** —
+  its own words, not a default this package invented — so a caller reconciling a longer
+  history must pass both.
   """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
     with {:ok, account_id} <- account_id(opts) do
+      history? = Keyword.get(opts, :history, false)
+
       path =
-        if Keyword.get(opts, :history, false),
+        if history?,
           do: "/trading/orders/historical-orders/list",
           else: "/trading/orders/open-orders/list"
 
-      params = put_present(%{"account_id" => account_id}, "page_size", Keyword.get(opts, :limit))
+      # `start_time`/`end_time` are documented on `/orders/historical-orders/list` only
+      # (`order-history.md:47,58`) — `/orders/open-orders/list` names just `account_id`
+      # and `pagination_key` (`order-open.md:36,46`). Sending them unconditionally, on
+      # the open path too, would ask that endpoint a parameter it does not define.
+      base_params =
+        if history? do
+          %{"account_id" => account_id}
+          |> put_present("start_time", iso_millis(Keyword.get(opts, :since)))
+          |> put_present("end_time", iso_millis(Keyword.get(opts, :until)))
+        else
+          %{"account_id" => account_id}
+        end
 
-      with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, order_rows} <- rows(body) do
-        # An order with no `client_order_id` is one a caller cannot cancel, amend or look up
-        # again, and the envelope bug above produced exactly that — so it is dropped here,
-        # by the same rule `to_watchlist/2` already applies: "a nil key there is worse than
-        # one fewer row this cycle". `Core.Types.Order` admits `id: nil` for acknowledgements
-        # that carry an id and little else; a LIST of orders is not that case.
-        {:ok, order_rows |> Enum.map(&to_order/1) |> Enum.reject(&is_nil(&1.id))}
+      fetch_page = fn key ->
+        params = put_present(base_params, "pagination_key", key)
+
+        with {:ok, body} <- get(path, params, credentials, opts),
+             {:ok, page_rows} <- rows(body) do
+          {:ok, {page_rows, next_pagination_key(body)}}
+        end
+      end
+
+      with {:ok, order_rows} <- paginate(fetch_page) do
+        # A group this package cannot decode into one `Order` — no `orders`, or a
+        # multi-order combo `to_order/1` refuses (see its own comment) — is dropped here,
+        # the same rule `to_watchlist/2` already applies: "a nil key there is worse than
+        # one fewer row this cycle". `Core.Types.Order` admits `id: nil` for
+        # acknowledgements that carry an id and little else; a LIST of orders is not that
+        # case, so a decode failure is dropped rather than surfaced as `id: nil`.
+        {:ok,
+         order_rows
+         |> Enum.map(&to_order/1)
+         |> Enum.filter(&match?({:ok, %Order{id: id}} when is_binary(id), &1))
+         |> Enum.map(fn {:ok, order} -> order end)}
       end
     end
   end
 
-  # The venue's own order row. Anything it names that this package does not recognise
-  # becomes `nil` rather than the nearest atom.
+  # The venue's own order GROUP — `{client_order_id, combo_order_id, combo_type, orders:
+  # [leg, ...]}` (`order-detail.md:163,182`), the same envelope `/orders/get`,
+  # `/orders/open-orders/list` and `/orders/historical-orders/list` all return one or more
+  # of. A single-leg group (`combo_type: "NORMAL"`, one entry in `orders`) decodes onto
+  # `Core.Types.Order` directly, from that one leg.
   #
-  # `stop_price`/`stopPrice` follows the exact dual-naming convention already proven
-  # correct for every other field on this same row (`limit_price`/`limitPrice`,
-  # `avg_filled_price`/`avgFilledPrice`, …) — it was missing entirely before this fix, so a
-  # caller reading back their own STOP_LOSS or STOP_LOSS_LIMIT order via `get_order/3` or
-  # `get_orders/2` got `stop_price: nil` regardless of what the venue actually reported,
-  # even though `Core.Types.Order` carries the field for exactly this purpose. Not
-  # independently re-verified against a rendered schema capture the way `replace_order/4`'s
-  # own field table was — flagged here rather than presented as measured.
-  defp to_order(row) do
-    %Order{
-      id: value(row, ["client_order_id", "clientOrderId"]),
-      symbol: row |> value(["symbol"]) |> canonical_or_nil(),
-      side: row |> value(["side"]) |> side_atom(),
-      order_type: row |> value(["order_type", "orderType"]) |> order_type_atom(),
-      time_in_force: row |> value(["time_in_force", "timeInForce"]) |> tif_atom(),
-      quantity: decimal(value(row, ["qty", "quantity"])),
-      filled_quantity: decimal(value(row, ["filled_qty", "filledQty"])),
-      price: decimal(value(row, ["limit_price", "limitPrice"])),
-      stop_price: decimal(value(row, ["stop_price", "stopPrice"])),
-      average_price: decimal(value(row, ["avg_filled_price", "avgFilledPrice"])),
-      status: row |> value(["order_status", "status"]) |> status_atom(),
-      provider: :webull
-    }
+  # **A multi-leg group is refused, not decomposed.** `Types.OrderLeg`'s own moduledoc says
+  # what a leg means here: "the exchange accepts each as a single order and fills it as a
+  # unit or not at all". Webull's own combo types are not that — `MASTER`/`STOP_PROFIT`/
+  # `STOP_LOSS` is a parent order plus contingent orders that may never fire, and
+  # `OCO`/`OTO`/`OTOCO` are alternative or triggered orders, not a spread filled as one
+  # (`order-detail.md:182`'s own combo_type table). Representing them with `OrderLeg.ratio`
+  # would assert a fill guarantee the venue does not make. Unlike Schwab's spread legs
+  # (`dp-exchange-schwab`'s `Orders.leg_fields/1`), where the venue's `orderLegCollection`
+  # genuinely is one strategy filled together, nothing here is misdescribed by refusing.
+  defp to_order(%{"orders" => [leg]} = group) when is_map(leg) do
+    {:ok,
+     %Order{
+       id: value(group, ["client_order_id", "clientOrderId"]) || leg_id(leg),
+       symbol: leg |> value(["symbol"]) |> canonical_or_nil(),
+       side: leg |> value(["side"]) |> side_atom(),
+       order_type: leg |> value(["order_type", "orderType"]) |> order_type_atom(),
+       time_in_force: leg |> value(["time_in_force", "timeInForce"]) |> tif_atom(),
+       quantity: decimal(value(leg, ["total_quantity", "totalQuantity"])),
+       filled_quantity: decimal(value(leg, ["filled_quantity", "filledQuantity"])),
+       price: decimal(value(leg, ["limit_price", "limitPrice"])),
+       stop_price: decimal(value(leg, ["stop_price", "stopPrice"])),
+       # `filled_price` is documented as "Average transaction price of the filled
+       # quantity" (`order-detail.md`) — `Core.Types.Order.average_price`'s own meaning,
+       # not a separate field. The venue names no `avg_filled_price` anywhere this
+       # package's own reference pages cover; that key was never proven, only assumed.
+       average_price: decimal(value(leg, ["filled_price", "filledPrice"])),
+       status: leg |> value(["status"]) |> status_atom(),
+       provider: :webull
+     }}
   end
+
+  defp to_order(%{"orders" => [_first | _rest]} = group),
+    do: {:error, {:unsupported_combo_type, Map.get(group, "combo_type")}}
+
+  defp to_order(%{"orders" => []}), do: {:error, {:missing_required_field, :orders}}
+  defp to_order(_other), do: {:error, :unexpected_response_shape}
+
+  defp leg_id(leg), do: value(leg, ["client_order_id", "clientOrderId"])
 
   defp canonical_or_nil(nil), do: nil
   # Only a string is a symbol. A map or a list used to reach
@@ -4026,17 +4605,35 @@ defmodule DpExchange.Webull.Rest do
 
   defp canonical_or_nil(_absent), do: nil
 
+  # `order-detail.md:182`'s own `side` enum names `SHORT` beside `BUY`/`SELL`, and
+  # `Core.Types.Order.side/0` is `:buy | :sell` — Core has no third slot for it. `nil` is
+  # the honest answer for `SHORT` here, the same rule `Types.Order`'s own moduledoc states
+  # for Coinbase's `close_position/3`: the venue's word, or nothing, never the nearest atom.
   defp side_atom("BUY"), do: :buy
   defp side_atom("SELL"), do: :sell
   defp side_atom(_other), do: nil
 
+  # `order-detail.md:215`'s documented `status` enum is exactly six values: `PENDING`,
+  # `SUBMITTED`, `CANCELLED`, `FILLED`, `FAILED`, `PARTIAL_FILLED`. `WORKING`, the
+  # single-`L` `CANCELED`, `REJECTED` and `EXPIRED` are not among them and are removed here
+  # rather than kept on the strength of an earlier, unrecorded measurement — nothing in
+  # `docs/reference/webull/` attests any of the four live, so keeping them would be
+  # presenting a guess as a documented mapping.
+  #
+  # `PARTIAL_FILLED` is `Core.Types.Order.status/0`'s own `:partially_filled`, not `:open`
+  # — the two are different claims (some of the order filled, vs. none of it), and this
+  # sent the wrong one for every partially filled order read back.
+  #
+  # `FAILED` maps to `:rejected` on the vendor's OWN equivalence, not this package's: its
+  # description reads "Indicates a failed order, such as REJECTED" — the venue naming its
+  # own FAILED status as the rejected-order case. `SUBMITTED` gets no such statement
+  # anywhere on the page ("submitted to the exchange or webull" says nothing about whether
+  # the order is working), and `Core.Types.Order.status/0` has no slot for "submitted,
+  # outcome unknown" — so it stays `nil` rather than being guessed as `:open`.
   defp status_atom("PENDING"), do: :pending
-  defp status_atom("WORKING"), do: :open
-  defp status_atom("PARTIAL_FILLED"), do: :open
+  defp status_atom("PARTIAL_FILLED"), do: :partially_filled
   defp status_atom("FILLED"), do: :filled
   defp status_atom("CANCELLED"), do: :cancelled
-  defp status_atom("CANCELED"), do: :cancelled
-  defp status_atom("REJECTED"), do: :rejected
-  defp status_atom("EXPIRED"), do: :expired
+  defp status_atom("FAILED"), do: :rejected
   defp status_atom(_other), do: nil
 end

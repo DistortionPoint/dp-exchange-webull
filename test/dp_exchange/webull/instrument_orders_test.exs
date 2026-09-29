@@ -349,7 +349,10 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert_receive {:sent, body, _path}
       leaf = body["new_orders"] |> List.first()
       assert leaf["entrust_type"] == "AMOUNT"
-      assert leaf["amount"] == "1000"
+      # `common-order-place.md:292` names `total_cash_amount`, not `amount` — no page
+      # defines an `amount` field.
+      assert leaf["total_cash_amount"] == "1000"
+      refute Map.has_key?(leaf, "amount")
     end
   end
 
@@ -539,7 +542,10 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
     test "a LIMIT order takes price, quantity and time in force" do
       me = self()
 
-      # The venue's replace answers without an order, so the package reads it back.
+      # The venue's replace answers without an order, so the package reads it back. The
+      # read-back is a GROUP — `{combo_type, orders: [...]}` (order-detail.md:163,182) —
+      # not a bare row; `status: "PENDING"` because `WORKING` is not in the venue's
+      # documented enum any more (see `order_mapping_test.exs`).
       plug = fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         send(me, {:sent, conn.request_path, raw})
@@ -547,7 +553,12 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
         body =
           if conn.request_path =~ "replace",
             do: %{},
-            else: [%{"client_order_id" => "abc", "order_status" => "WORKING"}]
+            else: [
+              %{
+                "combo_type" => "NORMAL",
+                "orders" => [%{"client_order_id" => "abc", "status" => "PENDING"}]
+              }
+            ]
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
@@ -567,14 +578,62 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert_receive {:sent, replace_path, raw}
       assert replace_path == "/trading/orders/replace"
       sent = Jason.decode!(raw)
-      assert sent["client_order_id"] == "abc"
-      assert sent["limit_price"] == "191.00"
-      assert sent["quantity"] == "5"
+      # `common-order-replace.md:141,150` requires `account_id` plus a `modify_orders`
+      # array, each entry keyed on its own `client_order_id` — not a flat body with
+      # `client_order_id` beside `account_id`, which is what this endpoint received before
+      # the fix (and which the venue's schema has no field to receive).
+      assert sent["account_id"] == @account
+      refute Map.has_key?(sent, "client_order_id")
+      modification = sent["modify_orders"] |> List.first()
+      assert modification["client_order_id"] == "abc"
+      assert modification["limit_price"] == "191.00"
+      assert modification["quantity"] == "5"
 
       # The order was read back, not reported from the request.
       assert_receive {:sent, read_path, _raw2}
       assert read_path == "/trading/orders/get"
       assert order.id == "abc"
+    end
+
+    test "order_type is sent when the caller's changes include it" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, conn.request_path, raw})
+
+        body =
+          if conn.request_path =~ "replace",
+            do: %{},
+            else: [
+              %{
+                "combo_type" => "NORMAL",
+                "orders" => [%{"client_order_id" => "abc", "status" => "PENDING"}]
+              }
+            ]
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      # `order_type: :market` passes `@amendable[:limit]`'s check (it names `:order_type`
+      # among the fields a LIMIT order may amend) but was never read out of `changes` onto
+      # the wire before this fix — silently dropping the one field the caller asked to
+      # change.
+      assert {:ok, _order} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{order_type: :market, quantity: Decimal.new("5")},
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, "/trading/orders/replace", raw}
+      modification = raw |> Jason.decode!() |> Map.get("modify_orders") |> List.first()
+      assert modification["order_type"] == "MARKET"
     end
 
     test "a replace that times out is not sent again" do

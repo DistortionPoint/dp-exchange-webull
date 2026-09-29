@@ -239,7 +239,10 @@ defmodule DpExchange.Webull.FakeTest do
 
     test "open and historical are different questions here too" do
       assert {:ok, [open]} = Fake.get_orders(@credentials, @order_opts)
-      assert open.status == :open
+      # `:pending`, not `:open` — `order-detail.md:215`'s documented `status` enum has no
+      # `WORKING`/`OPEN` member, so the real decode path (`Rest.to_order/1`) can never
+      # produce `:open` here; see `fake_order/0`'s own comment.
+      assert open.status == :pending
 
       assert {:ok, [done]} = Fake.get_orders(@credentials, [history: true] ++ @order_opts)
       assert done.status == :filled

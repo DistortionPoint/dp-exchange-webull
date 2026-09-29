@@ -558,8 +558,16 @@ defmodule DpExchange.Webull.RestTest do
     end
 
     test "data: {object} is that object as one row, not its wrapper" do
-      order = %{"client_order_id" => "c-1", "symbol" => "AAPL", "side" => "BUY"}
-      envelope = %{"code" => "200", "data" => order}
+      # `/trading/orders/get`-shaped rows: a GROUP — `{combo_type, orders: [leg]}`
+      # (order-detail.md:163,182) — not a flat row. `rows/1`'s own unwrapping (a `data`
+      # object becomes a one-element list) is the thing under test here; `to_order/1`'s own
+      # group-vs-leg parsing is covered separately in `order_mapping_test.exs`.
+      group = %{
+        "combo_type" => "NORMAL",
+        "orders" => [%{"client_order_id" => "c-1", "symbol" => "AAPL", "side" => "BUY"}]
+      }
+
+      envelope = %{"code" => "200", "data" => group}
 
       assert {:ok, [%{id: "c-1", symbol: "AAPL"}]} =
                Rest.get_orders(@credentials,
@@ -573,8 +581,11 @@ defmodule DpExchange.Webull.RestTest do
       # A caller cannot cancel, amend or look up an order with no identity. Webull's own rule,
       # from `to_watchlist/2`: "a nil key there is worse than one fewer row this cycle".
       rows = [
-        %{"symbol" => "AAPL", "side" => "BUY"},
-        %{"client_order_id" => "c-2", "side" => "SELL"}
+        %{"combo_type" => "NORMAL", "orders" => [%{"symbol" => "AAPL", "side" => "BUY"}]},
+        %{
+          "combo_type" => "NORMAL",
+          "orders" => [%{"client_order_id" => "c-2", "side" => "SELL"}]
+        }
       ]
 
       assert {:ok, [%{id: "c-2"}]} =
@@ -586,7 +597,11 @@ defmodule DpExchange.Webull.RestTest do
 
       assert {:error, {:missing_required_field, :id}} =
                Rest.get_order(@credentials, "c-1",
-                 plug: answering(%{"symbol" => "AAPL"}),
+                 plug:
+                   answering(%{
+                     "combo_type" => "NORMAL",
+                     "orders" => [%{"symbol" => "AAPL"}]
+                   }),
                  retry_attempts: 0,
                  account_id: "acct"
                )

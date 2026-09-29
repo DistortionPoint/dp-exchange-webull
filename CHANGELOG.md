@@ -22,6 +22,39 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Checked against the vendor's own reference pages, fetched 2026-09-29 and now committed under
+`docs/reference/webull/openapi/`.
+
+- **Orders carried no size the venue reads.** `place_order/3`, `preview_order/3` and
+  `place_orders/3` sent `qty`/`amount`; the documented fields are `quantity` and
+  `total_cash_amount`.
+- `replace_order/4` sends the documented `modify_orders` list, and sends `order_type` when it
+  is changed; it sent a flat body and dropped `order_type`.
+- Orders are decoded from the documented group envelope (`orders: [...]`). Symbol, side,
+  type, status and sizes were read off the group and were always `nil`. A multi-leg combo is
+  refused with `{:error, {:unsupported_combo_type, _}}`. Statuses map the documented enum.
+- `get_orders/2` follows `pagination_key` (bounded), stops sending an undefined `page_size`,
+  and sends `:since`/`:until` as `start_time`/`end_time` for history.
+- `place_orders/3` validates against the batch endpoint's own narrower rules (MARKET or
+  LIMIT, DAY, quantity only) and requires `support_trading_session`.
+- Stock and option bars decode the documented `{"result": [...]}` envelope, which failed
+  before. Bars carry the documented `volume`. Option bars refuse a range the endpoint
+  cannot honour, rather than filtering the latest bars down to nothing.
+- The option chain sends `underlying_symbols`, `start_date`/`end_date` and the strike
+  bounds, reads `expiration_date`, `settlement_method` and `expired_cycle`, and follows
+  `pagination_key`. Every row failed to decode before.
+- Transfers, transactions, market sectors and fund dividends follow `pagination_key` and
+  stop sending parameters the endpoints do not define.
+- `get_filings/2` reads the `filings` list; corporate events read `ex_div_date`,
+  `declare_date` and `expected_publish_date`; `get_news/2` decodes the documented
+  Server-Sent Events stream, which failed on every call.
+- Screener defaults use values from each endpoint's enum; `week52_high_low` requires a
+  `rank_type`. ETFs are requested as `sub_category=ETF`.
+- `get_top_of_book/3` refuses `US_EVENT`, whose snapshot has two books, instead of
+  returning `nil` prices.
+
 ## [0.4.91] - 2026-09-29
 
 ### Fixed

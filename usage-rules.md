@@ -380,9 +380,12 @@ is `nil`, never `0` — zero would look like a real measurement of no trading.
 package-wide boolean cannot say "true for equities, false for crypto," and `false` would
 be an under-declaration of a venue capability this package already reaches. Branch on
 `opts[:category]`, not on the boolean alone, if the distinction matters to you: `nil` on a
-crypto call, a real aggregate on a stock or ETF call. Bars carry no volume on any category,
-and `get_volume_profile/3` is the equity endpoint that splits traded volume by price and
-side.
+crypto call, a real aggregate on a stock or ETF call. **Bars are the same split, not a
+blanket "no volume":** the stock, option, futures and event bar endpoints each document a
+required `volume` on their own bar row, and this package now carries it through; only the
+crypto bar endpoint documents none, and `volume` stays `nil` there — never `0`, for the
+same reason as the crypto snapshot. `get_volume_profile/3` remains the separate equity
+endpoint that splits traded volume by price and side.
 
 That is a different claim from `Trade.quantity` — the streamed tape and `get_trades/2`
 both report **one print's own size**, which the venue does publish. This package does not
@@ -431,25 +434,20 @@ DpExchange.Webull.adjusted?("1d")  #=> true
 DpExchange.Webull.adjusted?("1m")  #=> false
 ```
 
-## `get_orders/2` returns ONE page, and cannot yet return more
+## `get_orders/2` follows `pagination_key` to the end, bounded
 
-The venue paginates its order lists. This package does not follow that pagination, so a
-caller with more orders than one page holds gets a prefix of them — **every order in it
-real, and nothing saying which are missing.** Reconciling positions against it would find a
-difference with no explanation in the data.
+`/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` both
+document `pagination_key` — the venue's own reference pages, not just its endpoint
+inventory — and this package walks it the same way `get_symbols/2` walks the instrument
+catalogue's: to the end, or `{:error, {:too_many_pages, n}}` on a bound, or
+`{:error, :pagination_key_did_not_advance}` on a repeated key. `get_orders/2` returns the
+whole set the venue holds for the request, not a prefix.
 
-`opts[:limit]` is passed through as the venue's `page_size`, so the largest page the venue
-allows is the most this returns.
-
-**Why it is not simply fixed.** The venue's published endpoint inventory documents
-`/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` but not the
-parameter that requests the next page. This package walks a cursor wherever the venue
-documents one — `get_symbols/2` does exactly that, bounded, and refuses a key that does not
-advance — and it will not guess a parameter name here, because a wrong one is silently
-ignored by most APIs and would turn a visible limit into an invisible one.
-
-Until that parameter is confirmed against the live venue, treat a full page as "there may be
-more" rather than as the whole set.
+**`opts[:limit]` is no longer read.** Neither endpoint documents a `page_size` parameter —
+sending one asked the venue a field it does not define, and did not actually bound the
+walk (there was no walk). `history: true` accepts `opts[:since]`/`opts[:until]`
+(`DateTime`s) instead, sent as the documented `start_time`/`end_time`; omitted, the venue
+answers the last 7 days, its own default.
 
 ## Timestamps come from the venue, or the call fails
 
@@ -480,14 +478,20 @@ that is a real shape, not an unreadable one.
 
 ## A row the venue did not identify is dropped, not given an empty id
 
-As of 0.4.38, `get_screener/2`, `get_news/1` and `list_watchlists/1` drop a row that cannot
-supply its own identifying field rather than publishing it with `""`.
+As of 0.4.38, `get_screener/2` and `list_watchlists/1` drop a row that cannot supply its
+own identifying field rather than publishing it with `""`.
 
 An empty string is worse than the `nil` it replaced: a `nil` is detectable and `""` is a
-value, so a consumer keying coverage by symbol used to get a live entry named `""`, and one
-deduplicating news by id collapsed every unidentified story into a single entry. The news
-case was the worst — an absent id fell back to the **ticker symbol**, which looks like an id
-and collides for every story about that symbol.
+value, so a consumer keying coverage by symbol used to get a live entry named `""`.
+
+**`get_news/1` no longer has "rows" to drop.** It reads Server-Sent Events, one generated
+reply per call, not a JSON list of independently-published stories each naming their own
+id — see the news paragraph above. The old fallback on that JSON shape, before the endpoint
+was corrected, was an absent id falling back to the **ticker symbol**, which looks like an
+id and collides for every story about that symbol; that whole failure mode is gone with
+the JSON-list assumption it depended on. What replaces it: a stream with no conversation id
+in its `meta` event is `{:error, {:missing_required_field, :id}}` rather than a fabricated
+one, since `Types.NewsItem.id` is required.
 
 **So a shorter list is not an error, and the venue's own ranking is preserved.** A dropped
 screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
@@ -712,9 +716,16 @@ the label `nil` rather than inventing one.
 **`get_corporate_events/1` needs `:symbol`** — these calendars are per issuer, not
 market-wide — and without `:kind` reads *both* calendars, which is two requests.
 
-**`get_news/1` is generated, not reported.** The vendor's own description is "invokes LLM to
-generate news summaries", so each `summary` is a model's paraphrase and `source` names the
-venue rather than a wire. If you quote it, you are quoting a summary.
+**`get_news/1` is generated, not reported — and answers one item, not a list of stories.**
+The vendor's own description is "invokes LLM to generate news summaries", and the endpoint
+itself answers Server-Sent Events (`event:message\ndata:{"type":"text","message":...}`
+chunks), not a JSON list — this package concatenates the chunks into one `summary` and
+returns it as a single-element list, `:id` taken from the stream's own conversation id
+(`convId`, falling back to `sessionId`). `source` names the venue rather than a wire; if
+you quote `summary`, you are quoting a paraphrase, not the publisher's text. Before this
+was corrected, every call returned `{:error, {:undecodable_response, :webull}}` — the
+generic JSON decoder this package's other POST calls share cannot parse an SSE body, so the
+endpoint never actually worked.
 
 **A screener's rank is the position the venue returned the row in.** Nothing is re-ranked:
 two venues' "top movers" answer different questions, and so do one venue's under two sorts.
@@ -774,6 +785,15 @@ request into several.
 **The result is per order.** The venue validates each and returns each; a batch where three
 of five were accepted is the normal shape. The vendor also notes the endpoint is not
 available to every client, so a refusal can mean the account is not entitled.
+
+**The batch endpoint's own matrix is narrower than `place_order/3`'s, and it is checked
+against, not discovered.** `order_type` is `MARKET` or `LIMIT` only — no `STOP_LOSS`,
+`STOP_LOSS_LIMIT` or `TRAILING_STOP_LOSS`, all real for a single order.
+`time_in_force` is `DAY`, the one member of this endpoint's own enum; a caller who asks
+for anything else is refused rather than silently switched to `DAY`. Sizing is `QTY`
+only — `:amount` is refused here, where `place_order/3` accepts it for equities. And
+`:support_trading_session` (`:core`, `:all` or `:night`) is **required per order**, with
+no documented venue default, unlike on `place_order/3` where it is optional.
 
 ## Tokens: a token that exists is not a token that works
 

@@ -60,6 +60,32 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     end
   end
 
+  # Server-Sent Events — the real shape `news-summary.md:195` documents for
+  # `POST /market-data/news/summaries/get`, and the only endpoint in this file that
+  # answers this way rather than with JSON. `events` is a list of maps, each becoming one
+  # `event:message\ndata:{...}` frame.
+  defp sse_body(events),
+    do: Enum.map_join(events, "\n\n", &"event:message\ndata:#{Jason.encode!(&1)}")
+
+  defp sse_responding(events) do
+    fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("text/event-stream")
+      |> Plug.Conn.resp(200, sse_body(events))
+    end
+  end
+
+  defp sse_capturing(events, test_pid) do
+    fn conn ->
+      {:ok, raw, conn} = Plug.Conn.read_body(conn)
+      send(test_pid, {:request, conn.method, conn.request_path, conn.query_string, raw})
+
+      conn
+      |> Plug.Conn.put_resp_content_type("text/event-stream")
+      |> Plug.Conn.resp(200, sse_body(events))
+    end
+  end
+
   describe "the fundamentals table" do
     test "every kind names a path, and there are twenty-three of them" do
       kinds = Rest.fundamental_kinds()
@@ -150,6 +176,47 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
       assert row["total_assets"] == "379297000000"
     end
+
+    # `fund-files.md`, `fund-holdings.md` and `fund-splits.md` each document only `symbol`
+    # and `category` — no `count`, unlike `capital_flows` above.
+    for kind <- [:fund_files, :fund_holdings, :fund_splits] do
+      test "#{kind} does not send count, which its own page does not define" do
+        me = self()
+
+        assert {:ok, []} =
+                 Rest.get_fundamental(unquote(kind), "AAPL", @credentials,
+                   count: 5,
+                   plug: capturing([], me),
+                   retry_attempts: 0
+                 )
+
+        assert_receive {:request, "GET", _path, query, _raw}
+        refute query =~ "count="
+      end
+    end
+
+    test "fund_dividends follows pagination_key bounded, and sends no count" do
+      # `fund-dividends.md:36-73` documents `symbol`, `category` and `pagination_key` — no
+      # `count`.
+      plug = fn conn ->
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=page-2") do
+            [%{"ex_date" => "2026-06-01"}]
+          else
+            %{"data" => [%{"ex_date" => "2026-03-01"}], "pagination_key" => "page-2"}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, [%{"ex_date" => "2026-03-01"}, %{"ex_date" => "2026-06-01"}]} =
+               Rest.get_fundamental(:fund_dividends, "AAPL", @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "get_financials/4" do
@@ -239,11 +306,13 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     test "a kind narrows it to one request" do
       me = self()
 
+      # `dividend-calendar.md:202,207` names `ex_div_date` and `declare_date` — not
+      # `ex_dividend_date`/`announce_date`, which no page defines.
       assert {:ok, [event]} =
                Rest.get_corporate_events(@credentials,
                  symbol: "AAPL",
                  kind: :dividend,
-                 plug: capturing([%{"ex_dividend_date" => "2026-08-10", "amount" => "0.25"}], me),
+                 plug: capturing([%{"ex_div_date" => "2026-08-10", "amount" => "0.25"}], me),
                  retry_attempts: 0
                )
 
@@ -257,16 +326,24 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       refute_receive {:request, "GET", _other, _q2, _r2}
     end
 
-    test "confirmed is nil, because the venue publishes no such flag" do
-      # `true` would claim a date is final when an earnings date routinely is not.
+    test "an earnings row's date is expected_publish_date, carried under announced_date" do
+      # `earnings-calendar.md:185` — `Core.Types.CorporateEvent` has no earnings-specific
+      # date field, so the venue's one published date for this calendar goes under
+      # `:announced_date`; `ex_date`/`record_date`/`pay_date` stay `nil` because they are
+      # dividend vocabulary an earnings row has no business populating.
       assert {:ok, [event]} =
                Rest.get_corporate_events(@credentials,
                  symbol: "AAPL",
                  kind: :earnings,
-                 plug: responding([%{"announce_date" => "2026-08-01"}]),
+                 plug: responding([%{"expected_publish_date" => "2026-08-01"}]),
                  retry_attempts: 0
                )
 
+      assert event.kind == :earnings
+      assert event.announced_date == ~D[2026-08-01]
+      assert event.ex_date == nil
+      # `true` would claim a date is final when an earnings date routinely is not; the
+      # venue publishes no confirmed/estimated flag on either calendar.
       assert event.confirmed == nil
     end
 
@@ -279,15 +356,23 @@ defmodule DpExchange.Webull.ReferenceDataTest do
   end
 
   describe "get_filings/3 and get_news/2" do
+    # `filings.md:176` documents `{symbol, category, filings: [{title, url,
+    # publish_date}]}` — the list under `filings`, not `data`, which `get_fundamental/4`'s
+    # generic `rows/1` cannot see on its own; a bare array of filing rows, which this
+    # fixture used to send, is not this endpoint's real shape.
     test "a filing points at a url and nothing follows it" do
-      body = [
-        %{
-          "id" => "f-1",
-          "form_type" => "10-Q",
-          "title" => "Quarterly report",
-          "url" => "https://example.invalid/f-1"
-        }
-      ]
+      body = %{
+        "symbol" => "AAPL",
+        "category" => "US_STOCK",
+        "filings" => [
+          %{
+            "id" => "f-1",
+            "form_type" => "10-Q",
+            "title" => "Quarterly report",
+            "url" => "https://example.invalid/f-1"
+          }
+        ]
+      }
 
       assert {:ok, [filing]} =
                Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
@@ -302,7 +387,11 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                Rest.get_news(@credentials,
                  symbols: ["AAPL", "GOOG"],
                  lang: "en",
-                 plug: capturing([%{"title" => "x"}], me),
+                 plug:
+                   sse_capturing(
+                     [%{"type" => "meta", "args" => %{"convId" => 1}}],
+                     me
+                   ),
                  retry_attempts: 0
                )
 
@@ -321,18 +410,58 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {:error, :symbols_required} = Rest.get_news(@credentials, [])
     end
 
+    # `news-summary.md:195` documents this endpoint's `200` as a Server-Sent Events
+    # stream — `event:message\ndata:{"type":"text","message":...}` chunks concatenated
+    # into one generated reply, not a JSON list of independently-published items. The
+    # vendor's own description is "invokes LLM to generate news summaries"; naming a
+    # publisher would attribute a paraphrase to them.
     test "the source is the venue, because the summary is generated" do
-      # The vendor's own description is "invokes LLM to generate news summaries". Naming a
-      # publisher would attribute a paraphrase to them.
+      events = [
+        %{"type" => "meta", "args" => %{"convId" => "n-1"}},
+        %{"type" => "text", "message" => "y"}
+      ]
+
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
-                 plug: responding([%{"id" => "n-1", "title" => "x", "summary" => "y"}]),
+                 plug: sse_responding(events),
                  retry_attempts: 0
                )
 
+      assert item.id == "n-1"
       assert item.source == "webull"
       assert item.symbols == ["AAPL"]
+      assert item.summary == "y"
+    end
+
+    test "text chunks are concatenated in the order the venue sent them" do
+      events = [
+        %{"type" => "meta", "args" => %{"sessionId" => "s-1"}},
+        %{"type" => "text", "message" => "Hi"},
+        %{"type" => "text", "message" => ", I'm Wally an"},
+        %{"type" => "text", "message" => "d I'll help you with this question"}
+      ]
+
+      assert {:ok, [item]} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: sse_responding(events),
+                 retry_attempts: 0
+               )
+
+      assert item.id == "s-1"
+      assert item.summary == "Hi, I'm Wally and I'll help you with this question"
+    end
+
+    test "a stream with no meta event has no conversation id, so it is refused" do
+      events = [%{"type" => "text", "message" => "orphaned text"}]
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: sse_responding(events),
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -371,24 +500,28 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert second.rank == 3, "the survivor keeps the position the venue returned it in"
     end
 
-    test "a news row with no id is dropped rather than published under the ticker" do
-      # The old fallback was `value(row, ["id", "news_id"]) || value(row, ["symbol"]) || ""`.
-      # A ticker as an item id is the worst of the three: it looks like an id, and it
-      # collides for every item about the same symbol, so a consumer deduplicating by id
-      # silently keeps one story per ticker.
-      rows = [
-        %{"id" => "n-1", "title" => "real"},
-        %{"symbol" => "AAPL", "title" => "no id of its own"}
+    # This news endpoint answers Server-Sent Events, one generated reply per call
+    # (`news-summary.md:195`) rather than a JSON list of independently-published rows each
+    # naming their own id — see `get_filings/3 and get_news/2`'s own describe block for
+    # the full coverage of that shape. `:id` here is the venue's own conversation id
+    # (`convId`, falling back to `sessionId`), never a symbol used as a stand-in: the old
+    # fallback on a JSON row was `value(row, ["id", "news_id"]) || value(row, ["symbol"])
+    # || ""`, and a ticker as an item id is the worst of the three — it looks like an id
+    # and collides for every item about the same symbol.
+    test "the news item's id prefers convId over sessionId, never a symbol" do
+      events = [
+        %{"type" => "meta", "args" => %{"sessionId" => "s-1", "convId" => 42}},
+        %{"type" => "text", "message" => "x"}
       ]
 
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
-                 plug: responding(rows),
+                 plug: sse_responding(events),
                  retry_attempts: 0
                )
 
-      assert item.id == "n-1"
+      assert item.id == "42"
     end
 
     test "a watchlist row with no id is dropped" do
@@ -497,6 +630,86 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
       assert row.symbol == "Technology"
     end
+
+    # `get-top-active.md:51-57` documents `VOLUME` as this screener's own default —
+    # `DAY_1` is `gainers_losers`'s ranking window and was never a member of
+    # `top_actives`'s `rank_type` enum at all.
+    test "top_actives defaults rank_type to VOLUME, not gainers_losers's DAY_1" do
+      me = self()
+
+      assert {:ok, _rows} =
+               Rest.get_screener("top_actives", @credentials,
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", _path, query, _raw}
+      assert query =~ "rank_type=VOLUME"
+    end
+
+    # `get-week-52-high-low.md:44` documents four `rank_type` values and no default —
+    # unlike `top_actives`, a caller who does not say which rank is refused rather than
+    # given a guess at one of the four.
+    test "week52_high_low requires rank_type — its page names no default" do
+      exploding = fn _conn -> raise "must not guess a rank_type this endpoint never defaulted" end
+
+      assert {:error, :rank_type_required} =
+               Rest.get_screener("week52_high_low", @credentials,
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:ok, _rows} =
+               Rest.get_screener("week52_high_low", @credentials,
+                 rank_type: "NEW_HIGH",
+                 plug: responding([]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "market_sector sends sort_by, not agg_type — that belongs to market_sectors" do
+      # `get-market-sectors-detail.md:73-90` documents `sort_by` on this endpoint (the
+      # singular, `/get`); `agg_type` is `get-market-sectors.md:47-60`'s own parameter, on
+      # the plural `/list` endpoint, and was sent on the wrong one of the two before this.
+      me = self()
+
+      assert {:ok, _rows} =
+               Rest.get_screener("market_sector", @credentials,
+                 sector_id: "6391",
+                 sort_by: "VOLUME",
+                 plug: capturing([], me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", path, query, _raw}
+      assert path == "/market-data/screeners/market-sectors/get"
+      assert query =~ "sort_by=VOLUME"
+      refute query =~ "agg_type"
+    end
+
+    test "market_sectors and market_sector both follow pagination_key, bounded" do
+      for name <- ["market_sectors", "market_sector"] do
+        plug = fn conn ->
+          body =
+            if String.contains?(conn.query_string || "", "pagination_key=page-2") do
+              [%{"sector_name" => "Energy"}]
+            else
+              %{"data" => [%{"sector_name" => "Technology"}], "pagination_key" => "page-2"}
+            end
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!(body))
+        end
+
+        assert {:ok, [%{symbol: "Technology"}, %{symbol: "Energy"}]} =
+                 Rest.get_screener(name, @credentials,
+                   sector_id: "1",
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+      end
+    end
   end
 
   describe "the fake and the facade" do
@@ -567,11 +780,18 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                )
 
       assert {:ok, [_filing]} =
-               DpExchange.Webull.get_filings("AAPL", base ++ [plug: responding([%{}])])
+               DpExchange.Webull.get_filings(
+                 "AAPL",
+                 base ++ [plug: responding(%{"filings" => [%{"id" => "f-1"}]})]
+               )
 
       assert {:ok, [_item]} =
                DpExchange.Webull.get_news(
-                 base ++ [symbols: ["AAPL"], plug: responding([%{"id" => "n-1"}])]
+                 base ++
+                   [
+                     symbols: ["AAPL"],
+                     plug: sse_responding([%{"type" => "meta", "args" => %{"convId" => "n-1"}}])
+                   ]
                )
 
       assert {:ok, [_row]} =
@@ -633,31 +853,40 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     end
 
     test "a filing with no timestamp the reader knows leaves filed_at nil" do
-      assert {:ok, [filing]} =
-               Rest.get_filings("AAPL", @credentials,
-                 plug: responding([%{"id" => "f-1"}]),
-                 retry_attempts: 0
-               )
-
-      assert filing.filed_at == nil
-    end
-
-    test "a filing that carries one is read" do
-      body = [%{"id" => "f-1", "time" => "2026-08-31T10:15:30.691Z"}]
+      body = %{"symbol" => "AAPL", "filings" => [%{"id" => "f-1"}]}
 
       assert {:ok, [filing]} =
                Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert filing.filed_at.year == 2026
+      assert filing.filed_at == nil
+    end
+
+    # `filings.md:192` documents `publish_date` as a bare `YYYY-MM-DD`, not a
+    # `time`/timestamp field — `filed_at` is a `DateTime`, so midnight UTC on the venue's
+    # own date satisfies the type (see `filing_time/1`'s own comment).
+    test "a filing that carries a publish_date is read, at midnight UTC on that date" do
+      body = %{
+        "symbol" => "AAPL",
+        "filings" => [%{"id" => "f-1", "publish_date" => "2026-08-31"}]
+      }
+
+      assert {:ok, [filing]} =
+               Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert filing.filed_at == ~U[2026-08-31 00:00:00Z]
     end
 
     test "a single symbol reaches get_news/2 as a one-element list" do
       me = self()
 
-      assert {:ok, _news} =
+      assert {:ok, [_item]} =
                Rest.get_news(@credentials,
                  symbols: "AAPL",
-                 plug: capturing([%{}], me),
+                 plug:
+                   sse_capturing(
+                     [%{"type" => "meta", "args" => %{"convId" => 1}}],
+                     me
+                   ),
                  retry_attempts: 0
                )
 

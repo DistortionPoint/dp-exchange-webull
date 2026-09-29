@@ -282,7 +282,15 @@ defmodule DpExchange.Webull.DelegationTest do
     end
 
     test "cancel_order/3, get_order/3 and get_orders/2" do
-      order = [%{"client_order_id" => "abc", "order_status" => "WORKING"}]
+      # `/trading/orders/get`-shaped: a GROUP — `{combo_type, orders: [leg]}`
+      # (order-detail.md:163,182) — not a flat row; `status: "PENDING"` because `WORKING`
+      # is not in the venue's documented enum.
+      order = [
+        %{
+          "combo_type" => "NORMAL",
+          "orders" => [%{"client_order_id" => "abc", "status" => "PENDING"}]
+        }
+      ]
 
       assert {:ok, :cancelled} =
                Webull.cancel_order(
@@ -313,7 +321,12 @@ defmodule DpExchange.Webull.DelegationTest do
         body =
           if conn.request_path =~ "replace",
             do: %{},
-            else: [%{"client_order_id" => "abc", "order_status" => "WORKING"}]
+            else: [
+              %{
+                "combo_type" => "NORMAL",
+                "orders" => [%{"client_order_id" => "abc", "status" => "PENDING"}]
+              }
+            ]
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")

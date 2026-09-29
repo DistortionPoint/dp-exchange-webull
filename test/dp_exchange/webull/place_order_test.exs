@@ -152,12 +152,15 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       {:ok, plug: plug}
     end
 
+    # `common-order-place.md:287,292` names `quantity` and `total_cash_amount` — not
+    # `qty`/`amount`, which no page defines and which the venue never read.
     test "a quantity sizes in units, as QTY", %{plug: plug} do
       assert {:ok, _order} = place(limit_request(), plug: plug, account_id: @account)
 
       assert_receive {:sent, %{"new_orders" => [leaf]}}
       assert leaf["entrust_type"] == "QTY"
-      assert leaf["qty"] == "0.5"
+      assert leaf["quantity"] == "0.5"
+      refute Map.has_key?(leaf, "qty")
     end
 
     test "an amount sizes in cash, as AMOUNT", %{plug: plug} do
@@ -167,7 +170,8 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       assert_receive {:sent, %{"new_orders" => [leaf]}}
       assert leaf["entrust_type"] == "AMOUNT"
-      assert leaf["amount"] == "250"
+      assert leaf["total_cash_amount"] == "250"
+      refute Map.has_key?(leaf, "amount")
     end
 
     test "neither is an error, not a default" do
@@ -342,22 +346,30 @@ defmodule DpExchange.Webull.PlaceOrderTest do
   end
 
   describe "reading orders back" do
-    defp order_row(overrides \\ %{}) do
-      Map.merge(
-        %{
-          "client_order_id" => "abc",
-          "symbol" => "BTCUSD",
-          "side" => "BUY",
-          "order_type" => "LIMIT",
-          "time_in_force" => "GTC",
-          "order_status" => "WORKING",
-          "qty" => "0.5",
-          "filled_qty" => "0.1",
-          "limit_price" => "40000",
-          "avg_filled_price" => "40010"
-        },
-        overrides
-      )
+    # `/trading/orders/get` returns a GROUP — `{client_order_id, combo_order_id,
+    # combo_type, orders: [...]}` (order-detail.md:163,182) — the leg's own fields live
+    # inside `orders`, not on this envelope; `total_quantity`/`filled_quantity`/
+    # `filled_price` are the leg's documented names, not `qty`/`filled_qty`/
+    # `avg_filled_price`, which no page defines.
+    defp order_row(leg_overrides \\ %{}) do
+      leg =
+        Map.merge(
+          %{
+            "client_order_id" => "abc",
+            "symbol" => "BTCUSD",
+            "side" => "BUY",
+            "order_type" => "LIMIT",
+            "time_in_force" => "GTC",
+            "status" => "PENDING",
+            "total_quantity" => "0.5",
+            "filled_quantity" => "0.1",
+            "limit_price" => "40000",
+            "filled_price" => "40010"
+          },
+          leg_overrides
+        )
+
+      %{"combo_type" => "NORMAL", "orders" => [leg]}
     end
 
     test "get_order returns the venue's own view" do
@@ -373,15 +385,18 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert order.side == :buy
       assert order.order_type == :limit
       assert order.time_in_force == :gtc
-      assert order.status == :open
+      # PENDING is the closest "not yet filled" status `order-detail.md:215`'s own enum
+      # documents on this endpoint — the enum has no `WORKING`/`OPEN` member at all.
+      assert order.status == :pending
       assert Decimal.equal?(order.filled_quantity, Decimal.new("0.1"))
+      assert Decimal.equal?(order.average_price, Decimal.new("40010"))
       assert order.provider == :webull
     end
 
     test "a status this package does not recognise is nil, never a guess" do
       assert {:ok, order} =
                Rest.get_order(@credentials, "abc",
-                 plug: responding([order_row(%{"order_status" => "SOMETHING_NEW"})]),
+                 plug: responding([order_row(%{"status" => "SOMETHING_NEW"})]),
                  account_id: @account,
                  retry_attempts: 0
                )
@@ -389,15 +404,15 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert order.status == nil
     end
 
-    test "PARTIAL_FILLED is open, because the rest can still fill" do
+    test "PARTIAL_FILLED is :partially_filled, a different claim from :open" do
       assert {:ok, order} =
                Rest.get_order(@credentials, "abc",
-                 plug: responding([order_row(%{"order_status" => "PARTIAL_FILLED"})]),
+                 plug: responding([order_row(%{"status" => "PARTIAL_FILLED"})]),
                  account_id: @account,
                  retry_attempts: 0
                )
 
-      assert order.status == :open
+      assert order.status == :partially_filled
     end
 
     test "open and historical orders are different endpoints, not a filter" do
@@ -464,9 +479,9 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     assert_receive {:sent, body}
     leaf = body |> Map.get("new_orders") |> List.first()
 
-    assert leaf["qty"] == "0.00000001"
+    assert leaf["quantity"] == "0.00000001"
     assert leaf["limit_price"] == "150"
-    refute String.contains?(leaf["qty"], "E")
+    refute String.contains?(leaf["quantity"], "E")
     refute String.contains?(to_string(leaf["limit_price"]), "E")
   end
 

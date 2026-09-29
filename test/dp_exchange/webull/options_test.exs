@@ -58,11 +58,15 @@ defmodule DpExchange.Webull.OptionsTest do
     end
   end
 
+  # `option-contract-list.md:312` documents the response field as `expiration_date`, not
+  # `expire_date` — that is the REQUEST parameter's name, on a different field entirely,
+  # and reading the request's own name off the response found nothing on every row before
+  # this fix.
   defp contract(overrides \\ %{}) do
     Map.merge(
       %{
         "symbol" => "AAPL250320C00100000",
-        "expire_date" => "2026-03-20",
+        "expiration_date" => "2026-03-20",
         "strike_price" => "100",
         "direction" => "CALL",
         "multiplier" => "100"
@@ -105,7 +109,7 @@ defmodule DpExchange.Webull.OptionsTest do
     end
 
     test "two expiries are two keys" do
-      body = [contract(), contract(%{"expire_date" => "2026-06-19", "strike_price" => "120"})]
+      body = [contract(), contract(%{"expiration_date" => "2026-06-19", "strike_price" => "120"})]
 
       assert {:ok, chain} =
                Rest.get_option_chain("AAPL", @credentials,
@@ -137,7 +141,7 @@ defmodule DpExchange.Webull.OptionsTest do
                  retry_attempts: 0
                )
 
-      assert "expire_date" in keys
+      assert "expiration_date" in keys
       refute "strike_price" in keys
     end
 
@@ -180,6 +184,51 @@ defmodule DpExchange.Webull.OptionsTest do
       assert call.non_standard == nil
     end
 
+    # `option-contract-list.md:357,362` names `settlement_method` and `expired_cycle`, not
+    # `settlement_type`/`expiration_type` — those are `Core.Types.OptionContract`'s own
+    # field names (freeform per-venue strings, not a shared enum), populated from the
+    # venue's differently-spelled response fields.
+    test "settlement_type and expiration_type come from settlement_method and expired_cycle" do
+      body = [contract(%{"settlement_method" => "CASH", "expired_cycle" => "WEEKLY"})]
+
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      call = chain.expiries[~D[2026-03-20]][Decimal.new("100")].call
+      assert call.settlement_type == "CASH"
+      assert call.expiration_type == "WEEKLY"
+    end
+
+    test "pagination_key is followed to the end, bounded" do
+      # `option-contract-list.md:167` documents `pagination_key`; `page_size` is not a
+      # parameter this endpoint defines at all.
+      plug = fn conn ->
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=page-2") do
+            [contract(%{"symbol" => "AAPL250320P00100000", "direction" => "PUT"})]
+          else
+            %{
+              "data" => [contract()],
+              "pagination_key" => "page-2"
+            }
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @credentials, plug: plug, retry_attempts: 0)
+
+      row = chain.expiries[~D[2026-03-20]][Decimal.new("100")]
+      assert row.call.right == :call
+      assert row.put.right == :put
+    end
+
     test "the filters go to the venue rather than being applied here" do
       me = self()
 
@@ -193,16 +242,25 @@ defmodule DpExchange.Webull.OptionsTest do
 
       assert_receive {:request, path, query}
       assert path == "/trading/instruments/options/contracts/list"
-      assert query =~ "underlying_symbol=AAPL"
-      assert query =~ "expire_date=2026-03-20"
-      assert query =~ "strike_price=100"
+      # `underlying_symbols` (plural, `option-contract-list.md:60`), `start_date`
+      # (`:78`, "Exact expiration date"), and `strike_price_gte`/`strike_price_lte`
+      # (`:127,136`) — an exact strike sent as the same value on both bounds of the
+      # venue's range-only pair, not as a `strike_price` field this endpoint never
+      # defines.
+      assert query =~ "underlying_symbols=AAPL"
+      assert query =~ "start_date=2026-03-20"
+      assert query =~ "strike_price_gte=100"
+      assert query =~ "strike_price_lte=100"
+      refute query =~ "underlying_symbol="
+      refute query =~ "expire_date="
+      refute query =~ "strike_price="
     end
   end
 
   describe "get_option_expirations/3" do
     test "the distinct expiries come back earliest first" do
       body = [
-        contract(%{"expire_date" => "2026-06-19"}),
+        contract(%{"expiration_date" => "2026-06-19"}),
         contract(),
         contract(%{"direction" => "PUT"})
       ]
@@ -219,7 +277,7 @@ defmodule DpExchange.Webull.OptionsTest do
     test "an unreadable contract refuses here too, rather than yielding a short list" do
       # Silently dropping the row would return a list of expiries missing one the venue
       # listed, which reads as "the venue lists no such expiry".
-      body = [Map.delete(contract(), "expire_date")]
+      body = [Map.delete(contract(), "expiration_date")]
 
       assert {:error, {:unreadable_option_contract, _keys}} =
                Rest.get_option_expirations("AAPL", @credentials,

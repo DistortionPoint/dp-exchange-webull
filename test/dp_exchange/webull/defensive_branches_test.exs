@@ -357,6 +357,14 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert_receive {:body, body}
       assert body["sub_types"] == ["SNAPSHOT", "QUOTE", "TICK"]
       assert body["category"] == "US_CRYPTO"
+      # `subscribe.md:140-196` marks `grab` required, with a description that says nothing
+      # beyond "true/false" and no documented default — sending either value would be a
+      # guess on a field this package cannot read the semantics of. `["SNAPSHOT",
+      # "QUOTE"]` has subscribed successfully for months without it (DpCryptoManagement
+      # issue #19), so this asserts the divergence stays: `grab` omitted, `category`
+      # left at the confirmed-live `US_CRYPTO` rather than the page's narrower
+      # `["US_STOCK", "US_ETF"]` enum. See `Subscription`'s own moduledoc.
+      refute Map.has_key?(body, "grab")
     end
   end
 
@@ -504,12 +512,15 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     end
 
     test "an order whose symbol is not a string carries nil; a position refuses it" do
-      order = %{"client_order_id" => "abc", "symbol" => %{"a" => nil}, "side" => "BUY"}
+      # `/trading/orders/get`-shaped: a GROUP — `{combo_type, orders: [leg]}`
+      # (order-detail.md:163,182) — not a flat row.
+      leg = %{"client_order_id" => "abc", "symbol" => %{"a" => nil}, "side" => "BUY"}
+      group = %{"combo_type" => "NORMAL", "orders" => [leg]}
 
       assert {:ok, %{symbol: nil}} =
-               Rest.get_order(@credentials, "abc", wrong_type_opts([order]))
+               Rest.get_order(@credentials, "abc", wrong_type_opts([group]))
 
-      assert {:ok, [%{symbol: nil}]} = Rest.get_orders(@credentials, wrong_type_opts([order]))
+      assert {:ok, [%{symbol: nil}]} = Rest.get_orders(@credentials, wrong_type_opts([group]))
 
       position = %{"symbol" => [%{}], "quantity" => "1", "instrument_type" => "CRYPTO"}
 

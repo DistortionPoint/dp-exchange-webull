@@ -38,6 +38,11 @@ defmodule DpExchange.Webull.OrderMappingTest do
   @credentials %{app_key: "key", app_secret: "secret"}
   @account "93IUJ28O9VO2KBGHDHR4H9"
 
+  # `/trading/orders/get` returns a GROUP — `{client_order_id, combo_order_id, combo_type,
+  # orders: [...]}` (order-detail.md:163,182) — never a flat order row at the top. This
+  # fixture used to be the bare row itself, which pinned the bug `to_order/1` had rather
+  # than the vendor's documented shape: `total_quantity` (not `qty`) and `status` (not
+  # `order_status`) are this leg's own field names.
   defp row(overrides) do
     Map.merge(
       %{
@@ -46,12 +51,14 @@ defmodule DpExchange.Webull.OrderMappingTest do
         "side" => "BUY",
         "order_type" => "LIMIT",
         "time_in_force" => "GTC",
-        "order_status" => "WORKING",
-        "qty" => "0.5"
+        "status" => "PENDING",
+        "total_quantity" => "0.5"
       },
       overrides
     )
   end
+
+  defp group(overrides), do: %{"combo_type" => "NORMAL", "orders" => [row(overrides)]}
 
   defp responding(body, status \\ 200) do
     fn conn ->
@@ -64,7 +71,7 @@ defmodule DpExchange.Webull.OrderMappingTest do
   defp fetch(overrides) do
     {:ok, order} =
       Rest.get_order(@credentials, "abc",
-        plug: responding([row(overrides)]),
+        plug: responding([group(overrides)]),
         account_id: @account,
         retry_attempts: 0
       )
@@ -130,18 +137,35 @@ defmodule DpExchange.Webull.OrderMappingTest do
       assert fetch(%{"time_in_force" => "GFD"}).time_in_force == nil
     end
 
+    # `order-detail.md:215`'s documented `status` enum is exactly PENDING, SUBMITTED,
+    # CANCELLED, FILLED, FAILED, PARTIAL_FILLED — `WORKING`, single-`L` `CANCELED`,
+    # `REJECTED` and `EXPIRED` are not members of it and are covered by the
+    # "not documented" test below instead of asserted as mapped values here.
+    # `PARTIAL_FILLED` is Core's own `:partially_filled`, not `:open` — the two are
+    # different claims (some of the order filled vs. none of it) and this package sent the
+    # wrong one for every partially filled order read back before the fix. `FAILED` maps
+    # to `:rejected` on the vendor's own equivalence ("Indicates a failed order, such as
+    # REJECTED").
     for {venue, expected} <- [
           {"PENDING", :pending},
-          {"WORKING", :open},
-          {"PARTIAL_FILLED", :open},
+          {"PARTIAL_FILLED", :partially_filled},
           {"FILLED", :filled},
           {"CANCELLED", :cancelled},
-          {"CANCELED", :cancelled},
-          {"REJECTED", :rejected},
-          {"EXPIRED", :expired}
+          {"FAILED", :rejected}
         ] do
       test "status #{venue} is #{expected}" do
-        assert fetch(%{"order_status" => unquote(venue)}).status == unquote(expected)
+        assert fetch(%{"status" => unquote(venue)}).status == unquote(expected)
+      end
+    end
+
+    # `SUBMITTED` is a real vendor value with no stated equivalence to any status this
+    # package's own `Core.Types.Order.status/0` names ("submitted to the exchange or
+    # webull" says nothing about whether the order is working) — `nil`, not a guess at
+    # `:open`. `WORKING`, `CANCELED` (single `L`) and `EXPIRED` were never in the
+    # documented enum at all and get the same answer for not being provable.
+    for venue <- ["SUBMITTED", "WORKING", "CANCELED", "REJECTED", "EXPIRED"] do
+      test "status #{venue} is not documented for this endpoint, so nil" do
+        assert fetch(%{"status" => unquote(venue)}).status == nil
       end
     end
 
@@ -247,7 +271,11 @@ defmodule DpExchange.Webull.OrderMappingTest do
                Rest.get_orders(@credentials, plug: exploding, retry_attempts: 0)
     end
 
-    test "a limit is sent to the venue as its page size" do
+    # `order-open.md:46,554` and `order-history.md:66` document `pagination_key`, never a
+    # `page_size` — this used to send `opts[:limit]` as `page_size` on both list endpoints,
+    # a parameter neither one defines. `opts[:limit]` is no longer read here at all; it is
+    # asserted absent from the wire rather than asserted present under any name.
+    test "opts[:limit] is not sent — this endpoint has no page_size parameter" do
       me = self()
 
       plug = fn conn ->
@@ -255,7 +283,7 @@ defmodule DpExchange.Webull.OrderMappingTest do
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!([]))
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => []}))
       end
 
       assert {:ok, []} =
@@ -267,7 +295,60 @@ defmodule DpExchange.Webull.OrderMappingTest do
                )
 
       assert_receive {:query, query}
-      assert query =~ "page_size=25"
+      refute query =~ "page_size"
+      refute query =~ "limit"
+    end
+
+    # `order-history.md:47,58` documents `start_time`/`end_time` on the HISTORY endpoint
+    # only, in the venue's `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'` format — sending them on
+    # `/orders/open-orders/list` too would ask that endpoint a parameter it does not
+    # define, which is why `history: true` is required here.
+    test "history: true sends opts[:since]/opts[:until] as start_time/end_time" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:path, conn.request_path, :query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => []}))
+      end
+
+      assert {:ok, []} =
+               Rest.get_orders(@credentials,
+                 history: true,
+                 since: ~U[2026-01-01 00:00:00.000Z],
+                 until: ~U[2026-01-31 23:59:59.000Z],
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:path, path, :query, query}
+      assert path == "/trading/orders/historical-orders/list"
+      assert query =~ "start_time=2026-01-01T00%3A00%3A00.000Z"
+      assert query =~ "end_time=2026-01-31T23%3A59%3A59.000Z"
+    end
+
+    test "pagination_key is followed to the end, bounded" do
+      # Same convention `order_book_test.exs`'s `get_symbols/2` pagination tests use:
+      # branch on the query string rather than process-bound state, because the plug may
+      # run outside this test process.
+      plug = fn conn ->
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=page-2") do
+            %{"data" => [group(%{"client_order_id" => "c-2"})]}
+          else
+            %{"data" => [group(%{"client_order_id" => "c-1"})], "pagination_key" => "page-2"}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, [%{id: "c-1"}, %{id: "c-2"}]} =
+               Rest.get_orders(@credentials, plug: plug, account_id: @account, retry_attempts: 0)
     end
   end
 end

@@ -60,6 +60,32 @@ defmodule DpExchange.Webull.Subscription do
   no recognisable list already produced — inventing an empty exclusion list from a
   rejection nobody could attribute would look like "nothing was rejected" to `Feed`, which
   is the one interpretation this response never supports.
+
+  ## Two more divergences between `subscribe.md` and this request, neither changed here
+
+  `subscribe.md:140-196` marks `category`, `grab`, `session_id` and `sub_types` all
+  required, and its `category` enum is `["US_STOCK", "US_ETF"]` only — `US_CRYPTO`, which
+  this body sends, is not a member of it. That is the SAME category-vs-page conflict the
+  moduledoc's `["SNAPSHOT", "QUOTE"]` note already resolves for `sub_types`, and it
+  resolves the same way for the same reason: `US_CRYPTO` is confirmed live (the same
+  DpCryptoManagement issue #19 read), so the wire stays `US_CRYPTO` and the page's
+  narrower enum is recorded as wrong, or at least incomplete, rather than acted on.
+
+  `grab` ("Whether to grab snapshot data, true/false") is different in kind: it is a real
+  gap, not a resolved one. The page marks it required and gives it no documented default,
+  and its one-line description says nothing about what "grab" means beyond the two literal
+  values — there is no worked example, no note on what a subscribe without it does instead,
+  and nothing elsewhere in this repository's captured pages defines the term further.
+  Sending either `"true"` or `"false"` here would be **guessing which of two values is
+  safe** on a required field this package cannot read the semantics of, which is exactly
+  the substitution `CLAUDE.md`'s fail-closed rule exists to prevent — and the live evidence
+  says the guess is not even needed: `["SNAPSHOT", "QUOTE"]` has subscribed successfully for
+  months without `grab` ever being sent (the same issue #19 measurement). So the wire is
+  left unchanged, `grab` omitted, and this paragraph is the record of the divergence rather
+  than a silent one: measured-live behaviour (works, without `grab`) against the
+  documentation (requires it, undefined how). Sending a guessed value on a *working*
+  request risks breaking it to satisfy a schema this package cannot verify; that trade is
+  refused the same way a request would be if the direction were reversed.
   """
 
   alias DpExchange.Core.{Config, HttpClient}

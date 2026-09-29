@@ -483,7 +483,34 @@ defmodule DpExchange.Webull.AccountsTest do
 
       assert_receive {:query, query}
       assert query =~ "start_time=2026-01-05T22%3A59%3A59"
-      assert query =~ "page_size=100"
+      # `trade-cash-activity-by-type.md:90` names `account_id`, `activity_types`,
+      # `start_time`, `end_time` and `pagination_key` — no `page_size` and no
+      # `last_activity_id`, so `opts[:limit]` above is not read any more, and neither key
+      # reaches the wire.
+      refute query =~ "page_size"
+      refute query =~ "last_activity_id"
+    end
+
+    test "pagination_key is followed to the end, bounded" do
+      plug = fn conn ->
+        body =
+          if String.contains?(conn.query_string || "", "pagination_key=page-2") do
+            [%{"activity_id" => "a-2"}]
+          else
+            %{"data" => [%{"activity_id" => "a-1"}], "pagination_key" => "page-2"}
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:ok, [%{"activity_id" => "a-1"}, %{"activity_id" => "a-2"}]} =
+               Rest.get_transfers(@credentials,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
     end
 
     test "no range means the venue's own 7-day default, not this package's" do

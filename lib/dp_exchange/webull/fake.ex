@@ -1323,6 +1323,12 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  # **`:pending`, not `:open`.** `order-detail.md:215`'s documented `status` enum is
+  # PENDING, SUBMITTED, CANCELLED, FILLED, FAILED, PARTIAL_FILLED — no `WORKING`/`OPEN`
+  # member — and `Rest.to_order/1`'s own `status_atom/1` no longer maps anything to
+  # `Core.Types.Order`'s `:open` for this reason (see that function's own comment). A fake
+  # returning `:open` here would simulate a status the real decode path can never produce,
+  # which is exactly the "differently capable" divergence this fake exists to avoid.
   defp fake_order do
     %Types.Order{
       id: "fake-webull-order-1",
@@ -1333,7 +1339,7 @@ defmodule DpExchange.Webull.Fake do
       quantity: Decimal.new("0.5"),
       filled_quantity: Decimal.new("0"),
       price: Decimal.new("40000"),
-      status: :open,
+      status: :pending,
       provider: :webull
     }
   end
