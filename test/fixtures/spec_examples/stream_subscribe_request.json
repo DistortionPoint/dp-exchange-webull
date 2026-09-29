@@ -1,0 +1,9 @@
+{
+  "session_id": "2d29ea02-8a35-11ec-8356-020017000b7b",
+  "symbols": ["AAPL", "TSLA"],
+  "category": "US_STOCK",
+  "sub_types": ["SNAPSHOT"],
+  "grab": "true",
+  "depth": "10",
+  "overnight_required": false
+}

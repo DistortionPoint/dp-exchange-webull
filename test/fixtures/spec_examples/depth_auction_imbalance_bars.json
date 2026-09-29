@@ -1,0 +1,11 @@
+[
+  {
+    "instrument_id": "913256135",
+    "symbol": "AAPL",
+    "imbalance_time": 1711262998500,
+    "imbalance_ref_price": "172.35",
+    "imbalance_near_price": "173.1",
+    "imbalance_far_price": "175.5",
+    "imbalance_action_type": "PRE_OPEN"
+  }
+]

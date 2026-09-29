@@ -1,0 +1,18 @@
+{
+  "_citation": "Request: docs/reference/webull/openapi/common-order-replace.md:375-399, the page's own 'jsonRequestBodyExample', narrowed to the four fields the endpoint's own field table (common-order-replace.md:3, quoted in rest.ex's replace_order/4 moduledoc) says a LIMIT order may amend: client_order_id, time_in_force, limit_price, quantity — order_type/stop_price/trailing_* are real fields on the same vendor example but apply to other order types, not exercised here. ack_response: POST /trading/orders/replace has no full worked response example; built from the OrderCommonWriteResult schema's own per-field examples, common-order-replace.md:281-299 (same schema place/cancel share) — included for documentation only, since replace_order/4 does not parse this body at all (its own moduledoc: 'the venue's response carries no order, so the order is read back' via get_order/3, which uses order_detail.json instead).",
+  "request": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "modify_orders": [
+      {
+        "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+        "time_in_force": "DAY",
+        "limit_price": "11.0",
+        "quantity": "1"
+      }
+    ]
+  },
+  "ack_response": {
+    "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+    "order_id": "80HG7CPSFDPCAL3TP66LKBAS69"
+  }
+}

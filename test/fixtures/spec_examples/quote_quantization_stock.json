@@ -1,0 +1,29 @@
+{
+  "data": [
+    {
+      "name": "APPLE INC",
+      "instrument_id": "10152734329",
+      "exchange_code": "NSQ",
+      "category": "US_STOCK",
+      "symbol": "AAPL",
+      "status": "OC",
+      "shortable": false,
+      "fractionable": false,
+      "marginable": false,
+      "overnight_trading_supported": false,
+      "margin_requirement_long": "0.5",
+      "margin_requirement_short": "0.5",
+      "intraday_margin_long": "0.5",
+      "intraday_margin_short": "0.5",
+      "maintenance_margin_long": "0.5",
+      "maintenance_margin_short": "0.5",
+      "easy_to_borrow": false,
+      "lot_size": "1.0",
+      "currency": "USD",
+      "sub_category": "ETF",
+      "etf_leveraged_flag": "NO",
+      "etf_leveraged_factor": "0",
+      "crypto_etf": false
+    }
+  ]
+}

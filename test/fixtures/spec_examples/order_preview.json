@@ -1,0 +1,26 @@
+{
+  "_citation": "Request: docs/reference/webull/openapi/common-order-preview.md:437-459 (the 'Equity' named example under requestBody.content.application/json.schema.examples), with the doc's own placeholder strings '<your_account_id>' and '<unique_id>' replaced by the SAME schema's own field-level example values for those exact fields (account_id example at common-order-preview.md:145, client_order_id example at common-order-preview.md:172). Response: no full worked response example exists on this page (POST /trading/orders/preview has no 'examples' block under responses.200) — built strictly from the OrderCommonPreviewResult schema's own per-field 'example' values, common-order-preview.md:976 (estimated_cost) and common-order-preview.md:981 (estimated_transaction_fee).",
+  "request": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "new_orders": [
+      {
+        "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+        "combo_type": "NORMAL",
+        "symbol": "AAPL",
+        "instrument_type": "EQUITY",
+        "market": "US",
+        "order_type": "LIMIT",
+        "limit_price": "180.00",
+        "quantity": "10",
+        "side": "BUY",
+        "time_in_force": "DAY",
+        "support_trading_session": "CORE",
+        "entrust_type": "QTY"
+      }
+    ]
+  },
+  "response": {
+    "estimated_cost": "100",
+    "estimated_transaction_fee": "1"
+  }
+}

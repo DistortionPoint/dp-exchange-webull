@@ -1,0 +1,13 @@
+[
+  {
+    "position_id": "N4I4SIM8TJF38KN2TAA0QVVNE9",
+    "currency": "USD",
+    "quantity": "1",
+    "symbol": "AAPL",
+    "option_strategy": "SINGLE",
+    "instrument_type": "OPTION",
+    "last_price": "10.0",
+    "cost_price": "11.12",
+    "unrealized_profit_loss": "0.08"
+  }
+]

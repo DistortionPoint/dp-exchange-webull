@@ -22,6 +22,30 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+Found by spec-example tests that drive the vendor's own documented examples through each
+call.
+
+- `place_orders/3` returns one result per order. It wrapped the whole
+  `{total, success, failed, batch_orders}` envelope as a single row, so a batch of N orders
+  always answered with one result. It now reads `batch_orders`.
+- `update_watchlist/3` checks the venue's `success` flag like every other watchlist write.
+  It reported `{:ok, _}` for a documented `{"success": false}`.
+- A watchlist `sort` is sent as a JSON integer, as documented; it was sent as a string.
+- `place_order/3` and `preview_order/3` send a caller's `support_trading_session`, checked
+  against the venue's enum. It was dropped.
+- Parameters the vendor documents are no longer dropped: `sort_by` on industry comparisons
+  and on the `top_actives`, `week52_high_low` and `high_dividend_ranks` screeners, and
+  `last_date` on fund net values.
+
+### Added
+
+- Spec-example tests: every REST call, the subscribe endpoint and the protobuf stream
+  decoders, driven with the vendor's documented examples (or cited schema-built instances),
+  with requests checked against the documented parameters. 55 further vendor pages are
+  committed under `docs/reference/webull/openapi/`.
+
 ## [0.4.92] - 2026-09-29
 
 ### Fixed

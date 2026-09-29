@@ -1,0 +1,6 @@
+[
+  { "type": "meta", "args": { "sessionId": "1", "convId": 451107711450219 } },
+  { "type": "text", "message": "Hi" },
+  { "type": "text", "message": ", I'm Wally an" },
+  { "type": "text", "message": "d I'll help you with this question" }
+]

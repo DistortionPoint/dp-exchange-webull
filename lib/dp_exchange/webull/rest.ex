@@ -2294,8 +2294,15 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("name", Keyword.get(opts, :name))
         |> put_present("sort", Keyword.get(opts, :sort))
 
-      with {:ok, _response} <-
-             post("/market-data/watchlists/update", body, credentials, send_once(opts)) do
+      with {:ok, response} <-
+             post("/market-data/watchlists/update", body, credentials, send_once(opts)),
+           # `update-watchlist.md:168-186` documents the same `SuccessResponseVo`
+           # `{"success": boolean}` shape every other watchlist write already guards with
+           # `watchlist_success/1` (see its own comment: a `false` here is "a 200 that did
+           # nothing"). This was the one watchlist write that discarded the response body
+           # and reported `{:ok, watchlist}` for any 2xx, including a documented
+           # `{"success": false}`.
+           :ok <- watchlist_success(response) do
         {:ok,
          %Watchlist{
            id: watchlist_id,
@@ -2489,13 +2496,19 @@ defmodule DpExchange.Webull.Rest do
     # statement endpoints above, which do define it.
     fund_files: {"/market-data/fundamentals/fund-files/get", []},
     fund_holdings: {"/market-data/fundamentals/fund-holdings/get", []},
-    fund_net_values: {"/market-data/fundamentals/fund-net-values/get", [:count]},
+    # `fund-net-value.md:58-66` also documents `last_date` ("Last Query Date") alongside
+    # `count` — both optional, paging a fund's net-value history further back than the
+    # default 5-row window. Omitted here, `last_date` was silently dropped rather than
+    # forwarded.
+    fund_net_values: {"/market-data/fundamentals/fund-net-values/get", [:count, :last_date]},
     fund_performances: {"/market-data/fundamentals/fund-performances/get", []},
     fund_ratings: {"/market-data/fundamentals/fund-ratings/get", []},
     fund_splits: {"/market-data/fundamentals/fund-splits/get", []},
     income_statement: {"/market-data/fundamentals/income-statements/get", [:type, :count]},
     indicators: {"/market-data/fundamentals/indicators/get", [:type, :count]},
-    industry_comparisons: {"/market-data/fundamentals/industry-comparisons/get", []}
+    # `industry-comparison.md:58-67` documents an optional `sort_by` (default `EPS_TTM`) —
+    # omitted here, a caller's `sort_by:` opt was silently dropped rather than forwarded.
+    industry_comparisons: {"/market-data/fundamentals/industry-comparisons/get", [:sort_by]}
   }
 
   @doc """
@@ -2932,13 +2945,24 @@ defmodule DpExchange.Webull.Rest do
   @screeners %{
     "gainers_losers" =>
       {"/market-data/screeners/gainers-losers/list", [:rank_type, :sort_by, :direction]},
-    "high_dividend_ranks" => {"/market-data/screeners/high-dividend-ranks/list", [:direction]},
+    # `get-high-dividend.md` documents `sort_by` (default `YIELD`) alongside `category` and
+    # `direction` — omitted here, a caller's `sort_by:` opt was silently dropped.
+    "high_dividend_ranks" =>
+      {"/market-data/screeners/high-dividend-ranks/list", [:sort_by, :direction]},
     "market_sectors" =>
       {"/market-data/screeners/market-sectors/list", [:agg_type, :period, :direction]},
     "market_sector" =>
       {"/market-data/screeners/market-sectors/get", [:sector_id, :sort_by, :period, :direction]},
-    "top_actives" => {"/market-data/screeners/top-actives/list", [:rank_type, :direction]},
-    "week52_high_low" => {"/market-data/screeners/week52-high-low/list", [:rank_type, :direction]}
+    # `get-top-active.md:66-89` documents `sort_by` (default `VOLUME`) as a fourth query
+    # parameter alongside `rank_type`, `category` and `direction` — omitted here, a
+    # caller's `sort_by:` opt was silently dropped.
+    "top_actives" =>
+      {"/market-data/screeners/top-actives/list", [:rank_type, :sort_by, :direction]},
+    # `get-week-52-high-low.md:70-88` documents `sort_by` (default `CHANGE_RATIO_52W`)
+    # alongside `rank_type`, `category` and `direction` — omitted here, a caller's
+    # `sort_by:` opt was silently dropped.
+    "week52_high_low" =>
+      {"/market-data/screeners/week52-high-low/list", [:rank_type, :sort_by, :direction]}
   }
 
   @paginated_screeners ["market_sectors", "market_sector"]
@@ -3834,6 +3858,15 @@ defmodule DpExchange.Webull.Rest do
   defp put_present(map, key, %Decimal{} = value),
     do: Map.put(map, key, wire_number(value))
 
+  # `sort` on watchlist create/update is documented as a JSON integer
+  # (`create-watchlist.md:150-155`, `update-watchlist.md`), not a string. The generic
+  # clause below stringifies every other value — appropriate for a GET query, where
+  # `stringify/1` does the same thing again downstream, but wrong for a POST body
+  # `Jason.encode!/1`s directly: it sent `"sort":"1"` where the vendor documents `"sort":1`.
+  # An integer is kept as one here so a JSON body carries the venue's own type; `get/4`'s
+  # own `stringify/1` pass still turns it into a query string value where one is built.
+  defp put_present(map, key, value) when is_integer(value), do: Map.put(map, key, value)
+
   defp put_present(map, key, value), do: Map.put(map, key, to_string(value))
 
   # **`Decimal.to_string/1` defaults to SCIENTIFIC notation**, and `to_string/1` on a
@@ -3971,10 +4004,20 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, response} <-
              post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
-        rows(response)
+        batch_rows(response)
       end
     end
   end
+
+  # `order-batch-place.md:266-328` documents this endpoint's OWN response envelope —
+  # `{total, success, failed, batch_orders: [...]}` — not the generic `{"data": [...]}`
+  # shape `rows/1` reads everywhere else. Calling `rows/1` directly on it fell through to
+  # its bare-object clause, which wrapped the WHOLE envelope as a single one-element list:
+  # a batch of N orders always answered with exactly one "row" — the envelope itself,
+  # holding `total`/`success`/`failed` — never the N per-order results this function's own
+  # moduledoc promises ("Returns the venue's own rows, one per order").
+  defp batch_rows(%{"batch_orders" => rows}) when is_list(rows), do: {:ok, rows}
+  defp batch_rows(other), do: rows(other)
 
   @batch_limit 50
 
@@ -4232,7 +4275,8 @@ defmodule DpExchange.Webull.Rest do
   defp order_leaf(request, order_type, tif) do
     instrument = instrument_type(request)
 
-    with {:ok, entrust, sizing} <- entrust(request, order_type, instrument) do
+    with {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+         {:ok, session} <- support_trading_session(request) do
       leaf =
         %{
           "combo_type" => "NORMAL",
@@ -4250,8 +4294,33 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("trailing_stop_step", trailing_stop_step_for(request, order_type))
         |> put_present("expire_date", expire_date(request, tif))
         |> put_present("event_outcome", Map.get(request, :event_outcome))
+        |> put_present("support_trading_session", session)
 
       {:ok, leaf}
+    end
+  end
+
+  # `common-order-place.md`'s own "Equity" example (identically `common-order-preview.md`'s)
+  # carries `support_trading_session` as an ordinary field on an ordinary order — a real,
+  # documented, OPTIONAL field `order_leaf/3` (shared by `preview_order/3` and
+  # `place_order/3`) never read at all, so a caller asking for an extended-hours session
+  # had it silently dropped rather than sent. Unlike `batch_support_trading_session/1`
+  # (`order-batch-place.md`'s own schema marks it required, no default), an absent value
+  # here is left off the wire rather than refused; a value that does not match the venue's
+  # three-member enum is refused rather than sent unchecked.
+  defp support_trading_session(request) do
+    case Map.get(request, :support_trading_session) do
+      nil ->
+        {:ok, nil}
+
+      session ->
+        wire = session |> to_string() |> String.upcase()
+
+        if wire in @support_trading_sessions do
+          {:ok, wire}
+        else
+          {:error, {:unsupported_support_trading_session, session}}
+        end
     end
   end
 

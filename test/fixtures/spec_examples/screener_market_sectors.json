@@ -1,0 +1,22 @@
+{
+  "data": [
+    {
+      "id": "6391",
+      "name": "Energy - Fossil Fuels",
+      "change_ratio": "0.0111",
+      "volume": "1111111",
+      "market_value": "12345678901",
+      "declined": "39",
+      "advanced": "100",
+      "flat": "220",
+      "data": [
+        {
+          "instrument_id": "913256135",
+          "name": "Tesla Inc",
+          "symbol": "TSLA"
+        }
+      ]
+    }
+  ],
+  "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiIwIiwicGFnZUluZGV4IjoxLCJwYWd"
+}

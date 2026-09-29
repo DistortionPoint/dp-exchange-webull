@@ -1,0 +1,4 @@
+{
+  "error_code": "INVALID_SESSION",
+  "message": "Mqtt connection not exist for session:3c4fdabd54097164fbd0f66d95743aae"
+}

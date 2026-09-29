@@ -1,0 +1,41 @@
+{
+  "symbol": "F",
+  "instrument_id": "913255275",
+  "quote_time": "1640688000000",
+  "asks": [
+    {
+      "price": "13.9",
+      "size": "5",
+      "order": [
+        {
+          "mpid": "NSDQ",
+          "size": "5"
+        }
+      ],
+      "broker": [
+        {
+          "bid": "1",
+          "name": "2"
+        }
+      ]
+    }
+  ],
+  "bids": [
+    {
+      "price": "13.9",
+      "size": "5",
+      "order": [
+        {
+          "mpid": "NSDQ",
+          "size": "5"
+        }
+      ],
+      "broker": [
+        {
+          "bid": "1",
+          "name": "2"
+        }
+      ]
+    }
+  ]
+}

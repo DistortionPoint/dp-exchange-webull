@@ -1,0 +1,23 @@
+[
+  {
+    "instrument_id": "913256135",
+    "symbol": "TSLA",
+    "name": "Tesla Inc",
+    "exchange_code": "NSQ",
+    "currency_code": "USD",
+    "pre_close": "11.001",
+    "open": "11.001",
+    "high": "11.001",
+    "low": "11.001",
+    "close": "11.001",
+    "price": "12.002",
+    "change": "1.001",
+    "change_ratio": "0.091",
+    "volume": "1111111",
+    "turnover": "123434545656",
+    "turnover_rate": "0.011",
+    "market_value": "12345678901",
+    "amplitude": "0.0909",
+    "relative_volume_10d": "11.91"
+  }
+]

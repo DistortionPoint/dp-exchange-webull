@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "category": "ECONOMICS",
+      "series_id": "151750",
+      "symbol": "KXRATECUTCOUNT",
+      "name": "Number of Rate Cuts",
+      "frequency": "ANNUAL"
+    }
+  ],
+  "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+}

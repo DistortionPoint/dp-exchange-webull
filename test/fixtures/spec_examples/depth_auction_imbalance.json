@@ -1,0 +1,13 @@
+{
+  "instrument_id": "913256135",
+  "symbol": "AAPL",
+  "paired_shares": "701859",
+  "imbalance_shares": "5715",
+  "imbalance_side": "2",
+  "imbalance_ref_price": "253.83",
+  "imbalance_near_price": "253.93",
+  "imbalance_far_price": "253.98",
+  "imbalance_action_type": "PRE_OPEN",
+  "imbalance_time": 1774272599000,
+  "imbalance_var_indicator": "10"
+}

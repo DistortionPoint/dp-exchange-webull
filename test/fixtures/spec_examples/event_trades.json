@@ -1,0 +1,16 @@
+[
+  {
+    "instrument_id": "504279491",
+    "symbol": "KXCPI-26JAN-T0.3",
+    "result": [
+      {
+        "time": "1772730554000",
+        "yes_price": "0.05",
+        "no_price": "0.95",
+        "volume": "1.0",
+        "side": "no",
+        "trade_id": "604d16d9-9000-4266-68f9-1ec898e2acf6"
+      }
+    ]
+  }
+]

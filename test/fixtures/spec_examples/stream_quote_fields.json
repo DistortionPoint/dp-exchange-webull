@@ -1,0 +1,17 @@
+{
+  "basic": {
+    "symbol": "BTCUSD",
+    "instrument_id": "913256135",
+    "timestamp": "1787936147000"
+  },
+  "asks": [
+    {
+      "price": "77846.48",
+      "size": "0.014",
+      "order": [{ "mpid": "MM1", "size": "0.01" }],
+      "broker": [{ "bid": "B1", "name": "Broker One" }]
+    },
+    { "price": "77850.00", "size": "1.0" }
+  ],
+  "bids": [{ "price": "77845.79", "size": "0.045" }]
+}

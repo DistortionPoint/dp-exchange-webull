@@ -1,0 +1,31 @@
+[
+  {
+    "instrument_id": "504279491",
+    "symbol": "KXCPI-26JAN-T0.3",
+    "quote_time": 1768872168870,
+    "yes_bids": [
+      {
+        "price": "0.13",
+        "size": "543"
+      }
+    ],
+    "yes_asks": [
+      {
+        "price": "0.13",
+        "size": "543"
+      }
+    ],
+    "no_bids": [
+      {
+        "price": "0.13",
+        "size": "543"
+      }
+    ],
+    "no_asks": [
+      {
+        "price": "0.13",
+        "size": "543"
+      }
+    ]
+  }
+]

@@ -1,0 +1,33 @@
+{
+  "_citation": "GET /trading/orders/historical-orders/list has no full worked response example on docs/reference/webull/openapi/order-history.md; the envelope matches order-open.md's ({data: [...], pagination_key}, order-history.md:183,574-581). Query parameters: account_id order-history.md:43, start_time/end_time :53/:63 (format yyyy-MM-dd'T'HH:mm:ss.SSS'Z', matching rest.ex's iso_millis/1), pagination_key :73. Row fields, same OrderListItem-shaped schema as order-open.md/order-detail.md: client_order_id order-history.md:196/229, order_id :234, symbol :239, side :244, status 'FILLED' — a documented enum member (order-history.md:255-264) chosen over the field's own literal 'SUBMITTED' example so a HISTORY row, which is expected to be closed, decodes to a real status rather than nil (nil-mapping is already covered by order_detail.json/order_open_list.json), order_type :267 (again LIMIT substituted for the vendor's own MARKET+limit_price example, same note as order_open_list.json), time_in_force :313, total_quantity :330, filled_quantity :335, filled_price/limit_price from the same field block further down the page (identical layout to order-detail.md).",
+  "request_query": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "start_time": "2025-01-05T22:59:59.012Z",
+    "end_time": "2025-01-05T22:59:59.012Z",
+    "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+  },
+  "response": {
+    "data": [
+      {
+        "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+        "combo_order_id": "OBJOAD3OV65I6UDLO1N70GOO78",
+        "combo_type": "NORMAL",
+        "orders": [
+          {
+            "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+            "order_id": "0352U72LQI6DT0KF41GK000000",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "status": "FILLED",
+            "order_type": "LIMIT",
+            "time_in_force": "DAY",
+            "total_quantity": "1",
+            "filled_quantity": "1",
+            "filled_price": "11.0",
+            "limit_price": "11.0"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "ProShares UltraPro QQQ",
+  "launch_date": "2010-02-09",
+  "benchmark": "NASDAQ 100 TR USD",
+  "investment_objective": "The investment seeks daily investment results, before fees and expenses",
+  "aum": "2.9858225645E10",
+  "issuer": "ProShares",
+  "custodian": "JPMorgan Chase Bank, N.A.",
+  "managers": [
+    {
+      "name": "Michael Neches",
+      "start_date": "2013-10-01",
+      "end_date": "2023-05-01",
+      "is_incumbent": 1,
+      "tenure_return": "61.332016",
+      "title": "Manager",
+      "tenure_years": "12.5",
+      "tenure_days": 4587
+    }
+  ]
+}

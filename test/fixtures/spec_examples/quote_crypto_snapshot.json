@@ -1,0 +1,19 @@
+[
+  {
+    "instrument_id": "913256135",
+    "symbol": "BTCUSD",
+    "pre_close": "101.0",
+    "last_trade_time": 1640688000000,
+    "price": "100.5",
+    "open": "100.0",
+    "high": "105.0",
+    "low": "99.0",
+    "change": "1.0",
+    "change_ratio": "0.05",
+    "quote_time": "1761131401742",
+    "bid": "0.6217",
+    "bid_size": "3817.29798008",
+    "ask": "0.6343",
+    "ask_size": "1387.5"
+  }
+]

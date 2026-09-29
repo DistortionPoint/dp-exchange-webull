@@ -1,0 +1,17 @@
+{
+  "symbol": "SILZ5",
+  "instrument_id": "470059643",
+  "quote_time": 1761131409276,
+  "asks": [
+    {
+      "price": "6770.75",
+      "size": "10"
+    }
+  ],
+  "bids": [
+    {
+      "price": "6770.75",
+      "size": "10"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "_citation": "Request: docs/reference/webull/openapi/order-batch-place.md:421-439, the page's own 'jsonRequestBodyExample' verbatim (account_id, batch_orders[0] with client_order_id, combo_type, instrument_type, entrust_type, support_trading_session, symbol, market, side, order_type, time_in_force, quantity, limit_price). NOTE: the vendor's own example pairs order_type MARKET with a limit_price field, which that same schema's limit_price description says is 'Required when order_type is LIMIT, STOP_LOSS_LIMIT' — a documentation inconsistency in the vendor's own example, not something this package invented; the test that exercises this fixture's field VALUES builds a LIMIT order instead so the request is actually sendable, reusing the same field values (quantity '1', limit_price '11.0', symbol 'BULL', side 'BUY', support_trading_session 'CORE') the vendor's example supplies. Response: order-batch-place.md:329-348, the page's own documented response example named ' Special Instructions' (leading space is in the vendor's own key), verbatim — {total, success, failed, batch_orders: [...]}, one accepted row (client_order_id + order_id) and one refused row (client_order_id + error_code + message).",
+  "request": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "batch_orders": [
+      {
+        "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+        "combo_type": "NORMAL",
+        "instrument_type": "EQUITY",
+        "entrust_type": "QTY",
+        "support_trading_session": "CORE",
+        "symbol": "BULL",
+        "market": "US",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "quantity": "1",
+        "limit_price": "11.0"
+      }
+    ]
+  },
+  "response": {
+    "total": 2,
+    "success": 1,
+    "failed": 1,
+    "batch_orders": [
+      {
+        "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0001",
+        "order_id": "80HG7CPSFDPCAL3TP66LKBAS69"
+      },
+      {
+        "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+        "error_code": "OAUTH_OPENAPI_NO_TRADING_TIME",
+        "message": "Non-trading time."
+      }
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "total_asset_currency": "USD",
+  "total_cash_balance": "485705.0",
+  "total_market_value": "995705.0",
+  "total_unrealized_profit_loss": "227689.0",
+  "total_net_liquidation_value": "727687.04",
+  "total_day_profit_loss": "11798.6",
+  "account_currency_assets": [
+    {
+      "currency": "USD",
+      "cash_balance": "485705.95",
+      "settled_cash": "485705.95",
+      "unsettled_cash": "0.0",
+      "market_value": "0.0",
+      "held_amount": "0.0",
+      "frozen_amount": "485705",
+      "buying_power": "484551",
+      "unrealized_profit_loss": "227689",
+      "available_withdrawal": "3.0558743194E8"
+    }
+  ]
+}

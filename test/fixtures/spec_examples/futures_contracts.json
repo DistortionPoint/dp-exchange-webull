@@ -1,0 +1,24 @@
+[
+  {
+    "symbol": "ESZ5",
+    "instrument_id": "470059643",
+    "exchange_code": "XCME",
+    "code": "ES",
+    "name": "E-mini S&P 500 Futures Dec 2025",
+    "product_class_id": 2,
+    "product_class_name": "Equities",
+    "status": "OC",
+    "currency": "USD",
+    "contract_month": "202512",
+    "settlement_date": "2025-12-29",
+    "size": "50.0",
+    "unit": "1-index points",
+    "min_tick": "0.25",
+    "first_notice_date": "2025-11-25",
+    "last_notice_date": "2025-11-28",
+    "first_trading_date": "2024-12-01",
+    "last_trading_date": "2025-12-19",
+    "contract_type": "MONTHLY",
+    "settlement": "Cash"
+  }
+]

@@ -1,0 +1,11 @@
+{
+  "basic": {
+    "symbol": "BTCUSD",
+    "instrument_id": "913256135",
+    "timestamp": "1787936147000"
+  },
+  "time": "1787936148500",
+  "price": "77850.00",
+  "volume": "0.5",
+  "side": "BUY"
+}

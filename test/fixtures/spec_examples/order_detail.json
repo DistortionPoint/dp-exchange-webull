@@ -1,0 +1,48 @@
+{
+  "_citation": "GET /trading/orders/get has no full worked response example on docs/reference/webull/openapi/order-detail.md; every value below is the schema's own documented per-field 'example', assembled into the documented envelope shape (required: combo_type, orders — order-detail.md:161-164). Envelope fields: client_order_id order-detail.md:170, combo_order_id :175, combo_type :180. Leg fields: client_order_id :203, order_id :208, symbol :213, side :218, order_type :241, time_in_force :287, expire_date :299, total_quantity :304, filled_quantity :309, filled_price :314, limit_price :319, stop_price :324, place_time_at :345, filled_time_at :356. request_query from the endpoint's own query parameters, order-detail.md:36-53 (account_id, client_order_id). response_filled uses status 'FILLED', one of the six documented enum members (order-detail.md:229-236) — chosen over the field's own literal 'example' value so the fixture exercises a real, decodable status. response_submitted uses status 'SUBMITTED', which IS the field's own literal documented 'example' (order-detail.md:228) — kept as its own fixture because rest.ex's status_atom/1 deliberately maps it to nil (no stated vendor equivalence to any Core.Types.Order.status/0 member), and that is worth pinning against the vendor's own chosen example value rather than an invented one.",
+  "request_query": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002"
+  },
+  "response_filled": {
+    "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+    "combo_order_id": "OBJOAD3OV65I6UDLO1N70GOO78",
+    "combo_type": "NORMAL",
+    "orders": [
+      {
+        "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+        "order_id": "0352U72LQI6DT0KF41GK000000",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "status": "FILLED",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "expire_date": "2026-12-01",
+        "total_quantity": "1",
+        "filled_quantity": "1",
+        "filled_price": "11.0",
+        "limit_price": "11.0",
+        "stop_price": "11.0",
+        "place_time_at": "2025-11-11T05:44:35.385Z",
+        "filled_time_at": "2025-11-11T05:44:35.385Z"
+      }
+    ]
+  },
+  "response_submitted": {
+    "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+    "combo_order_id": "OBJOAD3OV65I6UDLO1N70GOO78",
+    "combo_type": "NORMAL",
+    "orders": [
+      {
+        "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+        "order_id": "0352U72LQI6DT0KF41GK000000",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "status": "SUBMITTED",
+        "order_type": "MARKET",
+        "time_in_force": "DAY",
+        "total_quantity": "1"
+      }
+    ]
+  }
+}

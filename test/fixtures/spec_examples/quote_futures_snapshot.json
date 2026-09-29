@@ -1,0 +1,23 @@
+[
+  {
+    "symbol": "SILZ5",
+    "instrument_id": "470059643",
+    "price": "47.35",
+    "open": "48.17",
+    "high": "48.655",
+    "low": "46.855",
+    "pre_close": "47.704",
+    "volume": "48906",
+    "change": "-0.354",
+    "change_ratio": "-0.0074",
+    "last_trade_time": 1761131406558,
+    "open_interest": "14331",
+    "quote_time": 1761131409276,
+    "bid": "47.345",
+    "ask": "47.355",
+    "bid_size": "1",
+    "ask_size": "2",
+    "settle_date": "2025-10-21T12:00:00.000+0000",
+    "settle_price": "47.704"
+  }
+]

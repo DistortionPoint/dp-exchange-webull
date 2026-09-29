@@ -1,0 +1,16 @@
+{
+  "basic": {
+    "symbol": "BTCUSD",
+    "instrument_id": "913256135",
+    "timestamp": "1787936147000"
+  },
+  "trade_time": "1787936148000",
+  "price": "77845.79",
+  "open": "77000.00",
+  "high": "78000.00",
+  "low": "76500.00",
+  "pre_close": "76950.00",
+  "volume": "183.72",
+  "change": "895.79",
+  "change_ratio": "0.0116"
+}

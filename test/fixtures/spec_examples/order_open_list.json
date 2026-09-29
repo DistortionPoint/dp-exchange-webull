@@ -1,0 +1,30 @@
+{
+  "_citation": "GET /trading/orders/open-orders/list has no full worked response example on docs/reference/webull/openapi/order-open.md; the envelope ({data: [...], pagination_key}) is documented at order-open.md:163,554-558/560-561 ('Paginated result with cursor-based pagination'), and every value below is the schema's own per-field 'example', reusing the same OrderListItem-shaped rows as order-detail.md/order-history.md: client_order_id order-open.md:176/209, order_id :214, symbol :219, side :224, status 'SUBMITTED' :234 (the field's own literal example — this endpoint answers resting/open orders, and SUBMITTED per the code's own status_atom/1 decodes to nil, same reasoning as order_detail.json's response_submitted), order_type :247 (MARKET example overridden to LIMIT below so limit_price is coherent with the order_type actually sent, matching order-batch-place.json's own note about the vendor mixing MARKET with limit_price), time_in_force :293, total_quantity :310, limit_price :320. pagination_key (both query parameter and response field) is order-open.md's own example string, :53 and :557 — the query parameter and response field share byte-for-byte the same documented example value.",
+  "request_query": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+  },
+  "response": {
+    "data": [
+      {
+        "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+        "combo_order_id": "OBJOAD3OV65I6UDLO1N70GOO78",
+        "combo_type": "NORMAL",
+        "orders": [
+          {
+            "client_order_id": "THI82O5JB7MQ2K76LL5FSDS2CB",
+            "order_id": "0352U72LQI6DT0KF41GK000000",
+            "symbol": "AAPL",
+            "side": "BUY",
+            "status": "SUBMITTED",
+            "order_type": "LIMIT",
+            "time_in_force": "DAY",
+            "total_quantity": "1",
+            "limit_price": "11.0"
+          }
+        ]
+      }
+    ],
+    "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "_citation": "Request: docs/reference/webull/openapi/common-order-cancel.md:264-267, the page's own 'jsonRequestBodyExample' verbatim. Response: no full worked response example on this page either; built from the OrderCommonWriteResult schema's own per-field examples, common-order-cancel.md:170-189 (same schema place/replace share) — included for documentation only, since cancel_order/3 discards the response body and returns {:ok, :cancelled} on any 2xx.",
+  "request": {
+    "account_id": "93IUJ28O9VO2KBGHDHR4H9",
+    "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002"
+  },
+  "response": {
+    "client_order_id": "0KGOHL4PR2SLC0DKIND4TI0002",
+    "order_id": "80HG7CPSFDPCAL3TP66LKBAS69"
+  }
+}
