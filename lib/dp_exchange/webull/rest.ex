@@ -487,7 +487,8 @@ defmodule DpExchange.Webull.Rest do
     params = put_present(%{"category" => category}, "pagination_key", key)
 
     with {:ok, path} <- instruments_path(category),
-         {:ok, body} <- get(path, params, credentials, opts) do
+         {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, page_rows} <- rows(body) do
       # Pages are collected AS PAGES and concatenated once, not folded with `acc ++ page`.
       # `++` copies its left operand, so appending each page to a growing accumulator is
       # quadratic in the number of rows — the one thing a pagination walk is guaranteed to
@@ -495,7 +496,7 @@ defmodule DpExchange.Webull.Rest do
       # 49 rows from 0.20 ms to 0.01 ms.
       #
       # `dp_exchange_robinhood`'s `walk/6` already did it this way and says why.
-      collected = [rows(body) | acc]
+      collected = [page_rows | acc]
 
       case next_pagination_key(body) do
         nil -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
@@ -706,7 +707,7 @@ defmodule DpExchange.Webull.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_accounts(credentials, opts) do
     with {:ok, body} <- get("/trading/accounts/list", %{}, credentials, opts) do
-      {:ok, rows(body)}
+      rows(body)
     end
   end
 
@@ -741,21 +742,35 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, account_id} <- account_id(opts),
          {:ok, body} <-
-           get("/trading/assets/balances/get", %{"account_id" => account_id}, credentials, opts) do
-      body
-      |> currency_assets()
-      |> to_balances(asked_at)
+           get("/trading/assets/balances/get", %{"account_id" => account_id}, credentials, opts),
+         {:ok, rows} <- currency_assets(body) do
+      to_balances(rows, asked_at)
     end
   end
 
+  # **An absent asset list stays `[]` — a decision this file already made and tests already
+  # pin ("a body with no currency assets key is an empty list too").** The venue answered
+  # about an account and named no currencies under either spelling; that reads as "you hold
+  # nothing" and is different from a balance of zero and different from an error. This is
+  # the same shape `rows/1` gives `"data" => nil`: a key whose absence the venue's own
+  # envelope treats as "none" rather than "unreadable", and `value/2` cannot tell an absent
+  # key apart from one explicitly sent as `null` — both read back as `nil` — so both stay
+  # `[]` here for the same reason.
+  #
+  # **A present value that is not a list is a different case and is NOT this one.** A string,
+  # number, boolean or object under `account_currency_assets` is the venue answering with
+  # something this package cannot read as an asset list, not the venue saying there are none
+  # — the same distinction `rows/1` draws between `"data" => nil` and `"data" => "x"`.
+  # Collapsing that into `[]` reported "you hold nothing" for a reply that never said so.
   defp currency_assets(body) when is_map(body) do
     case value(body, ["account_currency_assets", "accountCurrencyAssets"]) do
-      rows when is_list(rows) -> rows
-      _absent -> []
+      rows when is_list(rows) -> {:ok, rows}
+      nil -> {:ok, []}
+      _unreadable -> {:error, :unexpected_response_shape}
     end
   end
 
-  defp currency_assets(_body), do: []
+  defp currency_assets(_body), do: {:error, :unexpected_response_shape}
 
   # Refuses a currency-asset row this package cannot attribute, rather than emitting an
   # unusable `Balance` and reporting it as success.
@@ -834,8 +849,9 @@ defmodule DpExchange.Webull.Rest do
   def get_positions(credentials, opts) do
     with {:ok, account_id} <- account_id(opts),
          {:ok, body} <-
-           get("/trading/assets/positions/list", %{"account_id" => account_id}, credentials, opts) do
-      body |> rows() |> to_positions()
+           get("/trading/assets/positions/list", %{"account_id" => account_id}, credentials, opts),
+         {:ok, position_rows} <- rows(body) do
+      to_positions(position_rows)
     end
   end
 
@@ -968,7 +984,7 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <-
              get("/trading/activities/cash-activities/list", params, credentials, opts) do
-        {:ok, rows(body)}
+        rows(body)
       end
     end
   end
@@ -1011,7 +1027,7 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <-
              get("/trading/activities/cash-activities/list", params, credentials, opts) do
-        {:ok, rows(body)}
+        rows(body)
       end
     end
   end
@@ -1084,8 +1100,13 @@ defmodule DpExchange.Webull.Rest do
   defp previewable(_instrument), do: :ok
 
   defp to_preview(response, instrument) do
-    row = response |> rows() |> List.first() || response
+    case rows(response) do
+      {:ok, preview_rows} -> to_preview_result(List.first(preview_rows) || response, instrument)
+      {:error, _reason} = error -> error
+    end
+  end
 
+  defp to_preview_result(row, instrument) do
     case value(row, ["estimated_cost", "estimatedCost"]) do
       nil ->
         {:error, :unexpected_response_shape}
@@ -1505,11 +1526,9 @@ defmodule DpExchange.Webull.Rest do
         "imbalance_action_type" => action_type
       }
 
-      with {:ok, body} <- get(path, params, credentials, opts) do
-        {:ok,
-         body
-         |> rows()
-         |> Enum.map(&to_imbalance(&1, symbol, auction, observed_at))}
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, imbalance_rows} <- rows(body) do
+        {:ok, Enum.map(imbalance_rows, &to_imbalance(&1, symbol, auction, observed_at))}
       end
     end
   end
@@ -1767,25 +1786,26 @@ defmodule DpExchange.Webull.Rest do
   defp epoch_ms(other), do: other
 
   defp decode_stock_bars(response, symbol, timeframe, range) do
-    response
-    |> rows()
-    |> Enum.flat_map(fn row -> row |> value(["result"]) |> List.wrap() end)
-    |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
-      case decode_bar(bar, symbol, timeframe) do
-        {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
-        error -> {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, bars} ->
-        {:ok,
-         bars
-         |> Enum.reverse()
-         |> Enum.filter(&within?(&1, range))
-         |> Enum.sort_by(& &1.opened_at, DateTime)}
+    with {:ok, response_rows} <- rows(response) do
+      response_rows
+      |> Enum.flat_map(fn row -> row |> value(["result"]) |> List.wrap() end)
+      |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
+        case decode_bar(bar, symbol, timeframe) do
+          {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, bars} ->
+          {:ok,
+           bars
+           |> Enum.reverse()
+           |> Enum.filter(&within?(&1, range))
+           |> Enum.sort_by(& &1.opened_at, DateTime)}
 
-      error ->
-        error
+        error ->
+          error
+      end
     end
   end
 
@@ -1921,8 +1941,9 @@ defmodule DpExchange.Webull.Rest do
   @spec list_watchlists(map(), keyword()) ::
           {:ok, [Watchlist.t()]} | {:error, term()} | {:refused, term()}
   def list_watchlists(credentials, opts) do
-    with {:ok, body} <- get("/market-data/watchlists/list", %{}, credentials, opts) do
-      {:ok, body |> rows() |> Enum.map(&to_watchlist(&1, nil)) |> Enum.reject(&is_nil/1)}
+    with {:ok, body} <- get("/market-data/watchlists/list", %{}, credentials, opts),
+         {:ok, watchlist_rows} <- rows(body) do
+      {:ok, watchlist_rows |> Enum.map(&to_watchlist(&1, nil)) |> Enum.reject(&is_nil/1)}
     end
   end
 
@@ -2173,11 +2194,20 @@ defmodule DpExchange.Webull.Rest do
   # failure this venue's watchlist endpoints invite: every one of them answers with a
   # boolean rather than an error status.
   defp watchlist_success(response) do
-    case response |> rows() |> List.first() do
-      %{"success" => true} -> :ok
-      %{"success" => false} -> {:refused, :watchlist_write_rejected}
-      nil -> {:error, :unexpected_response_shape}
-      _other -> :ok
+    case rows(response) do
+      {:ok, success_rows} ->
+        case List.first(success_rows) do
+          %{"success" => true} -> :ok
+          %{"success" => false} -> {:refused, :watchlist_write_rejected}
+          nil -> {:error, :unexpected_response_shape}
+          # A row that names no `success` is not a success. Every watchlist endpoint answers
+          # with that boolean; a reply without it did not say the write happened, and
+          # reporting `:ok` for it asserted one this package cannot know about.
+          _no_verdict -> {:error, :unexpected_response_shape}
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -2282,7 +2312,7 @@ defmodule DpExchange.Webull.Rest do
           %{"symbol" => symbol, "category" => fundamental_category(opts)}
           |> put_allowed(allowed, opts)
 
-        with {:ok, body} <- get(path, params, credentials, opts), do: {:ok, rows(body)}
+        with {:ok, body} <- get(path, params, credentials, opts), do: rows(body)
 
       :error ->
         {:error, {:unknown_fundamental, kind}}
@@ -2478,9 +2508,9 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("lang", Keyword.get(opts, :lang))
 
-      with {:ok, response} <- post("/market-data/news/summaries/get", body, credentials, opts) do
-        {:ok,
-         response |> rows() |> Enum.map(&to_news_item(&1, symbols)) |> Enum.reject(&is_nil/1)}
+      with {:ok, response} <- post("/market-data/news/summaries/get", body, credentials, opts),
+           {:ok, news_rows} <- rows(response) do
+        {:ok, news_rows |> Enum.map(&to_news_item(&1, symbols)) |> Enum.reject(&is_nil/1)}
       end
     end
   end
@@ -2569,10 +2599,10 @@ defmodule DpExchange.Webull.Rest do
           |> put_allowed(allowed, opts)
           |> screener_defaults(name)
 
-        with {:ok, body} <- get(path, params, credentials, opts) do
+        with {:ok, body} <- get(path, params, credentials, opts),
+             {:ok, screener_rows} <- rows(body) do
           {:ok,
-           body
-           |> rows()
+           screener_rows
            |> Enum.with_index(1)
            |> Enum.map(&to_screener_result(&1, name))
            |> Enum.reject(&is_nil/1)}
@@ -2649,7 +2679,7 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <-
              get("/trading/instruments/futures/contracts/list", params, credentials, opts) do
-        {:ok, rows(body)}
+        rows(body)
       end
     end
   end
@@ -2681,7 +2711,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/trading/instruments/futures/product-classes/list", params, credentials, opts) do
-      {:ok, rows(body)}
+      rows(body)
     end
   end
 
@@ -2696,7 +2726,7 @@ defmodule DpExchange.Webull.Rest do
   def list_event_categories(credentials, opts) do
     with {:ok, body} <-
            get("/trading/instruments/event-contracts/categories/list", %{}, credentials, opts) do
-      {:ok, rows(body)}
+      rows(body)
     end
   end
 
@@ -2724,7 +2754,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/trading/instruments/event-contracts/series/list", params, credentials, opts) do
-      {:ok, paged(body)}
+      paged(body)
     end
   end
 
@@ -2753,7 +2783,7 @@ defmodule DpExchange.Webull.Rest do
 
         with {:ok, body} <-
                get("/trading/instruments/event-contracts/events/list", params, credentials, opts) do
-          {:ok, rows(body)}
+          rows(body)
         end
     end
   end
@@ -2786,7 +2816,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/trading/instruments/event-contracts/markets/list", params, credentials, opts) do
-      {:ok, paged(body)}
+      paged(body)
     end
   end
 
@@ -2796,9 +2826,14 @@ defmodule DpExchange.Webull.Rest do
   # `nil` where the venue sent no key, which is its way of saying this was the last page.
   # A missing key and an empty string are the same thing here and both mean the end.
   defp paged(%{"data" => data} = body) when is_list(data),
-    do: %{rows: data, pagination_key: presence(body["pagination_key"])}
+    do: {:ok, %{rows: data, pagination_key: presence(body["pagination_key"])}}
 
-  defp paged(body), do: %{rows: rows(body), pagination_key: nil}
+  defp paged(body) do
+    case rows(body) do
+      {:ok, page_rows} -> {:ok, %{rows: page_rows, pagination_key: nil}}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp presence(""), do: nil
   defp presence(value), do: value
@@ -2937,7 +2972,8 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/trading/instruments/options/contracts/list", params, credentials, opts) do
-      body |> rows() |> decode_option_contracts(underlying)
+      with {:ok, contract_rows} <- rows(body),
+           do: decode_option_contracts(contract_rows, underlying)
     end
   end
 
@@ -3053,22 +3089,23 @@ defmodule DpExchange.Webull.Rest do
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
   # decoder over the groups yields all-nil bars, which reads as "the venue has no data".
   defp decode_bars(body, symbol, timeframe) do
-    body
-    |> rows()
-    |> Enum.flat_map(fn
-      %{"result" => rows} when is_list(rows) -> rows
-      %{} = flat_bar -> [flat_bar]
-      _other -> []
-    end)
-    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case decode_bar(row, symbol, timeframe) do
-        {:ok, bar} -> {:cont, {:ok, [bar | acc]}}
-        error -> {:halt, error}
+    with {:ok, body_rows} <- rows(body) do
+      body_rows
+      |> Enum.flat_map(fn
+        %{"result" => group_rows} when is_list(group_rows) -> group_rows
+        %{} = flat_bar -> [flat_bar]
+        _other -> []
+      end)
+      |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+        case decode_bar(row, symbol, timeframe) do
+          {:ok, bar} -> {:cont, {:ok, [bar | acc]}}
+          error -> {:halt, error}
+        end
+      end)
+      |> case do
+        {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
+        error -> error
       end
-    end)
-    |> case do
-      {:ok, bars} -> {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
-      error -> error
     end
   end
 
@@ -3181,18 +3218,38 @@ defmodule DpExchange.Webull.Rest do
   # position, which fails closed but reports "no positions" as corrupt data.
   #
   # So a `"data"` key decides the shape whatever it holds: a list is the rows, an object is
-  # one row (the object, not its wrapper), and anything else — `null` above all — is none.
-  defp rows(body) when is_list(body), do: body
-  defp rows(%{"data" => rows}) when is_list(rows), do: rows
-  defp rows(%{"data" => %{} = row}), do: [row]
-  defp rows(%{"data" => _nothing}), do: []
-  defp rows(%{} = body), do: [body]
-  defp rows(_other), do: []
+  # one row (the object, not its wrapper), and `null` is none.
+  #
+  # **A `"data"` that is present and is neither a list, an object nor `null` is unreadable,
+  # not empty.** This used to fall through the same `_nothing -> []` clause `null` takes —
+  # `%{"data" => "x"}`, or a `42` or a `true` the venue sent where a list belongs, came back
+  # as `{:ok, []}`, indistinguishable from a genuinely empty page. `get_orders/2`,
+  # `get_positions/2` and every other list endpoint built on this function answered "no
+  # orders" / "no positions" from a response this package could not read at all — the exact
+  # substitution the family rule against is written for: a value that stays plausible while
+  # its meaning silently changes from "none" to "the venue said something this package does
+  # not understand". `null` keeps its own clause and stays `[]`, because it is the one shape
+  # in this set that is a documented, deliberate "nothing here" rather than a shape this
+  # package failed to parse.
+  #
+  # Same reasoning for the body itself: a `2xx` payload that decoded to neither a list nor a
+  # map — a bare string, number or boolean where JSON allows one but this contract never
+  # expects one — used to fall through `_other -> []` below the bare-object clause. That is
+  # the same "no rows" answer a caller cannot tell apart from an endpoint with nothing to
+  # report.
+  defp rows(body) when is_list(body), do: {:ok, body}
+  defp rows(%{"data" => rows}) when is_list(rows), do: {:ok, rows}
+  defp rows(%{"data" => %{} = row}), do: {:ok, [row]}
+  defp rows(%{"data" => nil}), do: {:ok, []}
+  defp rows(%{"data" => _unreadable}), do: {:error, :unexpected_response_shape}
+  defp rows(%{} = body), do: {:ok, [body]}
+  defp rows(_other), do: {:error, :unexpected_response_shape}
 
   defp first_row(body) do
     case rows(body) do
-      [row | _rest] when is_map(row) -> {:ok, row}
-      _empty -> {:error, :unexpected_response_shape}
+      {:ok, [row | _rest]} when is_map(row) -> {:ok, row}
+      {:ok, _empty} -> {:error, :unexpected_response_shape}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -3438,7 +3495,7 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, response} <-
              post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
-        {:ok, rows(response)}
+        rows(response)
       end
     end
   end
@@ -3878,13 +3935,14 @@ defmodule DpExchange.Webull.Rest do
 
       params = put_present(%{"account_id" => account_id}, "page_size", Keyword.get(opts, :limit))
 
-      with {:ok, body} <- get(path, params, credentials, opts) do
+      with {:ok, body} <- get(path, params, credentials, opts),
+           {:ok, order_rows} <- rows(body) do
         # An order with no `client_order_id` is one a caller cannot cancel, amend or look up
         # again, and the envelope bug above produced exactly that — so it is dropped here,
         # by the same rule `to_watchlist/2` already applies: "a nil key there is worse than
         # one fewer row this cycle". `Core.Types.Order` admits `id: nil` for acknowledgements
         # that carry an id and little else; a LIST of orders is not that case.
-        {:ok, body |> rows() |> Enum.map(&to_order/1) |> Enum.reject(&is_nil(&1.id))}
+        {:ok, order_rows |> Enum.map(&to_order/1) |> Enum.reject(&is_nil(&1.id))}
       end
     end
   end

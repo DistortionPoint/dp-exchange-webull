@@ -22,6 +22,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- A reply whose `data` is present and not a list, an object or `null`, or a body that is not
+  an object or a list, is now `{:error, :unexpected_response_shape}` everywhere rows are read.
+  Such a reply was read as no rows, so `get_orders/2`, `get_positions/2`, `get_accounts/2`,
+  `get_transfers/2` and every other list call answered `{:ok, []}` from a response that said
+  nothing about any of them. `"data": null` is still no rows.
+- `get_balances/2` refuses an `account_currency_assets` that is present and not a list, or a
+  body that is not an object, instead of answering "no balances". An absent list is still
+  empty, as before.
+- A watchlist write whose reply names no `success` is `{:error,
+  :unexpected_response_shape}`, not `:ok`. Every watchlist endpoint answers with that
+  boolean, so a reply without it is no evidence the write happened.
+- Locked `dp_exchange_core` 0.3.48.
+
 ## [0.4.89] - 2026-09-29
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

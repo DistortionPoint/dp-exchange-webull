@@ -312,6 +312,15 @@ defmodule DpExchange.Webull.WatchlistsTest do
                Rest.remove_watchlist_instruments("wl-1", ["AAPL"], @credentials, opts)
     end
 
+    test "a reply that names no success is not a success" do
+      # Every watchlist endpoint answers with a `success` boolean. A row without one used to
+      # be reported as `:ok`, a write this package had no evidence of.
+      opts = [plug: responding([%{"status" => "done"}]), retry_attempts: 0]
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.add_watchlist_instruments("wl-1", ["AAPL"], @credentials, opts)
+    end
+
     test "a reorder needs positions, and sends them per symbol" do
       # A call without positions would send the venue a list of symbols with no change in it.
       assert {:error, :sorts_required} =

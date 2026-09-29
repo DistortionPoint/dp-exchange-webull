@@ -593,6 +593,102 @@ defmodule DpExchange.Webull.RestTest do
     end
   end
 
+  describe "a `data` that is present and not a list, an object or null is unreadable" do
+    # `rows/1` used to fall through the same clause `null` takes for ANY value it could not
+    # place — a string, a number, a boolean — and answer `{:ok, []}`, indistinguishable from
+    # a genuine empty page. `get_orders/2`, `get_positions/2` and every list endpoint built
+    # on `rows/1` then reported "no orders" / "no positions" from a response this package
+    # never actually read. The family rule is fail closed, never substitute: `null` stays a
+    # documented, deliberate "nothing here"; anything else under `data` is a shape this
+    # package could not read and must say so.
+    @unreadable_envelope %{"code" => "200", "msg" => "ok", "data" => "x"}
+
+    test "get_orders/2 refuses rather than reporting no orders" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_orders(@credentials,
+                 plug: answering(@unreadable_envelope),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "get_positions/2 refuses rather than reporting no positions" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_positions(@credentials,
+                 plug: answering(@unreadable_envelope),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "get_transfers/2 refuses rather than reporting no transfers" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_transfers(@credentials,
+                 plug: answering(@unreadable_envelope),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "get_accounts/2 refuses rather than reporting no accounts" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_accounts(@credentials,
+                 plug: answering(@unreadable_envelope),
+                 retry_attempts: 0
+               )
+    end
+
+    test "list_event_categories/2 refuses, same as every other rows/1-built list" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.list_event_categories(@credentials,
+                 plug: answering(@unreadable_envelope),
+                 retry_attempts: 0
+               )
+    end
+
+    test "data: null is still no rows — the one shape that stays a deliberate empty" do
+      empty = %{"code" => "200", "msg" => "ok", "data" => nil}
+
+      assert {:ok, []} =
+               Rest.get_orders(@credentials,
+                 plug: answering(empty),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+
+      assert {:ok, []} =
+               Rest.get_accounts(@credentials, plug: answering(empty), retry_attempts: 0)
+    end
+
+    test "get_balances/2 refuses when account_currency_assets is present and unreadable" do
+      # get_balances/2 does not read `rows/1`'s "data" envelope at all — the venue answers
+      # the account object directly, with `account_currency_assets` as one of its fields —
+      # so this is `currency_assets/1`'s own clause, not `rows/1`'s, and is exercised
+      # separately for that reason.
+      body = %{"account_currency_assets" => "x"}
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_balances(@credentials,
+                 plug: answering(body),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+
+    test "get_balances/2 still answers no balances when the key is absent — a kept decision" do
+      # `account_currency_assets` missing entirely (or explicitly null, which `value/2`
+      # cannot tell apart from absent) is NOT this failure: it is the venue naming no
+      # currencies for the account, already pinned by
+      # accounts_test.exs "a body with no currency assets key is an empty list too".
+      assert {:ok, []} =
+               Rest.get_balances(@credentials,
+                 plug: answering(%{}),
+                 retry_attempts: 0,
+                 account_id: "acct"
+               )
+    end
+  end
+
   describe "a retried request" do
     # A retry that replayed the first attempt's `x-signature-nonce` was a replay the venue is
     # built to refuse — every retry of a signed call wasted itself on an authentication error.
