@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.93] - 2026-09-29
+
 ### Fixed
 
 Found by spec-example tests that drive the vendor's own documented examples through each
