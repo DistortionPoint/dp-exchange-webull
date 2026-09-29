@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.90] - 2026-09-29
+
 ### Fixed
 
 - A reply whose `data` is present and not a list, an object or `null`, or a body that is not
