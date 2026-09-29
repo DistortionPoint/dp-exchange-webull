@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.92] - 2026-09-29
+
 ### Fixed
 
 Checked against the vendor's own reference pages, fetched 2026-09-29 and now committed under
