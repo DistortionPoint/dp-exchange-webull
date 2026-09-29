@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.97] - 2026-09-29
+
 ### Changed
 
 - **`:trades` is no longer declared streamable, and `TICK` is no longer requested by
