@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.101] - 2026-10-02
+
 ### Fixed
 
 - **Each endpoint is now held to the venue's 1 request per second.** Every endpoint page
