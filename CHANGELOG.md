@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.99] - 2026-10-02
+
 ### Fixed
 
 - **The streamed snapshot's volume is delivered instead of discarded** (issue #6).
