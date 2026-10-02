@@ -510,6 +510,11 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert path == "/market-data/stocks/snapshots/list"
       assert query =~ "category=US_STOCK"
       assert quote_.symbol == "AAPL"
+
+      # The stock snapshot's `volume` is the day's aggregate: a running total, said so
+      # (dp-exchange-core issue #42).
+      assert Decimal.equal?(quote_.volume, Decimal.new("1000"))
+      assert quote_.volume_window == :running_total
     end
 
     test "the default is still crypto, which is what this package served before" do

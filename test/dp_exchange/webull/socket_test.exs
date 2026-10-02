@@ -91,12 +91,33 @@ defmodule DpExchange.Webull.SocketTest do
       assert quote_struct.provider == :webull
     end
 
-    test "volume is nil, because this venue reports none on the stream either" do
+    test "a snapshot with no volume field carries nil and no window — nothing invented" do
       frame = publish("snapshot", snapshot_payload("BTCUSD", "1"))
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      assert_receive {:dp_exchange, :webull, %Quote{volume: nil}}
+      assert_receive {:dp_exchange, :webull, %Quote{volume: nil, volume_window: nil}}
+    end
+
+    test "a snapshot's volume (field 8) is delivered, labelled a running total" do
+      # dp_exchange_webull issue #6: decoded off the wire and then dropped. It sits beside
+      # open/high/low in `Snapshot`, so it is the session's cumulative total, not one print
+      # (dp-exchange-core issue #42).
+      frame = publish("snapshot", snapshot_payload("BTCUSD", "1") <> proto_field(8, "1523.75"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{} = quote_struct}
+      assert Decimal.equal?(quote_struct.volume, Decimal.new("1523.75"))
+      assert quote_struct.volume_window == :running_total
+    end
+
+    test "an unreadable snapshot volume is nil, never a guessed number" do
+      frame = publish("snapshot", snapshot_payload("BTCUSD", "1") <> proto_field(8, "null"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{volume: nil, volume_window: nil}}
     end
 
     test "a payload with no venue timestamp still delivers its Quote" do

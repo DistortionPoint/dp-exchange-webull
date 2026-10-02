@@ -355,8 +355,9 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
         )
 
       assert_receive {:body, body}
-      # No `TICK`: the venue publishes none for us-crypto (dp-exchange-core issue #40).
-      assert body["sub_types"] == ["SNAPSHOT", "QUOTE"]
+      # `TICK` requested again (dp_exchange_webull issue #7): the venue accepted it in #40's
+      # measurement, so asking costs nothing, and a tick that arrives is a trade delivered.
+      assert body["sub_types"] == ["SNAPSHOT", "QUOTE", "TICK"]
       assert body["category"] == "US_CRYPTO"
       # `subscribe.md:140-196` marks `grab` required, with a description that says nothing
       # beyond "true/false" and no documented default — sending either value would be a

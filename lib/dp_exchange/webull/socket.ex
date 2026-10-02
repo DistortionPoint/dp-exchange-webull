@@ -699,15 +699,26 @@ defmodule DpExchange.Webull.Socket do
     :ok
   end
 
+  # **`Snapshot.volume` (field 8) is passed through, labelled a running total.** It was
+  # decoded off the wire by `QuoteProto` and then hard-coded to `nil` here, from this
+  # package's first commit, under the belief that crypto publishes no volume — never
+  # measured (dp_exchange_webull issue #6). The schema's `Snapshot` carries `volume` beside
+  # `open`, `high`, `low` and `pre_close`, which makes it the session's cumulative total, not
+  # one print: `:running_total` (dp-exchange-core issue #42), to be differenced, never
+  # summed. A snapshot that states no volume (`QuoteProto` reads `""` as absent) or an
+  # unreadable one stays `nil`, with no window, so nothing is invented either way.
   defp emit_decoded(state, {:ok, decoded}) do
     with {:ok, price} <- required_decimal(decoded[:price], :price) do
+      volume = decimal(decoded[:volume])
+
       send(
         state.subscriber,
         {:dp_exchange, :webull,
          %Quote{
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
            price: price,
-           volume: nil,
+           volume: volume,
+           volume_window: volume && :running_total,
            venue_time: venue_time_or_nil(decoded),
            observed_at: DateTime.utc_now(),
            provider: :webull

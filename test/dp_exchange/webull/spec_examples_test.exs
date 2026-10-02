@@ -3439,8 +3439,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # Divergence (a) — subscription.ex's own moduledoc: uppercase, and TICK joins the
       # pair the venue actually accepted (issue #19). subscribe.md:176-191's own example
       # is ["SNAPSHOT"].
-      # No `TICK`: the venue publishes none for us-crypto (dp-exchange-core issue #40).
-      assert body["sub_types"] == ["SNAPSHOT", "QUOTE"]
+      # `TICK` requested again (dp_exchange_webull issue #7): the venue accepted it in #40's
+      # measurement, so asking costs nothing, and a tick that arrives is a trade delivered.
+      assert body["sub_types"] == ["SNAPSHOT", "QUOTE", "TICK"]
       refute body["sub_types"] == fixture["sub_types"]
 
       # Divergence (b) — subscription.ex: US_CRYPTO, confirmed live (issue #19), against
@@ -3526,8 +3527,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       assert body["session_id"] == fixture["session_id"]
       assert body["symbols"] == fixture["symbols"]
-      # No `TICK`: the venue publishes none for us-crypto (dp-exchange-core issue #40).
-      assert body["sub_types"] == ["SNAPSHOT", "QUOTE"]
+      # `TICK` requested again (dp_exchange_webull issue #7): the venue accepted it in #40's
+      # measurement, so asking costs nothing, and a tick that arrives is a trade delivered.
+      assert body["sub_types"] == ["SNAPSHOT", "QUOTE", "TICK"]
       refute body["sub_types"] == fixture["sub_types"]
       assert body["category"] == "US_CRYPTO"
       refute body["category"] == fixture["category"]

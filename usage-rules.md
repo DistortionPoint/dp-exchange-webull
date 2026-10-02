@@ -258,13 +258,14 @@ by a session identifier this package generates and gives to both.
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
 the credentials you supplied — at start, or on the subscribe call.
 
-### Two kinds arrive on the same subscription, and crypto has no trade tape
+### What one subscription delivers, and where its volume comes from
 
-A subscribe asks the venue for its `SNAPSHOT` and `QUOTE` topics, and both are forwarded to
-you: `%DpExchange.Core.Types.Quote{}` (a traded price) and
-`%DpExchange.Core.Types.TopOfBook{}` (bid/ask). Match on the struct, not on having
-subscribed once. A handler that only matches `%Quote{}` silently drops every top-of-book
-message rather than erroring.
+A subscribe asks the venue for its `SNAPSHOT`, `QUOTE` and `TICK` topics. Each is forwarded
+to you as its own type: `%DpExchange.Core.Types.Quote{}` (a traded price),
+`%DpExchange.Core.Types.TopOfBook{}` (bid/ask) and, whenever the venue sends a tick,
+`%DpExchange.Core.Types.Trade{}` (one print). Match on the struct, not on having subscribed
+once. A handler that only matches `%Quote{}` silently drops every other message rather than
+erroring.
 
 ```elixir
 receive do
@@ -280,14 +281,21 @@ off the wire and discarding it. A `nil` there still means what `Core.Types.TopOf
 it means — "not published", never "none available" — so a level the venue sends without a
 size is `nil`, and one that states `"0"` is a zero.
 
-`capabilities/0` declares `streamable: [:quotes, :top_of_book]`. **There is no `:trades`
-stream for crypto.** It was declared from the streaming page's topic table, which lists
-`TICK` for "Stocks, Futures and Crypto", and a consumer measured otherwise: on ~325
-us-crypto symbols, no `Trade` and no drop notice (dp-exchange-core issue #40). So `TICK` is
-no longer requested by default, and a Webull crypto symbol has no streamed volume. Plan
-volume-based work for this venue around that. `sub_types: ["SNAPSHOT", "QUOTE", "TICK"]`
-still asks for it, and `Socket` decodes a `tick` into a `Trade` (with `id: nil`: the tape
-carries no per-print identifier) if one ever arrives.
+**Volume comes by two routes, and each says which quantity it is.**
+
+* **The snapshot's `volume`** arrives on every streamed `Quote` that states one, with
+  `volume_window: :running_total`: the session's cumulative total. Difference consecutive
+  values for an interval's volume, and treat a decrease as a reset. Never sum them.
+* **The tick** arrives as a `Trade` whose `quantity` is one print: sum these. `id` is `nil`,
+  because the tape carries no per-print identifier.
+
+`TICK` is requested by default again (dp_exchange_webull issue #7). The streaming page lists
+it for "Stocks, Futures and Crypto". A consumer on ~325 us-crypto symbols measured none on
+2026-09-29 (dp-exchange-core issue #40), from a request the venue accepted with `TICK` in it.
+So asking costs nothing, and every tick that does arrive is delivered. `capabilities/0`
+declares `streamable: [:quotes, :top_of_book]`. `:trades` joins it once a run shows ticks
+arriving, because a declaration states what was measured. Until then the snapshot's running
+total is the volume route to build on.
 
 ### Coverage means delivering, not accepted
 
@@ -368,8 +376,17 @@ end
 
 ## There is no *aggregate* trade volume on crypto — but there is on stocks
 
-Not on the bars, not on the crypto snapshot's `Quote.volume`. On a crypto symbol that field
-is `nil`, never `0` — zero would look like a real measurement of no trading.
+Not on the bars, and not on the REST crypto snapshot's `Quote.volume`. On a crypto symbol from
+`get_price/2` that field is `nil`, never `0`, because zero would look like a real measurement
+of no trading.
+
+**The streamed snapshot is passed through, not assumed away.** A `Quote` from the stream
+carries the `Snapshot` frame's own `volume` (field 8) whenever the frame states one, with
+`volume_window: :running_total`: the session's cumulative total, to be **differenced, never
+summed**. Treat a decrease as a reset. When a frame leaves the field empty, `volume` and
+`volume_window` are both `nil`. This package has not measured whether crypto frames fill
+it in. Read `volume_window`, not the venue, to know what a `Quote.volume` means: every
+quote that carries a volume now says which quantity it is.
 
 **The stock snapshot is different**: `get_price/2` with `category: "US_STOCK"` or
 `"US_ETF"` carries a real `volume`, the day's aggregate rather than the last trade's size.
@@ -976,7 +993,7 @@ by accident, and it is equally usable for a proxy.
 
 ## A print that cannot be delivered says so
 
-`:trades`, where a caller opts into `TICK`, comes from the `tick` topic, which the vendor lists for
+`Trade`s come from the `tick` topic, requested by default, which the vendor lists for
 stocks, futures and crypto. A tick this package cannot turn into a `Trade` (undecodable, or
 missing a readable time, price or volume) raises a `:data_quality` `Notice` once per reason
 per connection, with the raw field strings in `details` (`dropped`, `symbol`, `time`,

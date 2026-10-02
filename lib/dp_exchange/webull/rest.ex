@@ -29,9 +29,15 @@ defmodule DpExchange.Webull.Rest do
 
   ## Volume is real on stocks, absent on crypto
 
-  Webull's crypto OpenAPI exposes **no trade volume** — not on the bars, not on the
-  snapshot, not on the MQTT stream. `volume` is `nil` rather than `0` on a crypto quote,
-  because zero is a volume and this venue is not reporting one.
+  Webull's crypto OpenAPI documents **no trade volume** on the bars or the REST snapshot.
+  `volume` is `nil` rather than `0` on a crypto quote from this module, because zero is a
+  volume and this venue is not reporting one.
+
+  **The MQTT stream is not covered by that sentence any more.** It used to be, but that
+  was never measured. The stream's `Snapshot` schema carries `volume` (field 8) for every
+  category, and `Socket` now passes it through as a `:running_total`, or `nil` when the
+  frame leaves it empty (dp_exchange_webull issue #6). Whether crypto snapshots fill it in
+  is for a live run to show, not for this doc to assume.
 
   The **stock** snapshot is different: `get_price/2` with `category: "US_STOCK"` or
   `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` therefore
@@ -207,11 +213,16 @@ defmodule DpExchange.Webull.Rest do
            {:ok, row} <- first_row(body),
            {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
            {:ok, price} <- required_decimal(raw_price, :price) do
+        # A stock or ETF snapshot's `volume` is the day's aggregate, so a running total —
+        # dp-exchange-core issue #42. The crypto snapshot documents none.
+        volume = snapshot_volume(row, category)
+
         {:ok,
          %Quote{
            symbol: snapshot_canonical(native, category),
            price: price,
-           volume: snapshot_volume(row, category),
+           volume: volume,
+           volume_window: volume && :running_total,
            # Read, not required — see `top_of_book_time/1`, which has always answered this
            # way for the sibling call on the same endpoint. `Core.Types.Quote` enforces
            # `[:symbol, :price, :observed_at, :provider]`; refusing a guarded traded price

@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The streamed snapshot's volume is delivered instead of discarded** (issue #6).
+  `QuoteProto` decoded `Snapshot.volume` (field 8) off the wire and `Socket` then built every
+  `Quote` with `volume: nil`, unchanged since the package's first commit and never measured.
+  It now passes it through as `volume_window: :running_total`: the session's cumulative
+  total, to difference rather than sum. A frame that leaves the field empty or unreadable
+  still gives `nil`, with no window.
+- **`TICK` is requested by default again** (issue #7). It is the trade-tape route the
+  venue documents for crypto, and the venue accepted the request carrying it in
+  dp-exchange-core issue #40's measurement, so asking costs nothing and any tick that
+  arrives is delivered as a `Trade`. `:trades` stays out of `capabilities/0` until a run
+  shows ticks arriving.
+
+### Changed
+
+- **Every `Quote` that carries a volume says which quantity it is** (`volume_window`,
+  dp_exchange_core 0.3.50, dp-exchange-core issue #42). The stream's snapshot volume and the
+  stock or ETF REST snapshot's day aggregate are both `:running_total`.
+
 ## [0.4.98] - 2026-10-01
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

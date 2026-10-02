@@ -28,16 +28,36 @@ defmodule DpExchange.Webull.Subscription do
   after #18 unblocked the request enough to reach this validation for the first time.
 
   `["SNAPSHOT", "QUOTE"]` is **confirmed live**, the same pair the prior in-repo client
-  accepted for months and issue #19 measured directly, and it is the whole default.
+  accepted for months and issue #19 measured directly. The default is that pair plus
+  `TICK`.
 
-  **`TICK` is not requested for crypto, because the venue publishes none.** It joined the
-  default on 2026-09-06, read from `streaming-api.md`'s topic table ("Stocks, Futures and
-  Crypto"), so a plain `subscribe/2` would deliver `Core.Types.Trade`. It never did. On
-  2026-09-29, with `Socket` reporting every way a tick can be dropped, a consumer on ~325
-  us-crypto symbols measured no `Trade` and no drop notice (dp-exchange-core issue #40): the
-  venue sends no `TICK` for this category, whatever the table says. It left the default and
-  `:trades` left `capabilities/0`. A caller can still ask for it with
-  `sub_types: ["SNAPSHOT", "QUOTE", "TICK"]`; `Socket` decodes a `tick` if one ever arrives.
+  **`TICK` is requested, because it is the one trade-tape route this venue documents for
+  crypto.** It joined the default on 2026-09-06, read from `streaming-api.md`'s topic table
+  ("Stocks, Futures and Crypto"). On 2026-09-29, with `Socket` reporting every way a tick can
+  be dropped, a consumer on ~325 us-crypto symbols measured no `Trade` and no drop notice
+  (dp-exchange-core issue #40), and it left the default. It came back on 2026-10-02
+  (dp_exchange_webull issue #7): the venue accepted the request carrying it, so asking costs
+  nothing, while not asking guarantees a trade never arrives. `Socket` decodes every `tick`
+  into a `Core.Types.Trade`, and reports any it cannot. `:trades` stays out of
+  `capabilities/0` until a run shows ticks arriving, because a declaration is a claim about
+  what was measured.
+
+  #7 also asked whether that measurement could be trusted. The record answers both of its
+  doubts:
+
+  * **`TICK` was in the measured request, and the venue accepted it.** #40's own body records
+    `sub_types: ["SNAPSHOT", "QUOTE", "TICK"]`. A refused sub-type fails the whole request
+    (`HTTP 417 UNSUPPORTED_SUB_TYPE`, issue #19), so if `TICK` had been refused no quote would
+    have arrived either. Quotes from that same request arrived, about 20,000 in 3 minutes.
+  * **The session was serving.** The same 20,000 quotes in 3 minutes came on it. The
+    "Permission grabbed" churn in that consumer's log was real, but it did not stop the
+    session delivering every other topic it was subscribed to.
+
+  What the record lacks is the venue's response body to that subscribe, and a run on a
+  session with no competing grab. Both need credentials this repo never holds. Requesting
+  `TICK` by default makes every consumer's run that re-measurement:
+  every way a `tick` can be dropped raises a `:data_quality` notice, so
+  a run with no `Trade` and no notice is the measurement repeated.
 
   ## `INVALID_SYMBOL` names the offending symbols, and this module hands them back
 
@@ -126,10 +146,10 @@ defmodule DpExchange.Webull.Subscription do
         # `snapshot`, `tick` — see streaming-api.md). Confirmed live by
         # DpCryptoManagement's issue #19: lowercase values here get every subscribe
         # rejected `HTTP 417 UNSUPPORTED_SUB_TYPE`. `SNAPSHOT` and `QUOTE` are what the
-        # venue actually accepted for months from the prior in-repo client. `TICK` was the
-        # default until 2026-09-29, when a consumer measured that us-crypto publishes none
-        # (dp-exchange-core issue #40) — see the moduledoc.
-        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE"])
+        # venue actually accepted for months from the prior in-repo client. `TICK` left the
+        # default on 2026-09-29 (dp-exchange-core issue #40) and came back on 2026-10-02
+        # (dp_exchange_webull issue #7) — see the moduledoc.
+        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
       })
 
     request = %{path: path, query_params: %{}, body: body, host: host}
