@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.100] - 2026-10-02
+
 ### Fixed
 
 - **`get_price/2` reads a crypto snapshot's `volume` instead of answering `nil` without
