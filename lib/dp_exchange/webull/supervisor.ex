@@ -96,6 +96,23 @@ defmodule DpExchange.Webull.Supervisor do
     end)
   end
 
+  # **Two limits, so two buckets.** Every endpoint page states both: "1 request per second
+  # per App Key" and "Market Data Global Limit: 600 requests per minute"
+  # (docs/reference/webull/rest-rate-limits.md). This used to be one shared bucket at
+  # 60/60s with a burst of 60, read as "1 per second in other units". It is not the same
+  # thing: a burst of 60 let a backfill send a minute's budget to one endpoint at once, and
+  # the venue refused all but the first in each second. A consumer's log on 2026-10-02 showed
+  # 45 `429`s with `retry_after=5s` on crypto bars. That one bucket also held every OTHER
+  # endpoint to the same 60 a minute, a tenth of the global budget.
+  #
+  # So each endpoint is metered alone at the stated rate with a burst of 1 (strictly 1 per
+  # second), and all of them together against the global 600/60s.
+  @market_data_global %{limit: 600, per_ms: 60_000}
+  @endpoint_burst 1
+  # Ours, not the venue's. It publishes no burst depth for the global cap, so this allows
+  # one second's worth at its stated rate.
+  @global_burst 10
+
   @doc """
   The limits this venue's `DefaultRateLimiter` is started with, for the environment `opts`
   resolves to.
@@ -109,9 +126,17 @@ defmodule DpExchange.Webull.Supervisor do
         }
   def limits(opts) do
     caps = DpExchange.Webull.capabilities()
-    ceiling = environment_ceiling(caps.public_ceiling, Environment.resolve(opts))
+    environment = Environment.resolve(opts)
+    endpoint = environment_ceiling(caps.public_ceiling, environment)
+    global = environment_ceiling(@market_data_global, environment)
 
-    %{webull: to_limit(ceiling), default: to_limit(ceiling)}
+    # `:webull` is the bucket every request clears; `:default` is what each endpoint's own
+    # bucket (`"webull <path>"`, from `rate_limit_per_endpoint: true`) takes. See
+    # `@market_data_global` and `@endpoint_burst`.
+    %{
+      webull: %{limit: global.limit, per_ms: global.per_ms, burst: @global_burst},
+      default: %{limit: endpoint.limit, per_ms: endpoint.per_ms, burst: @endpoint_burst}
+    }
   end
 
   # `capabilities/0` declares the PRODUCTION ceiling and can declare nothing else: it takes
@@ -133,10 +158,4 @@ defmodule DpExchange.Webull.Supervisor do
 
   defp environment_ceiling(%{limit: limit} = ceiling, :uat),
     do: %{ceiling | limit: max(div(limit, 2), 1)}
-
-  # No published burst depth on this venue — unlike Gemini, which states one. Falling back
-  # to the per-interval limit is the conventional GCRA choice and is labelled as ours
-  # rather than the venue's.
-  defp to_limit(%{limit: limit, per_ms: per_ms} = ceiling),
-    do: %{limit: limit, per_ms: per_ms, burst: Map.get(ceiling, :burst, limit)}
 end

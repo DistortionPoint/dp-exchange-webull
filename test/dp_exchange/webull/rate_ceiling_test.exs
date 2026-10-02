@@ -42,18 +42,21 @@ defmodule DpExchange.Webull.RateCeilingTest do
   end
 
   describe "limits/1 derives the limiter's configuration from that declaration" do
-    test "production is the declared ceiling, unmodified" do
-      assert %{webull: webull, default: default} =
+    test "production: each endpoint at the declared 1/s with a burst of 1, all of them at 600/60s" do
+      # Two limits, two buckets — see `Supervisor`'s "Two limits, so two buckets". A burst of
+      # 60 on one shared bucket drew 45 `429`s from crypto bars in a consumer's log.
+      assert %{webull: global, default: endpoint} =
                WebullSupervisor.limits(environment: :production)
 
-      assert webull == %{limit: 60, per_ms: 60_000, burst: 60}
-      assert default == webull
+      assert endpoint == %{limit: 60, per_ms: 60_000, burst: 1}
+      assert global == %{limit: 600, per_ms: 60_000, burst: 10}
     end
 
-    test "sandbox is half, which is the venue's own relationship between its two columns" do
-      assert %{webull: webull} = WebullSupervisor.limits(environment: :uat)
+    test "sandbox is half of both, which is the venue's own relationship between its columns" do
+      assert %{webull: global, default: endpoint} = WebullSupervisor.limits(environment: :uat)
 
-      assert webull == %{limit: 30, per_ms: 60_000, burst: 30}
+      assert endpoint == %{limit: 30, per_ms: 60_000, burst: 1}
+      assert global == %{limit: 300, per_ms: 60_000, burst: 10}
     end
 
     test "the two environments do not share a figure" do
@@ -71,11 +74,30 @@ defmodule DpExchange.Webull.RateCeilingTest do
       assert WebullSupervisor.limits([]) == WebullSupervisor.limits(environment: :production)
     end
 
-    test "burst tracks the environment's own limit, never production's" do
-      # `to_limit/1` defaults burst to the limit. The halving has to happen BEFORE that
-      # default is applied, or sandbox would carry a production-sized burst — the exact
-      # shape of the bug this test exists for, one layer down.
-      assert %{webull: %{burst: 30, limit: 30}} = WebullSupervisor.limits(environment: :uat)
+    test "an endpoint's burst is 1 in both environments, never its limit" do
+      assert %{default: %{burst: 1}} = WebullSupervisor.limits(environment: :uat)
+      assert %{default: %{burst: 1}} = WebullSupervisor.limits(environment: :production)
+    end
+
+    test "against the real limiter: one endpoint is held to 1/s, another is not held by it" do
+      name = :"webull_limits_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {DpExchange.Core.DefaultRateLimiter,
+         name: name, limits: WebullSupervisor.limits(environment: :production)}
+      )
+
+      bars = "webull /market-data/crypto/bars/list"
+      snapshot = "webull /market-data/crypto/snapshot"
+
+      assert :ok = DpExchange.Core.DefaultRateLimiter.check(bars, 1, limiter: name)
+      :ok = DpExchange.Core.DefaultRateLimiter.record(bars, 1, limiter: name)
+
+      assert {:rate_limited, wait_ms} =
+               DpExchange.Core.DefaultRateLimiter.check(bars, 1, limiter: name)
+
+      assert wait_ms > 900
+      assert :ok = DpExchange.Core.DefaultRateLimiter.check(snapshot, 1, limiter: name)
     end
   end
 end

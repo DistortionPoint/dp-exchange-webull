@@ -950,7 +950,8 @@ defmodule DpExchange.Webull.Rest do
       :req_adapter,
       :rate_limit_blocking
     ])
-    |> Keyword.merge(provider: :webull, raw_status: true)
+    # Per endpoint as well as per venue — see `Supervisor.limits/1`.
+    |> Keyword.merge(provider: :webull, raw_status: true, rate_limit_per_endpoint: true)
   end
 
   defp query(params) when map_size(params) == 0, do: ""

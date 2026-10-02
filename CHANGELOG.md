@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Each endpoint is now held to the venue's 1 request per second.** Every endpoint page
+  states "1 request per second per App Key" and a "Market Data Global Limit: 600 requests
+  per minute". This package metered both as one shared bucket at 60/60s with a burst of 60,
+  which let a backfill send a minute's budget to one endpoint at once. A consumer's log on
+  2026-10-02 showed 45 `429`s with `retry_after=5s` on crypto bars. Now every request
+  clears two buckets: its own endpoint at 60/60s with a burst of 1, and the global 600/60s
+  with a burst of 10. Sandbox is half of each, as before. Endpoints no longer share the
+  same 60 a minute either, which held all of them together to a tenth of the global budget.
+  Needs dp_exchange_core 0.3.51 (`rate_limit_per_endpoint`), which also stops a blocking
+  request being metered twice. That double count had held this package's feed to 30
+  requests a minute.
+
 ## [0.4.100] - 2026-10-02
 
 ### Fixed

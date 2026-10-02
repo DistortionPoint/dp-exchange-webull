@@ -66,12 +66,20 @@ number:
 > • 1 request per second per App Key
 > • Market Data Global Limit: 600 requests per minute
 
-`1 request per second per App Key` **is** `60/60s`, stated in different units — so two
-independently maintained vendor pages agree on the per-endpoint figure. The `600 requests
-per minute` is a *global* market-data budget across all endpoints, ten times the
-per-endpoint one, and it binds only for a caller fanning out across ten or more distinct
-endpoints at once. This package does not, and its single shared limiter at 60/60s sits an
-order of magnitude under it regardless.
+`1 request per second per App Key` has the same *average* as `60/60s`, so two independently
+maintained vendor pages agree on the per-endpoint figure. **It is not the same limit.** A
+60/60s bucket with a burst of 60, which is what this package metered until 2026-10-02, lets
+60 requests go in one instant. The venue refuses every one past the first in that second: a
+consumer's log on 2026-10-02 showed 45 `429`s with `retry_after=5s` on crypto bars from a
+backfill. The `600 requests per minute` is a *global* market-data budget across all
+endpoints, ten times the per-endpoint one.
+
+So `Supervisor.limits/1` meters **two buckets**, and every request clears both:
+
+* **Per endpoint** (`"webull <path>"`, via Core's `rate_limit_per_endpoint: true`): 60/60s
+  with a **burst of 1**, so strictly one request per second.
+* **Global** (`:webull`): 600/60s with a burst of 10. The 10 is this package's choice,
+  one second's worth at the stated rate; the venue publishes no burst depth.
 
 ## What this package declares, and why it is conservative
 
@@ -79,13 +87,13 @@ order of magnitude under it regardless.
 here is signed (`credential_benefit: :required`), so there is no anonymous surface and no
 public/authenticated split to make.
 
-**The declaration is stricter than the venue requires, deliberately.** The venue meters
-per endpoint; `Supervisor`'s limiter is one shared bucket for all of them. So this package
-spends a single 60/60s budget where the venue would allow each endpoint its own. That is
-the safe direction against a limit whose stated penalty is an IP block, and the shape of
-`Core.Capabilities`'s `public_ceiling` — one figure, no per-endpoint dimension — cannot
-express the real rule anyway. The same shape gap `historical_timeframes` already has for
-per-asset-class widths.
+**The declaration is the per-endpoint figure; the limiter meters the venue's real rule.**
+`Core.Capabilities`'s `public_ceiling` holds one figure with no per-endpoint dimension, so
+it states the per-endpoint 60/60s. `Supervisor`'s limiter used to be one shared bucket at
+that figure too. That was strict in one direction, holding all endpoints together to a tenth
+of the global budget, and loose in the one that bites: its burst of 60 broke the venue's
+1-per-second rule on any single endpoint. The two buckets above are the venue's stated
+rule, and the limit's stated penalty is an IP block.
 
 **Sandbox is not declared here.** `capabilities/0` takes no arguments and so cannot state
 a figure that differs per environment; production is what a consumer is entitled to read
