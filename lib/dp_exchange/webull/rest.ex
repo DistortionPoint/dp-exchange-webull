@@ -192,9 +192,11 @@ defmodule DpExchange.Webull.Rest do
   (the default), `US_STOCK` or `US_ETF`. `US_OPTION` is refused: the vendor states the stock
   snapshot does not serve it.
 
-  ## Volume is `nil` on crypto and real on stocks
+  ## Volume is read wherever the response carries it
 
-  This venue publishes no crypto volume anywhere, so a crypto quote's volume is `nil` —
+  The crypto snapshot documents no volume, and a response without one gives `nil`. One
+  that carries a `volume` delivers it as a `:running_total`, because a documented field
+  list is not a measurement. Where crypto gives none, its quote's volume is `nil` —
   never zero, which would claim a genuinely flat interval. The **stock** snapshot does
   publish `volume`, and it is the day's aggregate rather than the last trade's size; the
   venue names no per-trade size on this endpoint, so that is what a caller gets and the
@@ -213,9 +215,9 @@ defmodule DpExchange.Webull.Rest do
            {:ok, row} <- first_row(body),
            {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
            {:ok, price} <- required_decimal(raw_price, :price) do
-        # A stock or ETF snapshot's `volume` is the day's aggregate, so a running total —
-        # dp-exchange-core issue #42. The crypto snapshot documents none.
-        volume = snapshot_volume(row, category)
+        # A snapshot's `volume` is the day's aggregate, so a running total —
+        # dp-exchange-core issue #42. `nil`, with no window, where the response has none.
+        volume = snapshot_volume(row)
 
         {:ok,
          %Quote{
@@ -243,9 +245,11 @@ defmodule DpExchange.Webull.Rest do
   defp snapshot_canonical(native, "US_CRYPTO"), do: SymbolFormat.to_canonical_symbol(native)
   defp snapshot_canonical(native, _category), do: native
 
-  # `nil` on crypto because the venue reports none — not zero, which claims a flat interval.
-  defp snapshot_volume(_row, "US_CRYPTO"), do: nil
-  defp snapshot_volume(row, _category), do: decimal(value(row, ["volume"]))
+  # Read on every category, crypto included. Crypto used to answer `nil` without looking,
+  # because `crypto-snapshot.md` documents no volume field — the same unmeasured assumption
+  # dp_exchange_webull issue #6 found on the stream. A response that carries none still
+  # gives `nil`, never zero, which would claim a flat interval.
+  defp snapshot_volume(row), do: decimal(value(row, ["volume"]))
 
   @doc """
   OHLC bars for a symbol and canonical timeframe.

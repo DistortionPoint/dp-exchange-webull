@@ -64,7 +64,7 @@ defmodule DpExchange.Webull.RestTest do
       assert quote_struct.provider == :webull
     end
 
-    test "volume is nil, because this venue reports none — not zero" do
+    test "a crypto snapshot with no volume field gives nil and no window — not zero" do
       # Zero would look like a real measurement of no trading.
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials,
@@ -73,6 +73,22 @@ defmodule DpExchange.Webull.RestTest do
                )
 
       assert quote_struct.volume == nil
+      assert quote_struct.volume_window == nil
+    end
+
+    test "a crypto snapshot that does carry a volume delivers it, as a running total" do
+      # Undocumented for crypto, so this used to answer nil without looking — the
+      # assumption dp_exchange_webull issue #6 found on the stream.
+      snapshot = Enum.map(@snapshot, &Map.put(&1, "volume", "812.5"))
+
+      assert {:ok, quote_struct} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(snapshot),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quote_struct.volume, Decimal.new("812.5"))
+      assert quote_struct.volume_window == :running_total
     end
 
     test "accepts any of the venue's three spellings for the last price" do

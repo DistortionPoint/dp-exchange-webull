@@ -294,8 +294,18 @@ it for "Stocks, Futures and Crypto". A consumer on ~325 us-crypto symbols measur
 2026-09-29 (dp-exchange-core issue #40), from a request the venue accepted with `TICK` in it.
 So asking costs nothing, and every tick that does arrive is delivered. `capabilities/0`
 declares `streamable: [:quotes, :top_of_book]`. `:trades` joins it once a run shows ticks
-arriving, because a declaration states what was measured. Until then the snapshot's running
-total is the volume route to build on.
+arriving, because a declaration states what was measured.
+
+**Measured on 2026-10-02, on 0.4.99: both routes are empty for crypto.** A consumer
+subscribed with `TICK` and saw the request accepted and quotes flowing. Its first Webull
+quote carried no `volume`, so the snapshot leaves field 8 empty. About 6 minutes in, its
+1-minute candles for BTC-USD and ETH-USD read `volume_avg` 0 and OBV 0, so no tick had
+arrived for either. Gemini's BTC-USD, built from Gemini's `:trades`, read real volume on the
+same consumer at the same moment. **Webull crypto delivers no traded volume on its stream.**
+The REST snapshot and the bars read a `volume` field whenever a response carries one, but
+their spec documents none for crypto. For volume on a pair Webull trades, use another
+venue's `:trades` for the same pair. That choice belongs to the consumer. This package
+never puts another venue's volume under Webull's name.
 
 ### Coverage means delivering, not accepted
 

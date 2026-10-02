@@ -22,6 +22,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_price/2` reads a crypto snapshot's `volume` instead of answering `nil` without
+  looking.** `crypto-snapshot.md` documents no volume field, and the code took that as a
+  measurement: the same unmeasured assumption issue #6 found on the stream. A response that
+  carries `volume` now delivers it as `volume_window: :running_total`. One that carries
+  none still gives `nil`.
+
+### Measured
+
+- **On 2026-10-02, Webull crypto delivered no traded volume on its stream**, on the first
+  run with `TICK` back in the default. The subscribe was accepted and quotes flowed, but
+  the snapshot's field 8 was empty, and about 6 minutes in a consumer's 1-minute BTC-USD and
+  ETH-USD candles held zero volume. Gemini's trades gave the same consumer real volume at
+  the same moment. `TICK` stays requested and `:trades` stays undeclared. `usage-rules.md`
+  says to take volume for Webull pairs from another venue's `:trades`, as the consumer's
+  own choice.
+
 ## [0.4.99] - 2026-10-02
 
 ### Fixed

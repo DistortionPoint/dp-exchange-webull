@@ -59,6 +59,12 @@ defmodule DpExchange.Webull.Subscription do
   every way a `tick` can be dropped raises a `:data_quality` notice, so
   a run with no `Trade` and no notice is the measurement repeated.
 
+  **Repeated on 2026-10-02, on 0.4.99**, the first run with `TICK` back in the default: the
+  request was accepted and quotes flowed, but about 6 minutes in a consumer's 1-minute
+  BTC-USD and ETH-USD candles held zero volume, while Gemini's trades gave the same consumer
+  real volume. No tick arrived. `TICK` stays requested, because asking costs nothing and
+  catches the venue starting to publish one; `:trades` stays undeclared.
+
   ## `INVALID_SYMBOL` names the offending symbols, and this module hands them back
 
   Rejection here is per-**request**, not per-symbol: one symbol the venue's streaming
