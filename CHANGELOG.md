@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.103] - 2026-10-03
+
 ### Fixed
 
 - **Requires dp_exchange_core `~> 0.3.52`**, which closes the two ways crypto bars still
