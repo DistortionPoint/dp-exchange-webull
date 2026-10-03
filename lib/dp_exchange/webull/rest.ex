@@ -214,6 +214,7 @@ defmodule DpExchange.Webull.Rest do
       with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- first_row(body),
            {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
+           :ok <- quoted(raw_price),
            {:ok, price} <- required_decimal(raw_price, :price) do
         # A snapshot's `volume` is the day's aggregate, so a running total —
         # dp-exchange-core issue #42. `nil`, with no window, where the response has none.
@@ -250,6 +251,18 @@ defmodule DpExchange.Webull.Rest do
   # dp_exchange_webull issue #6 found on the stream. A response that carries none still
   # gives `nil`, never zero, which would claim a flat interval.
   defp snapshot_volume(row), do: decimal(value(row, ["volume"]))
+
+  # **The string `"null"` is the venue saying it has no price, so it is refused, not an
+  # error** (dp_exchange_webull issue #8). Measured by a consumer on 2026-10-02 against
+  # 0.4.101: 51 of the ~325 USD pairs the catalogue lists as tradable answered every quote
+  # this way (MATIC-USD, FTM-USD, FTT-USD, KLAY-USD, … several delisted or renamed upstream),
+  # and they never tick on the stream either. `Socket` already recorded the same shape from a
+  # delisted pair. Reported as `{:invalid_decimal, :price, "null"}` it read as a broken
+  # parser, and since `{:error, _}` is possibly transient by contract, the consumer retried
+  # it forever. `{:refused, :no_quote}` is the venue's definite answer, and permanent.
+  # Anything else unreadable stays an error: only this exact venue spelling means "no quote".
+  defp quoted("null"), do: {:refused, :no_quote}
+  defp quoted(_raw_price), do: :ok
 
   @doc """
   OHLC bars for a symbol and canonical timeframe.

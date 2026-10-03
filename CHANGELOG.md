@@ -22,6 +22,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `"null"` price from the venue is now `{:refused, :no_quote}`, not a decode error**
+  (issue #8). On 2026-10-02, 51 of the ~325 USD pairs the catalogue lists as tradable
+  (MATIC-USD, FTM-USD, FTT-USD, KLAY-USD, …) answered every `get_price/2` with the literal
+  string `"null"`. That came back as `{:error, {:invalid_decimal, :price, "null"}}`, which
+  looked like a broken parser, and as a possibly-transient `:error` a consumer retried it
+  forever. It is the venue's definite "no quote", so it is now a refusal, which is
+  permanent by contract. Any other unreadable price is still an error.
+
 ## [0.4.101] - 2026-10-02
 
 ### Fixed

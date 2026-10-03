@@ -497,6 +497,18 @@ only serves `US_CRYPTO`; `US_STOCK`/`US_ETF` refuse by name
 (`{:error, {:unsupported_instrument_category, category}}`) rather than being served with an
 invented instrument type or quote currency — see `DpExchange.Webull.Rest.list_instruments/2`.
 
+### `:tradable` does not promise a quote: `{:refused, :no_quote}`
+
+The catalogue and the quote endpoint can disagree. On 2026-10-02, 51 of the ~325 USD pairs
+`list_instruments/1` marked `:tradable` answered every `get_price/2` with the venue's literal
+`"null"` price, and never ticked on the stream. Examples are MATIC-USD, FTM-USD, FTT-USD,
+KLAY-USD and MIOTA-USD, several of them delisted or renamed upstream (issue #8).
+`get_price/2` returns **`{:refused, :no_quote}`** for these. That is permanent by contract,
+so don't retry it on a timer, and treat the pair as one with no market here. It used to
+come back as `{:error, {:invalid_decimal, :price, "null"}}`, which looked like a parser fault
+and, as an `:error`, invited endless retries. This package leaves the catalogue's `"OC"`
+alone, because that status is the venue's word and the refusal is its other word.
+
 ## Timestamps come from the venue, or the call fails
 
 **The local clock is never substituted** — an undated bar stamped with your own clock is
