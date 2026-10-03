@@ -22,6 +22,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Requires dp_exchange_core `~> 0.3.52`**, which closes the two ways crypto bars still
+  drew 429s on 0.4.102. On 2026-10-03 a consumer's log showed 27 in 31 s. Concurrent
+  non-blocking requests all passed the limiter's check before any of them was counted, so
+  two went out 250 ms apart through the 1/s endpoint bucket. Core now reserves atomically
+  before sending. And the venue's `Retry-After` (5 s) held only the request that drew it,
+  so every other symbol's request kept arriving into the penalty. It now holds the
+  endpoint's bucket.
+
 ## [0.4.102] - 2026-10-03
 
 ### Fixed

@@ -84,7 +84,7 @@ defmodule DpExchangeWebull.MixProject do
       # before they reach the behaviour under test, and skipping. Green, and proving nothing.
       # That is the exact false pass the option was added to remove, so the floor is what
       # keeps it removed. Resolved and compiled against before this line was written.
-      {:dp_exchange_core, "~> 0.3.51"},
+      {:dp_exchange_core, "~> 0.3.52"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.
