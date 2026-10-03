@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.102] - 2026-10-03
+
 ### Fixed
 
 - **A `"null"` price from the venue is now `{:refused, :no_quote}`, not a decode error**
