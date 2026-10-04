@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.104] - 2026-10-04
+
 ### Added
 
 - **`get_prices/2`: crypto quotes twenty per request** (issue #9). The crypto snapshot
