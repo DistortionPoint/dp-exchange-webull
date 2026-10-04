@@ -212,29 +212,101 @@ defmodule DpExchange.Webull.Rest do
       params = snapshot_params(native, category, opts)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body),
-           {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
-           :ok <- quoted(raw_price),
-           {:ok, price} <- required_decimal(raw_price, :price) do
-        # A snapshot's `volume` is the day's aggregate, so a running total —
-        # dp-exchange-core issue #42. `nil`, with no window, where the response has none.
-        volume = snapshot_volume(row)
-
-        {:ok,
-         %Quote{
-           symbol: snapshot_canonical(native, category),
-           price: price,
-           volume: volume,
-           volume_window: volume && :running_total,
-           # Read, not required — see `top_of_book_time/1`, which has always answered this
-           # way for the sibling call on the same endpoint. `Core.Types.Quote` enforces
-           # `[:symbol, :price, :observed_at, :provider]`; refusing a guarded traded price
-           # over an optional field discards the fact the caller asked for.
-           venue_time: top_of_book_time(row),
-           observed_at: DateTime.utc_now(),
-           provider: :webull
-         }}
+           {:ok, row} <- first_row(body) do
+        snapshot_quote(row, native, category)
       end
+    end
+  end
+
+  # One snapshot row as a `Quote`, shared by `get_price/3` and `get_prices/3`, so the batched
+  # call cannot drift from the single one.
+  defp snapshot_quote(row, native, category) do
+    with {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
+         :ok <- quoted(raw_price),
+         {:ok, price} <- required_decimal(raw_price, :price) do
+      # A snapshot's `volume` is the day's aggregate, so a running total —
+      # dp-exchange-core issue #42. `nil`, with no window, where the response has none.
+      volume = snapshot_volume(row)
+
+      {:ok,
+       %Quote{
+         symbol: snapshot_canonical(native, category),
+         price: price,
+         volume: volume,
+         volume_window: volume && :running_total,
+         # Read, not required — see `top_of_book_time/1`, which has always answered this
+         # way for the sibling call on the same endpoint. `Core.Types.Quote` enforces
+         # `[:symbol, :price, :observed_at, :provider]`; refusing a guarded traded price
+         # over an optional field discards the fact the caller asked for.
+         venue_time: top_of_book_time(row),
+         observed_at: DateTime.utc_now(),
+         provider: :webull
+       }}
+    end
+  end
+
+  @snapshot_batch 20
+
+  @doc """
+  Last prices for many crypto symbols, up to #{@snapshot_batch} per request.
+
+  The crypto snapshot endpoint takes a list: "Supports querying up to 20 symbols per
+  request" (`docs/reference/webull/openapi/crypto-snapshot.md`). `get_price/3` sends one, so
+  a consumer filling a stale stream from REST got 60 symbols a minute from a per-endpoint
+  limit of one request per second, where the venue serves 1,200 (dp_exchange_webull issue
+  #9). Each chunk of #{@snapshot_batch} is one request through the same endpoint bucket.
+
+  Answers `{:ok, %{symbol => result}}` with a result for **every** symbol asked for, in the
+  shape `get_price/3` gives it: `{:ok, Quote.t()}`, `{:refused, :no_quote}` for the venue's
+  `"null"` price, or `{:error, reason}`. A symbol the response carries no row for is
+  `{:error, :not_in_response}`, never silently absent. A chunk whose request fails gives
+  each of its symbols that failure, so one chunk's trouble never costs another's quotes.
+  `US_CRYPTO` only. Other categories answer `{:error, {:unsupported_category, category}}`,
+  because their snapshot limits are not read here.
+  """
+  @spec get_prices([String.t()], map(), keyword()) ::
+          {:ok, %{String.t() => {:ok, Quote.t()} | {:error, term()} | {:refused, term()}}}
+          | {:error, term()}
+  def get_prices(symbols, credentials, opts) when is_list(symbols) do
+    case Config.opt(opts, :category, "US_CRYPTO") do
+      "US_CRYPTO" ->
+        {:ok, path} = snapshot_path("US_CRYPTO")
+
+        results =
+          symbols
+          |> Enum.uniq()
+          |> Enum.chunk_every(@snapshot_batch)
+          |> Enum.flat_map(&snapshot_chunk(&1, path, credentials, opts))
+          |> Map.new()
+
+        {:ok, results}
+
+      other ->
+        {:error, {:unsupported_category, other}}
+    end
+  end
+
+  defp snapshot_chunk(symbols, path, credentials, opts) do
+    natives = Map.new(symbols, &{SymbolFormat.to_exchange_symbol(&1), &1})
+    params = snapshot_params(natives |> Map.keys() |> Enum.join(","), "US_CRYPTO", opts)
+
+    with {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, rows} <- rows(body) do
+      by_native =
+        for row <- rows,
+            is_map(row),
+            is_binary(row["symbol"]),
+            into: %{},
+            do: {row["symbol"], row}
+
+      Enum.map(natives, fn {native, symbol} ->
+        case Map.fetch(by_native, native) do
+          {:ok, row} -> {symbol, snapshot_quote(row, native, "US_CRYPTO")}
+          :error -> {symbol, {:error, :not_in_response}}
+        end
+      end)
+    else
+      failure -> Enum.map(symbols, &{&1, failure})
     end
   end
 

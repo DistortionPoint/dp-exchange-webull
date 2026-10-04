@@ -141,6 +141,18 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  `DpExchange.Webull.get_prices/2`'s shape: a result for every symbol asked for, each
+  exactly what `get_price/2` gives that symbol here.
+  """
+  @spec get_prices([String.t()], keyword()) :: {:ok, map()} | {:error, term()}
+  def get_prices(symbols, opts \\ []) do
+    case Config.opt(opts, :category, "US_CRYPTO") do
+      "US_CRYPTO" -> {:ok, Map.new(Enum.uniq(symbols), &{&1, get_price(&1, opts)})}
+      other -> {:error, {:unsupported_category, other}}
+    end
+  end
+
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->

@@ -49,6 +49,99 @@ defmodule DpExchange.Webull.RestTest do
     end
   end
 
+  describe "get_prices/3 — twenty symbols per request (issue #9)" do
+    # The venue's crypto snapshot takes "up to 20 symbols per request". One per request
+    # held a consumer to 60 quotes a minute from a 1/s endpoint.
+    defp echoing_rows(me, overrides \\ %{}) do
+      fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        natives = String.split(conn.query_params["symbols"], ",")
+        send(me, {:batch, natives})
+
+        rows =
+          for native <- natives, not Map.has_key?(overrides, native) or overrides[native] do
+            Map.merge(
+              %{"symbol" => native, "price" => "1.5", "time" => 1_787_936_147_000},
+              Map.get(overrides, native) || %{}
+            )
+          end
+
+        Req.Test.json(conn, rows)
+      end
+    end
+
+    defp pairs(n), do: for(i <- 1..n, do: "C#{i}-USD")
+
+    test "45 symbols go out as three requests of at most 20, in the plural `symbols` param" do
+      assert {:ok, results} =
+               Rest.get_prices(pairs(45), @credentials,
+                 plug: echoing_rows(self()),
+                 retry_attempts: 0
+               )
+
+      sizes =
+        for _batch <- 1..3 do
+          assert_receive {:batch, natives}
+          length(natives)
+        end
+
+      assert Enum.sort(sizes) == [5, 20, 20]
+      refute_receive {:batch, _natives}
+      assert map_size(results) == 45
+      assert {:ok, %Types.Quote{symbol: "C7-USD"}} = results["C7-USD"]
+    end
+
+    test "every symbol asked for has a result: a missing row is an error, a \"null\" price a refusal" do
+      overrides = %{"C2USD" => false, "C3USD" => %{"price" => "null"}}
+
+      assert {:ok, results} =
+               Rest.get_prices(pairs(3), @credentials,
+                 plug: echoing_rows(self(), overrides),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, %Types.Quote{}} = results["C1-USD"]
+      assert results["C2-USD"] == {:error, :not_in_response}
+      assert results["C3-USD"] == {:refused, :no_quote}
+    end
+
+    test "a chunk whose request fails gives each of ITS symbols that failure, and no others" do
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        natives = String.split(conn.query_params["symbols"], ",")
+
+        if "C1USD" in natives do
+          Plug.Conn.send_resp(conn, 500, "boom")
+        else
+          Req.Test.json(conn, for(n <- natives, do: %{"symbol" => n, "price" => "2"}))
+        end
+      end
+
+      assert {:ok, results} =
+               Rest.get_prices(pairs(25), @credentials, plug: plug, retry_attempts: 1)
+
+      assert {:error, _reason} = results["C1-USD"]
+      assert {:error, _reason} = results["C20-USD"]
+      assert {:ok, %Types.Quote{}} = results["C21-USD"]
+      assert {:ok, %Types.Quote{}} = results["C25-USD"]
+    end
+
+    test "only US_CRYPTO — another category's snapshot limit is not read here" do
+      assert {:error, {:unsupported_category, "US_STOCK"}} =
+               Rest.get_prices(["AAPL"], @credentials, category: "US_STOCK")
+    end
+
+    test "the fake answers the same shape, one result per symbol" do
+      assert {:ok, results} =
+               DpExchange.Webull.Fake.get_prices(["BTC-USD", "NOPE-USD"],
+                 credentials: @credentials
+               )
+
+      assert {:ok, %Types.Quote{symbol: "BTC-USD"}} = results["BTC-USD"]
+      assert {:refused, :not_listed} = results["NOPE-USD"]
+    end
+  end
+
   describe "get_price/3" do
     @snapshot [%{"symbol" => "BTCUSD", "price" => "77845.79", "time" => 1_787_936_147_000}]
 

@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`get_prices/2`: crypto quotes twenty per request** (issue #9). The crypto snapshot
+  endpoint takes "up to 20 symbols per request", and `get_price/2` sent one. A consumer
+  covering a starved stream shard from REST got 60 symbols a minute, and its limiter
+  refused the rest (2,367 `:rate_limit_timeout`s in about 3 hours on 2026-10-03), where
+  the venue serves 1,200. It returns a result for every symbol asked for, in
+  `get_price/2`'s shape. A symbol with no row in the response is
+  `{:error, :not_in_response}`, and a failed chunk costs only its own symbols. `US_CRYPTO`
+  only. The fake implements it too.
+
 ## [0.4.103] - 2026-10-03
 
 ### Fixed

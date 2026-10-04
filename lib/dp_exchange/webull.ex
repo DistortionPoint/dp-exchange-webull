@@ -547,6 +547,24 @@ defmodule DpExchange.Webull do
   def get_price(symbol, opts \\ []),
     do: Rest.get_price(symbol, credentials(opts), with_limiter(opts))
 
+  @doc """
+  Last prices for many crypto symbols at once, 20 per request: one result per symbol asked
+  for, each in `get_price/2`'s own shape.
+
+  For a consumer covering many pairs from REST, `get_price/2` per symbol spends one
+  request of the endpoint's 1/s budget on each, where this spends one on twenty. See
+  `DpExchange.Webull.Rest.get_prices/3` (issue #9).
+  """
+  @spec get_prices([String.t()], keyword()) ::
+          {:ok,
+           %{
+             String.t() =>
+               {:ok, DpExchange.Core.Types.Quote.t()} | {:error, term()} | {:refused, term()}
+           }}
+          | {:error, term()}
+  def get_prices(symbols, opts \\ []),
+    do: Rest.get_prices(symbols, credentials(opts), with_limiter(opts))
+
   @impl true
   def get_top_of_book(symbol, opts \\ []),
     do: Rest.get_top_of_book(symbol, credentials(opts), with_limiter(opts))

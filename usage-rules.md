@@ -509,6 +509,22 @@ come back as `{:error, {:invalid_decimal, :price, "null"}}`, which looked like a
 and, as an `:error`, invited endless retries. This package leaves the catalogue's `"OC"`
 alone, because that status is the venue's word and the refusal is its other word.
 
+### Many crypto quotes over REST: `get_prices/2`, twenty per request
+
+The crypto snapshot endpoint takes "up to 20 symbols per request". `get_price/2` asks for one,
+so polling many pairs with it spends the endpoint's whole 1/s budget at 60 symbols a minute.
+`get_prices/2` sends them twenty at a time and answers a result for **every** symbol:
+
+```elixir
+{:ok, results} = DpExchange.Webull.get_prices(symbols, credentials: creds)
+for {symbol, {:ok, quote}} <- results, do: handle_price(symbol, quote)
+```
+
+Each result has `get_price/2`'s own shape. A `{:refused, :no_quote}` is permanent (see
+above). `{:error, :not_in_response}` means the venue returned no row for that symbol. A
+chunk whose request failed gives each of its own symbols that error and no others.
+`US_CRYPTO` only.
+
 ## Timestamps come from the venue, or the call fails
 
 **The local clock is never substituted** — an undated bar stamped with your own clock is
