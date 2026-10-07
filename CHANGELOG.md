@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.106] - 2026-10-07
+
 ### Fixed
 
 - **One rejected symbol no longer costs `get_prices/2` its whole chunk of twenty.** The
