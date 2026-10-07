@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **One rejected symbol no longer costs `get_prices/2` its whole chunk of twenty.** The
+  venue refuses an entire request for one symbol it calls invalid. A consumer that polls
+  its never-ticked pairs first, where those symbols collect, got
+  `{:every_symbol_failed, 60}` on more than 4,000 consecutive polls on 0.4.104. A chunk the
+  venue rejects for its content (a 4xx other than 401/403/429) is now halved and retried
+  down to single symbols. The rejected symbol keeps the venue's answer, every other symbol
+  gets its quote, and it costs about two extra requests per bad symbol. A credential or
+  budget refusal is not split, because it would fail every half the same way.
+
 ## [0.4.105] - 2026-10-05
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

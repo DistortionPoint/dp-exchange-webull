@@ -259,7 +259,10 @@ defmodule DpExchange.Webull.Rest do
   Answers `{:ok, %{symbol => result}}` with a result for **every** symbol asked for, in the
   shape `get_price/3` gives it: `{:ok, Quote.t()}`, `{:refused, :no_quote}` for the venue's
   `"null"` price, or `{:error, reason}`. A symbol the response carries no row for is
-  `{:error, :not_in_response}`, never silently absent. A chunk whose request fails gives
+  `{:error, :not_in_response}`, never silently absent. A chunk the venue rejects for its
+  content (a 4xx other than 401/403/429, such as one `INVALID_SYMBOL` member) is halved and
+  retried down to single symbols, so only the rejected symbol keeps the rejection. A chunk
+  whose request fails any other way gives
   each of its symbols that failure, so one chunk's trouble never costs another's quotes.
   `US_CRYPTO` only. Other categories answer `{:error, {:unsupported_category, category}}`,
   because their snapshot limits are not read here.
@@ -306,9 +309,49 @@ defmodule DpExchange.Webull.Rest do
         end
       end)
     else
-      failure -> Enum.map(symbols, &{&1, failure})
+      failure -> split_or_fail(failure, symbols, path, credentials, opts)
     end
   end
+
+  # **A chunk the venue rejects for its content is halved and retried, down to single
+  # symbols.** The venue refuses a whole subscribe request for one symbol it calls
+  # `INVALID_SYMBOL` (`Subscription`'s moduledoc, measured live), and a consumer that polls
+  # its never-ticked pairs first, where those symbols collect, would have every chunk of 20
+  # refused for one bad member and get nothing at all. That fits dp_crypto_management's log
+  # from 0.4.104 onward: thousands of consecutive polls, `{:every_symbol_failed, 60}` every
+  # time. Halving isolates each rejected symbol in about two extra requests per bad symbol,
+  # whatever wording the venue uses. The rejected symbol keeps the venue's own answer, and
+  # every other symbol gets its quote.
+  #
+  # Only a 4xx about the request's content is split. A 401/403 is the credential and a 429
+  # is the budget; both would fail every half the same way, so splitting would only spend
+  # more requests. A 5xx or a transport error is not about which symbols were asked for.
+  defp split_or_fail(failure, [_one] = symbols, _path, _credentials, _opts),
+    do: Enum.map(symbols, &{&1, failure})
+
+  defp split_or_fail(failure, symbols, path, credentials, opts) do
+    if content_rejection?(failure) do
+      {left, right} = Enum.split(symbols, div(length(symbols), 2))
+
+      snapshot_chunk(left, path, credentials, opts) ++
+        snapshot_chunk(right, path, credentials, opts)
+    else
+      Enum.map(symbols, &{&1, failure})
+    end
+  end
+
+  defp content_rejection?({:refused, {:venue_error, 400, _detail}}), do: true
+  defp content_rejection?({:refused, {:venue_error, 400}}), do: true
+
+  # `get/4` reports any other non-2xx as `"HTTP <status>: …"`, its own wording.
+  defp content_rejection?({:error, {:exchange_error, :webull, "HTTP " <> rest}}) do
+    case Integer.parse(rest) do
+      {status, _rest} when status in 400..499 and status not in [401, 403, 429] -> true
+      _other -> false
+    end
+  end
+
+  defp content_rejection?(_failure), do: false
 
   # Only crypto pairs go through the canonical mapper — an equity ticker is already the
   # venue's own identifier, and a splitter hunting for a quote currency would mangle one.

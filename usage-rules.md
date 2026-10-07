@@ -522,6 +522,8 @@ for {symbol, {:ok, quote}} <- results, do: handle_price(symbol, quote)
 
 Each result has `get_price/2`'s own shape. A `{:refused, :no_quote}` is permanent (see
 above). `{:error, :not_in_response}` means the venue returned no row for that symbol. A
+chunk the venue rejects because of one symbol it calls invalid is halved and retried down to
+that symbol, so the rest of the chunk still gets its quotes. A
 chunk whose request failed gives each of its own symbols that error and no others.
 `US_CRYPTO` only.
 

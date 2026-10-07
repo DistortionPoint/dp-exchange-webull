@@ -126,6 +126,60 @@ defmodule DpExchange.Webull.RestTest do
       assert {:ok, %Types.Quote{}} = results["C25-USD"]
     end
 
+    test "one rejected symbol in a chunk costs only itself — the chunk is halved down to it" do
+      # The venue refuses a whole request for one INVALID_SYMBOL. A consumer polling its
+      # never-ticked pairs first, where those collect, had every chunk refused and got
+      # nothing for 4,000+ consecutive polls.
+      me = self()
+
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        natives = String.split(conn.query_params["symbols"], ",")
+        send(me, :request)
+
+        if "BADUSD" in natives do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(417, ~s({"msg":"INVALID_SYMBOL"}))
+        else
+          Req.Test.json(conn, for(n <- natives, do: %{"symbol" => n, "price" => "3"}))
+        end
+      end
+
+      symbols = pairs(19) ++ ["BAD-USD"]
+
+      assert {:ok, results} =
+               Rest.get_prices(symbols, @credentials, plug: plug, retry_attempts: 1)
+
+      for symbol <- pairs(19), do: assert({:ok, %Types.Quote{}} = results[symbol])
+      assert {:error, {:exchange_error, :webull, "HTTP 417" <> _rest}} = results["BAD-USD"]
+
+      requests =
+        Enum.count(1..20, fn _n -> receive do: (:request -> true), after: (0 -> false) end)
+
+      assert requests <= 11
+    end
+
+    test "a credential refusal is not split — it would fail every half the same way" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, :request)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(401, ~s({"msg":"signature mismatch"}))
+      end
+
+      assert {:ok, results} =
+               Rest.get_prices(pairs(20), @credentials, plug: plug, retry_attempts: 1)
+
+      assert map_size(results) == 20
+      assert {:refused, {:venue_error, 401, _msg}} = results["C1-USD"]
+      assert_received :request
+      refute_received :request
+    end
+
     test "only US_CRYPTO — another category's snapshot limit is not read here" do
       assert {:error, {:unsupported_category, "US_STOCK"}} =
                Rest.get_prices(["AAPL"], @credentials, category: "US_STOCK")
