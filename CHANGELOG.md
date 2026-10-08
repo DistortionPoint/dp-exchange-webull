@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.107] - 2026-10-08
+
 ### Fixed
 
 - **A shard that is delivering is no longer re-subscribed every minute** (issue #10). Each
