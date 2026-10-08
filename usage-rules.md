@@ -952,7 +952,11 @@ captured without them looks finished and cannot be implemented from.
 
 ## A shard reopens its own socket only once it has stopped delivering
 
-Each shard reasserts its symbols on a timer. If one shard's blind resubscribe fails
+Each shard reasserts its symbols on a timer, **but only once it has gone quiet**: a shard where
+any of its symbols arrived within the last interval (60 s) is left alone. Each completed
+re-assert grabs the `us-crypto` permission from a sibling session, and on 2026-10-08 a
+consumer measured that costing a streaming shard 30 s or more of silence every minute (issue
+#10). If one shard's blind resubscribe fails
 **twelve times in a row** *and* none of that shard's symbols has arrived for **five minutes**,
 this package reopens that shard's socket on a fresh session — the same recovery an explicit
 `INVALID_SESSION` triggers. A `:link_down` notice says so, naming the shard.

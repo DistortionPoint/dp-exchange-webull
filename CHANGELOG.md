@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A shard that is delivering is no longer re-subscribed every minute** (issue #10). Each
+  completed blind re-subscribe grabs the `us-crypto` permission from a sibling session, and
+  the venue stops delivering to that sibling until its own tick grabs it back. On
+  2026-10-08 a consumer measured a contiguous block of 45–125 liquid pairs, one shard's
+  worth, going 30 s or more silent just after the grabs every minute, taking silence from a
+  60–75 pair baseline to ~205 of 272. The timer now re-asserts a shard only when none of its
+  symbols has arrived within the last `resubscribe_interval_ms`, which is the case it
+  exists to repair.
+
 ## [0.4.106] - 2026-10-07
 
 ### Fixed

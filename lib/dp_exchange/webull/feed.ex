@@ -1327,10 +1327,31 @@ defmodule DpExchange.Webull.Feed do
        when is_map_key(:erlang.map_get(:reconciling, state), {:resubscribe, index}),
        do: state
 
+  # **A shard that is delivering is not re-asserted** (issue #10). Each blind re-subscribe
+  # that completes moves the `us-crypto` permission to that shard's session ("Permission
+  # grabbed by other session", type 1002, tick-aligned; see
+  # `validate_resubscribe_interval_ms!/1`), and the venue then stops delivering to whichever
+  # sibling session held it until that sibling's own tick grabs it back. Measured by a
+  # consumer on 2026-10-08 (04:01–04:13 UTC, 272 pairs, four sessions): every minute, just
+  # after the grabs, a contiguous alphabetical block of 45–125 liquid pairs, one shard's worth,
+  # went 30 s or more without a delivery, taking silence from a 60–75 pair baseline to
+  # ~205 of 272. The repair loop had become the outage: half the universe lost half of every
+  # minute to the safety net.
+  #
+  # The tick exists to repair a shard whose subscription was silently lost, and such a shard
+  # stops delivering. So a shard where ANY of its symbols arrived within the last
+  # `resubscribe_interval_ms` is left alone, and a shard gone quiet is re-asserted on the next
+  # tick as before. The window is the interval itself, not the five-minute `stale_delivery_ms`
+  # that gates a socket REOPEN: re-asserting a quiet shard is cheap and a minute is enough
+  # to call one quiet, while a reopen discards a live socket and needs the longer proof.
   defp resubscribe_shard({index, shard}, state) do
-    spawn_reconcile(state, {:resubscribe, index}, fn ->
-      Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
-    end)
+    if shard_delivered_within?(state, index, state.resubscribe_interval_ms) do
+      state
+    else
+      spawn_reconcile(state, {:resubscribe, index}, fn ->
+        Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
+      end)
+    end
   end
 
   # --- resharding -----------------------------------------------------------
@@ -2170,13 +2191,19 @@ defmodule DpExchange.Webull.Feed do
   # `delivering` is `%{symbol => epoch_ms}`, written on every arrival. A shard that has never
   # delivered at all reads as quiet here, which is right: reaching the failure limit takes
   # `resubscribe_failure_limit` minutes, and a working shard delivers well inside that.
-  defp shard_delivering?(state, index) do
+  defp shard_delivering?(state, index),
+    do: shard_delivered_within?(state, index, state.stale_delivery_ms)
+
+  # Whether any of this shard's symbols arrived within the last `window_ms`. The reopen gate
+  # above asks it over `stale_delivery_ms`; the blind resubscribe asks it over one
+  # `resubscribe_interval_ms` (see `resubscribe_shard/2`).
+  defp shard_delivered_within?(state, index, window_ms) do
     case Map.fetch(state.shards, index) do
       :error ->
         false
 
       {:ok, %{symbols: symbols}} ->
-        cutoff = :os.system_time(:millisecond) - state.stale_delivery_ms
+        cutoff = :os.system_time(:millisecond) - window_ms
         Enum.any?(symbols, fn symbol -> Map.get(state.delivering, symbol, 0) > cutoff end)
     end
   end

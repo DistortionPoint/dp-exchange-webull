@@ -120,6 +120,56 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       assert Process.alive?(feed)
     end
 
+    test "a shard that delivered within the interval is NOT re-asserted — no grab from a live session" do
+      # Issue #10: every completed re-subscribe grabs `us-crypto` from a sibling session, and
+      # a consumer measured a streaming shard going 30 s or more silent after each one, every
+      # minute. The tick is for a shard that stopped delivering; this one has not.
+      plug = fn _conn ->
+        flunk("a shard delivering within the interval must not be re-subscribed")
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTC-USD"]}
+      feed = start_feed(shards: %{0 => shard}, plug: plug, credentials: credentials())
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond)}}
+      end)
+
+      send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+    end
+
+    test "a shard silent for longer than the interval IS re-asserted, as before",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      shard = %{connected_shard("shard-0") | symbols: ["BTC-USD"]}
+
+      feed =
+        start_feed(
+          shards: %{0 => shard},
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      long_ago = :os.system_time(:millisecond) - 120_000
+      :sys.replace_state(feed, &%{&1 | delivering: %{"BTC-USD" => long_ago}})
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-0"}
+    end
+
     test "a shard that has never linked up is skipped, not asked to subscribe before it can" do
       plug = fn _conn -> flunk("a shard with no CONNACK yet must never be asked to subscribe") end
 
