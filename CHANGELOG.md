@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.108] - 2026-10-09
+
 ### Fixed
 
 - **Two shards no longer trade the `us-crypto` permission back and forth** (issue #11). On
