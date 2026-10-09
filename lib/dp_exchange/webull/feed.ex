@@ -597,6 +597,9 @@ defmodule DpExchange.Webull.Feed do
        max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
+       # Per shard, when its session last got a type-1002 "Permission grabbed" notice. See
+       # `note_permission_lost/2` and `resubscribe_shard/2` (issue #11).
+       permission_lost: %{},
        # kind() => %{symbol => timestamp}, built alongside `delivering` above from the
        # same arriving payloads — never from `wanted` or from what was subscribed. See
        # the moduledoc's "Coverage by kind" and `kind_for/1`.
@@ -1344,13 +1347,62 @@ defmodule DpExchange.Webull.Feed do
   # tick as before. The window is the interval itself, not the five-minute `stale_delivery_ms`
   # that gates a socket REOPEN: re-asserting a quiet shard is cheap and a minute is enough
   # to call one quiet, while a reopen discards a live socket and needs the longer proof.
+  #
+  # ## …nor a quiet shard a sibling silenced (issue #11)
+  #
+  # The rule above, alone, made a ping-pong. On 0.4.107 a consumer measured two of three
+  # shards each silent 2 minutes of every 4, exactly out of phase. A shard silenced by a
+  # sibling's grab qualifies as quiet, its re-assert grabs the permission back, the sibling
+  # goes quiet, and one interval later the sibling grabs it back. So a quiet shard is also
+  # left alone when both of these hold:
+  #
+  #   * its own session got a type-1002 "Permission grabbed by other session" notice after
+  #     its last delivery, which is positive evidence its silence is a sibling's grab and not
+  #     a lost subscription (see `note_permission_lost/2`); and
+  #   * a sibling shard is delivering, so the account's stream is up and re-asserting would
+  #     only move the silence.
+  #
+  # A quiet shard with no such notice, the case this timer exists for (a subscription the
+  # venue silently dropped), is re-asserted as before, and so is any quiet shard once every
+  # sibling has gone quiet too. If the venue sends 1002 to the session that grabbed rather
+  # than the one that lost, the silenced shard has no notice and this behaves exactly as
+  # 0.4.107 did, no worse. Its symbols are meanwhile not on the stream, and `coverage/1`
+  # stops reporting them as `:stream` once they age out, so a consumer's REST cover sees
+  # them.
   defp resubscribe_shard({index, shard}, state) do
-    if shard_delivered_within?(state, index, state.resubscribe_interval_ms) do
-      state
+    cond do
+      shard_delivered_within?(state, index, state.resubscribe_interval_ms) ->
+        state
+
+      silenced_by_sibling?(state, index) ->
+        state
+
+      true ->
+        spawn_reconcile(state, {:resubscribe, index}, fn ->
+          Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
+        end)
+    end
+  end
+
+  defp silenced_by_sibling?(state, index) do
+    window = state.resubscribe_interval_ms
+
+    lost_after_last_delivery?(state, index) and
+      Enum.any?(
+        Map.keys(state.shards),
+        &(&1 != index and shard_delivered_within?(state, &1, window))
+      )
+  end
+
+  defp lost_after_last_delivery?(state, index) do
+    with {:ok, lost_at} <- Map.fetch(state.permission_lost, index),
+         {:ok, %{symbols: symbols}} <- Map.fetch(state.shards, index) do
+      last_delivery =
+        symbols |> Enum.map(&Map.get(state.delivering, &1, 0)) |> Enum.max(fn -> 0 end)
+
+      lost_at >= last_delivery
     else
-      spawn_reconcile(state, {:resubscribe, index}, fn ->
-        Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
-      end)
+      _none -> false
     end
   end
 
@@ -1549,14 +1601,37 @@ defmodule DpExchange.Webull.Feed do
   # shape this must tolerate rather than crash on: `Socket` now attaches one to every CONNACK
   # refusal, but a `:degraded` notice can be raised elsewhere in this package for reasons that
   # have nothing to do with a shard, and those must pass straight through.
-  defp answer_refused_session(state, %{session_id: session_id} = details) do
+  #
+  # `connack:` is required too. A venue `notice`-topic frame now also carries its shard's
+  # `session_id` (issue #11), and it is not a refused session: a "Permission grabbed" notice
+  # arriving during a subscribe must not fail that subscribe. It is recorded instead, in
+  # `note_permission_lost/2`.
+  defp answer_refused_session(state, %{session_id: session_id, connack: _code} = details) do
     case shard_index_for_session(state, session_id) do
       nil -> state
       index -> answer_refused_shard(state, index, details)
     end
   end
 
-  defp answer_refused_session(state, _no_session_id), do: state
+  defp answer_refused_session(state, details), do: note_permission_lost(state, details)
+
+  # **A "Permission grabbed by other session" notice on a shard's own session (type 1002) is
+  # the evidence that its silence is a sibling's doing** (issue #11). Each completed
+  # re-subscribe takes the `us-crypto` permission, and the venue stops delivering to the
+  # session that held it. Recorded per shard, with when, for `resubscribe_shard/2`.
+  defp note_permission_lost(state, %{venue_notice: %{"type" => "1002"}, session_id: session_id})
+       when is_binary(session_id) do
+    case shard_index_for_session(state, session_id) do
+      nil ->
+        state
+
+      index ->
+        lost = Map.put(state.permission_lost, index, :os.system_time(:millisecond))
+        %{state | permission_lost: lost}
+    end
+  end
+
+  defp note_permission_lost(state, _other), do: state
 
   # Answers a caller parked on a shard whose session the venue just refused, and leaves the
   # shard otherwise untouched.
@@ -1783,6 +1858,7 @@ defmodule DpExchange.Webull.Feed do
       | shards: Map.delete(state.shards, index),
         resubscribe_failed: Map.delete(state.resubscribe_failed, index),
         delivering: Map.drop(state.delivering, shard.symbols),
+        permission_lost: Map.delete(state.permission_lost, index),
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
 
@@ -1960,6 +2036,7 @@ defmodule DpExchange.Webull.Feed do
           | shards: Map.delete(state.shards, index),
             resubscribe_failed: Map.delete(state.resubscribe_failed, index),
             delivering: Map.drop(state.delivering, shard.symbols),
+            permission_lost: Map.delete(state.permission_lost, index),
             delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
         }
 

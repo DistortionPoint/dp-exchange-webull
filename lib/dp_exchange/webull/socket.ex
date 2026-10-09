@@ -571,7 +571,11 @@ defmodule DpExchange.Webull.Socket do
           state,
           Notice.new(:degraded, :webull,
             message: venue_notice_text(body),
-            details: %{venue_notice: body},
+            # `session_id` names the shard the venue said this to. Issue #10 asked for it,
+            # and `Feed` needs it (issue #11): a "Permission grabbed" notice on THIS
+            # session is the evidence that its silence is a sibling's grab rather than a
+            # lost subscription.
+            details: %{venue_notice: body, session_id: Map.get(state, :session_id)},
             severity: venue_notice_severity(body)
           )
         )

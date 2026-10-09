@@ -170,6 +170,96 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       assert_receive {:request, "shard-0"}
     end
 
+    # Issue #11: re-asserting a shard a sibling's grab silenced grabs it straight back, and the
+    # two traded the permission every interval, each silent 2 minutes in 4.
+    defp grabbed(feed, session_id) do
+      notice =
+        Notice.new(:degraded, :webull,
+          message: "Permission grabbed by other session, category : us-crypto",
+          details: %{venue_notice: %{"type" => "1002"}, session_id: session_id}
+        )
+
+      send(feed, {:dp_exchange, :webull, notice})
+    end
+
+    defp two_shards(feed_opts) do
+      start_feed(
+        Keyword.merge(
+          [
+            shards: %{
+              0 => %{connected_shard("shard-0") | symbols: ["BTC-USD"]},
+              1 => %{connected_shard("shard-1") | symbols: ["SOL-USD"]}
+            },
+            credentials: credentials()
+          ],
+          feed_opts
+        )
+      )
+    end
+
+    test "a quiet shard a sibling's grab silenced is NOT re-asserted while the sibling delivers" do
+      plug = fn _conn -> flunk("re-asserting a sibling-silenced shard restarts the ping-pong") end
+      feed = two_shards(plug: plug)
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
+      end)
+
+      grabbed(feed, "shard-0")
+      send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+    end
+
+    test "once every sibling is quiet too, the silenced shard IS re-asserted",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed = two_shards(plug: plug, limiter: limiter, retry_attempts: 0)
+      long_ago = :os.system_time(:millisecond) - 120_000
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => long_ago, "SOL-USD" => long_ago}}
+      end)
+
+      grabbed(feed, "shard-0")
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-0"}
+    end
+
+    test "a quiet shard with NO grab notice is re-asserted even while a sibling delivers",
+         %{limiter: limiter} do
+      # The case the timer exists for: a subscription the venue dropped silently.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed = two_shards(plug: plug, limiter: limiter, retry_attempts: 0)
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
+      end)
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-0"}
+      refute_receive {:request, "shard-1"}, 100
+    end
+
     test "a shard that has never linked up is skipped, not asked to subscribe before it can" do
       plug = fn _conn -> flunk("a shard with no CONNACK yet must never be asked to subscribe") end
 

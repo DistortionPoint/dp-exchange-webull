@@ -956,7 +956,12 @@ Each shard reasserts its symbols on a timer, **but only once it has gone quiet**
 any of its symbols arrived within the last interval (60 s) is left alone. Each completed
 re-assert grabs the `us-crypto` permission from a sibling session, and on 2026-10-08 a
 consumer measured that costing a streaming shard 30 s or more of silence every minute (issue
-#10). If one shard's blind resubscribe fails
+#10). Nor is a quiet shard whose own session just got a "Permission grabbed by other session"
+notice (type 1002) while a sibling shard is still delivering: its silence is the sibling's grab,
+and grabbing back only moved the silence, so two shards traded it every interval, each silent
+2 minutes in 4 (issue #11). A quiet shard with no such notice is re-asserted as before, and so
+is any quiet shard once all its siblings are quiet. Venue notices now carry `session_id` in
+`details`, so you can see which shard a notice concerns. If one shard's blind resubscribe fails
 **twelve times in a row** *and* none of that shard's symbols has arrived for **five minutes**,
 this package reopens that shard's socket on a fresh session — the same recovery an explicit
 `INVALID_SESSION` triggers. A `:link_down` notice says so, naming the shard.

@@ -22,6 +22,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two shards no longer trade the `us-crypto` permission back and forth** (issue #11). On
+  0.4.107 the quiet-shard rule from #10 created a ping-pong: a shard silenced by a sibling's
+  grab qualified as quiet, its re-assert grabbed the permission back, and one interval later
+  the sibling did the same. A consumer measured two of three shards each silent 2 minutes of
+  every 4, out of phase. A quiet shard is now left alone when its own session received a
+  type-1002 "Permission grabbed by other session" notice after its last delivery and a
+  sibling shard is still delivering. A quiet shard with no such notice, which is a
+  silently dropped subscription and the timer's purpose, is still re-asserted, and so is
+  any quiet shard once every sibling is quiet.
+- **Venue `notice`-topic notices carry `session_id` in `details`**, so a consumer can tell
+  which shard one concerns (asked for in #10). A grab notice arriving mid-subscribe no
+  longer answers a parked caller as a refused session. Only a notice with a `connack` code
+  does.
+
 ## [0.4.107] - 2026-10-08
 
 ### Fixed

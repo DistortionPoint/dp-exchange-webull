@@ -372,6 +372,9 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
       assert notice.message == "Permission grabbed by other session, category : us-crypto"
       assert notice.details.venue_notice["type"] == "1002"
+      # Which shard the venue said it to (issues #10 and #11): `Feed` reads it to tell a
+      # sibling's grab from a lost subscription.
+      assert notice.details.session_id == "s1"
     end
 
     test "a notice the venue sent no text with keeps message nil, never an invented one" do
