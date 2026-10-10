@@ -380,6 +380,10 @@ defmodule DpExchange.Webull.Feed do
   # docs/reference/webull/streaming-api.md.
   @max_shards 5
 
+  # The shard `priority_symbols:` are planned into — see `derive_shards/4` and
+  # `resubscribe_quiet_shards/1`.
+  @priority_shard 0
+
   # Between opening each shard's socket, when one call touches more than one newly-
   # opening shard. A connect burst is answered with resets — same reasoning as
   # Coinbase's Feed, not a Webull-specific measurement.
@@ -552,6 +556,8 @@ defmodule DpExchange.Webull.Feed do
        # See `@stale_delivery_ms`. Overridable so a test proving the delivery gate need not
        # wait out five real minutes of silence.
        stale_delivery_ms: Keyword.get(opts, :stale_delivery_ms) || @stale_delivery_ms,
+       # See `@priority_shard`. Symbols to plan into one shard that keeps the stream.
+       priority: priority_symbols(opts),
        resubscribe_interval_ms: resubscribe_interval_ms,
        socket_opts:
          Keyword.take(opts, [
@@ -1289,6 +1295,30 @@ defmodule DpExchange.Webull.Feed do
   # Validated rather than coerced, the same way that package validates its own: a value that
   # cannot schedule anything fails `init/1` loudly instead of silently reverting to the
   # default and leaving the experiment looking like a negative result.
+  # `priority_symbols:`, canonical and upper-cased, the form every symbol reaches this `Feed` in
+  # from the facade. Absent or `nil` is no priority. Anything that is not a list of
+  # strings fails `init/1` loudly, because a priority this package silently ignored would
+  # leave the pairs a consumer trades rotating with the rest.
+  defp priority_symbols(opts) do
+    case Keyword.get(opts, :priority_symbols) do
+      nil ->
+        MapSet.new()
+
+      symbols when is_list(symbols) ->
+        if Enum.all?(symbols, &is_binary/1),
+          do: MapSet.new(symbols, &String.upcase/1),
+          else: raise(ArgumentError, priority_error(symbols))
+
+      other ->
+        raise ArgumentError, priority_error(other)
+    end
+  end
+
+  defp priority_error(value),
+    do:
+      "DpExchange.Webull.Feed :priority_symbols must be a list of symbol strings, got " <>
+        inspect(value)
+
   defp validate_resubscribe_interval_ms!(value) when is_integer(value) and value >= 1_000,
     do: value
 
@@ -1362,6 +1392,16 @@ defmodule DpExchange.Webull.Feed do
     cond do
       quiet == [] ->
         state
+
+      # `priority_symbols:` — see `@priority_shard`. The reserved shard keeps the permission:
+      # it alone is re-asserted, the moment it is quiet, and no other shard is ever
+      # re-asserted against it, because with one holder any other shard streaming means the
+      # priority shard is not. The rest stay quiet and are covered by REST.
+      Map.has_key?(state.shards, @priority_shard) and state.priority != MapSet.new() ->
+        case List.keyfind(quiet, @priority_shard, 0) do
+          nil -> state
+          priority_shard -> reassert_shard(priority_shard, state)
+        end
 
       not streaming? ->
         Enum.reduce(quiet, state, &reassert_shard/2)
@@ -1451,7 +1491,10 @@ defmodule DpExchange.Webull.Feed do
   # actually needed to close.
   defp plan_reshard(state) do
     effective_wanted = MapSet.difference(state.wanted, active_rejections(state))
-    {new_shards, overflow} = derive_shards(effective_wanted, state.shard_capacity, state.shards)
+
+    {new_shards, overflow} =
+      derive_shards(effective_wanted, state.shard_capacity, state.shards, state.priority)
+
     existing_indices = Map.keys(state.shards)
     wanted_indices = Map.keys(new_shards)
     new_indices = wanted_indices -- existing_indices
@@ -2341,6 +2384,36 @@ defmodule DpExchange.Webull.Feed do
   #
   # A symbol that still does not fit anywhere within the venue's five-shard ceiling is
   # overflow — the venue's real ceiling for one App Key, reached.
+  #
+  # **With `priority_symbols:`, shard `@priority_shard` is reserved for them** (issue #11's
+  # follow-up). The account holds the `us-crypto` permission on one session at a time, so the
+  # pairs a consumer actually trades are planned into one shard. `resubscribe_quiet_shards/1`
+  # then keeps that shard holding the permission instead of rotating it. The reserved shard is
+  # recomputed rather than sticky: it is the wanted priority symbols, sorted, up to its
+  # capacity. Anything past that capacity, and every other wanted symbol, is placed in the
+  # remaining shards exactly as without a priority.
+  defp derive_shards(wanted, shard_capacity, existing_shards, priority) do
+    pinned =
+      priority
+      |> MapSet.intersection(wanted)
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.take(Map.get(shard_capacity, @priority_shard, @pairs_per_socket))
+
+    case pinned do
+      [] ->
+        derive_shards(wanted, shard_capacity, existing_shards)
+
+      pinned ->
+        rest = MapSet.difference(wanted, MapSet.new(pinned))
+        others = Map.delete(existing_shards, @priority_shard)
+        reserved = Map.put(shard_capacity, @priority_shard, 0)
+
+        {shards, overflow} = derive_shards(rest, reserved, others)
+        {Map.put(shards, @priority_shard, pinned), overflow}
+    end
+  end
+
   defp derive_shards(wanted, shard_capacity, existing_shards) do
     kept =
       Map.new(existing_shards, fn {index, shard} ->

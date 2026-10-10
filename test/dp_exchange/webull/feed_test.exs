@@ -1038,6 +1038,46 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:subscribed, "shard-1", 50}
     end
 
+    test "priority_symbols: are planned into shard 0 together, everything else after them",
+         %{limiter: limiter} do
+      # Issue #11's follow-up: the account holds the stream on one session at a time, so
+      # the pairs a consumer trades are planned into the one shard that keeps it.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(test_pid, {:subscribed, decoded["session_id"], Enum.sort(decoded["symbols"])})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => connected_shard("shard-0"), 1 => connected_shard("shard-1")},
+          priority_symbols: ["zzz-usd", "YYY-USD"]
+        )
+
+      symbols = for(i <- 1..48, do: "SYM#{i}-USD") ++ ["YYY-USD", "ZZZ-USD"]
+      assert :ok = Feed.subscribe(feed, symbols, subscribe_opts(limiter, plug: plug))
+
+      assert_receive {:subscribed, "shard-0", ["YYYUSD", "ZZZUSD"]}
+      assert_receive {:subscribed, "shard-1", rest}
+      assert length(rest) == 48
+      refute "YYYUSD" in rest
+    end
+
+    test "priority_symbols: that is not a list of strings fails at start" do
+      Process.flag(:trap_exit, true)
+
+      assert {:error, {%ArgumentError{message: message}, _stacktrace}} =
+               Feed.start_link(
+                 priority_symbols: "BTC-USD",
+                 name: :"priority_bad_#{System.unique_integer([:positive])}"
+               )
+
+      assert message =~ ":priority_symbols must be a list of symbol strings"
+    end
+
     test "a shard that rejects as oversubscribed moves the overflow to another shard, invisibly to the caller",
          %{limiter: limiter} do
       # `shard_capacity: %{0 => 2}` stands in for this package's own accounting being

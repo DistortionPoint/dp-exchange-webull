@@ -238,6 +238,49 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
                        }}
     end
 
+    test "with priority_symbols:, the priority shard is re-asserted when quiet even while another streams",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
+
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
+      end)
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-0"}
+      refute_receive {:request, "shard-1"}, 200
+    end
+
+    test "with priority_symbols:, no other shard is re-asserted against a streaming priority shard" do
+      plug = fn _conn ->
+        flunk("a rotating shard would take the stream from the priority shard")
+      end
+
+      feed = two_shards(plug: plug, priority_symbols: ["BTC-USD"])
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
+      end)
+
+      send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
+
+      assert Process.alive?(feed)
+    end
+
     test "once every sibling is quiet too, a quiet shard IS re-asserted", %{limiter: limiter} do
       test_pid = self()
 

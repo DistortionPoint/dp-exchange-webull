@@ -950,6 +950,25 @@ restated as a claim about the venue. It also records why the vendor's pages have
 **rendered** to be read — their parameter tables are built in JavaScript, and an inventory
 captured without them looks finished and cannot be implemented from.
 
+## `priority_symbols:` — keep the stream on the pairs you trade
+
+The account holds the `us-crypto` stream on **one session at a time**. A consumer measured this
+on 0.4.110: each of three shards streamed one contiguous minute in three, never two at once.
+By default the permission rotates, so every pair streams about a third of the time.
+
+To keep the pairs you actually trade on the stream continuously, name them at start:
+
+```elixir
+{DpExchange.Webull, credentials: creds, priority_symbols: ~w(BTC-USD ETH-USD SOL-USD)}
+```
+
+Those symbols, up to one session's capacity (100), are planned into one shard. That shard
+keeps the stream: it is re-asserted the moment it goes quiet, and no other shard is ever
+re-asserted against it. **The price is that the other shards do not rotate.** With one holder,
+any of them streaming would mean the priority shard is not. Plan to cover those pairs from REST
+(`get_prices/2`, twenty per request). Priority symbols past one session's capacity are placed
+with the rest. A value that is not a list of strings fails at start.
+
 ## A shard reopens its own socket only once it has stopped delivering
 
 Each shard reasserts its symbols on a timer, **but only once it has gone quiet**: a shard where

@@ -22,6 +22,17 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- **`priority_symbols:` keeps the stream on the pairs you trade** (issue #11's follow-up).
+  On 0.4.110 a consumer measured the rotation working as designed: each of three shards
+  streams one contiguous minute in three, never two at once, so the account holds the
+  `us-crypto` stream on one session at a time. Symbols named in `priority_symbols:` (start
+  option, up to one session's 100) are planned into one shard, which is re-asserted the
+  moment it is quiet and never re-asserted against. With one holder, no other shard
+  rotates while the priority shard streams. Those pairs belong to REST cover
+  (`get_prices/2`). Not a list of strings → `ArgumentError` at start.
+
 ## [0.4.110] - 2026-10-10
 
 ### Fixed
