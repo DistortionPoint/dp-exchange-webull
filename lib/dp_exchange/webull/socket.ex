@@ -341,7 +341,15 @@ defmodule DpExchange.Webull.Socket do
     # `Map.get/3` rather than a pattern, so the unit tests that call this callback directly
     # with a bare `%{reason: ...}` keep describing what they mean: one healthy session
     # dropping, which still reconnects at once.
-    attempt = Map.get(status, :attempt_number, 1)
+    #
+    # **A session the broker refused counts too.** `attempt_number` counts failed TRANSPORT
+    # reconnects, and restarts at 1 after every upgrade that succeeded. A broker answering
+    # CONNACK 103/104/105 leaves the WebSocket up, so the next drop was attempt 1 again: delay
+    # 0, forever. On 105 (connection limit) that is self-sustaining, because the broker holds
+    # state for about a minute and "backoff is the only way back" (streaming-api.md).
+    # Consecutive sessions that never reached CONNACK 0 now feed the same backoff.
+    unconnected = if state.connected?, do: 0, else: Map.get(state, :unconnected_sessions, 0) + 1
+    attempt = max(Map.get(status, :attempt_number, 1), unconnected + 1)
     delay = reconnect_delay_ms(attempt)
 
     Telemetry.link_reconnect_attempt(:webull, attempt, delay)
@@ -350,7 +358,13 @@ defmodule DpExchange.Webull.Socket do
     # the same trade `dp_exchange_schwab.Socket` already makes.
     if delay > 0, do: Process.sleep(delay)
 
-    {:reconnect, %{state | buffer: <<>>, connected?: false, ping: nil}}
+    {:reconnect,
+     Map.merge(state, %{
+       buffer: <<>>,
+       connected?: false,
+       ping: nil,
+       unconnected_sessions: unconnected
+     })}
   end
 
   @impl true

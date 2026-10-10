@@ -739,7 +739,7 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert body["timespan"] == "D"
     end
 
-    test "completed bars only — the venue's own default here is the opposite" do
+    test "the venue default is sent, and the forming bar is dropped here" do
       # On the crypto bars and footprints real_time_required defaults to false. Here the
       # vendor's default is Y, which includes an in-progress bar whose boundary has not
       # happened yet. A package storing that saves a bar that changes after it is written.
@@ -762,7 +762,9 @@ defmodule DpExchange.Webull.OrderBookTest do
                )
 
       assert_receive {:sent, body}
-      assert body["real_time_required"] == false
+      # `true` now: the venue's `N` stops at the last whole hour; the forming bar is
+      # dropped by this package instead (2026-10-10).
+      assert body["real_time_required"] == true
     end
 
     test "the three widths the crypto endpoint does not serve are accepted" do

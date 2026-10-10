@@ -730,10 +730,11 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert body["category"] == "US_STOCK"
       assert body["timespan"] == "M1"
       # `historical-bars.md`'s requestBody schema types `real_time_required` as a JSON
-      # `boolean` (historical-bars.md:192-196), not a stringified query param — `false`
-      # by this package's own choice ("Completed bars only.") against the vendor's
-      # documented default of `Y`/true.
-      assert body["real_time_required"] == false
+      # `boolean` (historical-bars.md:192-196), not a stringified query param. `true`, the
+      # vendor's default: its `N` returns only bars completed by the nearest whole hour, so
+      # `false` left up to an hour of finished intraday bars out. The forming bar is dropped
+      # by this package instead (2026-10-10).
+      assert body["real_time_required"] == true
       refute Map.has_key?(body, "start_time")
       refute Map.has_key?(body, "end_time")
     end
@@ -1571,7 +1572,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert order.provider == :webull
     end
 
-    test "the vendor's own documented SUBMITTED example decodes to nil, not a guess" do
+    test "the vendor's own documented SUBMITTED example decodes to :pending" do
       fixture = fixture!("order_detail.json")
 
       assert {:ok, order} =
@@ -1581,7 +1582,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert order.status == nil
+      assert order.status == :pending
     end
   end
 
@@ -1617,8 +1618,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert order.order_type == :limit
       assert order.time_in_force == :day
       # the fixture's status is the field's own literal documented example, "SUBMITTED" —
-      # rest.ex's status_atom/1 has no stated vendor equivalence for it.
-      assert order.status == nil
+      # accepted and not terminal, which is `:pending` (2026-10-10).
+      assert order.status == :pending
       assert Decimal.equal?(order.quantity, Decimal.new(row["total_quantity"]))
       assert Decimal.equal?(order.price, Decimal.new(row["limit_price"]))
 

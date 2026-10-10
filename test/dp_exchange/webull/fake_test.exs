@@ -168,6 +168,10 @@ defmodule DpExchange.Webull.FakeTest do
           side: :buy,
           quantity: Decimal.new("0.5"),
           price: Decimal.new("40000"),
+          # A stop needs its trigger and a trailing stop its step; the fake now refuses
+          # either without, as the real path does. Inert on every other type.
+          stop_price: Decimal.new("39000"),
+          trailing_stop_step: Decimal.new("1"),
           order_type: :limit,
           time_in_force: :gtc
         },

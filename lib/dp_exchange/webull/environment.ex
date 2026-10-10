@@ -9,8 +9,16 @@ defmodule DpExchange.Webull.Environment do
 
   | | Production | UAT |
   |---|---|---|
-  | REST | `api.webull.com` | `us-openapi-alb.uat.webullbroker.com` |
+  | REST | `api.webull.com` | `api.sandbox.webull.com` |
   | Streaming | `wss://data-api.webull.com:8883/mqtt` | **none** |
+
+  **The UAT REST host is the vendor's own, `api.sandbox.webull.com`**: every page under
+  `docs/reference/webull/openapi/` names it as the server, and so does
+  `futures-and-event-contracts.md`. This used `us-openapi-alb.uat.webullbroker.com`, carried
+  over from the prior adapter and named nowhere in those docs. Measured by DNS only, on
+  2026-10-10: the documented host resolves to CloudFront, and the old one to an AWS
+  `cn-northwest-1` load balancer. Neither was sent a request, because a signed sandbox
+  request needs a credential this repository never holds.
 
   The prior adapter records the measurement that establishes it:
   `mqtt-uat.webullbroker.com` → **NXDOMAIN**. There is no UAT broker to connect to, and no
@@ -44,10 +52,10 @@ defmodule DpExchange.Webull.Environment do
 
   @rest %{
     production: "https://api.webull.com",
-    uat: "https://us-openapi-alb.uat.webullbroker.com"
+    uat: "https://api.sandbox.webull.com"
   }
 
-  @hosts %{production: "api.webull.com", uat: "us-openapi-alb.uat.webullbroker.com"}
+  @hosts %{production: "api.webull.com", uat: "api.sandbox.webull.com"}
 
   @streaming %{production: "wss://data-api.webull.com:8883/mqtt", uat: nil}
 

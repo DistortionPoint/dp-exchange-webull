@@ -635,19 +635,11 @@ defmodule DpExchange.Webull.Fake do
         {:error, :no_order_changes}
 
       true ->
-        # The same per-type edit surface the real package enforces: a LIMIT order takes
-        # order_type, time_in_force, quantity and limit price and nothing else.
-        allowed = [
-          :order_type,
-          :time_in_force,
-          :quantity,
-          :price,
-          :stop_price,
-          :trailing_stop_step
-        ]
-
-        case Map.keys(changes) -- allowed do
-          [] ->
+        # The real package's own per-type edit table, not a union of every type's fields.
+        # This allowed `:stop_price` and `:trailing_stop_step` on a LIMIT order, which the
+        # real path refuses as `unsupported_order_edit`; its comment said a limit takes four.
+        case Rest.validate_amendment(order_type, changes) do
+          :ok ->
             # Account first, credentials second — matching `Rest.replace_order/4`'s own
             # order (account, THEN `post/4` -> `Auth.headers/2`).
             with :ok <- fake_account(opts),
@@ -655,8 +647,8 @@ defmodule DpExchange.Webull.Fake do
               {:ok, %{fake_order() | id: client_order_id, price: Map.get(changes, :price)}}
             end
 
-          rejected ->
-            {:error, {:unsupported_order_edit, order_type, rejected}}
+          refused ->
+            refused
         end
     end
   end
@@ -1243,6 +1235,10 @@ defmodule DpExchange.Webull.Fake do
       # green on an order the venue would reject.
       with :ok <- fake_account(opts),
            :ok <- fake_combination(request),
+           # The real path's own request checks (sizing, required prices, session), so the
+           # fake refuses what the venue would. It skipped them, and accepted a limit with
+           # no price or a market order sized twice.
+           :ok <- Rest.validate_order_request(request),
            :ok <- credentialed(credentials) do
         # Round-tripped through the real module's own encode then decode — not the
         # caller's atom echoed back — so a fake-based suite exercises the same wire
@@ -1253,7 +1249,9 @@ defmodule DpExchange.Webull.Fake do
 
         {:ok,
          %Types.Order{
-           id: "fake-webull-order-1",
+           # The caller's own `client_order_id` when it gave one, as the venue echoes it. A
+           # fixed id made a place-then-cancel round trip on a caller-chosen id fail.
+           id: Map.get(request, :client_order_id) || "fake-webull-order-1",
            symbol: Map.fetch!(request, :symbol),
            side: Map.fetch!(request, :side),
            order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),

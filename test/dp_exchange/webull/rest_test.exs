@@ -738,7 +738,7 @@ defmodule DpExchange.Webull.RestTest do
     test "UAT sends to the UAT host, and signs that host" do
       plug = fn conn ->
         # The host is part of the signature, so it must be the host actually reached.
-        assert Plug.Conn.get_req_header(conn, "host") == ["us-openapi-alb.uat.webullbroker.com"]
+        assert Plug.Conn.get_req_header(conn, "host") == ["api.sandbox.webull.com"]
         Req.Test.json(conn, [%{"price" => "1", "time" => 1_787_936_147_000}])
       end
 

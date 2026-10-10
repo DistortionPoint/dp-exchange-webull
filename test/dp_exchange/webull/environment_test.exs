@@ -12,8 +12,8 @@ defmodule DpExchange.Webull.EnvironmentTest do
     end
 
     test "UAT has REST" do
-      assert Environment.rest_url(:uat) == "https://us-openapi-alb.uat.webullbroker.com"
-      assert Environment.host(:uat) == "us-openapi-alb.uat.webullbroker.com"
+      assert Environment.rest_url(:uat) == "https://api.sandbox.webull.com"
+      assert Environment.host(:uat) == "api.sandbox.webull.com"
     end
 
     test "UAT has NO streaming, and says so rather than falling back" do

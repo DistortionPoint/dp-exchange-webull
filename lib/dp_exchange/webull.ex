@@ -853,7 +853,7 @@ defmodule DpExchange.Webull do
   trading-calendar endpoint Webull publishes anywhere,
   `GET /broker/master-data/trading-calendars/list`, belongs to a different product
   entirely — the **Broker API**, served from `broker-api.webull.com` rather than this
-  package's `api.webull.com`/`us-openapi-alb.uat.webullbroker.com`, and reachable only
+  package's `api.webull.com`/`api.sandbox.webull.com`, and reachable only
   with its own broker-tier credential, obtained through a separate business relationship
   ("contact our business team" — `developer.webull.com/apis/docs/broker-api/about-broker-
   api.md`). This package's `credentials()` is an OpenAPI App Key/App Secret pair; it does

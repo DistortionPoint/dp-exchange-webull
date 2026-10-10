@@ -61,7 +61,7 @@ defmodule DpExchange.Webull.Rest do
   for three other refusals. Fixed alongside `historical_timeframes` below.
   """
 
-  alias DpExchange.Core.{Config, HttpClient, Instrument}
+  alias DpExchange.Core.{Config, HttpClient, Instrument, Timeframe}
 
   alias DpExchange.Core.Types.{
     AuctionImbalance,
@@ -405,18 +405,20 @@ defmodule DpExchange.Webull.Rest do
     case Config.opt(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
       "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
-      "US_FUTURES" -> futures_bars(symbol, timeframe, credentials, opts)
-      "US_EVENT" -> event_bars(symbol, timeframe, credentials, opts)
+      "US_FUTURES" -> futures_bars(symbol, timeframe, range, credentials, opts)
+      "US_EVENT" -> event_bars(symbol, timeframe, range, credentials, opts)
       _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
     end
   end
 
   # **Futures bars take no range and no `real_time_required`.** The venue's page names
   # `symbols`, `category`, `timespan` and `count` and nothing else, so a caller's start and
-  # end are not silently dropped into parameters this endpoint does not read — they simply
-  # have nowhere to go, and `opts[:limit]` is how a caller bounds the read here.
-  defp futures_bars(symbol, timeframe, credentials, opts) do
-    with {:ok, timespan} <- stock_timespan(timeframe) do
+  # end have nowhere to go, and `opts[:limit]` is how a caller bounds the read here. **So a
+  # range is refused**, as `option_bars/5` refuses one: it was ignored, and the latest bars
+  # came back as though they answered a window in the past.
+  defp futures_bars(symbol, timeframe, range, credentials, opts) do
+    with :ok <- refuse_bar_range(range, :future),
+         {:ok, timespan} <- stock_timespan(timeframe) do
       params =
         %{
           "symbols" => symbol,
@@ -440,8 +442,10 @@ defmodule DpExchange.Webull.Rest do
   # market's symbol; a caller reconciling against `get_event_trades/3`, which does name both
   # sides, is the way to find out. Labelling them here would be this package asserting a
   # side the venue did not state.
-  defp event_bars(symbol, timeframe, credentials, opts) do
-    with {:ok, timespan} <- event_timespan(timeframe) do
+  # Takes no range either, and refuses one for the reason `futures_bars/5` does.
+  defp event_bars(symbol, timeframe, range, credentials, opts) do
+    with :ok <- refuse_bar_range(range, :event),
+         {:ok, timespan} <- event_timespan(timeframe) do
       params =
         %{
           "symbols" => symbol,
@@ -512,6 +516,11 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # crypto-bars.md: `count` defaults to 200 and is at most 1200, and the endpoint takes no
+  # start or end. A range is therefore a filter over the most recent `count` bars.
+  @crypto_bar_default 200
+  @crypto_bar_max 1_200
+
   defp crypto_bars(symbol, timeframe, range, credentials, opts) do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
@@ -546,10 +555,32 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("count", Keyword.get(opts, :limit))
 
-      with {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
-           {:ok, bars} <- decode_bars(body, symbol, timeframe) do
+      with :ok <- crypto_count_within_limit(Keyword.get(opts, :limit)),
+           {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
+           {:ok, bars} <- decode_bars(body, symbol, timeframe),
+           :ok <- range_reached(bars, range, Keyword.get(opts, :limit) || @crypto_bar_default) do
         {:ok, Enum.filter(bars, &within?(&1, range))}
       end
+    end
+  end
+
+  defp crypto_count_within_limit(nil), do: :ok
+  defp crypto_count_within_limit(n) when is_integer(n) and n in 1..@crypto_bar_max, do: :ok
+  defp crypto_count_within_limit(n), do: {:error, {:limit_out_of_range, n, max: @crypto_bar_max}}
+
+  # **A range older than the read reaches is refused, not answered short.** A full page
+  # whose oldest bar is still after `:start` means older bars exist that this read did not
+  # fetch, and filtering it to the range returned a truncated window as complete, or `[]`
+  # for a window wholly in the past, which reads as "no trading". A page shorter than
+  # `count` is the venue's whole history, and is answered.
+  defp range_reached(bars, range, count) do
+    with %DateTime{} = start <- Keyword.get(range, :start),
+         true <- length(bars) >= count,
+         %{opened_at: oldest} <- Enum.min_by(bars, & &1.opened_at, DateTime, fn -> nil end),
+         :gt <- DateTime.compare(oldest, start) do
+      {:error, {:range_exceeds_count, count}}
+    else
+      _reached_or_unbounded -> :ok
     end
   end
 
@@ -1627,6 +1658,13 @@ defmodule DpExchange.Webull.Rest do
     trailing_stop: [:trailing_stop_step]
   }
 
+  @doc """
+  Whether `changes` is an amendment the venue accepts for an order of `order_type`, per its
+  own per-type edit table. The check `replace_order/4` makes, for `DpExchange.Webull.Fake`.
+  """
+  @spec validate_amendment(atom(), map()) :: :ok | {:error, term()}
+  def validate_amendment(order_type, changes), do: amendable(order_type, changes)
+
   defp amendable(order_type, changes) do
     case Map.fetch(@amendable, order_type) do
       :error ->
@@ -2092,6 +2130,9 @@ defmodule DpExchange.Webull.Rest do
   defp tick_sessions(_category, opts), do: sessions_param(Config.opt(opts, :sessions, ["RTH"]))
 
   defp sessions_param(sessions) when is_list(sessions), do: Enum.join(sessions, ",")
+  # Absent is absent, not `""`: `to_string(nil)` sent `"trading_sessions": ""`, a value outside
+  # the PRE/RTH/ATH/OVN enum, on every stock bar request that named no session.
+  defp sessions_param(nil), do: nil
   defp sessions_param(session), do: to_string(session)
 
   defp decode_ticks(row, symbol) do
@@ -2190,17 +2231,38 @@ defmodule DpExchange.Webull.Rest do
           "symbols" => [symbol],
           "category" => category,
           "timespan" => timespan,
-          # Completed bars only. The venue's own default is the opposite here.
-          "real_time_required" => Keyword.get(opts, :real_time, false)
+          # **`true`, and the in-progress bar dropped here.** This sent `false` for
+          # "completed bars only", but historical-bars.md defines N as "Pulls only the
+          # completed bars from the previous period at the nearest whole hour at the time of
+          # request": an intraday read at 10:59 stopped at 10:00, up to an hour of finished
+          # bars missing. `true` (the venue's default) returns them all, and the one bar
+          # still forming is removed below. An explicit `real_time:` is still the caller's.
+          "real_time_required" => Keyword.get(opts, :real_time, true)
         }
         |> put_raw("count", Keyword.get(opts, :limit))
         |> put_raw("start_time", epoch_ms(Keyword.get(range, :start)))
         |> put_raw("end_time", epoch_ms(Keyword.get(range, :end)))
         |> put_present("trading_sessions", sessions_param(Keyword.get(opts, :sessions)))
 
-      with {:ok, response} <- post("/market-data/stocks/bars/list", body, credentials, opts) do
-        decode_stock_bars(response, symbol, timeframe, range)
+      with {:ok, response} <- post("/market-data/stocks/bars/list", body, credentials, opts),
+           {:ok, bars} <- decode_stock_bars(response, symbol, timeframe, range) do
+        {:ok, completed_unless_asked(bars, timeframe, Keyword.get(opts, :real_time))}
       end
+    end
+  end
+
+  # A caller who asked for the forming bar (`real_time: true`) keeps it. Otherwise a bar whose
+  # end has not happened yet is not a bar this package returns.
+  defp completed_unless_asked(bars, _timeframe, true), do: bars
+
+  defp completed_unless_asked(bars, timeframe, _default) do
+    case Timeframe.seconds(timeframe) do
+      {:ok, width} ->
+        now = DateTime.utc_now()
+        Enum.reject(bars, &(DateTime.compare(DateTime.add(&1.opened_at, width), now) == :gt))
+
+      :error ->
+        bars
     end
   end
 
@@ -2372,7 +2434,16 @@ defmodule DpExchange.Webull.Rest do
       url = Config.opt(opts, :oauth_url, oauth_url(opts)) <> "/oauth2/tokens/create"
       headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
-      case HttpClient.request(:post, url, headers, URI.encode_query(form), request_opts(opts)) do
+      # Sent once: an authorization code is single-use and a refresh token may rotate, so a
+      # retry after a lost answer to a request that succeeded fails, and the token it issued
+      # is gone.
+      case HttpClient.request(
+             :post,
+             url,
+             headers,
+             URI.encode_query(form),
+             send_once(request_opts(opts))
+           ) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
           decoded_token(body)
 
@@ -4232,13 +4303,21 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, account_id} <- account_id(opts),
          {:ok, order_type, tif} <- combination(request),
          {:ok, leaf} <- order_leaf(request, order_type, tif) do
+      client_order_id = client_order_id(request)
+
       body = %{
         "account_id" => account_id,
-        "new_orders" => [Map.put(leaf, "client_order_id", client_order_id(request))]
+        "new_orders" => [Map.put(leaf, "client_order_id", client_order_id)]
       }
 
-      with {:ok, response} <- post("/trading/orders/place", body, credentials, send_once(opts)) do
-        to_placed_order(response, request, order_type, tif)
+      case post("/trading/orders/place", body, credentials, send_once(opts)) do
+        {:ok, response} -> to_placed_order(response, request, order_type, tif)
+        # **The id goes back with the failure.** An `{:error, _}` (a timeout, a 5xx) does
+        # not say whether the order landed, and a generated id was returned only on
+        # success, so a caller left holding a possibly live order had no way to look it up
+        # or cancel it. `get_order/3` with this id is how to find out.
+        {:error, reason} -> {:error, {:order_unconfirmed, client_order_id, reason}}
+        refused -> refused
       end
     end
   end
@@ -4548,7 +4627,9 @@ defmodule DpExchange.Webull.Rest do
   defp order_leaf(request, order_type, tif) do
     instrument = instrument_type(request)
 
-    with {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+    with :ok <- required_order_identity(request),
+         {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+         :ok <- required_order_prices(request, order_type),
          {:ok, session} <- support_trading_session(request) do
       leaf =
         %{
@@ -4667,6 +4748,45 @@ defmodule DpExchange.Webull.Rest do
   # order type does not have — a caller building a stop request from a limit-order template
   # (leaving `:price` set) must not have it silently escape onto the wire on the wrong order
   # type.
+  # A limit with no limit price, or a stop with no trigger, was sent with the field simply
+  # absent, because `put_present/3` skips `nil`. The venue refuses it, but only after the
+  # request; refused here it names the field, and spends no write.
+  # `Map.fetch!/2` on `:side` raised `KeyError` in the caller's process, on an order write.
+  defp required_order_identity(request) do
+    case Enum.find([:symbol, :side], &is_nil(Map.get(request, &1))) do
+      nil -> :ok
+      field -> {:error, {:missing_required_field, field}}
+    end
+  end
+
+  @doc """
+  Whether `request` is an order this package would send: the venue's combination matrix,
+  sizing, and the prices its type requires. The same checks `place_order/3` makes before
+  it signs anything, for `DpExchange.Webull.Fake` to answer exactly as the real path does.
+  """
+  @spec validate_order_request(map()) :: :ok | {:error, term()}
+  def validate_order_request(request) do
+    with {:ok, order_type, tif} <- combination(request),
+         {:ok, _leaf} <- order_leaf(request, order_type, tif),
+         do: :ok
+  end
+
+  defp required_order_prices(request, order_type) do
+    required =
+      case order_type do
+        "LIMIT" -> [:price]
+        "STOP_LOSS" -> [:stop_price]
+        "STOP_LOSS_LIMIT" -> [:price, :stop_price]
+        "TRAILING_STOP_LOSS" -> [:trailing_stop_step]
+        _other -> []
+      end
+
+    case Enum.find(required, &is_nil(Map.get(request, &1))) do
+      nil -> :ok
+      field -> {:error, {:missing_required_field, field}}
+    end
+  end
+
   defp price_for(request, "LIMIT"), do: Map.get(request, :price)
   defp price_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :price)
   defp price_for(_request, _order_type), do: nil
@@ -4985,10 +5105,15 @@ defmodule DpExchange.Webull.Rest do
   #
   # `FAILED` maps to `:rejected` on the vendor's OWN equivalence, not this package's: its
   # description reads "Indicates a failed order, such as REJECTED" — the venue naming its
-  # own FAILED status as the rejected-order case. `SUBMITTED` gets no such statement
-  # anywhere on the page ("submitted to the exchange or webull" says nothing about whether
-  # the order is working), and `Core.Types.Order.status/0` has no slot for "submitted,
-  # outcome unknown" — so it stays `nil` rather than being guessed as `:open`.
+  # own FAILED status as the rejected-order case.
+  #
+  # `SUBMITTED` is `:pending`. It was `nil`, on the reading that `Core.Types.Order.status/0`
+  # has no slot for "submitted, outcome unknown". `:pending` is that slot: accepted, not
+  # yet known to be working, and not terminal, which is what "submitted to the exchange or
+  # webull" says. It is also the example status on the open-orders page (order-open.md:234),
+  # so a `nil` made every working order look unknown. It is still not `:open`, which would
+  # claim the order is resting on the book.
+  defp status_atom("SUBMITTED"), do: :pending
   defp status_atom("PENDING"), do: :pending
   defp status_atom("PARTIAL_FILLED"), do: :partially_filled
   defp status_atom("FILLED"), do: :filled

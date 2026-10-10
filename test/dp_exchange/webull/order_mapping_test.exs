@@ -158,12 +158,15 @@ defmodule DpExchange.Webull.OrderMappingTest do
       end
     end
 
-    # `SUBMITTED` is a real vendor value with no stated equivalence to any status this
-    # package's own `Core.Types.Order.status/0` names ("submitted to the exchange or
-    # webull" says nothing about whether the order is working) — `nil`, not a guess at
-    # `:open`. `WORKING`, `CANCELED` (single `L`) and `EXPIRED` were never in the
-    # documented enum at all and get the same answer for not being provable.
-    for venue <- ["SUBMITTED", "WORKING", "CANCELED", "REJECTED", "EXPIRED"] do
+    # `SUBMITTED` is `:pending`: accepted, not yet known to be working, not terminal, and
+    # the open-orders page's own example status (2026-10-10). It was `nil`, which made every
+    # working order look unknown. `WORKING`, `CANCELED` (single `L`) and `EXPIRED` were never
+    # in the documented enum at all and stay `nil` for not being provable.
+    test "status SUBMITTED is :pending, never :open" do
+      assert fetch(%{"status" => "SUBMITTED"}).status == :pending
+    end
+
+    for venue <- ["WORKING", "CANCELED", "REJECTED", "EXPIRED"] do
       test "status #{venue} is not documented for this endpoint, so nil" do
         assert fetch(%{"status" => unquote(venue)}).status == nil
       end

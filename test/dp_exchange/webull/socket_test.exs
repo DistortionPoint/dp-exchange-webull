@@ -895,7 +895,12 @@ defmodule DpExchange.Webull.SocketTest do
             started = System.monotonic_time(:millisecond)
 
             assert {:reconnect, _state} =
-                     Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, state())
+                     Socket.handle_disconnect(
+                       %{reason: :closed, attempt_number: 1},
+                       # A session that reached CONNACK 0: one that never did is now counted
+                       # toward the backoff (a broker refusal), which is not this path.
+                       Map.put(state(), :connected?, true)
+                     )
 
             System.monotonic_time(:millisecond) - started
           end

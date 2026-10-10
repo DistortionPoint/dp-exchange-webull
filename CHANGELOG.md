@@ -22,6 +22,39 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A broker that refused the session got an immediate reconnect, forever.** Backoff counted
+  only failed transport reconnects. A CONNACK 103/104/105 leaves the WebSocket up, so every
+  next drop was attempt 1 with no delay, and 105 (the connection limit, held about a minute)
+  sustained itself. Consecutive sessions that never reach CONNACK 0 now count toward the delay.
+- **Futures and event bars ignored the caller's range** and returned the latest bars as
+  though they answered it. They now refuse a range, as option bars already did.
+- **Crypto bars answered a range older than one read reaches with a short list, or `[]`.**
+  The endpoint takes only `count`. A full page whose oldest bar is still after `:start` is now
+  `{:error, {:range_exceeds_count, count}}`, and a `:limit` past 1200 is refused.
+- **Stock bars sent `real_time_required: false`.** The vendor defines that as "only the
+  completed bars ... at the nearest whole hour", so an intraday read at 10:59 stopped at
+  10:00. They now send the venue's default `true` and drop the bar still forming. An explicit
+  `real_time:` is still honoured.
+- **Stock bars sent `"trading_sessions": ""`** when no session was named. It is now omitted.
+- **A timed-out `place_order` lost its generated `client_order_id`.** It now returns
+  `{:error, {:order_unconfirmed, client_order_id, reason}}`, so the possibly live order can
+  be looked up with `get_order/3`.
+- **A limit order with no price, a stop with no trigger, or an order with no side** was sent,
+  or raised `KeyError`. Each is now `{:error, {:missing_required_field, field}}`.
+- **`oauth_token/3` was retried.** An authorization code is single-use and a refresh token
+  may rotate, so it is now sent once.
+- **`SUBMITTED` read back as `nil`.** It is now `:pending` (accepted, not terminal, not
+  `:open`). It is the open-orders page's own example status.
+- **The UAT REST host is now the vendor's documented `api.sandbox.webull.com`.** It was
+  `us-openapi-alb.uat.webullbroker.com`, carried over from the prior adapter and named in none
+  of the committed docs. Checked by DNS only, on 2026-10-10: the documented host resolves to
+  CloudFront, and the old one to an AWS `cn-northwest-1` load balancer.
+- **The fake accepted orders the real path refuses.** It now runs the real request checks
+  (`Rest.validate_order_request/1`) and the real amendment table
+  (`Rest.validate_amendment/2`), and echoes the caller's `client_order_id`.
+
 ## [0.4.113] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
