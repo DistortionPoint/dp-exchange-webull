@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.118] - 2026-10-10
+
 ### Fixed
 
 - **`Fake.place_orders/3` accepted batches `Rest.place_orders/3` refuses.** Its entry check
