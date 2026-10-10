@@ -105,6 +105,18 @@ defmodule DpExchange.Webull.RestTest do
       assert results["C3-USD"] == {:refused, :no_quote}
     end
 
+    test "two spellings of one pair are asked for once and BOTH get the result" do
+      assert {:ok, results} =
+               Rest.get_prices(["BTC-USD", "BTCUSD"], @credentials,
+                 plug: echoing_rows(self()),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:batch, ["BTCUSD"]}
+      assert {:ok, %Types.Quote{symbol: "BTC-USD"}} = results["BTC-USD"]
+      assert {:ok, %Types.Quote{symbol: "BTC-USD"}} = results["BTCUSD"]
+    end
+
     test "a chunk whose request fails gives each of ITS symbols that failure, and no others" do
       plug = fn conn ->
         conn = Plug.Conn.fetch_query_params(conn)

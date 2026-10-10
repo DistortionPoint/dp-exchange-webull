@@ -263,12 +263,21 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       refute_receive {:request, "shard-1"}, 200
     end
 
-    test "with priority_symbols:, no other shard is re-asserted against a streaming priority shard" do
-      plug = fn _conn ->
-        flunk("a rotating shard would take the stream from the priority shard")
+    test "with priority_symbols:, no other shard is re-asserted against a streaming priority shard",
+         %{limiter: limiter} do
+      # Reported to the test process, not `flunk/1`ed in the plug: the plug runs in a reconcile
+      # task, where a flunk only kills the task and the test passed with or without the guard.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
       end
 
-      feed = two_shards(plug: plug, priority_symbols: ["BTC-USD"])
+      feed =
+        two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
+
       now = :os.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
@@ -276,9 +285,137 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       end)
 
       send(feed, :resubscribe)
-      _settled = Feed.coverage(feed)
 
-      assert Process.alive?(feed)
+      refute_receive {:request, _session}, 300
+    end
+
+    test "with priority_symbols: none of which is wanted, shard 0 is ordinary and the rest rotate",
+         %{limiter: limiter} do
+      # `derive_shards/4` plans shard 0 as an ordinary shard when no priority symbol is
+      # wanted. Guarding on the option alone kept every other shard out of the stream.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["XRP-USD"])
+
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
+      end)
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-1"}
+    end
+
+    test "with the priority shard down, the other shards are still repaired", %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
+
+      long_ago = :os.system_time(:millisecond) - 300_000
+
+      :sys.replace_state(feed, fn state ->
+        state = put_in(state.shards[0].connected?, false)
+        %{state | delivering: %{"BTC-USD" => long_ago, "SOL-USD" => long_ago}}
+      end)
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-1"}
+      refute_receive {:request, "shard-0"}, 200
+    end
+
+    test "a shard that already had a rotation turn is not picked again over one still waiting",
+         %{limiter: limiter} do
+      # A shard whose symbols never tick has a `last_delivery` of zero forever. Ranked on
+      # delivery alone it won every rotation, taking the stream from the streaming sibling
+      # each tick and delivering nothing with it.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        start_feed(
+          shards: %{
+            0 => %{connected_shard("shard-0") | symbols: ["BTC-USD"]},
+            1 => %{connected_shard("shard-1") | symbols: ["SOL-USD"]},
+            2 => %{connected_shard("shard-2") | symbols: ["ETH-USD"]}
+          },
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
+      now = :os.system_time(:millisecond)
+
+      :sys.replace_state(feed, fn state ->
+        %{
+          state
+          | delivering: %{"BTC-USD" => now, "ETH-USD" => now - 90_000},
+            rotated_at: %{1 => now - 70_000}
+        }
+      end)
+
+      send(feed, :resubscribe)
+
+      assert_receive {:request, "shard-2"}
+      refute_receive {:request, "shard-1"}, 200
+    end
+
+    test "a shard torn down mid-resubscribe drops that attempt instead of holding the reopened shard",
+         %{limiter: limiter} do
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, self()})
+        Process.sleep(:infinity)
+        conn
+      end
+
+      crash_pid = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(crash_pid, :kill) end)
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("shard-0") | socket: crash_pid, symbols: ["BTC-USD"]}},
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0,
+          url: "ws://127.0.0.1:1/nowhere"
+        )
+
+      :ok = Feed.subscribe_notices(feed, to: self())
+      send(feed, :resubscribe)
+
+      assert_receive {:request, task}
+      task_ref = Process.monitor(task)
+
+      send(feed, {:EXIT, crash_pid, :boom})
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      assert_receive {:DOWN, ^task_ref, :process, ^task, _reason}
+      refute Map.has_key?(:sys.get_state(feed).reconciling, {:resubscribe, 0})
     end
 
     test "once every sibling is quiet too, a quiet shard IS re-asserted", %{limiter: limiter} do

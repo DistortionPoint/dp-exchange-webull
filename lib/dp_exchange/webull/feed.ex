@@ -603,6 +603,10 @@ defmodule DpExchange.Webull.Feed do
        max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
+       # shard index => epoch ms its last rotation turn was granted. See
+       # `resubscribe_quiet_shards/1`: a turn counts as recent activity, so a shard whose
+       # symbols never tick does not win every rotation on a `last_delivery` of zero.
+       rotated_at: %{},
        # kind() => %{symbol => timestamp}, built alongside `delivering` above from the
        # same arriving payloads — never from `wanted` or from what was subscribed. See
        # the moduledoc's "Coverage by kind" and `kind_for/1`.
@@ -1397,7 +1401,14 @@ defmodule DpExchange.Webull.Feed do
       # it alone is re-asserted, the moment it is quiet, and no other shard is ever
       # re-asserted against it, because with one holder any other shard streaming means the
       # priority shard is not. The rest stay quiet and are covered by REST.
-      Map.has_key?(state.shards, @priority_shard) and state.priority != MapSet.new() ->
+      #
+      # Only while shard 0 really IS the priority shard: connected, and holding a priority
+      # symbol. `derive_shards/4` plans shard 0 as an ordinary shard when no priority symbol
+      # is wanted, and guarding on the option alone then froze every other shard out of the
+      # stream for good. And while shard 0 is down nobody would ever be re-asserted, so the
+      # others rotate as usual until it is back; its own `:link_up` subscribe takes the
+      # permission back on reconnect.
+      priority_shard_held?(state) ->
         case List.keyfind(quiet, @priority_shard, 0) do
           nil -> state
           priority_shard -> reassert_shard(priority_shard, state)
@@ -1407,11 +1418,29 @@ defmodule DpExchange.Webull.Feed do
         Enum.reduce(quiet, state, &reassert_shard/2)
 
       true ->
-        {index, shard} = Enum.min_by(quiet, fn {index, _shard} -> last_delivery(state, index) end)
+        {index, shard} = Enum.min_by(quiet, fn {index, _shard} -> rotation_key(state, index) end)
         announce_rotation(state, index, shard)
+        state = put_in(state.rotated_at[index], :os.system_time(:millisecond))
         reassert_shard({index, shard}, state)
     end
   end
+
+  defp priority_shard_held?(%{priority: priority, shards: shards}) do
+    case Map.fetch(shards, @priority_shard) do
+      {:ok, %{connected?: true, symbols: symbols}} ->
+        Enum.any?(symbols, &MapSet.member?(priority, &1))
+
+      _absent_or_down ->
+        false
+    end
+  end
+
+  # Longest since it last streamed OR last had a turn. Delivery alone ranks a shard whose
+  # symbols never tick — never-quoted pairs collect together — at zero forever, so it won
+  # every rotation: it took the permission from the streaming sibling each tick and then
+  # delivered nothing with it. Ties (two shards that have had neither) go to the lower index.
+  defp rotation_key(state, index),
+    do: {max(last_delivery(state, index), Map.get(state.rotated_at, index, 0)), index}
 
   defp reassert_shard({index, shard}, state) do
     spawn_reconcile(state, {:resubscribe, index}, fn ->
@@ -1817,8 +1846,12 @@ defmodule DpExchange.Webull.Feed do
   # killed. What closes it is the attempt token on the answer itself; see
   # `handle_info({:reconcile_done, tag, attempt, result}, _)`.
   #
-  # `{:resubscribe, _}` never reaches this — `resubscribe_quiet_shards/1` skips a tick whose
-  # previous attempt is still running — so what arrives here is a `{:link_up, _}` or
+  # `{:resubscribe, _}` reaches this only when its shard is torn down and reopened
+  # (`isolate_crashed_shard/3`, `rebuild_stale_shard/3`): the attempt was for the old
+  # connection, and left tracked it held the new shard out of rotation until its deadline
+  # and then had its answer latched onto a connection it never ran against. Otherwise
+  # `resubscribe_quiet_shards/1` skips a tick whose previous attempt is still running, so
+  # what arrives here is a `{:link_up, _}` or
   # `{:background, _}` genuinely superseded by newer intent, where the newest attempt
   # winning is the behaviour wanted. `{:primary, _, from, _, _, _}` carries its caller in
   # the tag and so is unique per caller; two of them never collide.
@@ -1873,9 +1906,10 @@ defmodule DpExchange.Webull.Feed do
     # `drop_symbols_by_kind/2` above — because a symbol whose only shard just died has
     # exactly as little arriving for it as one that was never subscribed.
     state = %{
-      state
+      supersede_reconcile(state, {:resubscribe, index})
       | shards: Map.delete(state.shards, index),
         resubscribe_failed: Map.delete(state.resubscribe_failed, index),
+        rotated_at: Map.delete(state.rotated_at, index),
         delivering: Map.drop(state.delivering, shard.symbols),
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
@@ -2050,9 +2084,10 @@ defmodule DpExchange.Webull.Feed do
         answer_parked_caller(shard, {:error, {:invalid_session, named}})
 
         state = %{
-          state
+          supersede_reconcile(state, {:resubscribe, index})
           | shards: Map.delete(state.shards, index),
             resubscribe_failed: Map.delete(state.resubscribe_failed, index),
+            rotated_at: Map.delete(state.rotated_at, index),
             delivering: Map.drop(state.delivering, shard.symbols),
             delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
         }

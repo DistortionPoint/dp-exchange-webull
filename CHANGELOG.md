@@ -22,6 +22,26 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`priority_symbols:` froze the other shards out when shard 0 held no priority symbol.**
+  The guard read the option, not shard 0. With none of the priority symbols subscribed, shard 0
+  is planned as an ordinary shard, yet only it was ever re-asserted. Now the priority branch
+  applies only while shard 0 is connected and holds a priority symbol. While it is down, the
+  other shards are repaired and rotated as usual.
+- **Rotation handed every turn to a shard whose symbols never tick.** It ranked quiet shards by
+  last delivery alone, so a shard of never-quoted pairs ranked at zero forever. It took the
+  stream from the streaming sibling each tick and delivered nothing. A turn now counts as
+  activity, and ties go to the lower index.
+- **A shard torn down mid-resubscribe kept that attempt tracked.** After a socket crash or
+  `INVALID_SESSION`, the reopened shard sat out rotation until the old attempt's 60 s deadline.
+  The old answer was then latched onto the new connection. The attempt is now stopped and
+  forgotten with the shard.
+- **`get_prices/2` dropped one of two spellings of the same pair.** `"BTC-USD"` and `"BTCUSD"`
+  share a native symbol, and only the last one kept a result. Both now get it, from one request.
+- A test meant to prove no shard is re-asserted against a streaming priority shard could not
+  fail. It `flunk`ed inside the reconcile task. It now asserts in the test process.
+
 ## [0.4.111] - 2026-10-10
 
 ### Added

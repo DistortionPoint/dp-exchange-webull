@@ -969,6 +969,13 @@ any of them streaming would mean the priority shard is not. Plan to cover those 
 (`get_prices/2`, twenty per request). Priority symbols past one session's capacity are placed
 with the rest. A value that is not a list of strings fails at start.
 
+The guarantee holds while shard 0 really is the priority shard. If none of the priority
+symbols is subscribed, shard 0 is an ordinary shard and every shard rotates as without the
+option. While the priority shard is disconnected, the others are repaired and rotated as
+usual, and the priority shard takes the stream back when it reconnects. Subscribing a priority
+symbol later re-plans shard 0 to hold exactly the priority symbols. The ordinary symbols it
+held move to the other shards, and those re-subscribes take the stream briefly.
+
 ## A shard reopens its own socket only once it has stopped delivering
 
 Each shard reasserts its symbols on a timer, **but only once it has gone quiet**: a shard where
@@ -979,7 +986,7 @@ consumer measured that costing a streaming shard 30 s or more of silence every m
 0.4.107–0.4.109): re-asserting every quiet shard made two shards flap, each losing half its
 minutes, and never re-asserting while a sibling streamed left them with no stream at all. So the
 permission is **rotated**. While any shard streams, each tick re-asserts exactly one quiet
-shard, the one silent longest, and announces it with an `:info` `:coverage_change` naming
+shard, the one longest since it last streamed or last had a turn, and announces it with an `:info` `:coverage_change` naming
 the shard, its `session_id` and its symbols. A sibling may go quiet in turn, and that is the
 rotation, not a fault. When no shard streams at all, every quiet shard is re-asserted at once.
 Venue notices carry `session_id` in `details`. If one shard's blind resubscribe fails

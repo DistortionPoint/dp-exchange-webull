@@ -290,7 +290,10 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp snapshot_chunk(symbols, path, credentials, opts) do
-    natives = Map.new(symbols, &{SymbolFormat.to_exchange_symbol(&1), &1})
+    # Grouped, not mapped one-to-one: two spellings of one pair (`"BTC-USD"`, `"BTCUSD"`)
+    # survive `Enum.uniq/1` and share a native symbol, and a plain map would keep only the
+    # last of them — the other would get no result, breaking "a result for every symbol".
+    natives = Enum.group_by(symbols, &SymbolFormat.to_exchange_symbol/1)
     params = snapshot_params(natives |> Map.keys() |> Enum.join(","), "US_CRYPTO", opts)
 
     with {:ok, body} <- get(path, params, credentials, opts),
@@ -302,14 +305,19 @@ defmodule DpExchange.Webull.Rest do
             into: %{},
             do: {row["symbol"], row}
 
-      Enum.map(natives, fn {native, symbol} ->
-        case Map.fetch(by_native, native) do
-          {:ok, row} -> {symbol, snapshot_quote(row, native, "US_CRYPTO")}
-          :error -> {symbol, {:error, :not_in_response}}
-        end
-      end)
+      for {native, spellings} <- natives,
+          result = native_result(by_native, native),
+          symbol <- spellings,
+          do: {symbol, result}
     else
       failure -> split_or_fail(failure, symbols, path, credentials, opts)
+    end
+  end
+
+  defp native_result(by_native, native) do
+    case Map.fetch(by_native, native) do
+      {:ok, row} -> snapshot_quote(row, native, "US_CRYPTO")
+      :error -> {:error, :not_in_response}
     end
   end
 
@@ -321,7 +329,10 @@ defmodule DpExchange.Webull.Rest do
   # from 0.4.104 onward: thousands of consecutive polls, `{:every_symbol_failed, 60}` every
   # time. Halving isolates each rejected symbol in about two extra requests per bad symbol,
   # whatever wording the venue uses. The rejected symbol keeps the venue's own answer, and
-  # every other symbol gets its quote.
+  # every other symbol gets its quote. The bound is the tree's size: a 400 that is about the
+  # request itself rather than any member fails every half, and a chunk of 20 then spends
+  # 39 requests before each symbol carries the rejection — bounded, and paced by the
+  # endpoint bucket like any other request.
   #
   # Only a 4xx about the request's content is split. A 401/403 is the credential and a 429
   # is the budget; both would fail every half the same way, so splitting would only spend
