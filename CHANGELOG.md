@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.110] - 2026-10-10
+
 ### Fixed
 
 - **Starved shards get the stream in rotation instead of never** (issue #11, measured on
