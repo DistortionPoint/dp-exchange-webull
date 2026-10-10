@@ -127,6 +127,12 @@ defmodule DpExchange.Webull.Socket do
   # nobody answers ends the connection".
   @silence_ms div(@keep_alive_s, 2) * 3 * 1_000
 
+  # How long a session must have stayed up after CONNACK 0 before its drop counts as a
+  # healthy blip (reconnect at once) rather than another failure in a run. Long enough that
+  # a connect-then-drop flapper cannot reach it, and far shorter than any real session.
+  # This package's own choice, not a venue figure; see `handle_disconnect/2`.
+  @stable_session_ms 30_000
+
   # Chosen against `Feed`'s own `@call_timeout` (15s), not inherited.
   #
   # `WebSockex.Conn` defaults to `socket_connect_timeout: 6_000` and
@@ -212,6 +218,8 @@ defmodule DpExchange.Webull.Socket do
       app_key: Keyword.fetch!(opts, :app_key),
       buffer: <<>>,
       connected?: false,
+      # Monotonic ms of the last CONNACK 0, for `stable_session?/1`.
+      connected_at: nil,
       ping: nil,
       # When the last frame of any kind, a PINGRESP included, arrived. See the moduledoc's
       # "A PINGREQ nobody answers ends the connection".
@@ -348,7 +356,16 @@ defmodule DpExchange.Webull.Socket do
     # 0, forever. On 105 (connection limit) that is self-sustaining, because the broker holds
     # state for about a minute and "backoff is the only way back" (streaming-api.md).
     # Consecutive sessions that never reached CONNACK 0 now feed the same backoff.
-    unconnected = if state.connected?, do: 0, else: Map.get(state, :unconnected_sessions, 0) + 1
+    #
+    # **Reaching CONNACK 0 is not, by itself, a healthy session.** Found 2026-10-10 by
+    # reading this function: any session that got that far reset the counter, so a venue
+    # that accepted the CONNECT and dropped the socket seconds later (the malformed-close
+    # bursts this module's vendored fork exists for) was reconnected at delay 0 every time,
+    # the connect storm this backoff is here to prevent. The counter now resets only when the
+    # session LIVED `@stable_session_ms`; a shorter one counts as another failed attempt.
+    unconnected =
+      if stable_session?(state), do: 0, else: Map.get(state, :unconnected_sessions, 0) + 1
+
     attempt = max(Map.get(status, :attempt_number, 1), unconnected + 1)
     delay = reconnect_delay_ms(attempt)
 
@@ -362,10 +379,20 @@ defmodule DpExchange.Webull.Socket do
      Map.merge(state, %{
        buffer: <<>>,
        connected?: false,
+       connected_at: nil,
        ping: nil,
        unconnected_sessions: unconnected
      })}
   end
+
+  # Connected, and for at least `@stable_session_ms`. A state with no `:connected_at` (a
+  # session that never reached CONNACK 0, or one a test built by hand) is not stable: with
+  # nothing to measure the age from, the answer that cannot cause a storm is "no".
+  defp stable_session?(%{connected?: true, connected_at: connected_at})
+       when is_integer(connected_at),
+       do: now_ms() - connected_at >= @stable_session_ms
+
+  defp stable_session?(_state), do: false
 
   @impl true
   def handle_info(:send_connect, state) do
@@ -462,7 +489,7 @@ defmodule DpExchange.Webull.Socket do
     # is a condition a consumer must ACT on, telemetry is aggregate and lossy by design.
     Telemetry.link_up(:webull)
     # A new connection gets its own drop reports: see `report_drop/3`.
-    Map.merge(state, %{connected?: true, drops_reported: MapSet.new()})
+    Map.merge(state, %{connected?: true, connected_at: now_ms(), drops_reported: MapSet.new()})
   end
 
   # The venue's connection error codes mean genuinely different things, and two of them
@@ -544,13 +571,19 @@ defmodule DpExchange.Webull.Socket do
   #
   # A book message is top-of-book data and now delivers `Core.Types.TopOfBook`, which has
   # no `price` field to misuse.
+  #
+  # **The guard tests the DECODED levels, not the raw strings.** It used to ask
+  # `is_binary(bid) or is_binary(ask)` of the wire strings and only then ran `decimal/1`, so a
+  # delisted pair's `"null"` (a documented shape — see `decimal/1`) passed the guard, decoded
+  # to `nil`, and went out as `%TopOfBook{bid: nil, ask: nil}`: delivered, and counted by
+  # `Feed` as coverage for a symbol with no book at all. Found 2026-10-10. A quote that states
+  # no readable level is no quote.
   defp emit(state, "quote", payload) do
-    case QuoteProto.decode_quote(payload) do
-      {:ok, %{bid: bid, ask: ask} = decoded} when is_binary(bid) or is_binary(ask) ->
-        emit_top_of_book(state, decoded)
-
-      _no_levels ->
-        :ok
+    with {:ok, decoded} <- QuoteProto.decode_quote(payload),
+         {:ok, bid, ask} <- readable_levels(decoded) do
+      emit_top_of_book(state, decoded, bid, ask)
+    else
+      _no_levels -> :ok
     end
   end
 
@@ -691,14 +724,22 @@ defmodule DpExchange.Webull.Socket do
 
   defp venue_notice_text(_no_content), do: nil
 
-  defp emit_top_of_book(state, decoded) do
+  # Both levels decoded once, here, so the caller can refuse a book that states neither.
+  defp readable_levels(decoded) do
+    case {decimal(decoded[:bid]), decimal(decoded[:ask])} do
+      {nil, nil} -> :error
+      {bid, ask} -> {:ok, bid, ask}
+    end
+  end
+
+  defp emit_top_of_book(state, decoded, bid, ask) do
     send(
       state.subscriber,
       {:dp_exchange, :webull,
        %TopOfBook{
          symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
-         bid: decimal(decoded[:bid]),
-         ask: decimal(decoded[:ask]),
+         bid: bid,
+         ask: ask,
          # The venue's `AskBid` carries `price = 1` AND `size = 2` — its own schema, kept
          # verbatim in `docs/reference/webull/streaming-api.md`. These were hardcoded to
          # `nil` under a comment saying the venue sent no sizes; it sends them, and

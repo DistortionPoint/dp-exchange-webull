@@ -1117,11 +1117,15 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:request, "/market-data/streaming/subscribe", "shard-0",
                       ["AAAUSD", "BBBUSD"]}
 
-      # ...the retry that trims shard 0 back down to what it actually measured...
-      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BBBUSD"]}
+      # ...the retry that subscribes only what shard 0 actually measured it can carry...
+      assert_receive {:request, "/market-data/streaming/subscribe", "shard-0", ["AAAUSD"]}
 
       # ...and the overflow landing on shard 1, all without the caller seeing a refusal.
       assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["BBBUSD"]}
+
+      # No unsubscribe of BBB from shard 0: the refused attempt is reverted, so the shard
+      # never claimed it, and taking back something never subscribed was a wasted call.
+      refute_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", _symbols}, 100
     end
 
     test "a link_down for a session this feed no longer tracks is ignored", %{limiter: _limiter} do
@@ -1562,7 +1566,13 @@ defmodule DpExchange.Webull.FeedTest do
                Feed.subscribe(feed, ["GOOD-USD", "BAD-USD"], subscribe_opts(limiter, plug: plug))
 
       assert_receive {:request, "/market-data/streaming/subscribe", ["BADUSD", "GOODUSD"]}
-      assert_receive {:request, "/market-data/streaming/unsubscribe", ["BADUSD"]}
+
+      # The retry sends only the good symbol. It used to also UNSUBSCRIBE the bad one, because
+      # the shard had been left believing it subscribed the whole refused batch; the failed
+      # attempt is now reverted, so there is nothing to take back.
+      assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD"]}
+      refute_receive {:request, "/market-data/streaming/unsubscribe", _symbols}, 100
+      assert :sys.get_state(feed).shards[0].symbols == ["GOOD-USD"]
     end
 
     test "a :refusal notice names the rejected symbols in canonical form", %{limiter: limiter} do

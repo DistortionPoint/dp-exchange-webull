@@ -331,9 +331,12 @@ defmodule DpExchange.Webull do
       # can be dropped, a consumer on ~325 us-crypto symbols saw no `Trade` and no drop notice
       # at all: the venue publishes no `TICK` for the `US_CRYPTO` category, which is the only
       # category `Subscription` streams. Declaring it told consumers a trade tape existed, so
-      # every volume-based indicator sat empty with nothing saying why. `TICK` is no longer
-      # in the default `sub_types` either; the `tick` decoder stays for a caller that asks for
-      # it with `:sub_types`.
+      # every volume-based indicator sat empty with nothing saying why. `TICK` left the
+      # default `sub_types` that day and came back on 2026-10-02 (dp_exchange_webull issue
+      # #7): it IS requested by default now, because asking costs nothing, and a re-run
+      # on 0.4.99 still saw no tick. `:trades` stays undeclared for that reason, and `Feed`
+      # delivers any `Trade` that does arrive without counting it in `coverage/1` or
+      # `coverage_by_kind/1`, so those two cannot report a kind this list does not declare.
       streamable: [:quotes, :top_of_book],
 
       # **Every streamed kind needs a credential here, so this is the whole of
@@ -760,7 +763,7 @@ defmodule DpExchange.Webull do
   @impl true
   def subscribe(symbols, opts) do
     feed_call(
-      fn -> Feed.subscribe(feed(opts), canonical_case(symbols), with_limiter(opts)) end,
+      fn -> Feed.subscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
       {:error, :feed_not_started}
     )
   end
@@ -769,7 +772,7 @@ defmodule DpExchange.Webull do
   def unsubscribe(symbols, opts),
     do:
       feed_call(
-        fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols), with_limiter(opts)) end,
+        fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         :ok
       )
 
@@ -777,9 +780,16 @@ defmodule DpExchange.Webull do
   def update_symbols(symbols, opts),
     do:
       feed_call(
-        fn -> Feed.update_symbols(feed(opts), canonical_case(symbols), with_limiter(opts)) end,
+        fn -> Feed.update_symbols(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         {:error, :feed_not_started}
       )
+
+  # `with_limiter/1`, with the credentials wrapped (`Credentials`) before they cross into the
+  # `Feed` process. They ride in the call message, then in reconcile tags, task closures and
+  # `{:open_shard, ...}` messages, every one of which a crash report prints. Found
+  # 2026-10-10: only `Feed`'s `resubscribe_opts` was wrapped, so a crash printed
+  # `app_secret` from the rest. `Feed` wraps again on arrival, for direct callers.
+  defp feed_opts(opts), do: opts |> with_limiter() |> DpExchange.Webull.Credentials.wrap_opt()
 
   @impl true
   def coverage(opts \\ []) do
@@ -813,6 +823,12 @@ defmodule DpExchange.Webull do
   from `capabilities/0`'s own `streamable` list — so a further kind reaching the feed
   without this function being updated for it is caught rather than silently folded into
   an existing kind.
+
+  **`:trades` never appears here**, although `TICK` is requested and a `Trade` that arrives
+  is delivered. `streamable` does not declare `:trades` (the venue has published no tick for
+  us-crypto in either measurement), and Core's contract is that every key here is a declared
+  kind and that `coverage/1` is exactly their union. A tick is therefore delivered and left
+  out of both until a run shows ticks arriving and the declaration moves with it.
   """
   @impl true
   @spec coverage_by_kind(keyword()) :: %{

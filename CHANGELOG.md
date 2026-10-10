@@ -22,6 +22,53 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A failed subscribe left its shard believing it had subscribed.** The shard's symbol list
+  was set to the new value before the HTTP reconcile answered and never put back on failure
+  (a transport error, `:reconcile_timeout`, `:reconcile_pending`, `INVALID_SYMBOL`,
+  `:oversubscribed`), so a retry diffed empty and returned `:ok` while the symbol stayed
+  unsubscribed. A failure now reverts what the attempt changed and marks the shard
+  `unsettled`, so the next call, or the next 60-second tick, sends it again. A refused batch
+  is no longer "taken back" with an unsubscribe of symbols it never subscribed.
+- **A background reconcile superseded before it answered lost its delta.** Its symbols stayed
+  recorded on the shard while the successor sent only its own delta, so they were believed
+  subscribed and never re-sent. The superseded attempt is now treated as failed: reverted and
+  left `unsettled`, and the tick's re-plan clears the mark.
+- **A failed unsubscribe cancelled the subscribe beside it.** `reconcile_by_session/4` stopped
+  at the first error; both halves now run.
+- **A late answer from a replaced session tore down its healthy replacement.** `INVALID_SESSION`
+  was acted on without comparing the session it named with the shard's current one, and
+  `:oversubscribed` capped the new shard from the old one's measurement. Answers for a session
+  the shard no longer has are dropped (a venue-level `INVALID_SYMBOL` is still recorded).
+- **`app_secret` sat raw in `Feed`'s state and messages.** Only `resubscribe_opts` was wrapped.
+  The credentials of `subscribe/2`, `unsubscribe/2` and `update_symbols/2` are now wrapped by
+  the facade and again on arrival in `Feed`, so reconcile tags and `{:open_shard, ...}`
+  messages print them redacted.
+- **A `null` book was delivered as `%TopOfBook{bid: nil, ask: nil}`.** The guard tested the raw
+  wire strings, so the venue's documented `"null"` for a delisted pair passed it. Levels are
+  decoded first and a quote with neither readable is dropped.
+- **A shard open applied the symbols of the plan that scheduled it.** `{:open_shard, ...}` and
+  `{:reopen_shard, ...}` now re-derive the shard's symbols from what is wanted at open time, so
+  an older timer winning no longer discards a later re-plan. A shard with nothing wanted opens
+  nothing.
+- **The priority shard's empty room could not take overflow.** Three priority symbols plus 450
+  others were refused as `capacity_exceeded` below the 500-symbol ceiling. Ordinary symbols are
+  still planned into shards 1 to 4 first; only overflow now fills shard 0's remaining room.
+- **A connect-then-drop socket reconnected at once, forever.** Reaching CONNACK 0 reset the
+  backoff whatever the session's age. It now resets only for a session that lasted 30 seconds;
+  a shorter one counts as another failed attempt.
+- **A crashing shard was reopened immediately, without limit.** The first crash still reopens
+  at once; one within 60 seconds of the previous waits 1 s, doubling to 60 s.
+- **`coverage_by_kind/1` could report `:trades`, which `capabilities/0` does not declare.**
+  `TICK` is requested by default, and a tick that arrived was counted. Core requires every
+  reported kind to be declared and `coverage/1` to be exactly their union. A `Trade` is still
+  delivered, and is no longer counted, until a run shows ticks arriving and the declaration
+  moves with it. Not measured: the venue has published no tick for us-crypto in either
+  measurement (2026-09-29 and 2026-10-02), which is why `:trades` was not simply declared.
+- **Docs said `TICK` is not requested by default** (`Feed`'s moduledoc, a comment in
+  `capabilities/0`). `Subscription`'s default `sub_types` includes it; the docs now match.
+
 ## [0.4.116] - 2026-10-10
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

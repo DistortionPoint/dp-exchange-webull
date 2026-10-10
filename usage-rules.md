@@ -190,7 +190,11 @@ socket dying abnormally does not take `Feed` down with it: only that shard's sym
 drop out of `coverage/1` and `coverage_by_kind/1` (cleared immediately, not left to
 report `:stream` for a connection that no longer exists), you get a `:link_down`
 `Core.Notice` naming the crashed shard, and this package reopens it on its own — you
-never need to call `subscribe/2` again.
+never need to call `subscribe/2` again. The first crash reopens at once. A shard that crashes
+again within a minute of its last crash waits first, 1 s doubling to 60 s, so a socket that
+connects and dies cannot spin through the venue's five-connections-per-key budget. The same
+goes for a socket that reaches the broker's CONNACK and drops within 30 s: it counts as a
+failed attempt toward the reconnect backoff instead of resetting it.
 
 **Your `app_secret` and `access_token` will not appear in `Feed`'s crash log.** `Feed`
 keeps what you passed at start (or on a later `subscribe/2`) so it can replay your
@@ -198,7 +202,9 @@ subscriptions after a reconnect — see above — and a crash of `Feed` logs its
 OTP's default crash report, which is where you *would* see it, because a crash report
 prints unredacted `Logger` metadata otherwise. The credential map is wrapped in a struct
 before it ever reaches state, so the crash line reads `credentials:
-#DpExchange.Webull.Credentials<...>` rather than the key pair itself. This does not
+#DpExchange.Webull.Credentials<...>` rather than the key pair itself. That now holds for the
+credentials you pass to `subscribe/2`, `unsubscribe/2` and `update_symbols/2` as well, which
+used to sit unwrapped in in-flight reconcile state and in the messages that reopen a shard. This does not
 extend to `app_key` on a live shard's socket — `app_key` is sent as a plaintext header
 (`x-app-key`) on every signed request this venue accepts by design, so it carries none of
 the confidentiality `app_secret` does, and a shard's own crash report still shows it.
@@ -294,7 +300,11 @@ it for "Stocks, Futures and Crypto". A consumer on ~325 us-crypto symbols measur
 2026-09-29 (dp-exchange-core issue #40), from a request the venue accepted with `TICK` in it.
 So asking costs nothing, and every tick that does arrive is delivered. `capabilities/0`
 declares `streamable: [:quotes, :top_of_book]`. `:trades` joins it once a run shows ticks
-arriving, because a declaration states what was measured.
+arriving, because a declaration states what was measured. **Until then a `Trade` that does
+arrive is delivered to you but not counted:** `coverage/1` and `coverage_by_kind/1` never
+report `:trades`, because Core requires every reported kind to be a declared one and
+`coverage/1` to be exactly their union. Do not read an empty `:trades` as "no ticks arrived";
+a `Trade` on your mailbox is the evidence.
 
 **Measured on 2026-10-02, on 0.4.99: both routes are empty for crypto.** A consumer
 subscribed with `TICK` and saw the request accepted and quotes flowing. Its first Webull
@@ -314,15 +324,15 @@ On this venue there are three different moments: you asked, the HTTP subscribe r
 not mean the stream is flowing.
 
 `coverage/1` folds all three kinds above into one `:stream` per symbol. `coverage_by_kind/1`
-splits them apart — a symbol can show `:quotes` healthy while `:top_of_book` or `:trades`
-has gone dark for it, or the reverse, and `coverage/1` alone cannot tell you which:
+splits them apart — a symbol can show `:quotes` healthy while `:top_of_book` has gone dark
+for it, or the reverse, and `coverage/1` alone cannot tell you which. Only the declared kinds
+(`:quotes`, `:top_of_book`) appear; see the note on `:trades` above:
 
 ```elixir
 DpExchange.Webull.coverage_by_kind(credentials: creds)
 #=> %{
 #=>   quotes: %{"BTC-USD" => :stream},
-#=>   top_of_book: %{"BTC-USD" => :stream},
-#=>   trades: %{"BTC-USD" => :stream}
+#=>   top_of_book: %{"BTC-USD" => :stream}
 #=> }
 ```
 
@@ -973,8 +983,17 @@ The guarantee holds while shard 0 really is the priority shard. If none of the p
 symbols is subscribed, shard 0 is an ordinary shard and every shard rotates as without the
 option. While the priority shard is disconnected, the others are repaired and rotated as
 usual, and the priority shard takes the stream back when it reconnects. Subscribing a priority
-symbol later re-plans shard 0 to hold exactly the priority symbols. The ordinary symbols it
+symbol later re-plans shard 0 so the priority symbols come first. The ordinary symbols it
 held move to the other shards, and those re-subscribes take the stream briefly.
+
+**Shard 0's unused room is not wasted, and only overflow uses it.** Ordinary symbols are
+planned into shards 1 to 4 first. Only when those are full does what would otherwise be
+refused as `capacity_exceeded` fill the room left in shard 0 after the priority symbols. So
+three priority symbols and 450 others fit, where they used to be refused below the 500-symbol
+ceiling. This costs the priority guarantee nothing, because the permission is per session: an
+ordinary symbol in shard 0 streams on the session that already holds it, and a priority symbol
+always takes its place first. Such a symbol therefore streams continuously while the total is
+high, unlike the symbols on the other shards, which fall back to REST.
 
 ## A shard reopens its own socket only once it has stopped delivering
 

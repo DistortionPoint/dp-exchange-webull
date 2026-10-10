@@ -23,6 +23,14 @@ defmodule DpExchange.Webull.SocketTest do
       last_heard_at: nil
     }
 
+  # A session that reached CONNACK 0 `age_ms` ago. The backoff resets only for one that lived
+  # `@stable_session_ms` (30s), so a test wanting the healthy-blip path has to say so.
+  defp stable_since(state, age_ms \\ 60_000) do
+    state
+    |> Map.put(:connected?, true)
+    |> Map.put(:connected_at, System.monotonic_time(:millisecond) - age_ms)
+  end
+
   defp varint(value) when value < 0x80, do: <<value>>
   defp varint(value), do: <<1::1, band(value, 0x7F)::7, varint(bsr(value, 7))::binary>>
 
@@ -185,6 +193,41 @@ defmodule DpExchange.Webull.SocketTest do
       refute Map.has_key?(top, :price)
 
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+    end
+
+    test "a book whose levels are both \"null\" delivers nothing" do
+      # Found 2026-10-10: the guard tested the RAW strings, so the venue's documented "null"
+      # for a delisted pair passed it, decoded to nil, and went out as
+      # `%TopOfBook{bid: nil, ask: nil}` that `Feed` then counted as coverage.
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      frame =
+        publish(
+          "quote",
+          proto_field(1, basic) <>
+            proto_field(2, proto_field(1, "null")) <> proto_field(3, proto_field(1, "null"))
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+    end
+
+    test "a book with one unreadable level and one readable level still delivers the readable one" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      frame =
+        publish(
+          "quote",
+          proto_field(1, basic) <>
+            proto_field(2, proto_field(1, "null")) <> proto_field(3, proto_field(1, "77845.79"))
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
+      assert top.ask == nil
     end
 
     test "the sizes on a book message reach the consumer" do
@@ -626,7 +669,7 @@ defmodule DpExchange.Webull.SocketTest do
     end
 
     test "disconnecting clears the buffer, because a half packet cannot span a reconnect" do
-      dirty = %{state() | buffer: <<1, 2, 3>>, connected?: true}
+      dirty = stable_since(%{state() | buffer: <<1, 2, 3>>})
 
       assert {:reconnect, state} = Socket.handle_disconnect(%{reason: :closed}, dirty)
 
@@ -897,9 +940,9 @@ defmodule DpExchange.Webull.SocketTest do
             assert {:reconnect, _state} =
                      Socket.handle_disconnect(
                        %{reason: :closed, attempt_number: 1},
-                       # A session that reached CONNACK 0: one that never did is now counted
-                       # toward the backoff (a broker refusal), which is not this path.
-                       Map.put(state(), :connected?, true)
+                       # A session that reached CONNACK 0 AND stayed up: one that never did,
+                       # or that dropped within seconds, now counts toward the backoff.
+                       stable_since(state())
                      )
 
             System.monotonic_time(:millisecond) - started
@@ -908,6 +951,42 @@ defmodule DpExchange.Webull.SocketTest do
 
       # Against the smallest possible BACKOFF (1s at attempt 2), not an arbitrary budget.
       assert elapsed < 1_000
+    end
+
+    test "a session that reached CONNACK 0 but dropped within seconds still counts as a failure" do
+      # Found 2026-10-10: reaching CONNACK 0 reset the counter whatever the session's age, so a
+      # venue that accepted the CONNECT and dropped the socket at once was reconnected at delay
+      # 0 forever. A flapper that lived 1s must advance the counter and wait the attempt-2
+      # backoff (1s).
+      flapper = stable_since(state(), 1_000)
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, after_first} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, flapper)
+
+      assert System.monotonic_time(:millisecond) - started >= 1_000
+      assert after_first.unconnected_sessions == 1
+      assert after_first.connected_at == nil
+
+      # And it keeps climbing while the flapping does, rather than being reset by the next
+      # CONNACK: a second short session lands on attempt 3 (2s).
+      second = %{stable_since(after_first, 1_000) | unconnected_sessions: 1}
+      started = System.monotonic_time(:millisecond)
+
+      assert {:reconnect, after_second} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, second)
+
+      assert System.monotonic_time(:millisecond) - started >= 2_000
+      assert after_second.unconnected_sessions == 2
+    end
+
+    test "a session that stayed up past the stable age resets the counter" do
+      long_lived = state() |> stable_since() |> Map.put(:unconnected_sessions, 4)
+
+      assert {:reconnect, state} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, long_lived)
+
+      assert state.unconnected_sessions == 0
     end
 
     test "handle_disconnect/2 actually waits once reconnects are failing" do

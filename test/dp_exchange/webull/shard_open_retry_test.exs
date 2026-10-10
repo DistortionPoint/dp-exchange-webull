@@ -33,6 +33,9 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
   describe "a shard that never opened is retried, not orphaned" do
     test "a failed open is tracked and says so once, rather than being dropped on the floor" do
       feed = start_feed(shards: %{}, open_retry_base_ms: 20)
+      # An open now re-derives its symbols from `wanted` (see "an open applies what is wanted
+      # NOW"), so the symbol the message names has to be wanted for the shard to carry it.
+      want(feed, ["BTCUSD"])
       Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:open_shard, 0, ["BTCUSD"], unopenable_opts()})
@@ -56,6 +59,9 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
 
     test "the retry keeps running, and stops once the shard is open" do
       feed = start_feed(shards: %{}, open_retry_base_ms: 20)
+      # An open now re-derives its symbols from `wanted` (see "an open applies what is wanted
+      # NOW"), so the symbol the message names has to be wanted for the shard to carry it.
+      want(feed, ["BTCUSD"])
       Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:open_shard, 0, ["BTCUSD"], unopenable_opts()})
@@ -84,6 +90,9 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
 
     test "a retry that succeeds installs the shard and clears the latch" do
       feed = start_feed(shards: %{}, open_retry_base_ms: 20)
+      # An open now re-derives its symbols from `wanted` (see "an open applies what is wanted
+      # NOW"), so the symbol the message names has to be wanted for the shard to carry it.
+      want(feed, ["BTCUSD"])
       Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:open_shard, 0, ["BTCUSD"], unopenable_opts()})
@@ -101,6 +110,42 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
       assert is_pid(shard.socket)
       assert shard.symbols == ["BTCUSD"]
       refute MapSet.member?(:sys.get_state(feed).open_failed, 0)
+    end
+  end
+
+  describe "an open applies what is wanted NOW, not what was planned when it was scheduled" do
+    # Found 2026-10-10: `{:open_shard, ...}` and `{:reopen_shard, ...}` carried the symbols of
+    # the plan that scheduled them. A later re-plan that also found the slot empty queued its
+    # own open; whichever timer fired first filled the slot with its plan-time list and the
+    # other found the slot taken, so a symbol added in between was never subscribed.
+    test "a symbol wanted after the open was scheduled is carried by the shard" do
+      feed = start_feed(shards: %{})
+      want(feed, ["AAA-USD", "BBB-USD"])
+
+      # The message names only AAA-USD: BBB-USD was wanted after it was scheduled.
+      send(feed, {:open_shard, 0, ["AAA-USD"], [credentials: credentials()]})
+      _settled = Feed.coverage(feed)
+
+      assert Enum.sort(:sys.get_state(feed).shards[0].symbols) == ["AAA-USD", "BBB-USD"]
+    end
+
+    test "a symbol no longer wanted is not subscribed by the reopen" do
+      feed = start_feed(shards: %{})
+      want(feed, ["BBB-USD"])
+
+      send(feed, {:reopen_shard, 0, ["AAA-USD", "BBB-USD"], [credentials: credentials()], 2})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).shards[0].symbols == ["BBB-USD"]
+    end
+
+    test "an open for a shard nothing is wanted on any more opens nothing" do
+      feed = start_feed(shards: %{}, open_retry_base_ms: 20)
+
+      send(feed, {:open_shard, 0, ["AAA-USD"], [credentials: credentials()]})
+      _settled = Feed.coverage(feed)
+
+      assert :sys.get_state(feed).shards == %{}
     end
   end
 end

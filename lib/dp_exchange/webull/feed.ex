@@ -32,8 +32,9 @@ defmodule DpExchange.Webull.Feed do
 
   ## Coverage by kind, because this venue's streamed kinds really are independent
 
-  Every subscribe asks the venue for `SNAPSHOT` and `QUOTE` (see `Subscription`; `TICK` only
-  when a caller asks, since us-crypto publishes none). The topics arrive separately and
+  Every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK` (see `Subscription`:
+  `TICK` is in the default `sub_types` again since dp_exchange_webull issue #7, although the
+  venue has so far published none for us-crypto). The topics arrive separately and
   `Socket` decodes each into its own struct:
   `snapshot` becomes `Core.Types.Quote` (kind `:quotes`, a traded price), `quote`
   becomes `Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask), `tick` becomes
@@ -44,6 +45,32 @@ defmodule DpExchange.Webull.Feed do
   actually observed. `kind_for/1` derives the kind from the struct that arrived rather
   than assuming it, so a future new kind reaching this clause without a matching case
   here is caught (logged, loudly) instead of silently folded into an existing kind.
+
+  **`:trades` is delivered but never counted here.** `capabilities().streamable` does not
+  declare `:trades` (the venue publishes no `TICK` for us-crypto, measured twice — see
+  `Subscription`), and Core's `coverage_by_kind/1` contract is that every reported key is a
+  declared kind, with `coverage/1` the exact union of them. A `Trade` that does arrive is
+  still delivered to subscribers, but `record_quote/3` records no coverage for it: counting
+  it would either break that invariant or declare a capability nobody measured. It moves
+  into coverage together with the declaration, when a run shows ticks arriving.
+
+  ## A reconcile that fails leaves its shard dirty, not believed-subscribed
+
+  `touch_primary_shard/7` and `touch_background_shard/4` record the shard's NEW symbol list
+  before the HTTP reconcile has answered. Found 2026-10-10 by reading the path: when that
+  reconcile failed for any reason that does not tear the shard down (a transport error, a
+  `:reconcile_timeout`, `:reconcile_pending`, a 429, `:oversubscribed`, `INVALID_SYMBOL`) the
+  list was never put back, so a retry diffed the wanted set against a shard that already
+  "had" it, found nothing to send and answered `:ok` while the symbol stayed unsubscribed.
+  The failure now reverts the delta (`added` leaves the shard's list, `removed` returns to
+  it) and records the shard in `state.unsettled`, which makes the 60-second tick re-plan it
+  even when nobody calls. `reconcile_by_session/4` also attempts the subscribe when the
+  unsubscribe half failed, so one failing half no longer cancels the other.
+
+  A result is only ever applied to the session it was asked of. The context travels with
+  the attempt (`state.settled`) and an answer from a session the shard has since replaced is
+  dropped: an `INVALID_SESSION` or `:oversubscribed` measured against a dead session says
+  nothing about its healthy successor and used to tear it down or cap it.
 
   ## Sharded — one session tops out at 100 symbols, this package's scope does not
 
@@ -415,6 +442,16 @@ defmodule DpExchange.Webull.Feed do
   @open_retry_base_ms 1_000
   @open_retry_max_ms 60_000
 
+  # How soon after a shard's previous crash a new one counts as the SAME run of crashes.
+  # Found 2026-10-10 by reading `isolate_crashed_shard/3`: a crashed shard was reopened with
+  # a `send(self(), ...)`, no delay and no limit, so a socket that connected and died at
+  # once was rebuilt in a tight loop, each turn claiming a fresh session against the venue's
+  # five-connections-per-key ceiling. The first crash still reopens at once (the common
+  # case is a one-off); a crash within this window of the last one waits
+  # `open_retry_base_ms * 2^(n-2)`, capped at `open_retry_max_ms` — the same ladder a failed
+  # open already climbs. A shard that stayed up longer than this starts over.
+  @crash_window_ms 60_000
+
   # How many consecutive blind resubscribes one shard may fail before this `Feed` stops
   # repeating the identical call and reopens that shard's socket instead. See
   # `count_resubscribe_failure/2` for the incident (dp-exchange-webull issue #1) and why the
@@ -645,6 +682,16 @@ defmodule DpExchange.Webull.Feed do
        # resubscribe is failing" are different conditions with different recoveries, and one
        # latch for both would let either one's recovery notice clear the other.
        open_failed: MapSet.new(),
+       # tag => the context an in-flight reconcile was started with, moved here by
+       # `forget_reconcile/2` when the attempt concludes and popped by whichever
+       # `{:reconcile_done, ...}` clause settles it. See the moduledoc's "A reconcile that
+       # fails leaves its shard dirty".
+       settled: %{},
+       # Shard indices whose last primary/background reconcile failed and was reverted, so
+       # the next `:resubscribe` tick re-plans them even with no caller and no rejection.
+       unsettled: MapSet.new(),
+       # index => %{count:, at:} of consecutive socket crashes — see `@crash_window_ms`.
+       crashes: %{},
        # Overridable for the same reason every other cadence here is: a test proving the
        # retry actually recurs should not have to wait out a real second to see it.
        open_retry_base_ms: Config.opt(opts, :open_retry_base_ms, @open_retry_base_ms),
@@ -654,6 +701,13 @@ defmodule DpExchange.Webull.Feed do
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber, opts}, from, state) do
+    # Wrapped before `opts` goes anywhere: it is captured by in-flight reconcile tags, by
+    # `{:open_shard, ...}` messages and by the closures of every task, all of which sit in
+    # `state` or the mailbox where a crash report prints them. Found 2026-10-10: only
+    # `resubscribe_opts` was wrapped, so `app_secret` was readable in the rest. See
+    # `Credentials`. Idempotent for the facade, which wraps too.
+    opts = Credentials.wrap_opt(opts)
+
     if Environment.streaming?(environment(state, opts)) do
       wanted = MapSet.union(state.wanted, MapSet.new(symbols))
 
@@ -675,6 +729,7 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_call({:unsubscribe, symbols, opts}, from, state) do
+    opts = Credentials.wrap_opt(opts)
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
 
     state = %{
@@ -688,6 +743,7 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_call({:update_symbols, symbols, opts}, from, state) do
+    opts = Credentials.wrap_opt(opts)
     wanted = MapSet.new(symbols)
 
     state = %{
@@ -1002,29 +1058,18 @@ defmodule DpExchange.Webull.Feed do
   # Answers nothing if the slot has since been filled. A `reshard/4` or a `subscribe/2`
   # arriving between two attempts opens the shard by its own route, and the guard below is
   # the same one the first attempt uses.
+  #
+  # **The symbols in the message are what the shard carried when this was scheduled, not
+  # what it should carry now.** Found 2026-10-10 by reading the path: a later re-plan that
+  # also found the slot empty queued its own open, and whichever timer fired first filled
+  # the slot with ITS plan-time list while the other found the slot taken and did nothing,
+  # so a symbol added in between was never subscribed. `symbols_to_open/3` re-derives the
+  # list from `wanted` at open time. A list that has become empty opens nothing.
   def handle_info({:reopen_shard, index, symbols, opts, attempt}, state) do
     case Map.get(state.shards, index) do
       nil ->
-        case open_socket(state, opts) do
-          {:ok, session_id, socket} ->
-            shard = %{
-              session_id: session_id,
-              socket: socket,
-              connected?: false,
-              symbols: symbols,
-              reply_to: nil
-            }
-
-            Logger.info(
-              "[Webull Feed] shard #{index} opened on attempt #{attempt + 1} — its " <>
-                "#{length(symbols)} symbol(s) are covered again"
-            )
-
-            {:noreply, clear_open_failure(put_in(state.shards[index], shard), index)}
-
-          {:error, reason} ->
-            {:noreply, retry_shard_open(state, index, symbols, opts, attempt + 1, reason)}
-        end
+        planned = symbols_to_open(state, index, symbols)
+        {:noreply, reopen_planned(state, index, planned, opts, attempt)}
 
       _opened_by_something_else ->
         {:noreply, clear_open_failure(state, index)}
@@ -1034,21 +1079,8 @@ defmodule DpExchange.Webull.Feed do
   def handle_info({:open_shard, index, symbols, opts}, state) do
     case Map.get(state.shards, index) do
       nil ->
-        case open_socket(state, opts) do
-          {:ok, session_id, socket} ->
-            shard = %{
-              session_id: session_id,
-              socket: socket,
-              connected?: false,
-              symbols: symbols,
-              reply_to: nil
-            }
-
-            {:noreply, put_in(state.shards[index], shard)}
-
-          {:error, reason} ->
-            {:noreply, retry_shard_open(state, index, symbols, opts, 1, reason)}
-        end
+        planned = symbols_to_open(state, index, symbols)
+        {:noreply, open_planned(state, index, planned, opts)}
 
       _already_open ->
         # A reshard already handled this index by the time the stagger elapsed (a fast-
@@ -1068,9 +1100,12 @@ defmodule DpExchange.Webull.Feed do
     # it; `handle_info({:reconcile_done, {:background, ^index}, result}, state)` below does
     # what this used to do inline once the real answer comes back.
     {:noreply,
-     spawn_reconcile(state, {:background, index}, fn ->
-       reconcile_by_session(session_id, added, removed, opts)
-     end)}
+     spawn_reconcile(
+       state,
+       {:background, index},
+       fn -> reconcile_by_session(session_id, added, removed, opts) end,
+       %{session_id: session_id, added: added, removed: removed}
+     )}
   end
 
   # This venue keeps a session's MQTT connection alive and subscribed while quietly
@@ -1093,7 +1128,13 @@ defmodule DpExchange.Webull.Feed do
     # `state.wanted` for every shard on every tick regardless of whether this package has
     # ever recorded a rejection, which is a real behaviour change this fix has no reason
     # to make.
-    state = if state.rejected == %{}, do: state, else: resync(state)
+    #
+    # Also when a reconcile failed and was reverted (`state.unsettled`): with no caller to
+    # retry, nothing else would ever re-send what that failure left unsubscribed.
+    state =
+      if state.rejected == %{} and MapSet.size(state.unsettled) == 0,
+        do: state,
+        else: %{resync(state) | unsettled: MapSet.new()}
 
     {:noreply, state}
   end
@@ -1119,10 +1160,10 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_info(
-        {:reconcile_done, {:primary, index, from, overflow, retries_left, opts}, result},
+        {:reconcile_done, {:primary, index, from, overflow, retries_left, opts} = tag, result},
         state
       ) do
-    {state, _rebalanced?} = handle_subscribe_result(state, index, result)
+    {state, _rebalanced?} = settle_result(state, index, tag, result)
 
     case result do
       {:error, :oversubscribed} when retries_left > 0 ->
@@ -1144,14 +1185,24 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  def handle_info({:reconcile_done, {:background, index}, result}, state) do
-    {state, rebalanced?} = handle_subscribe_result(state, index, result)
+  def handle_info({:reconcile_done, {:background, index} = tag, result}, state) do
+    {state, rebalanced?} = settle_result(state, index, tag, result)
     state = if rebalanced?, do: resync(state), else: state
     {:noreply, state}
   end
 
-  def handle_info({:reconcile_done, {:link_up, index}, result}, state) do
-    {:noreply, complete_link_up(state, index, result)}
+  # An answer addressed to a session the shard no longer has is not an answer about this
+  # shard. `complete_link_up/3` would hand it to whoever is parked on the REPLACEMENT.
+  def handle_info({:reconcile_done, {:link_up, index} = tag, result}, state) do
+    {context, settled} = Map.pop(state.settled, tag)
+    state = %{state | settled: settled}
+
+    if current_session?(state, index, context) do
+      {:noreply, complete_link_up(state, index, result)}
+    else
+      {state, rebalanced?} = settle_stale(state, index, result)
+      {:noreply, if(rebalanced?, do: resync(state), else: state)}
+    end
   end
 
   def handle_info({:reconcile_done, {:resubscribe, index}, result}, state) do
@@ -1557,7 +1608,10 @@ defmodule DpExchange.Webull.Feed do
           spawn_reconcile(
             state,
             {:primary, index, from, overflow, retries_left, opts},
-            fn -> reconcile_now(shard, added, removed, opts) end
+            fn -> reconcile_now(shard, added, removed, opts) end,
+            # What this attempt changed and which session it was asked of, so a failure can
+            # put the symbols back and a late answer from a replaced session is ignored.
+            %{session_id: shard.session_id, added: added, removed: removed}
           )
 
         # The caller is waiting on an HTTP round trip that may legitimately outlast its own
@@ -1653,9 +1707,12 @@ defmodule DpExchange.Webull.Feed do
         complete_link_up(state, index, :ok)
 
       symbols ->
-        spawn_reconcile(state, {:link_up, index}, fn ->
-          Subscription.subscribe(shard.session_id, symbols, state.resubscribe_opts)
-        end)
+        spawn_reconcile(
+          state,
+          {:link_up, index},
+          fn -> Subscription.subscribe(shard.session_id, symbols, state.resubscribe_opts) end,
+          %{session_id: shard.session_id}
+        )
     end
   end
 
@@ -1736,9 +1793,18 @@ defmodule DpExchange.Webull.Feed do
   defp reconcile_now(shard, added, removed, opts),
     do: reconcile_by_session(shard.session_id, added, removed, opts)
 
+  # Both halves always run. This used to be `with :ok <- unsubscribe do subscribe end`, so a
+  # failed unsubscribe silently cancelled the subscribe of everything `added` — found
+  # 2026-10-10 by reading the path. The two are independent requests; one failing is not a
+  # reason to leave the other's symbols dark. When both fail the SUBSCRIBE error is the one
+  # returned, because it is the one `handle_subscribe_result/3` has recoveries for
+  # (`INVALID_SYMBOL`, `INVALID_SESSION`, `:oversubscribed`).
   defp reconcile_by_session(session_id, added, removed, opts) do
-    with :ok <- Subscription.unsubscribe(session_id, removed, opts) do
-      Subscription.subscribe(session_id, added, opts)
+    unsubscribed = Subscription.unsubscribe(session_id, removed, opts)
+
+    case Subscription.subscribe(session_id, added, opts) do
+      :ok -> unsubscribed
+      {:error, _reason} = failed -> failed
     end
   end
 
@@ -1790,13 +1856,23 @@ defmodule DpExchange.Webull.Feed do
       {nil, _reconciling} ->
         state
 
-      {%{ref: ref}, reconciling} ->
+      {%{ref: ref} = entry, reconciling} ->
         Process.demonitor(ref, [:flush])
-        %{state | reconciling: reconciling}
+
+        # The attempt's context moves to `settled`, where the clause that settles this tag
+        # pops it. Entries written by tests carry no `:context`; that is `nil`, which
+        # `current_session?/3` treats as "no claim about a session".
+        settled =
+          case Map.get(entry, :context) do
+            nil -> Map.delete(state.settled, tag)
+            context -> Map.put(state.settled, tag, context)
+          end
+
+        %{state | reconciling: reconciling, settled: settled}
     end
   end
 
-  defp spawn_reconcile(state, tag, fun) do
+  defp spawn_reconcile(state, tag, fun, context \\ nil) do
     me = self()
     state = supersede_reconcile(state, tag)
 
@@ -1830,7 +1906,7 @@ defmodule DpExchange.Webull.Feed do
     # it has silently stopped publishing to.
     Process.send_after(self(), {:reconcile_timeout, tag, attempt}, state.reconcile_timeout_ms)
 
-    put_in(state.reconciling[tag], %{ref: ref, pid: pid, attempt: attempt})
+    put_in(state.reconciling[tag], %{ref: ref, pid: pid, attempt: attempt, context: context})
   end
 
   # An attempt being replaced under a tag that is still tracking one. Torn down here rather
@@ -1860,11 +1936,33 @@ defmodule DpExchange.Webull.Feed do
       :error ->
         state
 
-      {:ok, %{pid: pid}} ->
+      {:ok, %{pid: pid} = entry} ->
         stop_reconcile_task(pid)
-        forget_reconcile(state, tag)
+        forgotten = forget_reconcile(state, tag)
+
+        # Superseded, not concluded: nothing will settle this attempt, so its context must
+        # not wait in `settled` for the next, unrelated answer under the same tag.
+        forgotten = %{forgotten | settled: Map.delete(forgotten.settled, tag)}
+        revert_superseded(forgotten, tag, Map.get(entry, :context))
     end
   end
+
+  # A background reconcile killed before it answered. Found 2026-10-10: its delta had been
+  # recorded on the shard at plan time and the successor only sends ITS OWN delta, so what the
+  # killed attempt was carrying was believed subscribed and never re-sent. Its outcome is
+  # unknown, so it is treated as failed: reverted and left `unsettled` for the next re-plan
+  # (over-sending is idempotent; under-sending is the bug).
+  defp revert_superseded(
+         state,
+         {:background, index},
+         %{added: _added, removed: _removed} = context
+       ) do
+    if current_session?(state, index, context),
+      do: revert_failed_delta(state, index, context, {:error, :superseded}),
+      else: state
+  end
+
+  defp revert_superseded(state, _tag, _context), do: state
 
   # A shard's socket crashing abnormally is contained here rather than taking the whole
   # Feed down — see the moduledoc's "A shard's socket crash is contained to that shard".
@@ -1914,7 +2012,43 @@ defmodule DpExchange.Webull.Feed do
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
 
-    send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
+    reopen_after_crash(state, index, shard.symbols)
+  end
+
+  # Reopens a crashed shard — at once the first time, then on the `@crash_window_ms` ladder.
+  # The shard's slot stays empty meanwhile, which is the honest state: a `reshard/4` arriving
+  # in the gap opens it by its own route, and the delayed message then finds it taken.
+  defp reopen_after_crash(state, index, symbols) do
+    now = System.monotonic_time(:millisecond)
+
+    count =
+      case Map.get(state.crashes, index) do
+        %{count: previous, at: at} when now - at < @crash_window_ms -> previous + 1
+        _first_or_long_ago -> 1
+      end
+
+    state = %{
+      state
+      | crashes: Map.put(state.crashes, index, %{count: count, at: now}),
+        unsettled: MapSet.delete(state.unsettled, index)
+    }
+
+    message = {:open_shard, index, symbols, state.resubscribe_opts}
+
+    if count <= 1 do
+      send(self(), message)
+    else
+      delay = min(state.open_retry_base_ms * 2 ** min(count - 2, 30), state.open_retry_max_ms)
+
+      Logger.warning(
+        "[Webull Feed] shard #{index} has crashed #{count} times within " <>
+          "#{div(@crash_window_ms, 1_000)}s of each other — reopening it in #{delay}ms " <>
+          "rather than at once"
+      )
+
+      Process.send_after(self(), message, delay)
+    end
+
     state
   end
 
@@ -2018,10 +2152,107 @@ defmodule DpExchange.Webull.Feed do
   # `{:reconcile_done, ...}` clause so every subscribe path — a caller's own `subscribe/2`,
   # a background reconcile, a post-CONNACK replay and the blind resubscribe timer — recovers
   # the same way. The blind resubscribe is merely where it was first observed.
-  defp handle_subscribe_result(state, index, {:error, {:invalid_session, session_id}}),
-    do: {rebuild_stale_shard(state, index, session_id), false}
+  #
+  # **Only for the session the shard has NOW.** Found 2026-10-10 by reading the path: the
+  # session id the venue names was never compared with the shard's, so a slow answer from a
+  # session that had already been replaced (a rebuild, a crash reopen) tore down the healthy
+  # replacement, and each teardown mints another stale answer's worth of the same.
+  defp handle_subscribe_result(state, index, {:error, {:invalid_session, session_id}}) do
+    if stale_invalid_session?(state, index, session_id) do
+      Logger.debug(
+        "[Webull Feed] shard #{index}: INVALID_SESSION for #{inspect(session_id)} ignored — " <>
+          "the shard is on a different session now"
+      )
+
+      {state, false}
+    else
+      {rebuild_stale_shard(state, index, session_id), false}
+    end
+  end
 
   defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  defp stale_invalid_session?(_state, _index, nil), do: false
+
+  defp stale_invalid_session?(state, index, session_id) do
+    match?(%{session_id: current} when current != session_id, Map.get(state.shards, index))
+  end
+
+  # Applies the answer to a primary or background reconcile — `handle_subscribe_result/3`,
+  # plus the two things that need to know which attempt this was. Returns the same
+  # `{state, rebalanced?}`.
+  #
+  # An answer for a session the shard has since replaced is dropped (`settle_stale/3`).
+  # Otherwise a failure that leaves the shard standing reverts the attempt's delta, so the
+  # shard's list says what the venue was actually told.
+  defp settle_result(state, index, tag, result) do
+    {context, settled} = Map.pop(state.settled, tag)
+    state = %{state | settled: settled}
+
+    if current_session?(state, index, context) do
+      # `handle_subscribe_result/3` first: `:oversubscribed` measures capacity from the
+      # size the shard was ATTEMPTED at, which the revert below shrinks.
+      {state, rebalanced?} = handle_subscribe_result(state, index, result)
+      {revert_failed_delta(state, index, context, result), rebalanced?}
+    else
+      settle_stale(state, index, result)
+    end
+  end
+
+  # `nil` is "no claim about a session" (a result delivered without a tracked attempt), so
+  # it is current. A tracked attempt is current only while the shard still has its session.
+  defp current_session?(_state, _index, nil), do: true
+
+  defp current_session?(state, index, %{session_id: session_id}) do
+    match?(%{session_id: ^session_id}, Map.get(state.shards, index))
+  end
+
+  defp current_session?(_state, _index, _context_without_a_session), do: true
+
+  # A venue-level refusal is true whichever session carried it, so `INVALID_SYMBOL` is still
+  # recorded. Everything else was measured against a session that is gone.
+  defp settle_stale(state, index, {:error, {:invalid_symbols, _symbols}} = result),
+    do: handle_subscribe_result(state, index, result)
+
+  defp settle_stale(state, index, _result) do
+    Logger.debug(
+      "[Webull Feed] shard #{index}: an answer for a replaced session was ignored — it says " <>
+        "nothing about the session the shard has now"
+    )
+
+    {state, false}
+  end
+
+  # `:ok` settles the shard. `INVALID_SESSION` already tore it down and reopened it from its
+  # full list. Any other failure reverts: `added` was never subscribed, `removed` may still
+  # be, and the next plan must see that difference to send it again.
+  defp revert_failed_delta(state, index, nil, _result), do: forget_unsettled(state, index)
+
+  # Not cleared on `:ok`: this attempt succeeding says nothing about a DIFFERENT, superseded
+  # attempt's reverted delta. The tick clears the set after the re-plan it triggers.
+  defp revert_failed_delta(state, _index, _context, :ok), do: state
+
+  defp revert_failed_delta(state, index, _context, {:error, {:invalid_session, _sid}}),
+    do: forget_unsettled(state, index)
+
+  defp revert_failed_delta(state, index, %{added: added, removed: removed}, {:error, _reason}) do
+    case Map.fetch(state.shards, index) do
+      {:ok, shard} ->
+        kept = shard.symbols -- added
+        reverted = kept ++ (removed -- kept)
+
+        state = put_in(state.shards[index].symbols, reverted)
+        %{state | unsettled: MapSet.put(state.unsettled, index)}
+
+      :error ->
+        state
+    end
+  end
+
+  defp revert_failed_delta(state, index, _no_delta, _result), do: forget_unsettled(state, index)
+
+  defp forget_unsettled(state, index),
+    do: %{state | unsettled: MapSet.delete(state.unsettled, index)}
 
   # A subscribe answered `INVALID_SESSION`: the session this shard is addressed to no longer
   # exists venue-side, so its MQTT connection is gone whatever the socket process still
@@ -2088,6 +2319,7 @@ defmodule DpExchange.Webull.Feed do
           | shards: Map.delete(state.shards, index),
             resubscribe_failed: Map.delete(state.resubscribe_failed, index),
             rotated_at: Map.delete(state.rotated_at, index),
+            unsettled: MapSet.delete(state.unsettled, index),
             delivering: Map.drop(state.delivering, shard.symbols),
             delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
         }
@@ -2161,6 +2393,64 @@ defmodule DpExchange.Webull.Feed do
   # `Logger.warning` above keeps firing with it, unchanged, by design) but short-circuits
   # here rather than notifying again — a notice per tick on a sustained outage is still a
   # storm, just a slower one.
+  defp open_planned(state, _index, [], _opts), do: state
+
+  defp open_planned(state, index, planned, opts) do
+    case open_socket(state, opts) do
+      {:ok, session_id, socket} ->
+        # `resync/1` because `symbols_to_open/3` may have placed a symbol that arrived after
+        # the open was scheduled on ANOTHER shard; nothing else would touch that one.
+        state
+        |> put_in([:shards, index], new_shard(session_id, socket, planned))
+        |> resync()
+
+      {:error, reason} ->
+        retry_shard_open(state, index, planned, opts, 1, reason)
+    end
+  end
+
+  defp reopen_planned(state, index, [], _opts, _attempt),
+    do: %{state | open_failed: MapSet.delete(state.open_failed, index)}
+
+  defp reopen_planned(state, index, planned, opts, attempt) do
+    case open_socket(state, opts) do
+      {:ok, session_id, socket} ->
+        Logger.info(
+          "[Webull Feed] shard #{index} opened on attempt #{attempt + 1} — its " <>
+            "#{length(planned)} symbol(s) are covered again"
+        )
+
+        state
+        |> put_in([:shards, index], new_shard(session_id, socket, planned))
+        |> clear_open_failure(index)
+        |> resync()
+
+      {:error, reason} ->
+        retry_shard_open(state, index, planned, opts, attempt + 1, reason)
+    end
+  end
+
+  defp new_shard(session_id, socket, symbols) do
+    %{session_id: session_id, socket: socket, connected?: false, symbols: symbols, reply_to: nil}
+  end
+
+  # The symbols a shard opening NOW should carry, derived from what is wanted NOW.
+  #
+  # `carried` (what the shard held when its open was scheduled) is offered to
+  # `derive_shards/4` as the slot's existing contents, so it stays sticky: a crashed shard
+  # reopens with its own symbols rather than having them spread over its siblings. What
+  # changes is that anything unsubscribed, rejected or newly wanted in the meantime is
+  # applied. Empty means there is nothing to open.
+  defp symbols_to_open(state, index, carried) do
+    effective = MapSet.difference(state.wanted, active_rejections(state))
+    existing = Map.put(state.shards, index, %{symbols: carried})
+
+    {planned, _overflow} =
+      derive_shards(effective, state.shard_capacity, existing, state.priority)
+
+    Map.get(planned, index, [])
+  end
+
   # Logs every failed open, notifies on the FIRST one, and schedules the next attempt.
   #
   # The log keeps firing on every attempt by design — a sustained outage should stay visible
@@ -2427,6 +2717,17 @@ defmodule DpExchange.Webull.Feed do
   # recomputed rather than sticky: it is the wanted priority symbols, sorted, up to its
   # capacity. Anything past that capacity, and every other wanted symbol, is placed in the
   # remaining shards exactly as without a priority.
+  #
+  # **The priority shard's unused room takes the overflow, and only the overflow.** It used
+  # to be reserved outright, so three priority symbols plus 450 others reported
+  # `capacity_exceeded` against a 500-symbol ceiling while 97 slots of shard 0 sat empty.
+  # Found 2026-10-10 by reading this function. Other symbols are still planned into shards
+  # 1..4 first, exactly as before, so nothing changes until those are full; only what would
+  # otherwise be refused fills shard 0's remaining room. That is safe for what priority is
+  # for: the permission is per SESSION, so a non-priority symbol riding in shard 0 streams on
+  # the session that already holds it, `priority_shard_held?/1` and
+  # `resubscribe_quiet_shards/1` only ask whether shard 0 holds a PRIORITY symbol, and a
+  # filler can never displace one — the priority symbols are pinned first and every plan.
   defp derive_shards(wanted, shard_capacity, existing_shards, priority) do
     pinned =
       priority
@@ -2445,7 +2746,12 @@ defmodule DpExchange.Webull.Feed do
         reserved = Map.put(shard_capacity, @priority_shard, 0)
 
         {shards, overflow} = derive_shards(rest, reserved, others)
-        {Map.put(shards, @priority_shard, pinned), overflow}
+
+        room =
+          max(Map.get(shard_capacity, @priority_shard, @pairs_per_socket) - length(pinned), 0)
+
+        {fillers, still_over} = Enum.split(overflow, room)
+        {Map.put(shards, @priority_shard, pinned ++ fillers), still_over}
     end
   end
 
@@ -2607,6 +2913,14 @@ defmodule DpExchange.Webull.Feed do
     do: not MapSet.member?(wanted, symbol)
 
   defp unwanted?(_payload, _wanted), do: false
+
+  # A `Trade` is delivered and not counted — see the moduledoc's "`:trades` is delivered but
+  # never counted here". `capabilities().streamable` does not declare `:trades`, and Core's
+  # `coverage_by_kind/1` invariant ties every reported kind to a declared one (and
+  # `coverage/1` to their union). Found 2026-10-10: `TICK` is requested by default, so a
+  # tick that did arrive put `:trades` into `coverage_by_kind/1` while the capability
+  # claimed no such kind existed.
+  defp record_quote(state, message, %Trade{}), do: {:noreply, deliver(state, message)}
 
   defp record_quote(state, message, quote_struct) do
     state = deliver(state, message)
