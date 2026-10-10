@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.120] - 2026-10-10
+
 ### Fixed
 
 - **Documentation contradicted the code in several places a consumer reads.**
