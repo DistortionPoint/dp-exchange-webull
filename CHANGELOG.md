@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The shard ping-pong is stopped by a rule that does not depend on the venue's notices**
+  (issue #11, reopened). 0.4.108 skipped re-asserting a quiet shard only if its own session
+  had received a type-1002 grab notice. Measured 2026-10-10 on 0.4.108, two shards still
+  alternated minute by minute while a third stayed steady, so the notice does not reliably
+  reach the session that lost. A quiet shard is now re-asserted only when **no** sibling
+  shard is delivering. A shard silent while its siblings stream is left alone and reported
+  once per episode with a `:coverage_change` warning naming the shard, its `session_id` and
+  its symbols. Its symbols leave `:stream` coverage for REST cover to take. The cost is that
+  a subscription the venue drops silently on one shard, while the others stream, is no
+  longer repaired by the timer. From outside it cannot be told apart from a starved shard,
+  and treating it as starved is what stops the flapping.
+
 ## [0.4.108] - 2026-10-09
 
 ### Fixed
