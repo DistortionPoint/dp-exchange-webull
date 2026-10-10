@@ -1276,10 +1276,13 @@ defmodule DpExchange.Webull.Fake do
     # The venue's two limits, and a per-order result. A fake that answered ok-or-error would
     # let a consumer ship code that believes "the batch failed" when most of it was placed.
     #
-    # Every shape check below matches `Rest.place_orders/3`'s own order (account, size,
-    # per-order instrument), with `credentialed/1` last — right before the `post/4` call
-    # it stands in for — via `with`, once every `cond` clause above it has passed.
-    with :ok <- batch_shape(requests, opts),
+    # Every shape check below matches `Rest.place_orders/3`'s own order (account, then size
+    # and every entry by index through `Rest.validate_batch_orders/1`), with
+    # `credentialed/1` last — right before the `post/4` call it stands in for. The entry
+    # checks used to be a local copy that knew only the instrument rule, so the fake
+    # accepted `STOP_LOSS`, a `:gtc` entry and a price-less `LIMIT` the real path refuses.
+    with :ok <- fake_batch_account(opts),
+         :ok <- Rest.validate_batch_orders(requests),
          :ok <- credentialed(credentials) do
       {:ok,
        requests
@@ -1292,27 +1295,10 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
-  defp batch_shape(requests, opts) do
-    cond do
-      not is_binary(Keyword.get(opts, :account_id)) ->
-        {:error, :account_id_required}
-
-      requests == [] ->
-        {:error, :empty_batch}
-
-      length(requests) > 50 ->
-        {:error, {:batch_too_large, length(requests), 50}}
-
-      Enum.any?(requests, &(Map.get(&1, :instrument_type, :equity) != :equity)) ->
-        index = Enum.find_index(requests, &(Map.get(&1, :instrument_type, :equity) != :equity))
-
-        {:error,
-         {:batch_instrument_not_supported, index,
-          requests |> Enum.at(index) |> Map.get(:instrument_type)}}
-
-      true ->
-        :ok
-    end
+  defp fake_batch_account(opts) do
+    if is_binary(Keyword.get(opts, :account_id)),
+      do: :ok,
+      else: {:error, :account_id_required}
   end
 
   defp fake_account(opts) do

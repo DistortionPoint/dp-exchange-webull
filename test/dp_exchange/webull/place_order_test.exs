@@ -292,6 +292,16 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert order.time_in_force == :gtc
     end
 
+    test "an accepted row that names no order is unconfirmed, with the id that was sent" do
+      # `id: nil` cannot be cancelled or looked up, and the order may be live. The caller
+      # gets the id back, as it does for a timeout, so `get_order/3` can settle it.
+      assert {:error, {:order_unconfirmed, "mine-1", :unexpected_response_shape}} =
+               place(limit_request(%{client_order_id: "mine-1"}),
+                 plug: responding([%{"order_id" => "wb-1"}]),
+                 account_id: @account
+               )
+    end
+
     test "a body with no order row is unreadable" do
       assert {:error, :unexpected_response_shape} =
                place(limit_request(), plug: responding([]), account_id: @account)

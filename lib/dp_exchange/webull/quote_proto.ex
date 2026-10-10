@@ -185,6 +185,13 @@ defmodule DpExchange.Webull.QuoteProto do
 
   defp decode_varint(binary), do: decode_varint(binary, 0, 0)
 
+  # A proto3 varint is at most ten bytes (64 bits at seven per byte). Without the bound a
+  # frame of continuation bytes - up to the 1 MiB `MqttPacket` allows - grew the accumulator
+  # by seven bits per byte, each `bor/2` copying the whole bignum: quadratic work, in the
+  # socket process, from one malformed frame. Past ten bytes the walk ends as it does for
+  # any other unparseable tail.
+  defp decode_varint(_binary, _acc, shift) when shift >= 70, do: :error
+
   defp decode_varint(<<1::1, chunk::7, rest::binary>>, acc, shift),
     do: decode_varint(rest, bor(acc, bsl(chunk, shift)), shift + 7)
 

@@ -893,6 +893,14 @@ only — `:amount` is refused here, where `place_order/3` accepts it for equitie
 `:support_trading_session` (`:core`, `:all` or `:night`) is **required per order**, with
 no documented venue default, unlike on `place_order/3` where it is optional.
 
+An entry with no `:symbol` or `:side`, or a `LIMIT` entry with no `:price`, is refused by
+index before anything is sent: `{:error, {:batch_order_rejected, index,
+{:missing_required_field, field}}}`.
+
+`place_order/3` answers `{:error, {:order_unconfirmed, client_order_id,
+:unexpected_response_shape}}` when the venue accepts (2xx) but its row names no order. The
+order may be live: settle it with `get_order/3` and the id in the tuple.
+
 ## Tokens: a token that exists is not a token that works
 
 `create_token/1` returns one that is `PENDING`, and verification happens through an SMS code

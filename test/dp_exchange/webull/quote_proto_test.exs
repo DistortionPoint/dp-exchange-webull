@@ -314,6 +314,24 @@ defmodule DpExchange.Webull.QuoteProtoTest do
     end
   end
 
+  describe "an over-long varint" do
+    test "ends the walk with what was read, without building a huge integer" do
+      # More than ten continuation bytes is not a proto3 varint. A frame of them used to
+      # grow the accumulator seven bits per byte, quadratically.
+      endless = :binary.copy(<<0xFF>>, 200_000) <> <<0x01>>
+
+      assert %{3 => "ok"} = QuoteProto.decode_message(field(3, "ok") <> endless)
+      assert %{} == QuoteProto.decode_message(endless)
+    end
+
+    test "a ten-byte varint is still read" do
+      max_varint = :binary.copy(<<0xFF>>, 9) <> <<0x01>>
+      unknown = varint(Bitwise.bsl(9, 3)) <> max_varint
+
+      assert %{3 => "ok"} = QuoteProto.decode_message(unknown <> field(3, "ok"))
+    end
+  end
+
   describe "scalar/2" do
     test "reads a single value" do
       assert QuoteProto.scalar(%{1 => "x"}, 1) == "x"

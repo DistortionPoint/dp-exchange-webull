@@ -22,6 +22,33 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Fake.place_orders/3` accepted batches `Rest.place_orders/3` refuses.** Its entry check
+  was a local copy that knew only the equities-only rule, so a `STOP_LOSS` entry, a `:gtc`
+  entry or a price-less `LIMIT` passed against the fake and failed against the venue path.
+  The fake now runs the new `Rest.validate_batch_orders/1`, the exact checks the real path
+  makes, and refuses by the same index.
+
+- **`QuoteProto` had no bound on a varint's length.** A malformed frame of continuation
+  bytes (up to the 1 MiB `MqttPacket` accepts) grew the accumulator seven bits per byte, each
+  `bor/2` copying the whole integer: quadratic work in the socket process from one bad frame.
+  A varint longer than ten bytes now ends the walk like any other unparseable tail.
+- **`place_orders/3` raised `KeyError` for an entry with no `:side` or `:symbol`, and sent a
+  `LIMIT` entry with no `:price` without `limit_price`.** The identity and price checks
+  `place_order/3` already made were not applied to batch entries. Both are now refused by
+  index, before anything is sent: `{:batch_order_rejected, index, {:missing_required_field,
+  field}}`.
+- **`place_order/3` returned `{:ok, %Order{id: nil}}` for a 2xx whose row named no
+  `client_order_id`.** An order with no id cannot be cancelled or looked up, and may be live;
+  `get_order/3` already refused the same shape. It is now
+  `{:error, {:order_unconfirmed, client_order_id, :unexpected_response_shape}}`, carrying the
+  id that was sent, as a timeout does.
+- **Cash-activity and order-history time ranges were not normalised to UTC.** A `DateTime` in
+  another zone was sent with its `+05:00` offset, a second-precision one without the
+  documented `.SSS`, and the same-calendar-year check compared the local `year` rather than
+  the UTC one the venue applies. All three now use UTC with millisecond precision.
+
 ## [0.4.117] - 2026-10-10
 
 ### Fixed

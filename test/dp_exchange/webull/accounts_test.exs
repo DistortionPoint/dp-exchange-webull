@@ -445,6 +445,74 @@ defmodule DpExchange.Webull.AccountsTest do
       assert row["biz_time"] == "2026-08-31T10:15:30.691Z"
     end
 
+    test "the range is judged and sent in UTC, with three fractional digits" do
+      me = self()
+
+      plug = fn conn ->
+        send(me, {:query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([]))
+      end
+
+      # 2025-12-31 22:00 at UTC-5 is 2026-01-01 03:00 UTC: the same year as the end, as the
+      # venue sees it, though the local `year` field says 2025.
+      est_start = %DateTime{
+        year: 2025,
+        month: 12,
+        day: 31,
+        hour: 22,
+        minute: 0,
+        second: 0,
+        microsecond: {0, 0},
+        time_zone: "EST",
+        zone_abbr: "EST",
+        utc_offset: -18_000,
+        std_offset: 0
+      }
+
+      assert {:ok, []} =
+               Rest.get_transfers(@credentials,
+                 start: est_start,
+                 end: ~U[2026-01-02 00:00:00Z],
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:query, query}
+      assert query =~ "start_time=2026-01-01T03%3A00%3A00.000Z"
+      assert query =~ "end_time=2026-01-02T00%3A00%3A00.000Z"
+    end
+
+    test "a range that crosses a year only in UTC is refused" do
+      exploding = fn _conn -> raise "must not send a cross-year activity range" end
+
+      est_end = %DateTime{
+        year: 2025,
+        month: 12,
+        day: 31,
+        hour: 20,
+        minute: 0,
+        second: 0,
+        microsecond: {0, 0},
+        time_zone: "EST",
+        zone_abbr: "EST",
+        utc_offset: -18_000,
+        std_offset: 0
+      }
+
+      assert {:error, {:cross_year_range, 2025, 2026}} =
+               Rest.get_transfers(@credentials,
+                 start: ~U[2025-12-31 00:00:00Z],
+                 end: est_end,
+                 plug: exploding,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
     test "a cross-year range is refused before the request" do
       # The venue says cross-year queries are not supported. Sending one and reading the
       # answer would give a real list missing whichever half it dropped.

@@ -54,7 +54,18 @@ defmodule DpExchange.Webull.FakeTest do
       assert missing == Fake.get_positions(account)
       assert missing == Fake.quantization("BTC-USD", [])
       assert missing == Fake.place_order(%{}, request(%{}), account)
-      assert missing == Fake.place_orders(%{}, [%{symbol: "AAPL"}], account)
+      # A complete batch entry: the fake checks entries before credentials, in the real
+      # path's order, so a bare `%{symbol: "AAPL"}` is refused for its missing `:side`.
+      batch_entry = %{
+        symbol: "AAPL",
+        side: :buy,
+        order_type: :limit,
+        quantity: Decimal.new("1"),
+        price: Decimal.new("180"),
+        support_trading_session: :core
+      }
+
+      assert missing == Fake.place_orders(%{}, [batch_entry], account)
       assert missing == Fake.cancel_order(%{}, "fake-webull-order-1", account)
       assert missing == Fake.get_order(%{}, "fake-webull-order-1", account)
       assert missing == Fake.get_orders(%{}, account)

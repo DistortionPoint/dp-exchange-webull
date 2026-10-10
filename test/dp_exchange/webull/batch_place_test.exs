@@ -271,6 +271,43 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     end
   end
 
+  describe "an entry missing a field the venue requires" do
+    test "no side or symbol is refused by index, not raised as a KeyError" do
+      exploding = fn _conn -> raise "must not send an unbuildable batch" end
+
+      assert {:error, {:batch_order_rejected, 1, {:missing_required_field, :side}}} =
+               Rest.place_orders(
+                 @credentials,
+                 [order(), Map.delete(order(), :side)],
+                 account_id: "acct-1",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :symbol}}} =
+               Rest.place_orders(
+                 @credentials,
+                 [Map.delete(order(), :symbol)],
+                 account_id: "acct-1",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+
+    test "a limit order with no price is refused rather than sent without limit_price" do
+      exploding = fn _conn -> raise "must not send a limit order with no price" end
+
+      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :price}}} =
+               Rest.place_orders(
+                 @credentials,
+                 [Map.delete(order(), :price)],
+                 account_id: "acct-1",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
+  end
+
   describe "the fake and the facade" do
     test "the fake holds the same limits" do
       assert {:error, :account_id_required} = Fake.place_orders(%{}, [order()], [])
@@ -281,6 +318,25 @@ defmodule DpExchange.Webull.BatchPlaceTest do
 
       assert {:error, {:batch_instrument_not_supported, 0, :crypto}} =
                Fake.place_orders(%{}, [order(%{instrument_type: :crypto})], account_id: "a")
+    end
+
+    test "the fake refuses every entry the real path refuses, by the same index" do
+      # It used to copy only the instrument rule, so a consumer's batch of stop orders or
+      # price-less limits passed against the fake and failed against the venue path.
+      batch = [order(), order(%{order_type: :stop_loss, stop_price: Decimal.new("170")})]
+
+      assert {:error, real} =
+               Rest.place_orders(@credentials, batch,
+                 account_id: "a",
+                 plug: fn _conn -> raise "must not send" end,
+                 retry_attempts: 0
+               )
+
+      assert {:error, ^real} = Fake.place_orders(@credentials, batch, account_id: "a")
+      assert {:batch_order_rejected, 1, _reason} = real
+
+      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :price}}} =
+               Fake.place_orders(@credentials, [Map.delete(order(), :price)], account_id: "a")
     end
 
     test "the fake's batch is partial" do

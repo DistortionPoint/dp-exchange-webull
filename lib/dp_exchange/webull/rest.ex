@@ -1495,20 +1495,29 @@ defmodule DpExchange.Webull.Rest do
 
   # The venue's stated limit. Sending a cross-year range and reading the answer would give a
   # real list missing whichever half the venue dropped.
-  defp same_year(%DateTime{year: year}, %DateTime{year: year}), do: :ok
-
-  defp same_year(%DateTime{year: from}, %DateTime{year: to}),
-    do: {:error, {:cross_year_range, from, to}}
+  #
+  # Compared in UTC, the zone `iso_millis/1` puts on the wire. A `DateTime` in another zone
+  # carries its local `year`, so `2025-12-31T22:00-05:00` (already 2026 in UTC) read as 2025
+  # and let a range the venue sees as cross-year through to be silently truncated.
+  defp same_year(%DateTime{} = start, %DateTime{} = finish) do
+    from = utc_millis(start).year
+    to = utc_millis(finish).year
+    if from == to, do: :ok, else: {:error, {:cross_year_range, from, to}}
+  end
 
   defp same_year(_start, _finish), do: :ok
 
-  # The venue's documented format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'.
+  # The venue's documented format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'. Always UTC and always three
+  # fractional digits: `DateTime.to_iso8601/1` keeps a non-UTC offset (`+05:00`) and omits
+  # the fraction on a second-precision value, and neither is the documented format.
   defp iso_millis(nil), do: nil
 
-  defp iso_millis(%DateTime{} = at),
-    do: at |> DateTime.truncate(:millisecond) |> DateTime.to_iso8601()
+  defp iso_millis(%DateTime{} = at), do: at |> utc_millis() |> DateTime.to_iso8601()
 
   defp iso_millis(other), do: other
+
+  defp utc_millis(%DateTime{} = at),
+    do: at |> DateTime.to_unix(:millisecond) |> DateTime.from_unix!(:millisecond)
 
   @doc """
   Prices an order **without placing it** — `/trading/orders/preview`.
@@ -4296,6 +4305,13 @@ defmodule DpExchange.Webull.Rest do
   The venue supports MASTER, OTO, OCO and OTOCO groupings, and states that **crypto supports
   only `NORMAL`**. Multi-leg and bracket orders are a Phase 11 shape for the venues that
   have them; sending one here would be rejected upstream.
+
+  ## An accepted response that names no order is `:order_unconfirmed`
+
+  A 2xx whose row carries no `client_order_id` is
+  `{:error, {:order_unconfirmed, client_order_id, :unexpected_response_shape}}` - the same
+  shape a timeout gets, with the id this package sent, because the order may be live. Use
+  `get_order/3` with that id to find out.
   """
   @spec place_order(map(), map(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
@@ -4311,7 +4327,7 @@ defmodule DpExchange.Webull.Rest do
       }
 
       case post("/trading/orders/place", body, credentials, send_once(opts)) do
-        {:ok, response} -> to_placed_order(response, request, order_type, tif)
+        {:ok, response} -> to_placed_order(response, request, order_type, tif, client_order_id)
         # **The id goes back with the failure.** An `{:error, _}` (a timeout, a 5xx) does
         # not say whether the order landed, and a generated id was returned only on
         # success, so a caller left holding a possibly live order had no way to look it up
@@ -4338,6 +4354,9 @@ defmodule DpExchange.Webull.Rest do
   **The vendor also says this is not available to every client.** A refusal here can mean
   the account is not entitled rather than that the batch was wrong, and the venue's own
   message is carried through unchanged for that reason.
+
+  A missing `:symbol` or `:side`, or a `LIMIT` order with no `:price`, is refused by index as
+  `{:batch_order_rejected, index, {:missing_required_field, field}}` before anything is sent.
 
   Each order takes the same shape `place_order/3` builds, and `client_order_id` is generated
   per order where the caller did not supply one — the venue requires one per order and
@@ -4380,6 +4399,20 @@ defmodule DpExchange.Webull.Rest do
 
   defp batch_size(_requests), do: :ok
 
+  @doc """
+  Whether `requests` is a batch `place_orders/3` would send: its size and every entry
+  against the batch endpoint's own schema, refused by index. The same checks
+  `place_orders/3` makes before it signs anything, for `DpExchange.Webull.Fake` to answer
+  exactly as the real path does — a fake that accepted a `STOP_LOSS` or price-less `LIMIT`
+  entry would let a consumer ship a batch the venue path refuses.
+  """
+  @spec validate_batch_orders([map()]) :: :ok | {:error, term()}
+  def validate_batch_orders(requests) do
+    with :ok <- batch_size(requests),
+         {:ok, _orders} <- batch_orders(requests),
+         do: :ok
+  end
+
   defp batch_orders(requests) do
     requests
     |> Enum.with_index()
@@ -4417,8 +4450,15 @@ defmodule DpExchange.Webull.Rest do
   # than discovered from a venue rejection: `order_leaf/3`, which `place_order/3` uses,
   # builds a wider order than this endpoint accepts, so a batch entry is built separately
   # here instead of reusing it.
+  #
+  # The identity and price checks are the same ones `order_leaf/3` makes. Without them a
+  # batch entry with no `:side` or `:symbol` raised `KeyError` in the caller's process on a
+  # money-moving write, and a `LIMIT` entry with no `:price` was sent with no `limit_price`
+  # at all, one entry of up to fifty failing at the venue instead of by index here.
   defp batch_leaf(request) do
-    with {:ok, order_type} <- batch_order_type(request),
+    with :ok <- required_order_identity(request),
+         {:ok, order_type} <- batch_order_type(request),
+         :ok <- required_order_prices(request, order_type),
          :ok <- batch_time_in_force(request),
          {:ok, sizing} <- batch_entrust(request),
          {:ok, support_trading_session} <- batch_support_trading_session(request) do
@@ -4825,38 +4865,48 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp to_placed_order(response, request, order_type, tif) do
+  defp to_placed_order(response, request, order_type, tif, sent_id) do
     case first_row(response) do
-      {:ok, row} ->
-        {:ok,
-         %Order{
-           # **The client_order_id, not the venue's order id.**
-           #
-           # Webull's whole order API is keyed on the client id: `/orders/cancel` takes it,
-           # `/orders/get` takes it. Returning the venue's own `order_id` here would hand a
-           # caller an identifier that round-trips nowhere — place, then cancel, and the
-           # cancel fails on an id the venue does not accept.
-           id: value(row, ["client_order_id", "clientOrderId"]),
-           symbol: Map.fetch!(request, :symbol),
-           side: Map.fetch!(request, :side),
-           order_type: order_type_atom(order_type),
-           time_in_force: tif_atom(tif),
-           quantity: Map.get(request, :quantity),
-           price: Map.get(request, :price),
-           # Echoed from the caller's own request, the same as `price` and `quantity`
-           # above — the venue's `/orders/place` response carries only the accepted
-           # `client_order_id` and nothing else to build an `Order` from. Missing before
-           # this fix, the same gap `stop_for/2` had on the request side: a caller placing
-           # a STOP_LOSS or STOP_LOSS_LIMIT order got `stop_price: nil` back from the very
-           # call that set it.
-           stop_price: Map.get(request, :stop_price),
-           status: :pending,
-           provider: :webull
-         }}
+      # A 2xx whose row names no order is not a placed order the caller can use: `id: nil`
+      # cannot be cancelled or looked up, `get_order/3` already refuses the same shape, and
+      # the order may well be live. The id this package sent goes back with the failure, as
+      # it does for a timeout, so the caller can find out with `get_order/3`.
+      {:ok, row} when is_map(row) ->
+        case value(row, ["client_order_id", "clientOrderId"]) do
+          nil -> {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
+          id -> {:ok, placed_order(id, request, order_type, tif)}
+        end
 
       _no_row ->
         {:error, :unexpected_response_shape}
     end
+  end
+
+  defp placed_order(id, request, order_type, tif) do
+    %Order{
+      # **The client_order_id, not the venue's order id.**
+      #
+      # Webull's whole order API is keyed on the client id: `/orders/cancel` takes it,
+      # `/orders/get` takes it. Returning the venue's own `order_id` here would hand a
+      # caller an identifier that round-trips nowhere — place, then cancel, and the
+      # cancel fails on an id the venue does not accept.
+      id: id,
+      symbol: Map.fetch!(request, :symbol),
+      side: Map.fetch!(request, :side),
+      order_type: order_type_atom(order_type),
+      time_in_force: tif_atom(tif),
+      quantity: Map.get(request, :quantity),
+      price: Map.get(request, :price),
+      # Echoed from the caller's own request, the same as `price` and `quantity`
+      # above — the venue's `/orders/place` response carries only the accepted
+      # `client_order_id` and nothing else to build an `Order` from. Missing before
+      # this fix, the same gap `stop_for/2` had on the request side: a caller placing
+      # a STOP_LOSS or STOP_LOSS_LIMIT order got `stop_price: nil` back from the very
+      # call that set it.
+      stop_price: Map.get(request, :stop_price),
+      status: :pending,
+      provider: :webull
+    }
   end
 
   # Reverse of @order_type_names, derived from it rather than hand-duplicated so the two
