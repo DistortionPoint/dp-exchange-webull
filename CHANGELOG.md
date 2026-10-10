@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.117] - 2026-10-10
+
 ### Fixed
 
 - **A failed subscribe left its shard believing it had subscribed.** The shard's symbol list
