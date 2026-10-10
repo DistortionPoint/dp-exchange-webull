@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.109] - 2026-10-10
+
 ### Fixed
 
 - **The shard ping-pong is stopped by a rule that does not depend on the venue's notices**
