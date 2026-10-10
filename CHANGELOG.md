@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Starved shards get the stream in rotation instead of never** (issue #11, measured on
+  0.4.109). Never re-asserting a quiet shard while a sibling streamed stopped the flapping,
+  but left two of three shards with no stream at all: about 190 of 252 pairs on REST alone,
+  with each 1m bar a single flat quote. The consumer reported this as worse for candles than
+  0.4.107's flapping. The account cannot stream every shard at once, so the permission is
+  now rotated deliberately. While any shard streams, each tick re-asserts exactly one quiet
+  shard, the one silent longest, and announces it with an `:info` `:coverage_change`
+  naming the shard, its `session_id` and its symbols. One grab per tick replaces
+  simultaneous grabs. When no shard streams, every quiet shard is re-asserted, as before.
+  0.4.109's once-per-episode `:warning` for a starved shard is gone with the rule it
+  described.
+
 ## [0.4.109] - 2026-10-10
 
 ### Fixed

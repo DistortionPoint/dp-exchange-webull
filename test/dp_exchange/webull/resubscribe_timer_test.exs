@@ -170,9 +170,9 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       assert_receive {:request, "shard-0"}
     end
 
-    # Issue #11: re-asserting a quiet shard while a sibling streams grabs the permission back
-    # and silences the sibling, and the two traded it every interval. 0.4.108 keyed the skip
-    # on a 1002 notice and the ping-pong continued, so the rule no longer depends on one.
+    # Issue #11: the account cannot stream every shard at once. Re-asserting every quiet shard
+    # flapped (0.4.107, 0.4.108), and never re-asserting starved them (0.4.109). So the
+    # permission is rotated: one quiet shard per tick, the one silent longest.
     defp two_shards(feed_opts) do
       start_feed(
         Keyword.merge(
@@ -188,29 +188,54 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       )
     end
 
-    test "a quiet shard is NOT re-asserted while a sibling delivers, and is reported once" do
-      plug = fn _conn -> flunk("re-asserting a starved shard restarts the ping-pong") end
-      feed = two_shards(plug: plug)
+    test "while a sibling streams, a tick re-asserts ONE quiet shard — the longest silent — and says so",
+         %{limiter: limiter} do
+      # 0.4.109 never re-asserted while a sibling streamed, and two starved shards got no
+      # stream at all (issue #11). The permission is rotated instead: one grab per tick, to
+      # the shard silent longest.
+      test_pid = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request, Jason.decode!(body)["session_id"]})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
+      feed =
+        start_feed(
+          shards: %{
+            0 => %{connected_shard("shard-0") | symbols: ["BTC-USD"]},
+            1 => %{connected_shard("shard-1") | symbols: ["SOL-USD"]},
+            2 => %{connected_shard("shard-2") | symbols: ["ETH-USD"]}
+          },
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
+
       :ok = Feed.subscribe_notices(feed, to: self())
       now = :os.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
+        %{
+          state
+          | delivering: %{"BTC-USD" => now - 300_000, "SOL-USD" => now, "ETH-USD" => now - 90_000}
+        }
       end)
 
       send(feed, :resubscribe)
-      _settled = Feed.coverage(feed)
-      send(feed, :resubscribe)
-      _settled = Feed.coverage(feed)
+
+      assert_receive {:request, "shard-0"}
+      refute_receive {:request, "shard-2"}, 200
+      refute_received {:request, "shard-1"}
 
       assert_received {:dp_exchange, :webull,
                        %Notice{
                          kind: :coverage_change,
+                         severity: :info,
                          details: %{shard: 0, session_id: "shard-0"}
                        }}
-
-      refute_received {:dp_exchange, :webull,
-                       %Notice{kind: :coverage_change, details: %{shard: 0}}}
     end
 
     test "once every sibling is quiet too, a quiet shard IS re-asserted", %{limiter: limiter} do

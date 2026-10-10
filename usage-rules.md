@@ -956,13 +956,14 @@ Each shard reasserts its symbols on a timer, **but only once it has gone quiet**
 any of its symbols arrived within the last interval (60 s) is left alone. Each completed
 re-assert grabs the `us-crypto` permission from a sibling session, and on 2026-10-08 a
 consumer measured that costing a streaming shard 30 s or more of silence every minute (issue
-#10). Nor is a quiet shard while **any sibling shard is still delivering** (issue #11): its
-silence is most likely the siblings holding the permission, and grabbing it back only moved the
-silence. Two shards traded it every interval, each losing half its minutes. A starved shard is
-left silent and reported **once** with a `:coverage_change` warning naming the shard, its
-`session_id` and its symbols. Those symbols leave `:stream` coverage, so take them from REST.
-A quiet shard IS re-asserted once every shard is quiet, which is an account-wide loss. Venue
-notices carry `session_id` in `details`. If one shard's blind resubscribe fails
+#10). **The account cannot stream every shard at once** (issue #11, measured across
+0.4.107–0.4.109): re-asserting every quiet shard made two shards flap, each losing half its
+minutes, and never re-asserting while a sibling streamed left them with no stream at all. So the
+permission is **rotated**. While any shard streams, each tick re-asserts exactly one quiet
+shard, the one silent longest, and announces it with an `:info` `:coverage_change` naming
+the shard, its `session_id` and its symbols. A sibling may go quiet in turn, and that is the
+rotation, not a fault. When no shard streams at all, every quiet shard is re-asserted at once.
+Venue notices carry `session_id` in `details`. If one shard's blind resubscribe fails
 **twelve times in a row** *and* none of that shard's symbols has arrived for **five minutes**,
 this package reopens that shard's socket on a fresh session — the same recovery an explicit
 `INVALID_SESSION` triggers. A `:link_down` notice says so, naming the shard.

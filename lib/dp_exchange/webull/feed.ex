@@ -178,7 +178,7 @@ defmodule DpExchange.Webull.Feed do
   is the only one in the family whose periodic re-assert is a task tracked by a reusable key
   with a deadline on it, which is why the defect landed here and nowhere else. Re-arming at
   the top is kept — the timer must survive a crash in the body — and the in-flight skip in
-  `resubscribe_shard/2` is what supplies the bound instead.
+  `resubscribe_quiet_shards/1` is what supplies the bound instead.
 
   ## The resubscribe timer must never fail-fast
 
@@ -597,9 +597,6 @@ defmodule DpExchange.Webull.Feed do
        max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
-       # Shards found silent while a sibling streams, reported once per episode. See
-       # `resubscribe_shard/2` (issue #11).
-       starved: MapSet.new(),
        # kind() => %{symbol => timestamp}, built alongside `delivering` above from the
        # same arriving payloads — never from `wanted` or from what was subscribed. See
        # the moduledoc's "Coverage by kind" and `kind_for/1`.
@@ -1075,7 +1072,7 @@ defmodule DpExchange.Webull.Feed do
   # exactly what is already wanted computes an empty diff.
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, state.resubscribe_interval_ms)
-    state = Enum.reduce(state.shards, state, &resubscribe_shard/2)
+    state = resubscribe_quiet_shards(state)
 
     # A TTL-expired rejection (see the moduledoc's "A venue-rejected symbol is excluded,
     # timed, and reported") only ever returns to a shard's own symbol list through
@@ -1200,7 +1197,7 @@ defmodule DpExchange.Webull.Feed do
 
   # Best-effort, one MQTT `DISCONNECT` per shard still connected — see `Socket.disconnect/2`
   # and `MqttPacket.disconnect/0` for what this sends and why. A shard that never linked up
-  # has no session to close cleanly; `resubscribe_shard/2`'s own `connected?: false` clause
+  # has no session to close cleanly; `resubscribe_quiet_shards/1`'s `connected?` filter
   # makes the same distinction for the same reason.
   defp disconnect_connected_shards(state) do
     state.shards
@@ -1303,117 +1300,105 @@ defmodule DpExchange.Webull.Feed do
             "problem rather than a safety net."
   end
 
-  # A shard that has never linked up has nothing subscribed yet — on_link_up/2's own
-  # unconditional replay covers it once it does. A shard with nothing wanted has nothing
-  # to re-assert.
-  defp resubscribe_shard({_index, %{connected?: false}}, state), do: state
-  defp resubscribe_shard({_index, %{symbols: []}}, state), do: state
-
-  # A shard whose PREVIOUS blind resubscribe has not finished. Skipped rather than launched
-  # alongside it: a second identical subscribe for a session the venue has not answered for
-  # yet is load, not a safety net. `validate_resubscribe_interval_ms!/1` below refuses a
-  # configured interval under a second in those exact words, and an attempt still in flight
-  # makes the EFFECTIVE interval shorter than the configured one just as surely.
+  # ## Which shards a tick re-asserts, and why it is a rotation
   #
-  # This is the half of issue #3 that reached the venue. `@reconcile_timeout_ms` and
-  # `@resubscribe_interval_ms` are both 60,000, so in the steady state of a stalled shard
-  # every tick landed on top of an unfinished attempt, and the tick won the ordering (see
-  # `spawn_reconcile/3`). What the venue saw was every shard re-asserting its whole
-  # subscription on a rolling 60-second overlap, on one App Key, forever.
+  # A shard is a candidate only once it has linked up (`on_link_up/2`'s replay covers one
+  # that has not), has something wanted, and has no re-assert still in flight:
   #
-  # The cost is that a shard whose attempt is hung re-asserts on the tick AFTER its deadline
-  # clears rather than the next one — the deadline and the interval being equal, that is
-  # every other tick. Stated rather than tuned away: `@reconcile_timeout_ms` is derived from
-  # `@call_timeout` for a reason that has nothing to do with this timer, and shortening it
-  # here to buy back a cadence would change every other reconcile's deadline with it.
-  defp resubscribe_shard({index, _shard}, state)
-       when is_map_key(:erlang.map_get(:reconciling, state), {:resubscribe, index}),
-       do: state
-
-  # **A shard that is delivering is not re-asserted** (issue #10). Each blind re-subscribe
-  # that completes moves the `us-crypto` permission to that shard's session ("Permission
-  # grabbed by other session", type 1002, tick-aligned; see
-  # `validate_resubscribe_interval_ms!/1`), and the venue then stops delivering to whichever
-  # sibling session held it until that sibling's own tick grabs it back. Measured by a
-  # consumer on 2026-10-08 (04:01–04:13 UTC, 272 pairs, four sessions): every minute, just
-  # after the grabs, a contiguous alphabetical block of 45–125 liquid pairs, one shard's worth,
-  # went 30 s or more without a delivery, taking silence from a 60–75 pair baseline to
-  # ~205 of 272. The repair loop had become the outage: half the universe lost half of every
-  # minute to the safety net.
+  #   A shard whose PREVIOUS blind resubscribe has not finished. Skipped rather than launched
+  #   alongside it: a second identical subscribe for a session the venue has not answered for
+  #   yet is load, not a safety net. `validate_resubscribe_interval_ms!/1` below refuses a
+  #   configured interval under a second in those exact words, and an attempt still in flight
+  #   makes the EFFECTIVE interval shorter than the configured one just as surely.
   #
-  # The tick exists to repair a shard whose subscription was silently lost, and such a shard
-  # stops delivering. So a shard where ANY of its symbols arrived within the last
-  # `resubscribe_interval_ms` is left alone, and a shard gone quiet is re-asserted on the next
-  # tick as before. The window is the interval itself, not the five-minute `stale_delivery_ms`
-  # that gates a socket REOPEN: re-asserting a quiet shard is cheap and a minute is enough
-  # to call one quiet, while a reopen discards a live socket and needs the longer proof.
+  #   This is the half of issue #3 that reached the venue. `@reconcile_timeout_ms` and
+  #   `@resubscribe_interval_ms` are both 60,000, so in the steady state of a stalled shard
+  #   every tick landed on top of an unfinished attempt, and the tick won the ordering (see
+  #   `spawn_reconcile/3`). What the venue saw was every shard re-asserting its whole
+  #   subscription on a rolling 60-second overlap, on one App Key, forever.
   #
-  # ## …nor a quiet shard while a sibling is delivering (issue #11)
+  #   The cost is that a shard whose attempt is hung re-asserts on the tick AFTER its deadline
+  #   clears rather than the next one — the deadline and the interval being equal, that is
+  #   every other tick. Stated rather than tuned away: `@reconcile_timeout_ms` is derived from
+  #   `@call_timeout` for a reason that has nothing to do with this timer, and shortening it
+  #   here to buy back a cadence would change every other reconcile's deadline with it.
   #
-  # The rule above, alone, made a ping-pong. A shard silenced by a sibling's grab qualified
-  # as quiet, its re-assert grabbed the permission back, and the sibling did the same one
-  # interval later. On 0.4.107 a consumer measured two of three shards each silent 2 minutes
-  # in 4, out of phase, with the third shard steady.
+  # Among candidates, only a QUIET shard is re-asserted: one where none of its symbols
+  # arrived within `resubscribe_interval_ms`. Each completed re-assert grabs `us-crypto` for
+  # that session, and the venue stops delivering to whichever sibling held it. Re-asserting
+  # every shard every tick cost a streaming shard 30 s or more of silence per minute
+  # (issue #10).
   #
-  # 0.4.108 tried to hold the pair apart on evidence: skip a quiet shard only if its own
-  # session had received a type-1002 "Permission grabbed" notice. Measured 2026-10-10 on
-  # 0.4.108, the ping-pong continued: two A–Q shards were exact minute-by-minute complements,
-  # one minute on and one off, while the RAD–Z shard was steady. So the notice does not
-  # reliably reach the session that lost, and a rule that depends on it does not hold.
+  # **The account cannot stream every shard at once.** Measured by a consumer across
+  # 0.4.107–0.4.109 (issue #11), on one App Key with three shards:
   #
-  # Both runs fit a venue that lets fewer sessions hold `us-crypto` than this package opens
-  # shards: one steady shard and two fighting over what is left. In that state no re-assert
-  # policy gives every shard the stream. The choice is between flapping (two shards each
-  # losing half of every minute, every bar beside a gap truncated) and a stable split (the
-  # shards holding the permission keep it, and the starved one stays silent, where
-  # `coverage/1` stops calling its symbols `:stream` and a consumer's REST cover takes them).
-  # Stable is the honest choice. So a quiet shard is re-asserted only when NO sibling is
-  # delivering, which is the account-wide loss the timer must still repair. A starved shard
-  # gets one `:coverage_change` notice per episode, naming it.
+  #   * 0.4.107, re-assert every quiet shard: one shard steady and two alternating, each
+  #     silent 2 minutes in 4.
+  #   * 0.4.108, skip a quiet shard whose own session got a 1002 grab notice: still
+  #     alternating, now 1 on and 1 off. The notice does not reliably reach the loser.
+  #   * 0.4.109, never re-assert while a sibling streams: no flapping, but the two starved
+  #     shards got NO stream, ~190 of 252 pairs on REST alone, a 1m bar a single flat quote.
+  #     The consumer reported this as worse for candles than 0.4.107.
   #
-  # The cost, stated: a subscription the venue drops silently on one shard while its
-  # siblings stream is no longer repaired by this timer, and stays silent until the stale
-  # reopen (`count_resubscribe_failure/2`) or a reshard touches it. From outside, that case
-  # cannot be told apart from a starved shard, and treating it as starved is what stops the
-  # flapping.
-  defp resubscribe_shard({index, shard}, state) do
+  # So the permission is rotated deliberately. While any shard streams, a tick re-asserts
+  # exactly ONE quiet shard, the one silent longest, and says so with an `:info`
+  # `:coverage_change` naming it, so a consumer can see the schedule. Each starved shard gets
+  # the stream in turn, one grab per tick instead of simultaneous ones. When NO shard
+  # streams, the whole account has lost the stream, and every quiet shard is re-asserted at
+  # once, which is the repair this timer exists for.
+  defp resubscribe_quiet_shards(state) do
     window = state.resubscribe_interval_ms
 
-    cond do
-      shard_delivered_within?(state, index, window) ->
-        %{state | starved: MapSet.delete(state.starved, index)}
+    quiet =
+      for {index, shard} <- state.shards,
+          shard.connected?,
+          shard.symbols != [],
+          not Map.has_key?(state.reconciling, {:resubscribe, index}),
+          not shard_delivered_within?(state, index, window),
+          do: {index, shard}
 
-      Enum.any?(
-        Map.keys(state.shards),
-        &(&1 != index and shard_delivered_within?(state, &1, window))
-      ) ->
-        report_starved(state, index, shard)
+    streaming? = Enum.any?(Map.keys(state.shards), &shard_delivered_within?(state, &1, window))
+
+    cond do
+      quiet == [] ->
+        state
+
+      not streaming? ->
+        Enum.reduce(quiet, state, &reassert_shard/2)
 
       true ->
-        spawn_reconcile(state, {:resubscribe, index}, fn ->
-          Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
-        end)
+        {index, shard} = Enum.min_by(quiet, fn {index, _shard} -> last_delivery(state, index) end)
+        announce_rotation(state, index, shard)
+        reassert_shard({index, shard}, state)
     end
   end
 
-  defp report_starved(state, index, shard) do
-    if MapSet.member?(state.starved, index) do
-      state
-    else
-      notice =
-        Notice.new(:coverage_change, :webull,
-          severity: :warning,
-          message:
-            "shard #{index} is silent while its sibling shards stream — most likely starved " <>
-              "of the us-crypto permission by them. NOT re-asserting it, because that only " <>
-              "moves the silence to a sibling (issue #11). Its #{length(shard.symbols)} " <>
-              "symbol(s) need another source until it delivers again",
-          details: %{shard: index, session_id: shard.session_id, symbols: shard.symbols}
-        )
+  defp reassert_shard({index, shard}, state) do
+    spawn_reconcile(state, {:resubscribe, index}, fn ->
+      Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
+    end)
+  end
 
-      fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
-      %{state | starved: MapSet.put(state.starved, index)}
-    end
+  defp last_delivery(state, index) do
+    state.shards
+    |> Map.fetch!(index)
+    |> Map.fetch!(:symbols)
+    |> Enum.map(&Map.get(state.delivering, &1, 0))
+    |> Enum.max(fn -> 0 end)
+  end
+
+  defp announce_rotation(state, index, shard) do
+    notice =
+      Notice.new(:coverage_change, :webull,
+        severity: :info,
+        message:
+          "shard #{index} is quiet while a sibling streams — re-asserting it to take the " <>
+            "us-crypto permission in rotation; a sibling shard may go quiet in turn " <>
+            "(issue #11). The account cannot stream every shard at once",
+        details: %{shard: index, session_id: shard.session_id, symbols: shard.symbols}
+      )
+
+    fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
   end
 
   # --- resharding -----------------------------------------------------------
@@ -1789,7 +1774,7 @@ defmodule DpExchange.Webull.Feed do
   # killed. What closes it is the attempt token on the answer itself; see
   # `handle_info({:reconcile_done, tag, attempt, result}, _)`.
   #
-  # `{:resubscribe, _}` never reaches this — `resubscribe_shard/2` skips a tick whose
+  # `{:resubscribe, _}` never reaches this — `resubscribe_quiet_shards/1` skips a tick whose
   # previous attempt is still running — so what arrives here is a `{:link_up, _}` or
   # `{:background, _}` genuinely superseded by newer intent, where the newest attempt
   # winning is the behaviour wanted. `{:primary, _, from, _, _, _}` carries its caller in
@@ -1849,7 +1834,6 @@ defmodule DpExchange.Webull.Feed do
       | shards: Map.delete(state.shards, index),
         resubscribe_failed: Map.delete(state.resubscribe_failed, index),
         delivering: Map.drop(state.delivering, shard.symbols),
-        starved: MapSet.delete(state.starved, index),
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
     }
 
@@ -2027,7 +2011,6 @@ defmodule DpExchange.Webull.Feed do
           | shards: Map.delete(state.shards, index),
             resubscribe_failed: Map.delete(state.resubscribe_failed, index),
             delivering: Map.drop(state.delivering, shard.symbols),
-            starved: MapSet.delete(state.starved, index),
             delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, shard.symbols)
         }
 
@@ -2264,7 +2247,7 @@ defmodule DpExchange.Webull.Feed do
 
   # Whether any of this shard's symbols arrived within the last `window_ms`. The reopen gate
   # above asks it over `stale_delivery_ms`; the blind resubscribe asks it over one
-  # `resubscribe_interval_ms` (see `resubscribe_shard/2`).
+  # `resubscribe_interval_ms` (see `resubscribe_quiet_shards/1`).
   defp shard_delivered_within?(state, index, window_ms) do
     case Map.fetch(state.shards, index) do
       :error ->
