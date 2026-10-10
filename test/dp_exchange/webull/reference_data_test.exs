@@ -761,7 +761,9 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert Fake.get_financials("AAPL", :balance_sheet) ==
                {:error, {:missing_credentials, :webull}}
 
-      assert Fake.get_screener("nope") == {:error, {:missing_credentials, :webull}}
+      # A screener the venue publishes: an unknown one is refused before credentials, as
+      # `Rest.get_screener/3` does, so "nope" here would not be proving the credential check.
+      assert Fake.get_screener("top_actives") == {:error, {:missing_credentials, :webull}}
     end
 
     test "the facade delegates each of the six" do

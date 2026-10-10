@@ -92,6 +92,10 @@ defmodule DpExchange.Webull.Fake do
   # Fixed, not `utc_now/0`.
   @at ~U[2026-08-28 12:00:00Z]
 
+  # The id the fake issues when a placed order names none, and the one `get_orders/2`
+  # always lists.
+  @default_order_id "fake-webull-order-1"
+
   @impl true
   def child_spec(opts),
     do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
@@ -183,24 +187,20 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- authenticated(opts) do
-        cond do
-          symbol not in @symbols ->
-            {:refused, :not_listed}
-
-          timeframe not in Rest.timeframes() ->
-            # `@symbols` above is crypto-only, so this branch only ever sees a crypto
-            # pair, and `Rest.timeframes/0` is the crypto default — not
-            # `Rest.wide_timeframes/0`, the venue-wide set `capabilities/0` mostly (but
-            # not entirely — see `@core_unnameable_widths` in `webull.ex`) declares.
-            # Includes `12h`, unserved anywhere, and `1w`/`1M`/`1y`, which the venue's
-            # *equity, option and futures* bars serve and its crypto bars refuse
-            # deliberately (crypto's week has no boundary anything here can verify) —
-            # this fake models no non-crypto symbol, so it never has to accept them.
-            {:error, {:unsupported_timeframe, timeframe}}
-
-          true ->
-            {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
+      # The width and the `:limit` are checked BEFORE credentials, as `Rest`'s crypto path
+      # does (`timespan/1` and the count check run before `get/4` reaches `Auth.headers/2`),
+      # through the real validator rather than a copy. `@symbols` is crypto-only, so this is
+      # the crypto default set (`Rest.timeframes/0`) — not `Rest.wide_timeframes/0`: `12h`
+      # is unserved anywhere, and `1w`/`1M`/`1y`, which the venue's *equity, option and
+      # futures* bars serve, its crypto bars refuse deliberately. This fake models no
+      # non-crypto symbol, so it never has to accept them. A `:limit` over 1200 is refused
+      # as `{:limit_out_of_range, n, max: 1200}`, which the fake used to accept.
+      with :ok <- Rest.validate_crypto_bars_request(timeframe, opts),
+           :ok <- authenticated(opts) do
+        if symbol in @symbols do
+          {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
+        else
+          {:refused, :not_listed}
         end
       end
     end)
@@ -209,7 +209,13 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_symbols(opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts), do: {:ok, @symbols}
+      # The category first, credentials second — `Rest.get_symbols/2` builds its request
+      # path from the category before `get/4` signs anything. This fake lists only the
+      # crypto catalogue, so any other category (including `US_STOCK`, which the real path
+      # does serve) is refused by name rather than answered with the crypto list.
+      with :ok <- fake_instrument_category(Config.opt(opts, :category, "US_CRYPTO")),
+           :ok <- authenticated(opts),
+           do: {:ok, @symbols}
     end)
   end
 
@@ -293,37 +299,31 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_volume_profile(symbol, timeframe, opts \\ []) do
     with_injection(symbol, fn ->
-      cond do
-        timeframe not in ~w(5s 15s 1m 5m 30m) ->
-          # Five widths, narrower than the bars endpoint. A caller asking for one this
-          # endpoint does not serve gets an error, not the nearest.
-          {:error, {:unsupported_timeframe, timeframe}}
-
-        Keyword.get(opts, :session) == "OVN" ->
-          {:error, {:unsupported_session, "OVN"}}
-
-        true ->
-          with :ok <- authenticated(opts) do
-            {:ok,
-             [
-               %Types.VolumeProfile{
-                 symbol: symbol,
-                 timeframe: timeframe,
-                 opened_at: @at,
-                 total_volume: Decimal.new("1000"),
-                 # Deliberately NOT buy_volume - sell_volume. The venue's classifier leaves
-                 # some prints unattributed, and a fake where the three always reconcile
-                 # would teach a consumer they must.
-                 delta: Decimal.new("150"),
-                 buy_volume: Decimal.new("600"),
-                 sell_volume: Decimal.new("400"),
-                 buy_at_price: %{"24.20" => Decimal.new("100"), "24.21" => Decimal.new("500")},
-                 sell_at_price: %{"24.20" => Decimal.new("350"), "24.21" => Decimal.new("50")},
-                 session: :regular,
-                 provider: :webull
-               }
-             ]}
-          end
+      # Category, width (five, narrower than the bars endpoint - an unserved one is an error,
+      # not the nearest) and session, in `Rest.get_volume_profile/4`'s own order and from its
+      # own validator, all before credentials. A session outside PRE/RTH/ATH used to pass
+      # here; only `OVN` was refused.
+      with :ok <- Rest.validate_footprint_request(timeframe, opts),
+           :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %Types.VolumeProfile{
+             symbol: symbol,
+             timeframe: timeframe,
+             opened_at: @at,
+             total_volume: Decimal.new("1000"),
+             # Deliberately NOT buy_volume - sell_volume. The venue's classifier leaves
+             # some prints unattributed, and a fake where the three always reconcile
+             # would teach a consumer they must.
+             delta: Decimal.new("150"),
+             buy_volume: Decimal.new("600"),
+             sell_volume: Decimal.new("400"),
+             buy_at_price: %{"24.20" => Decimal.new("100"), "24.21" => Decimal.new("500")},
+             sell_at_price: %{"24.20" => Decimal.new("350"), "24.21" => Decimal.new("50")},
+             session: :regular,
+             provider: :webull
+           }
+         ]}
       end
     end)
   end
@@ -485,8 +485,11 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_transfers(credentials, opts) do
     with_injection(fn ->
-      # Account first, credentials second — matching `Rest.get_transfers/2`'s own order.
+      # Account, then the date range, credentials last — matching `Rest.get_transfers/2`'s
+      # own order. A range across two calendar years is refused as it is there; it used to
+      # be answered.
       with :ok <- fake_account(opts),
+           :ok <- Rest.validate_activity_range(opts),
            :ok <- credentialed(credentials) do
         # A dividend alongside a deposit, because that is the distinction a consumer must
         # handle: both credit cash and neither is the other. The fake filters the same way
@@ -524,36 +527,49 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_transactions(credentials, opts) do
     with_injection(fn ->
-      # Account first, credentials second — matching `Rest.get_transactions/2`'s own order.
+      # Account, then the date range, credentials last — matching
+      # `Rest.get_transactions/2`'s own order.
       with :ok <- fake_account(opts),
+           :ok <- Rest.validate_activity_range(opts),
            :ok <- credentialed(credentials) do
         # Unfiltered by default: the dividend and the fee are here beside the deposit, which
         # is the whole difference from `get_transfers/2`. A fake that returned only the three
-        # transfer kinds would make the two functions look interchangeable.
-        {:ok,
-         [
-           %{
-             "id" => "a1b2c3",
-             "activity_type" => "DEPOSIT",
-             "currency" => "USD",
-             "net_amount" => "1500.0"
-           },
-           %{
-             "id" => "d4e5f6",
-             "activity_type" => "DIVIDENDS",
-             "currency" => "USD",
-             "net_amount" => "12.40"
-           },
-           %{
-             "id" => "g7h8i9",
-             "activity_type" => "FEES",
-             "currency" => "USD",
-             "net_amount" => "-0.35"
-           }
-         ]}
+        # transfer kinds would make the two functions look interchangeable. `activity_types`
+        # narrows it, as it does at the venue (a list, or the venue's comma-joined string);
+        # it used to be ignored.
+        rows = [
+          %{
+            "id" => "a1b2c3",
+            "activity_type" => "DEPOSIT",
+            "currency" => "USD",
+            "net_amount" => "1500.0"
+          },
+          %{
+            "id" => "d4e5f6",
+            "activity_type" => "DIVIDENDS",
+            "currency" => "USD",
+            "net_amount" => "12.40"
+          },
+          %{
+            "id" => "g7h8i9",
+            "activity_type" => "FEES",
+            "currency" => "USD",
+            "net_amount" => "-0.35"
+          }
+        ]
+
+        {:ok, filter_activity_types(rows, Keyword.get(opts, :activity_types))}
       end
     end)
   end
+
+  defp filter_activity_types(rows, nil), do: rows
+
+  defp filter_activity_types(rows, types) when is_list(types),
+    do: Enum.filter(rows, &(&1["activity_type"] in types))
+
+  defp filter_activity_types(rows, types),
+    do: filter_activity_types(rows, types |> to_string() |> String.split(",", trim: true))
 
   @impl true
   def list_payment_methods(_credentials, _opts \\ []), do: Venue.not_supported()
@@ -601,11 +617,14 @@ defmodule DpExchange.Webull.Fake do
       if instrument == :crypto do
         {:error, {:preview_not_supported, :crypto}}
       else
-        # Account and combination first, credentials last — matching
-        # `Rest.preview_order/3`'s own order (account, combination, THEN
-        # `post/4` -> `Auth.headers/2`).
+        # Account, then the order itself, credentials last — matching
+        # `Rest.preview_order/3`'s own order (account, combination, order body, THEN
+        # `post/4` -> `Auth.headers/2`). The order body is checked through
+        # `Rest.validate_order_request/1`, which includes the combination: a preview with
+        # no size, or a limit with no price, is refused here as it is there. It used to
+        # check the combination alone and price anything.
         with :ok <- fake_account(opts),
-             :ok <- fake_combination(request),
+             :ok <- Rest.validate_order_request(request),
              :ok <- credentialed(credentials) do
           {:ok,
            %{
@@ -627,30 +646,37 @@ defmodule DpExchange.Webull.Fake do
     instrument = Config.opt(opts, :instrument_type, :equity)
     order_type = Config.opt(opts, :order_type, :limit)
 
-    cond do
-      instrument == :crypto ->
-        {:error, {:preview_not_supported, :crypto}}
-
-      changes == %{} ->
-        {:error, :no_order_changes}
-
-      true ->
-        # The real package's own per-type edit table, not a union of every type's fields.
-        # This allowed `:stop_price` and `:trailing_stop_step` on a LIMIT order, which the
-        # real path refuses as `unsupported_order_edit`; its comment said a limit takes four.
-        case Rest.validate_amendment(order_type, changes) do
-          :ok ->
-            # Account first, credentials second — matching `Rest.replace_order/4`'s own
-            # order (account, THEN `post/4` -> `Auth.headers/2`).
-            with :ok <- fake_account(opts),
-                 :ok <- credentialed(credentials) do
-              {:ok, %{fake_order() | id: client_order_id, price: Map.get(changes, :price)}}
-            end
-
-          refused ->
-            refused
-        end
+    # The real package's own order: crypto, then the per-type edit table (which also refuses
+    # an empty amendment, AFTER an unknown order type - an empty `changes` used to be
+    # `:no_order_changes` ahead of `{:unsupported_order_type, _}`), then the account, then
+    # `post/4` -> `Auth.headers/2`. The edit table is the real one, not a union of every
+    # type's fields.
+    with :ok <- fake_replaceable(instrument),
+         :ok <- Rest.validate_amendment(order_type, changes),
+         :ok <- fake_account(opts),
+         :ok <- credentialed(credentials) do
+      {:ok, amended_order(client_order_id, changes)}
     end
+  end
+
+  defp fake_replaceable(:crypto), do: {:error, {:preview_not_supported, :crypto}}
+  defp fake_replaceable(_instrument), do: :ok
+
+  # The order as the venue reads it back after the amendment (`Rest.replace_order/4` reads
+  # the order back rather than echoing the request): the fields that changed are the new
+  # values, and the rest are the order's own. A quantity-only edit used to blank the price,
+  # and the quantity edit itself was dropped.
+  defp amended_order(client_order_id, changes) do
+    Enum.reduce(
+      [:quantity, :price, :stop_price, :order_type, :time_in_force],
+      %{fake_order() | id: client_order_id},
+      fn field, order ->
+        case Map.get(changes, field) do
+          nil -> order
+          new -> Map.put(order, field, new)
+        end
+      end
+    )
   end
 
   @impl true
@@ -1051,12 +1077,13 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def update_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
-        if Keyword.has_key?(opts, :symbols) do
-          # Refused rather than silently skipped, as in the package: this venue's update
-          # endpoint does not touch membership.
-          {:error, :membership_not_updatable_here}
-        else
+      if Keyword.has_key?(opts, :symbols) do
+        # Refused rather than silently skipped, as in the package: this venue's update
+        # endpoint does not touch membership. Checked BEFORE credentials, as
+        # `Rest.update_watchlist/3` checks it before it builds a request.
+        {:error, :membership_not_updatable_here}
+      else
+        with :ok <- authenticated(opts) do
           {:ok,
            %Types.Watchlist{
              id: id,
@@ -1080,7 +1107,11 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_financials(symbol, kind, opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- authenticated(opts) do
+      # The kind first, credentials second — `Rest.get_financials/4` refuses a kind that is
+      # not a statement (`:company_profile`, a typo) before it builds a request. This
+      # answered a statement of whatever `kind` it was given.
+      with :ok <- Rest.validate_statement_kind(kind),
+           :ok <- authenticated(opts) do
         {:ok,
          [
            %Types.FinancialStatement{
@@ -1113,32 +1144,58 @@ defmodule DpExchange.Webull.Fake do
       # checks were the right side of `with`, but in the wrong order.
       case Keyword.get(opts, :symbol) do
         symbol when is_binary(symbol) ->
-          with :ok <- authenticated(opts) do
-            {:ok,
-             [
-               %Types.CorporateEvent{
-                 symbol: symbol,
-                 kind: :dividend,
-                 ex_date: ~D[2026-08-10],
-                 record_date: ~D[2026-08-11],
-                 pay_date: ~D[2026-08-14],
-                 announced_date: nil,
-                 amount: Decimal.new("0.25"),
-                 currency: "USD",
-                 ratio: nil,
-                 # The venue publishes no confirmed flag. `true` would claim an earnings date
-                 # is final when one routinely is not.
-                 confirmed: nil,
-                 details: %{},
-                 provider: :webull
-               }
-             ]}
+          # Symbol, then `opts[:kind]`, credentials last — `Rest.get_corporate_events/2`'s
+          # own order. One event per calendar it reads: both without a `:kind`, the one named
+          # with it. This answered a dividend whatever `:kind` was asked, and accepted a
+          # `:kind` the real path refuses.
+          with {:ok, kinds} <- Rest.corporate_event_kinds_for(Keyword.get(opts, :kind)),
+               :ok <- authenticated(opts) do
+            {:ok, Enum.map(kinds, &fake_event(symbol, &1))}
           end
 
         _missing ->
           {:error, :symbol_required}
       end
     end)
+  end
+
+  defp fake_event(symbol, :dividend) do
+    %Types.CorporateEvent{
+      symbol: symbol,
+      kind: :dividend,
+      ex_date: ~D[2026-08-10],
+      record_date: ~D[2026-08-11],
+      pay_date: ~D[2026-08-14],
+      announced_date: nil,
+      amount: Decimal.new("0.25"),
+      currency: "USD",
+      ratio: nil,
+      # The venue publishes no confirmed flag. `true` would claim an earnings date
+      # is final when one routinely is not.
+      confirmed: nil,
+      details: %{},
+      provider: :webull
+    }
+  end
+
+  # The earnings calendar's one date is carried as `announced_date`, as the real decoder does
+  # (`Core.Types.CorporateEvent` has no earnings-specific date field), and the dividend-only
+  # fields stay `nil`.
+  defp fake_event(symbol, :earnings) do
+    %Types.CorporateEvent{
+      symbol: symbol,
+      kind: :earnings,
+      ex_date: nil,
+      record_date: nil,
+      pay_date: nil,
+      announced_date: ~D[2026-08-20],
+      amount: nil,
+      currency: nil,
+      ratio: nil,
+      confirmed: nil,
+      details: %{},
+      provider: :webull
+    }
   end
 
   @impl true
@@ -1168,8 +1225,10 @@ defmodule DpExchange.Webull.Fake do
       # Symbols first, credentials second — see `get_corporate_events/1`'s own comment;
       # `Rest.get_news/2`'s `required_symbols/1` runs before anything reaches
       # `Auth.headers/2`.
-      case Keyword.get(opts, :symbols) do
-        [_first | _rest] = symbols ->
+      # Through `Rest.news_symbols/1`, which also takes one symbol as a bare string - the
+      # real path accepts `symbols: "AAPL"`, and the fake refused it as `:symbols_required`.
+      case Rest.news_symbols(opts) do
+        {:ok, symbols} ->
           with :ok <- authenticated(opts) do
             {:ok,
              [
@@ -1187,8 +1246,8 @@ defmodule DpExchange.Webull.Fake do
              ]}
           end
 
-        _missing ->
-          {:error, :symbols_required}
+        {:error, _reason} = missing ->
+          missing
       end
     end)
   end
@@ -1196,23 +1255,24 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_screener(name, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
-        if name in Rest.screeners() do
-          {:ok,
-           [
-             %Types.ScreenerResult{
-               symbol: "AAPL",
-               screener: name,
-               # The venue's returned order, not a metric this package ranked on.
-               rank: 1,
-               metrics: %{"change_ratio" => "0.031"},
-               venue_time: nil,
-               provider: :webull
-             }
-           ]}
-        else
-          {:error, {:unknown_screener, name}}
-        end
+      # The identifier (and `week52_high_low`'s required `rank_type`) first, credentials
+      # second — `Rest.get_screener/3` checks both before it builds a request. This checked
+      # credentials first, so an unknown screener without a credential was answered as a
+      # missing one, and the `rank_type` requirement was not enforced at all.
+      with :ok <- Rest.validate_screener(name, opts),
+           :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %Types.ScreenerResult{
+             symbol: "AAPL",
+             screener: name,
+             # The venue's returned order, not a metric this package ranked on.
+             rank: 1,
+             metrics: %{"change_ratio" => "0.031"},
+             venue_time: nil,
+             provider: :webull
+           }
+         ]}
       end
     end)
   end
@@ -1247,11 +1307,14 @@ defmodule DpExchange.Webull.Fake do
         order_type = Map.get(request, :order_type, :limit)
         tif = Map.get(request, :time_in_force, :gtc)
 
+        # Remembered (per process), so the caller-chosen id this echoes can be cancelled
+        # and read back: it used to be echoed here and then refused as `:not_found` by
+        # `cancel_order/3` and `get_order/3`, which knew only the one fixed id.
         {:ok,
-         %Types.Order{
+         remember_order(%Types.Order{
            # The caller's own `client_order_id` when it gave one, as the venue echoes it. A
            # fixed id made a place-then-cancel round trip on a caller-chosen id fail.
-           id: Map.get(request, :client_order_id) || "fake-webull-order-1",
+           id: Map.get(request, :client_order_id) || @default_order_id,
            symbol: Map.fetch!(request, :symbol),
            side: Map.fetch!(request, :side),
            order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),
@@ -1266,7 +1329,7 @@ defmodule DpExchange.Webull.Fake do
            stop_price: Map.get(request, :stop_price),
            status: :pending,
            provider: :webull
-         }}
+         })}
       end
     end)
   end
@@ -1330,9 +1393,13 @@ defmodule DpExchange.Webull.Fake do
       # Account first, credentials second — matching `Rest.cancel_order/3`'s own order.
       with :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
-        case client_order_id do
-          "fake-webull-order-1" -> {:ok, :cancelled}
-          _unknown -> {:refused, :not_found}
+        case lookup_order(client_order_id) do
+          {:ok, order} ->
+            remember_order(%{order | status: :cancelled})
+            {:ok, :cancelled}
+
+          :error ->
+            {:refused, :not_found}
         end
       end
     end)
@@ -1344,12 +1411,33 @@ defmodule DpExchange.Webull.Fake do
       # Account first, credentials second — matching `Rest.get_order/3`'s own order.
       with :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
-        case client_order_id do
-          "fake-webull-order-1" -> {:ok, fake_order()}
-          _unknown -> {:refused, :not_found}
+        case lookup_order(client_order_id) do
+          {:ok, order} -> {:ok, order}
+          :error -> {:refused, :not_found}
         end
       end
     end)
+  end
+
+  # Orders this process placed, by id. An order the fake never issued is `:error`, never
+  # invented; the one fixed id (`@default_order_id`) is always known, as it always was.
+  @orders_key {__MODULE__, :orders}
+
+  # The statuses `Rest.to_order/1` can produce for an order still working. See
+  # `fake_order/0` on why there is no `:open`.
+  @open_statuses [:pending, :partially_filled]
+
+  defp remember_order(%Types.Order{id: id} = order) do
+    Process.put(@orders_key, Map.put(Process.get(@orders_key, %{}), id, order))
+    order
+  end
+
+  defp lookup_order(id) do
+    case Map.fetch(Process.get(@orders_key, %{}), id) do
+      {:ok, _order} = found -> found
+      :error when id == @default_order_id -> {:ok, fake_order()}
+      :error -> :error
+    end
   end
 
   @impl true
@@ -1359,10 +1447,30 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
         # Open by default, history when asked — the venue has two endpoints, not a filter.
-        if Keyword.get(opts, :history, false) do
-          {:ok, [%{fake_order() | status: :filled}]}
-        else
-          {:ok, [fake_order()]}
+        #
+        # Orders this process placed are listed too, on the side their status puts them.
+        # They were findable by `get_order/3` but absent here, so a place-then-list round
+        # trip — the first thing a consumer's reconciliation does — never saw its own order.
+        # The fixed order is listed once: if this process cancelled it, its stored copy is it.
+        {fixed, placed} =
+          Process.get(@orders_key, %{})
+          |> Map.pop(@default_order_id)
+
+        placed = placed |> Map.values() |> Enum.sort_by(& &1.id)
+        {open, closed} = Enum.split_with(placed, &(&1.status in @open_statuses))
+
+        cond do
+          Keyword.get(opts, :history, false) and fixed ->
+            {:ok, [fixed | closed]}
+
+          Keyword.get(opts, :history, false) ->
+            {:ok, [%{fake_order() | status: :filled} | closed]}
+
+          fixed ->
+            {:ok, open}
+
+          true ->
+            {:ok, [fake_order() | open]}
         end
       end
     end)
@@ -1376,7 +1484,7 @@ defmodule DpExchange.Webull.Fake do
   # which is exactly the "differently capable" divergence this fake exists to avoid.
   defp fake_order do
     %Types.Order{
-      id: "fake-webull-order-1",
+      id: @default_order_id,
       symbol: "BTC-USD",
       side: :buy,
       order_type: :limit,

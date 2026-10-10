@@ -22,6 +22,56 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two different option contracts at one expiry, strike and right silently overwrote each
+  other.** `get_option_chain/3`'s grid holds one contract per cell, and an index whose
+  standard and weekly roots share a date (SPX and SPXW on the third Friday) can list two;
+  the second replaced the first, so a caller trading the cell got whichever row the venue
+  sent last. It is now `{:error, {:ambiguous_option_contract, expiry, strike, right,
+  [venue_symbol]}}`. The same contract listed twice is still one contract.
+- **`Fake.get_orders/2` never listed an order the process had placed.** `get_order/3` found
+  it and `get_orders/2` did not, so a place-then-list round trip never saw its own order.
+  Placed orders are now listed as open while working and under `history: true` once
+  cancelled.
+
+- **`get_top_of_book/3` dated the book by the last trade, not the quote.** The crypto, option
+  and futures snapshots carry both `last_trade_time` and `quote_time`, and the reader took the
+  first of a shared list, `last_trade_time`. On a thin pair the bid and ask were stamped with a
+  print hours older than the quote, so a staleness check on the book judged the wrong event.
+  `venue_time` is now `quote_time`; a row with only `last_trade_time` (the stock snapshot)
+  keeps it, and an unparseable `quote_time` is `nil` rather than the trade's time.
+- **A forming weekly, monthly or yearly stock bar was returned as complete.** Stock reads ask
+  the venue for `real_time_required: true` and drop the bar still forming by adding the width
+  to its open time, but `Core.Timeframe.seconds/1` is `:error` for `1w`, `1M` and `1y` and that
+  was read as "keep every bar". The end of those widths is now `opened_at` plus a calendar
+  week, month or year.
+- **`Fake` answered where `Rest` refuses, or refused in a different order.** Each now calls
+  the real path's own validator (new public `Rest.validate_activity_range/1`,
+  `validate_crypto_bars_request/2`, `validate_footprint_request/2`, `validate_statement_kind/1`,
+  `corporate_event_kinds_for/1`, `news_symbols/1`, `validate_screener/2`) instead of a copy:
+  - `preview_order/3` priced an order with no size or a limit with no price;
+  - `replace_order/4` answered `:no_order_changes` ahead of an unknown order type, blanked the
+    price on a quantity-only edit and dropped the quantity;
+  - `place_order/3` echoed a caller-chosen `client_order_id` that `get_order/3` and
+    `cancel_order/3` then refused as `:not_found` (placed orders are now remembered per
+    process, and a cancelled one reads back `:cancelled`);
+  - `get_transfers/2` and `get_transactions/2` answered a range across two calendar years,
+    and `get_transactions/2` ignored `:activity_types`;
+  - `get_historical_prices/4` accepted a `:limit` over 1200 and checked credentials before the
+    width; `get_volume_profile/3` accepted any session but `OVN` and any category;
+  - `get_symbols/1` answered the crypto list for any `:category`;
+  - `get_financials/3` answered a statement for a `kind` that is not one;
+    `get_corporate_events/1` ignored `:kind` and always answered a dividend;
+    `get_news/1` refused `symbols: "AAPL"`; `get_screener/2` checked credentials before the
+    identifier and did not require `week52_high_low`'s `rank_type`; `update_watchlist/2`
+    checked credentials before refusing `:symbols`.
+- **The `DpExchange.Webull` moduledoc described a gap that closed.** It said ten widths were
+  declared with `1y` withheld (`capabilities/0` declares all eleven since Core 0.1.57) and that
+  bars carry no volume on any category (stock, option, futures and event bars carry it).
+  `usage-rules.md` said the fake checks credentials before argument validation; it is the
+  other way round, as in `Rest`.
+
 ## [0.4.118] - 2026-10-10
 
 ### Fixed

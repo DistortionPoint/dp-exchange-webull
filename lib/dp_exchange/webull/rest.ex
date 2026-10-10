@@ -564,6 +564,17 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  @doc """
+  Whether a crypto bars request names a width and a `:limit` the endpoint serves: the two
+  checks `get_historical_prices/5` makes on the crypto path before anything is signed, in
+  the same order, for `DpExchange.Webull.Fake` to refuse exactly what the real path refuses.
+  """
+  @spec validate_crypto_bars_request(String.t(), keyword()) :: :ok | {:error, term()}
+  def validate_crypto_bars_request(timeframe, opts) do
+    with {:ok, _timespan} <- timespan(timeframe),
+         do: crypto_count_within_limit(Keyword.get(opts, :limit))
+  end
+
   defp crypto_count_within_limit(nil), do: :ok
   defp crypto_count_within_limit(n) when is_integer(n) and n in 1..@crypto_bar_max, do: :ok
   defp crypto_count_within_limit(n), do: {:error, {:limit_out_of_range, n, max: @crypto_bar_max}}
@@ -620,7 +631,7 @@ defmodule DpExchange.Webull.Rest do
            ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
            bid_size: decimal(value(row, ["bidSize", "bid_size"])),
            ask_size: decimal(value(row, ["askSize", "ask_size"])),
-           venue_time: top_of_book_time(row),
+           venue_time: quote_time(row),
            observed_at: DateTime.utc_now(),
            provider: :webull
          }}
@@ -630,6 +641,27 @@ defmodule DpExchange.Webull.Rest do
 
   defp refuse_event_top_of_book("US_EVENT"), do: {:error, {:use_get_event_order_book, "US_EVENT"}}
   defp refuse_event_top_of_book(_category), do: :ok
+
+  # **A bid and an ask are stamped with the quote's time, not the last trade's.** The crypto,
+  # option and futures snapshots carry both `last_trade_time` and `quote_time`
+  # (`crypto-snapshot.md:183,219`, `option-snapshot.md:221,272`, `futures-snapshot.md:221,232`)
+  # and `venue_time/1` reads `last_trade_time` first, so a `TopOfBook` was dated by the last
+  # print — on a thinly traded pair, hours before a quote that is live now — and a caller's
+  # staleness check on the book judged the trade, not the quote. The stock snapshot has only
+  # `last_trade_time` (`snapshot.md:214`), so a row with no `quote_time` keeps the old
+  # reading rather than losing the only time it has.
+  defp quote_time(row) do
+    case value(row, ["quote_time"]) do
+      nil ->
+        top_of_book_time(row)
+
+      raw ->
+        case parse_time(raw) do
+          {:ok, at} -> at
+          _unparseable -> nil
+        end
+    end
+  end
 
   # The book's own stamp where the row carries one. `nil` rather than the local clock —
   # `observed_at` already holds that, and says which it is.
@@ -1507,6 +1539,16 @@ defmodule DpExchange.Webull.Rest do
 
   defp same_year(_start, _finish), do: :ok
 
+  @doc """
+  Whether `opts[:start]`/`opts[:end]` is a range the cash-activity endpoint accepts: both in
+  one calendar year, compared in UTC. The check `get_transfers/2` and `get_transactions/2`
+  make after the account and before anything is signed, for `DpExchange.Webull.Fake` to
+  refuse a cross-year range exactly as the real path does.
+  """
+  @spec validate_activity_range(keyword()) :: :ok | {:error, term()}
+  def validate_activity_range(opts),
+    do: same_year(Keyword.get(opts, :start), Keyword.get(opts, :end))
+
   # The venue's documented format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'. Always UTC and always three
   # fractional digits: `DateTime.to_iso8601/1` keeps a non-UTC offset (`+05:00`) and omits
   # the fraction on a second-precision value, and neither is the documented format.
@@ -1921,6 +1963,19 @@ defmodule DpExchange.Webull.Rest do
   defp footprint_session(session) when session in ["PRE", "RTH", "ATH"], do: {:ok, session}
   defp footprint_session(session), do: {:error, {:unsupported_session, session}}
 
+  @doc """
+  Whether a footprint request names a category, width and session the endpoint serves: the
+  three checks `get_volume_profile/4` makes before anything is signed, in the same order,
+  for `DpExchange.Webull.Fake` to refuse exactly what the real path refuses.
+  """
+  @spec validate_footprint_request(String.t(), keyword()) :: :ok | {:error, term()}
+  def validate_footprint_request(timeframe, opts) do
+    with {:ok, _path} <- footprint_path(Config.opt(opts, :category, "US_STOCK")),
+         {:ok, _span} <- footprint_span(timeframe),
+         {:ok, _session} <- footprint_session(Keyword.get(opts, :session)),
+         do: :ok
+  end
+
   defp decode_profiles(row, symbol, timeframe) do
     with {:ok, entries} <- list_value(row, ["result"]),
          do: decode_profile_entries(entries, symbol, timeframe)
@@ -2265,15 +2320,34 @@ defmodule DpExchange.Webull.Rest do
   defp completed_unless_asked(bars, _timeframe, true), do: bars
 
   defp completed_unless_asked(bars, timeframe, _default) do
-    case Timeframe.seconds(timeframe) do
-      {:ok, width} ->
-        now = DateTime.utc_now()
-        Enum.reject(bars, &(DateTime.compare(DateTime.add(&1.opened_at, width), now) == :gt))
+    now = DateTime.utc_now()
 
-      :error ->
-        bars
+    Enum.reject(bars, fn bar ->
+      case bar_end(bar.opened_at, timeframe) do
+        {:ok, finish} -> DateTime.compare(finish, now) == :gt
+        :error -> false
+      end
+    end)
+  end
+
+  # **A week, a month and a year have an end too.** `Timeframe.seconds/1` is `:error` for
+  # `1w`, `1M` and `1y` (Core will not encode a boundary rule for a width that is not a fixed
+  # number of seconds), and this used to read that `:error` as "keep every bar" - while the
+  # request had asked the venue for `real_time_required: true`, so the weekly, monthly or
+  # yearly bar still forming came back stored as though complete, which is exactly what this
+  # function exists to stop. The end is `opened_at` plus the calendar width: a bar that has
+  # not reached it is the forming one. Any other width Core cannot size still keeps its bars.
+  defp bar_end(opened_at, timeframe) do
+    case Timeframe.seconds(timeframe) do
+      {:ok, width} -> {:ok, DateTime.add(opened_at, width)}
+      :error -> calendar_bar_end(opened_at, timeframe)
     end
   end
+
+  defp calendar_bar_end(opened_at, "1w"), do: {:ok, DateTime.add(opened_at, 7 * 86_400)}
+  defp calendar_bar_end(opened_at, "1M"), do: {:ok, DateTime.shift(opened_at, month: 1)}
+  defp calendar_bar_end(opened_at, "1y"), do: {:ok, DateTime.shift(opened_at, year: 1)}
+  defp calendar_bar_end(_opened_at, _timeframe), do: :error
 
   defp stock_timespan(timeframe) do
     case Map.fetch(@stock_timespans, timeframe) do
@@ -2936,6 +3010,17 @@ defmodule DpExchange.Webull.Rest do
     end)
   end
 
+  @statement_kinds [:balance_sheet, :income, :cash_flow, :indicators]
+
+  @doc """
+  Whether `kind` is a statement kind `get_financials/4` serves. The check it makes before a
+  request is built, for `DpExchange.Webull.Fake` to refuse a `kind` (`:company_profile`, a
+  typo) exactly as the real path does rather than answer with a statement of it.
+  """
+  @spec validate_statement_kind(term()) :: :ok | {:error, term()}
+  def validate_statement_kind(kind) when kind in @statement_kinds, do: :ok
+  def validate_statement_kind(kind), do: {:error, {:unsupported_statement_kind, kind}}
+
   @doc """
   Financial statements for an issuer — `Types.FinancialStatement`.
 
@@ -2955,7 +3040,7 @@ defmodule DpExchange.Webull.Rest do
   @spec get_financials(String.t(), atom(), map(), keyword()) ::
           {:ok, [FinancialStatement.t()]} | {:error, term()} | {:refused, term()}
   def get_financials(symbol, kind, credentials, opts)
-      when kind in [:balance_sheet, :income, :cash_flow, :indicators] do
+      when kind in @statement_kinds do
     with {:ok, rows} <- get_fundamental(statement_endpoint(kind), symbol, credentials, opts) do
       {:ok, Enum.map(rows, &to_statement(&1, symbol, kind))}
     end
@@ -3033,6 +3118,14 @@ defmodule DpExchange.Webull.Rest do
       end)
     end
   end
+
+  @doc """
+  The calendars `get_corporate_events/2` reads for `opts[:kind]`: both when it is absent,
+  one when it is `:dividend` or `:earnings`, and `{:error, {:unsupported_event_kind, kind}}`
+  for anything else. For `DpExchange.Webull.Fake`, which answers one event per calendar read.
+  """
+  @spec corporate_event_kinds_for(term()) :: {:ok, [atom()]} | {:error, term()}
+  def corporate_event_kinds_for(kind), do: corporate_event_kinds(kind)
 
   defp corporate_event_kinds(nil), do: {:ok, [:dividend, :earnings]}
   defp corporate_event_kinds(kind) when kind in [:dividend, :earnings], do: {:ok, [kind]}
@@ -3198,6 +3291,14 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  @doc """
+  The symbols `get_news/2` asks about: `opts[:symbols]` as a list, or one symbol as a
+  string; `{:error, :symbols_required}` otherwise. The first check `get_news/2` makes, for
+  `DpExchange.Webull.Fake` to accept and refuse exactly what the real path does.
+  """
+  @spec news_symbols(keyword()) :: {:ok, [String.t()]} | {:error, :symbols_required}
+  def news_symbols(opts), do: required_symbols(opts)
 
   defp required_symbols(opts) do
     case Keyword.get(opts, :symbols) do
@@ -3370,6 +3471,18 @@ defmodule DpExchange.Webull.Rest do
       :error ->
         {:error, {:unknown_screener, name}}
     end
+  end
+
+  @doc """
+  Whether `name` and `opts` are a screener request `get_screener/3` would send: a known
+  identifier, and the `rank_type` `week52_high_low` requires. The checks it makes before
+  anything is signed, for `DpExchange.Webull.Fake` to refuse exactly what the real path does.
+  """
+  @spec validate_screener(term(), keyword()) :: :ok | {:error, term()}
+  def validate_screener(name, opts) do
+    if Map.has_key?(@screeners, name),
+      do: require_rank_type(name, opts),
+      else: {:error, {:unknown_screener, name}}
   end
 
   defp require_rank_type("week52_high_low", opts) do
@@ -3713,15 +3826,24 @@ defmodule DpExchange.Webull.Rest do
 
   `opts[:expiry]` and `opts[:strike]` are passed to the venue where given — a full chain is
   large, and narrowing it at the venue is not the same as narrowing it here.
+
+  **Two different contracts at one expiry, strike and right are refused, not overwritten.**
+  The grid holds one contract per cell, and an index whose standard and weekly roots share a
+  date (SPX and SPXW on the third Friday) can list two. The second used to replace the
+  first silently, so a caller trading the cell got whichever row the venue sent last. That
+  is now `{:error, {:ambiguous_option_contract, expiry, strike, right, [venue_symbol]}}`;
+  narrow the request with `opts[:expiry]` / `opts[:strike]` or read the flat contract list.
+  The same contract listed twice is one contract, and is kept once.
   """
   @spec get_option_chain(String.t(), map(), keyword()) ::
           {:ok, OptionChain.t()} | {:error, term()} | {:refused, term()}
   def get_option_chain(underlying, credentials, opts) do
-    with {:ok, contracts} <- option_contracts(underlying, credentials, opts) do
+    with {:ok, contracts} <- option_contracts(underlying, credentials, opts),
+         {:ok, grid} <- chain_grid(contracts) do
       {:ok,
        %OptionChain{
          underlying: underlying,
-         expiries: chain_grid(contracts),
+         expiries: grid,
          underlying_price: nil,
          venue_time: nil,
          provider: :webull
@@ -3901,16 +4023,25 @@ defmodule DpExchange.Webull.Rest do
 
   # A strike listed with only one side keeps a `nil` on the other, rather than being absent:
   # a caller iterating strikes has to see that the put is missing.
+  #
+  # A cell already holding a DIFFERENT contract is refused — see `get_option_chain/3`'s
+  # "Two different contracts" paragraph. Found 2026-10-10 by reading this function.
   defp chain_grid(contracts) do
-    Enum.reduce(contracts, %{}, fn contract, grid ->
+    Enum.reduce_while(contracts, {:ok, %{}}, fn contract, {:ok, grid} ->
       strikes = Map.get(grid, contract.expiry, %{})
       row = Map.get(strikes, contract.strike, %{call: nil, put: nil})
 
-      Map.put(
-        grid,
-        contract.expiry,
-        Map.put(strikes, contract.strike, Map.put(row, contract.right, contract))
-      )
+      case Map.get(row, contract.right) do
+        held when is_nil(held) or held == contract ->
+          row = Map.put(row, contract.right, contract)
+          {:cont, {:ok, Map.put(grid, contract.expiry, Map.put(strikes, contract.strike, row))}}
+
+        held ->
+          {:halt,
+           {:error,
+            {:ambiguous_option_contract, contract.expiry, contract.strike, contract.right,
+             [held.venue_symbol, contract.venue_symbol]}}}
+      end
     end)
   end
 

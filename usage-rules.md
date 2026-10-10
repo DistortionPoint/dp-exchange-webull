@@ -160,9 +160,19 @@ screener callbacks, and is now closed as well: `Fake.get_option_chain/2`,
 `Fake.create_watchlist/3`, `Fake.update_watchlist/2`, `Fake.delete_watchlist/2`,
 `Fake.get_financials/3`, `Fake.get_corporate_events/1`, `Fake.get_filings/2`,
 `Fake.get_news/1` and `Fake.get_screener/2` all answered `{:ok, _}` with no credentials.
-The credential check now runs **before** each call's own argument validation, matching the
-real `Rest` order — so `Fake.get_corporate_events()` with neither a credential nor a
-`:symbol` is `{:error, {:missing_credentials, :webull}}`, not `{:error, :symbol_required}`.
+Each call's own argument validation runs **before** the credential check, matching the real
+`Rest` order (it refuses before it builds a request) — so `Fake.get_corporate_events()` with
+neither a credential nor a `:symbol` is `{:error, :symbol_required}`, and an unknown
+screener or a non-statement `kind` is refused the same way the real path refuses it,
+credential or not. The fake calls `Rest`'s own validators for these rather than copying the
+rules, so the two cannot drift: `Fake.preview_order/3`, `Fake.get_financials/3`,
+`Fake.get_corporate_events/1` (which now also honours `:kind`), `Fake.get_news/1` (which
+also takes one symbol as a string), `Fake.get_screener/2` (`week52_high_low` requires
+`:rank_type`), `Fake.update_watchlist/2`, `Fake.get_volume_profile/3`,
+`Fake.get_historical_prices/4` (a `:limit` over 1200 is refused), and the cash-activity
+calls (a range across two calendar years is refused, and `get_transactions/2` honours
+`:activity_types`). A fake order placed under a caller-chosen `client_order_id` can now be
+read back and cancelled under it.
 These were missed by the earlier sweep because `dp_exchange_core`'s assertion 17 checks a
 fixed list of nine callback names that predates this surface and does not include any of
 them — passing that assertion is not evidence that the rest of your fake gates credentials.

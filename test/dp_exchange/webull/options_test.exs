@@ -108,6 +108,35 @@ defmodule DpExchange.Webull.OptionsTest do
       assert row.put == nil
     end
 
+    test "two different contracts in one cell are refused, not overwritten" do
+      # SPX and SPXW share the third Friday. The second row used to replace the first, so a
+      # caller trading the cell got whichever the venue happened to send last.
+      body = [
+        contract(%{"symbol" => "SPX260320C00100000"}),
+        contract(%{"symbol" => "SPXW260320C00100000"})
+      ]
+
+      assert {:error,
+              {:ambiguous_option_contract, ~D[2026-03-20], strike, :call,
+               ["SPX260320C00100000", "SPXW260320C00100000"]}} =
+               Rest.get_option_chain("SPX", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(strike, 100)
+    end
+
+    test "the same contract listed twice is one contract" do
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @credentials,
+                 plug: responding([contract(), contract()]),
+                 retry_attempts: 0
+               )
+
+      assert chain.expiries[~D[2026-03-20]][Decimal.new("100")].call
+    end
+
     test "two expiries are two keys" do
       body = [contract(), contract(%{"expiration_date" => "2026-06-19", "strike_price" => "120"})]
 

@@ -49,28 +49,24 @@ defmodule DpExchange.Webull do
   `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` says
   `reports_trade_volume: true` because that path is real and active; `measured_against`
   carries the crypto/equity split so a caller does not read the boolean as "every quote
-  on every category has a number." Bars carry no volume on any category.
+  on every category has a number." Bars split the same way: the stock, option, futures and
+  event bar rows document a `volume` and it is carried through, while the crypto bar row
+  documents none and its `volume` is `nil`.
 
   This is a different claim from a `Trade.quantity` — the streamed tape (`subscribe/2`)
   and `get_trades/2` both report **one print's own size**, which the venue does publish.
   A sum of individual sizes is not the same statement as the venue's own aggregate
   figure, and this package does not compute one from the other.
 
-  ## Historical widths: eleven reachable, ten declared — Core cannot yet name the eleventh
+  ## Historical widths: eleven reachable, eleven declared
 
-  `capabilities/0`'s `historical_timeframes` names ten canonical widths — `Rest`'s eight
-  plus `1w` and `1M` — because the equity, option and futures bars serve three the crypto
-  and event-contract bars do not: `1w`, `1M` **and `1y`**. `Core.Capabilities` has one
-  flat list for the whole package, with no room to say "these three only on these asset
-  classes," so the declaration is the union of what any active path serves and Core can
-  name.
-
-  **`1y` is the one exception, and it is a Core gap rather than an under-declaration
-  here.** `dp_exchange_core` 0.1.48's `Timeframe.nameable/0` admits `1w` and `1M` beyond
-  what it can bucket, but not `1y` — declaring it raises `Capabilities.new/1`'s own
-  vocabulary check. This package serves `1y` on the equity, option and futures bars
-  (`Rest.get_stock_bars/5`, tested) and cannot say so in this struct until Core's
-  vocabulary widens by one more width. `get_historical_prices/5` still refuses
+  `capabilities/0`'s `historical_timeframes` names eleven canonical widths —
+  `Rest.wide_timeframes/0`: `Rest`'s eight plus `1w`, `1M` and `1y` — because the equity,
+  option and futures bars serve three the crypto and event-contract bars do not.
+  `Core.Capabilities` has one flat list for the whole package, with no room to say "these
+  three only on these asset classes," so the declaration is the union of what any active
+  path serves. (`1y` was withheld until `dp_exchange_core` 0.1.57 widened
+  `Timeframe.nameable/0`; it is declared now.) `get_historical_prices/5` still refuses
   `1w`/`1M`/`1y` per-call on a crypto or event-contract category rather than degrading to
   the nearest width it does serve.
 
