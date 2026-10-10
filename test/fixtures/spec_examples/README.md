@@ -69,8 +69,8 @@ each backs.
 | `order_place_batch.json` | `docs/reference/webull/openapi/order-batch-place.md:421-439` (request, verbatim `jsonRequestBodyExample`), `:329-348` (response, verbatim documented example) | |
 | `order_replace.json` | `docs/reference/webull/openapi/common-order-replace.md:375-399` (request, narrowed to the 4 fields a LIMIT amendment uses), `:281-299` (ack response fields) | `replace_order/4` never parses the ack body — it reads the order back via `get_order/3` |
 | `order_cancel.json` | `docs/reference/webull/openapi/common-order-cancel.md:264-267` (request, verbatim), `:170-189` (response fields, unused by `cancel_order/3`) | |
-| `order_detail.json` | `docs/reference/webull/openapi/order-detail.md:203-356` (field examples), `:228-236` (status enum — both `SUBMITTED` and `FILLED` variants kept, since `status_atom/1` maps `SUBMITTED` to `nil`), `:36-53` (request query) | two response variants: `response_filled`, `response_submitted` |
-| `order_open_list.json` | `docs/reference/webull/openapi/order-open.md:163,234,554-561` | `status: "SUBMITTED"` (the field's own literal example) chosen for the nil-mapping case |
+| `order_detail.json` | `docs/reference/webull/openapi/order-detail.md:203-356` (field examples), `:228-236` (status enum — both `SUBMITTED` and `FILLED` variants kept, so both the `:pending` and `:filled` mappings are exercised), `:36-53` (request query) | two response variants: `response_filled`, `response_submitted` |
+| `order_open_list.json` | `docs/reference/webull/openapi/order-open.md:163,234,554-561` | `status: "SUBMITTED"` (the field's own literal example) decodes to `:pending` |
 | `order_history_list.json` | `docs/reference/webull/openapi/order-history.md:183,255-264,574-581`, `:53,63` (start/end format) | `status: "FILLED"` for the closed-order path |
 
 ## Watchlists and auth/token

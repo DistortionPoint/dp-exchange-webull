@@ -76,10 +76,14 @@ defmodule DpExchange.Webull.EnvironmentTest do
     end
 
     test "every known environment answers both questions" do
-      for environment <- Environment.known() do
-        assert is_boolean(Environment.live?(environment))
-        assert is_boolean(Environment.streaming?(environment))
-      end
+      assert Environment.known() == [:production, :uat]
+
+      answers =
+        Map.new(Environment.known(), fn environment ->
+          {environment, {Environment.live?(environment), Environment.streaming?(environment)}}
+        end)
+
+      assert answers == %{production: {true, true}, uat: {false, false}}
     end
   end
 end

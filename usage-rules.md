@@ -872,7 +872,7 @@ which ones matter depends on `:order_type`:
 A field a given order type does not use is dropped rather than sent — a `:stop` request
 built from a `:limit` template (with `:price` left over) will not carry a stray
 `limit_price` the venue's schema for `STOP_LOSS` does not have. Read the fields back the
-same way: `get_order/2` and the struct `place_order/3` hands back both carry `:stop_price`
+same way: `get_order/3` and the struct `place_order/3` hands back both carry `:stop_price`
 on a stop or stop-limit order, `nil` on anything else.
 
 **Which pairs of `:order_type` and `:time_in_force` this venue actually accepts differs by

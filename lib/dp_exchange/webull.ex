@@ -348,12 +348,11 @@ defmodule DpExchange.Webull do
       # `:order_book` alone.
       authenticated_streamable: [:quotes, :top_of_book],
 
-      # **Ten widths, not eight — `1y` is a real, served, twelfth width this package
-      # cannot declare.** `Rest.timeframes/0`'s eight are the crypto and event-contract
-      # default; the equity, option and futures bars additionally serve `1w`, `1M` and
-      # `1y` (`Rest.get_stock_bars/5`, tested against the venue's own `timespan` enum).
-      # `Core.Capabilities` has one flat list for the whole package, so this is the union
-      # of every width *some* active path serves that Core can even name — narrowing it
+      # **Eleven widths, not eight.** `Rest.timeframes/0`'s eight are the crypto and
+      # event-contract default; the equity, option and futures bars additionally serve
+      # `1w`, `1M` and `1y` (`Rest.get_stock_bars/5`, tested against the venue's own
+      # `timespan` enum). `Core.Capabilities` has one flat list for the whole package, so
+      # this is the union of every width *some* active path serves — narrowing it
       # to the crypto default would under-declare the other three asset classes, exactly
       # the defect a 2026-09-06 documentation-accuracy sweep found here (this declaration
       # had been the crypto list all along, unnoticed because `usage-rules.md` and
@@ -441,13 +440,14 @@ defmodule DpExchange.Webull do
       # Declared in the venue's own units (`N/Ts`) rather than reduced to a per-second
       # rate, so the burst the venue actually permits survives the transcription.
       #
-      # **Deliberately conservative in one direction**: the venue meters per endpoint and
-      # `Supervisor`'s limiter is one shared bucket across all of them, so this spends a
-      # single 60/60s budget where the venue would allow each endpoint its own. Under-using
-      # a documented allowance is the safe side of a limit that answers 429 and then
-      # blocks. Sandbox is half this (`30/60s`) and is applied by `Supervisor.limits/1`
-      # from the resolved environment rather than declared here: `capabilities/0` takes no
-      # arguments and so cannot state a figure that differs per environment.
+      # **This is the per-endpoint figure, not the whole metering.** The venue also states
+      # "1 request per second per App Key" and a 600/60s global market-data cap, so
+      # `Supervisor.limits/1` meters two buckets: each endpoint at this rate with a burst
+      # of 1, plus a global 600/60s bucket (`rest-rate-limits.md`). One shared 60-burst
+      # bucket broke the 1-per-second rule and drew 429s. Sandbox is half this (`30/60s`)
+      # and is applied by `Supervisor.limits/1` from the resolved environment rather than
+      # declared here: `capabilities/0` takes no arguments and so cannot state a figure
+      # that differs per environment.
       #
       # Load-bearing, not documentation: `Supervisor`'s private `limits/1` feeds this
       # straight into the real `DefaultRateLimiter` this package starts. Every endpoint is
@@ -476,14 +476,11 @@ defmodule DpExchange.Webull do
           "the venue's documented timespan enum and snapshot schema, and the prior " <>
           "false/eight-width declaration was the crypto-only truth generalised to the " <>
           "whole venue, not a measurement that changed — 1w/1M/1y and real volume are " <>
-          "false on crypto and true on equity, option and futures, which one flat list " <>
-          "and one flat boolean cannot say; the crypto exception is enforced per-call by " <>
-          "Rest.get_historical_prices/5 and Rest.get_price/3 rather than by this field; " <>
-          "1y is a THIRD width this venue serves the same way but this declaration " <>
-          "cannot name — dp_exchange_core 0.1.48's Timeframe.nameable/0 admits 1w and 1M " <>
-          "beyond what it can bucket but not 1y, so Capabilities.new/1 raises if it is " <>
-          "declared here; see @core_unnameable_widths above and the CHANGELOG entry for " <>
-          "the upstream gap this surfaced, reported rather than worked around; " <>
+          "unserved on crypto and served on equity, option and futures, which one flat " <>
+          "list and one flat boolean cannot say; the crypto exception is enforced " <>
+          "per-call by Rest.get_historical_prices/5 and Rest.get_price/3 rather than by " <>
+          "this field; 1y is declared too (2026-09-07, once dp_exchange_core 0.1.57 " <>
+          "admitted it), read from the same equity bar path and not probed live; " <>
           "public_ceiling/authenticated_ceiling (corrected 2026-09-09) are doc-derived " <>
           "from developer.webull.com/apis/docs/rate-limits/ — the venue's per-endpoint " <>
           "table, which caps EVERY market-data endpoint at 60/60s in production and " <>
@@ -594,7 +591,7 @@ defmodule DpExchange.Webull do
 
   @impl true
   @doc """
-  The order book for an equity or ETF.
+  The order book for an equity, ETF or future.
 
   See `DpExchange.Webull.Rest.get_order_book/3` — including why a crypto symbol is refused
   here, and what per-participant attribution this contract has no place for.
@@ -603,7 +600,7 @@ defmodule DpExchange.Webull do
     do: Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
 
   @doc """
-  Tick-by-tick public trades for an equity or ETF — the tape.
+  Tick-by-tick public trades for an equity, ETF, option or future — the tape.
 
   See `DpExchange.Webull.Rest.get_trades/3`, including why three of the venue's five side
   codes map to `nil`.
@@ -982,7 +979,12 @@ defmodule DpExchange.Webull do
   @spec live?(keyword()) :: boolean()
   def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
 
-  @doc "The quote currencies this venue settles in."
+  @doc """
+  The quote currencies the symbol mapping recognises when splitting a native symbol.
+
+  This is the normaliser's list, not a statement about what trades: `capabilities/0`
+  declares `supported_quotes: ["USD"]`, because every pair measured was quoted in USD.
+  """
   @spec quotes() :: [String.t()]
   def quotes, do: SymbolFormat.quotes()
 

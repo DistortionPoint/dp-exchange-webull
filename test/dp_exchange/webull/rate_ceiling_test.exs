@@ -96,7 +96,10 @@ defmodule DpExchange.Webull.RateCeilingTest do
       assert {:rate_limited, wait_ms} =
                DpExchange.Core.DefaultRateLimiter.check(bars, 1, limiter: name)
 
-      assert wait_ms > 900
+      # Bounded by the refill interval of one request per second. The old `> 900` lower
+      # bound failed whenever the scheduler stalled this process for 100ms between `record`
+      # and `check`; the `rate_limited` match above is what proves the burst is 1.
+      assert wait_ms in 1..1_000
       assert :ok = DpExchange.Core.DefaultRateLimiter.check(snapshot, 1, limiter: name)
     end
   end

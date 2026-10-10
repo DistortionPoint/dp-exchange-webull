@@ -129,10 +129,8 @@ defmodule DpExchange.Webull.Rest do
   section, which cites this function as its worked example. This package chose that reading
   before it was written down, and the rule's second half is what makes it honest: the
   per-call path must fail closed, which is what the last paragraph below describes.
-  One exception: `1y`, which `Webull.capabilities/0` subtracts because
-  `dp_exchange_core`'s `Timeframe.nameable/0` does not admit it (see
-  `@core_unnameable_widths` in `webull.ex`). Read this function for what the venue
-  serves; read `capabilities/0` for what this package can currently say about it. Which
+  `Webull.capabilities/0` declares exactly this list, `1y` included (Core's
+  `Timeframe.nameable/0` has admitted it since `dp_exchange_core` 0.1.57). Which
   category a given call actually reaches a width on is enforced per-call either way:
   `get_historical_prices/5` with a crypto or event-contract category returns `{:error,
   {:unsupported_timeframe, _}}` for `1w`, `1M` and `1y` rather than silently degrading to
@@ -1735,38 +1733,27 @@ defmodule DpExchange.Webull.Rest do
   defp present?(_changes), do: :ok
 
   @doc """
-  The order book for an equity or ETF — `/market-data/stocks/depths/list`.
+  The order book for an equity, ETF or future — `/market-data/stocks/depths/list`, or
+  `/market-data/futures/depths/list` for `US_FUTURES`.
 
-  **This venue's book is equities-only.** The crypto snapshot endpoint publishes a top of
-  book and no depth, and the vendor states `US_OPTION` is not supported here. So a crypto
-  symbol is refused before the request rather than sent and rejected.
+  **The crypto and option books are refused.** The crypto snapshot endpoint publishes a top
+  of book and no depth, and the vendor states `US_OPTION` is not supported here. So a
+  crypto or option category is refused before the request
+  (`{:error, {:unsupported_book_category, category}}`) rather than sent and rejected.
 
-  `opts[:category]` picks `US_STOCK` (the default) or `US_ETF`; `opts[:depth]` is the
-  venue's own level count. `opts[:overnight]` includes overnight trading data, and the
-  venue **requires the parameter**, so `false` is sent explicitly rather than omitted.
+  `opts[:category]` picks `US_STOCK` (the default), `US_ETF` or `US_FUTURES`;
+  `opts[:depth]` is the venue's own level count. `opts[:overnight]` includes overnight
+  trading data on the stock endpoint, which **requires the parameter**, so `false` is sent
+  explicitly rather than omitted; the futures endpoint does not take it.
 
-  ## `depth`'s default of `10` is this package's own choice, not a confirmed venue default
+  ## `depth` defaults to `10`
 
-  Unlike `overnight_required`, this endpoint's own reference page has not been pulled into
-  `docs/reference/webull/` — `endpoint-inventory.md` has its path and nothing else. **That
-  is not because the vendor's pages need a browser.** `negative-claims.md`'s "pages had to
-  be rendered" note is itself stale: it was written against a capture method that fetched
-  only HTML, and every page pulled for the 2026-09-29 order/market-data audit
-  (`docs/reference/webull/openapi/`) came back from a plain fetch of the page's `.md` form
-  with the full OpenAPI parameter table embedded as JSON — no browser involved. The stock
-  depths page simply was not among the pages that audit needed and so was not fetched;
-  the gap is a page not yet pulled, not a page this package cannot read. `10` is inherited
-  from a sibling endpoint that IS documented — `/market-data/event-contracts/depths/list`
-  states "`depth` (default 10)" (`docs/reference/webull/futures-and-event-contracts.md`)
-  — generalised here without confirmation that the stock endpoint shares it. On
-  `US_FUTURES` specifically, the venue's own page states `depth` is **`1–10, required`**
-  with no default at all (same file), so supplying `10` there is this package filling a
-  required parameter with a value known to be in range, not a venue default being
-  honoured.
-
-  Settling the stock case needs this endpoint's own `.md` page pulled into
-  `docs/reference/webull/openapi/` the same way the 2026-09-29 pages were, or a
-  credentialed consumer's tier-3 probe of what an omitted `depth` actually returns.
+  The stock depths page (`docs/reference/webull/openapi/quotes.md`) marks `depth` required
+  and describes it as "L1-1 level, L2-default 10 levels", so `10` is the page's own L2
+  figure. On `US_FUTURES` the venue's page states `depth` is **`1–10, required`** with no
+  default (`docs/reference/webull/futures-and-event-contracts.md`), so `10` there is this
+  package filling a required parameter with a value known to be in range, not a venue
+  default being honoured.
 
   ## What is dropped, and why that is stated rather than silent
 
@@ -1777,8 +1764,9 @@ defmodule DpExchange.Webull.Rest do
   place for it. The sizes that survive are the venue's own level sizes, not a sum this
   package computed from the participants.
 
-  `timestamp` is the venue's `quote_time`. **A book the venue did not stamp is refused** —
-  a depth snapshot wearing the local clock cannot be told from a current one.
+  `venue_time` is the venue's `quote_time`. **A book the venue did not stamp is delivered
+  with `venue_time: nil`**, never the local clock: `observed_at` states when this package
+  read it, and refusing would discard real levels over an optional field.
   """
   @spec get_order_book(String.t(), map(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
@@ -1790,8 +1778,7 @@ defmodule DpExchange.Webull.Rest do
         %{
           "symbol" => symbol,
           "category" => category,
-          # `10` is generalised from the event-contracts endpoint's documented default,
-          # NOT confirmed for this endpoint — see this function's own @doc.
+          # `10`: the stock page's "L2-default 10 levels"; see this function's own @doc.
           "depth" => to_string(Config.opt(opts, :depth, 10))
         }
         |> put_present("overnight_required", book_overnight(category, opts))
@@ -2128,7 +2115,11 @@ defmodule DpExchange.Webull.Rest do
   defp to_string_or_nil(_not_a_code), do: nil
 
   @doc """
-  Tick-by-tick public trades — `/market-data/stocks/ticks/list`.
+  Tick-by-tick public trades — `/market-data/stocks/ticks/list` for `US_STOCK` (the
+  default) and `US_ETF`, `/market-data/options/ticks/list` for `US_OPTION` and
+  `/market-data/futures/ticks/list` for `US_FUTURES`. Crypto is refused
+  (`{:unsupported_book_category, category}`) and `US_EVENT` answers
+  `{:use_get_event_trades, "US_EVENT"}`. `opts[:sessions]` reaches the stock tape only.
 
   **The tape, not `get_trade_history/2`.** That returns the credential's own fills; this
   returns everyone's executions, newest first as the venue sorts them.

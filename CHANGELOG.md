@@ -22,6 +22,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Documentation contradicted the code in several places a consumer reads.**
+  `capabilities/0`'s `measured_against` still said `1y` could not be declared and pointed
+  at a `@core_unnameable_widths` that no longer exists, although `1y` has been declared
+  since 2026-09-07; it now says it is declared and read from the equity bar path, not
+  probed live. A comment on `public_ceiling` described one shared 60-burst bucket; the
+  limiter meters two buckets (per endpoint at burst 1, global 600/60s). The README
+  listed `:trades` as a streamed kind (it is deliberately undeclared), counted 30 venue
+  absences where `venue_does_not_serve/0` holds 31, showed `get_price/2` and `subscribe/2`
+  without the credentials they require, and pinned `~> 0.2.0`, which cannot resolve to
+  any current release. `Rest.get_order_book/3` documented a refusal of an unstamped book
+  (it delivers `venue_time: nil`), omitted `US_FUTURES`, and claimed the stock depth page
+  was not committed (`openapi/quotes.md` is, and gives `depth` as L2 default 10);
+  `Rest.get_trades/3` omitted the option and futures tapes. `quotes/0` was described as
+  what the venue settles in; it is the symbol mapping's list, and `supported_quotes` is
+  `["USD"]`. `usage-rules.md` named `get_order/2` for `get_order/3`.
+
 ## [0.4.119] - 2026-10-10
 
 ### Fixed

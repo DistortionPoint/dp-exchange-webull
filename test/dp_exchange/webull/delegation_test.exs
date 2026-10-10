@@ -82,17 +82,26 @@ defmodule DpExchange.Webull.DelegationTest do
     end
 
     test "quantization/2 reaches the instrument profile" do
-      body = [
-        %{
-          "symbol" => "BTCUSD",
-          "price_precision" => "2",
-          "quantity_precision" => "6",
-          "min_quantity" => "0.0001"
-        }
-      ]
+      # The row carries the fields `crypto-instrument-list.md` documents. This body used to
+      # name `price_precision`, `quantity_precision` and `min_quantity`, which that page does
+      # not define, so every value came back `nil` and `is_map/1` still passed.
+      body = %{
+        "data" => [
+          %{
+            "symbol" => "BTCUSD",
+            "price_step" => "0.01",
+            "lot_size" => "0.000001",
+            "min_trade_qty" => "0.0001",
+            "status" => "OC"
+          }
+        ]
+      }
 
       assert {:ok, quantum} = Webull.quantization("BTC-USD", base(plug: json(body)))
-      assert is_map(quantum)
+      assert Decimal.equal?(quantum.price_increment, Decimal.new("0.01"))
+      assert Decimal.equal?(quantum.quantity_increment, Decimal.new("0.000001"))
+      assert Decimal.equal?(quantum.min_quantity, Decimal.new("0.0001"))
+      assert quantum.status == "OC"
     end
 
     test "get_fees/2 answers from the published rate, with no request made" do
@@ -161,8 +170,7 @@ defmodule DpExchange.Webull.DelegationTest do
     test "get_symbols/1" do
       body = %{"data" => [%{"symbol" => "BTCUSD"}]}
 
-      assert {:ok, symbols} = Webull.get_symbols(base(plug: json(body)))
-      assert is_list(symbols)
+      assert {:ok, ["BTC-USD"]} = Webull.get_symbols(base(plug: json(body)))
     end
 
     test "list_instruments/1" do

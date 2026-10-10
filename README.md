@@ -5,7 +5,7 @@
 > This package has **never run in production.** It is published early and openly so it
 > can be used and reported on, not because it is finished.
 >
-> - **The API may change without a major version.** Pin three-part (`~> 0.2.0`).
+> - **The API may change without a major version.** Pin three-part (`~> 0.4.0`).
 > - **Verification is uneven, and the gaps are on the expensive side.** The conformance
 >   suite passes against a fake and against a stubbed HTTP transport — **no test here has
 >   ever run against Webull itself**, because this venue signs every call, including the
@@ -22,16 +22,16 @@ same facade every venue in the family exposes.
 
 88 callbacks, of which **47 are declared `:experimental`** and 41 `:unsupported`. None is `:proven` — that requires a consumer trading live, and this package has never run in production (D15).
 
-Asset classes: **crypto, equity, option, future, event contract**. Streamed kinds: **quotes, top_of_book, trades** — everything else pulls only.
+Asset classes: **crypto, equity, option, future, event contract**. Streamed kinds: **quotes, top_of_book** — everything else pulls only. (`TICK` is requested and a `Trade` that arrives is delivered, but `:trades` is not declared: no tick has been measured for crypto.)
 
-Of the 41 unsupported endpoints, **30 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/webull/negative-claims.md`, which records the source and date behind every one.
+Of the 41 unsupported endpoints, **31 are the venue's own absence**, not this package's backlog — see `venue_does_not_serve/0` and `docs/reference/webull/negative-claims.md`, which records the source and date behind every one.
 
 ## Installation
 
 ```elixir
 def deps do
   [
-    {:dp_exchange_webull, "~> 0.2.0"}
+    {:dp_exchange_webull, "~> 0.4.0"}
   ]
 end
 ```
@@ -42,9 +42,9 @@ end
 # In your supervision tree. Nothing starts itself.
 children = [{DpExchange.Webull, credentials: my_credentials()}]
 
-{:ok, quote} = DpExchange.Webull.get_price("BTCUSD", [])
+{:ok, quote} = DpExchange.Webull.get_price("BTC-USD", credentials: my_credentials())
 
-:ok = DpExchange.Webull.subscribe(["BTCUSD"], to: self())
+:ok = DpExchange.Webull.subscribe(["BTC-USD"], credentials: my_credentials(), to: self())
 ```
 
 `DpExchange.Webull` is the **entire public API**. Everything else — transport, signing,
