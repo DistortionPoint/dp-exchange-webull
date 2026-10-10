@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.112] - 2026-10-10
+
 ### Fixed
 
 - **`priority_symbols:` froze the other shards out when shard 0 held no priority symbol.**
