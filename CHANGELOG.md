@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.119] - 2026-10-10
+
 ### Fixed
 
 - **Two different option contracts at one expiry, strike and right silently overwrote each
