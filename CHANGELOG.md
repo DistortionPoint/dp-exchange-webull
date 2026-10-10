@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.111] - 2026-10-10
+
 ### Added
 
 - **`priority_symbols:` keeps the stream on the pairs you trade** (issue #11's follow-up).
