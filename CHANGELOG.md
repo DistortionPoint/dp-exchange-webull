@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.114] - 2026-10-10
+
 ### Fixed
 
 - **A broker that refused the session got an immediate reconnect, forever.** Backoff counted
