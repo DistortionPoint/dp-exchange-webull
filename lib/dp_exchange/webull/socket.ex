@@ -15,10 +15,12 @@ defmodule DpExchange.Webull.Socket do
   Assuming frame boundaries are packet boundaries loses every packet after the first
   coalesced frame — quietly, because the socket stays up and the first message parses fine.
 
-  A `:malformed_length` means the stream can no longer be resynchronised. The buffer is
-  dropped and a notice raised rather than retaining bytes that can never parse: keeping
-  them would leave a live socket delivering nothing, which is the failure mode this family
-  ranks worst.
+  A `:malformed_length` or `:malformed_header` means the stream can no longer be
+  resynchronised. A `:data_quality` notice is raised and the connection is closed, as MQTT
+  3.1.1 section 2.2 requires of a receiver; the ordinary disconnect path then reconnects with
+  backoff and resubscribes. Retaining the bytes would leave a live socket delivering nothing,
+  and merely emptying the buffer would read the next frame from an unknown offset - both
+  silent, which is the failure mode this family ranks worst.
 
   ## Keep-alive
 
@@ -536,10 +538,21 @@ defmodule DpExchange.Webull.Socket do
         finish(state)
 
       {:error, reason} when reason in [:malformed_length, :malformed_header] ->
-        # Unrecoverable: no future byte repairs an invalid length. Dropping the buffer and
-        # saying so beats a live socket that silently delivers nothing.
-        notify(state, Notice.new(:data_quality, :webull, details: %{dropped: :malformed_frame}))
-        finish(%{state | buffer: <<>>})
+        # Unrecoverable: no future byte repairs an invalid length, and MQTT 3.1.1 section 2.2
+        # says a receiver that gets an invalid header MUST close the connection. Carrying on
+        # with an emptied buffer read the next frame from an unknown offset, which could
+        # swallow real packets as the body of a bogus one. Say so once, then take the ordinary
+        # disconnect path (`:link_down`, backoff, reconnect, CONNECT, resubscribe). Acks owed
+        # on this connection are owed to nobody.
+        notify(
+          state,
+          Notice.new(:data_quality, :webull,
+            message: "MQTT stream lost framing (#{reason}) - closing the connection",
+            details: %{dropped: :malformed_frame, reason: reason, session_id: state.session_id}
+          )
+        )
+
+        {:close, state |> Map.put(:buffer, <<>>) |> Map.put(:acks, [])}
     end
   end
 
@@ -659,6 +672,11 @@ defmodule DpExchange.Webull.Socket do
   # list, the subscriber saw nothing and was told nothing. It is reported once per topic per
   # connection, with the payload's size rather than its bytes.
   defp handle_packet(state, {:publish, topic, payload}) do
+    # Copied: the topic is a view into the frame and it becomes part of a key that
+    # `state.drops_reported` holds for the life of the connection, which would pin every
+    # such frame (up to 1 MiB each, 64 keys) for as long.
+    topic = :binary.copy(topic)
+
     report_drop(state, {:unrecognised_topic, topic}, %{topic: topic, bytes: byte_size(payload)})
   end
 
@@ -768,7 +786,9 @@ defmodule DpExchange.Webull.Socket do
   # which is a real answer for the code-only shape the same reporter saw alongside it
   # (four numeric-keyed fields, no `content`).
   defp emit(state, "notice", payload) do
-    case Jason.decode(payload) do
+    # `strings: :copy`: by default Jason returns views into `payload`, and `body` rides in the
+    # notice's `details` - see `bound_text/1` for what that would pin.
+    case Jason.decode(payload, strings: :copy) do
       {:ok, %{} = body} ->
         notify(
           state,
@@ -817,7 +837,12 @@ defmodule DpExchange.Webull.Socket do
   @max_notice_text_bytes 1_024
 
   # Cut on a UTF-8 boundary (the input is valid UTF-8), with a marker saying it was cut.
-  defp bound_text(text) when byte_size(text) <= @max_notice_text_bytes, do: text
+  #
+  # Always a fresh binary. `String.trim/1` and `binary_part/3` hand back a view into the frame
+  # they came from, and a notice is the one thing here a consumer may keep for a long time
+  # (a "last notice" field, an ETS row): a 40-byte message would pin the whole frame - up to
+  # the 1 MiB `MqttPacket` allows - for as long as it was held.
+  defp bound_text(text) when byte_size(text) <= @max_notice_text_bytes, do: :binary.copy(text)
 
   defp bound_text(text) do
     cut = utf8_boundary(text, @max_notice_text_bytes)

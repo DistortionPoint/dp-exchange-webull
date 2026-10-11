@@ -534,6 +534,36 @@ defmodule DpExchange.Webull.SocketTest do
       assert notice.details.venue_notice_unparsed == "Permission grabbed by other session"
     end
 
+    test "a notice does not pin the frame it arrived in" do
+      # `String.trim/1` and Jason's default string handling return views into the payload; a
+      # consumer keeping the notice would keep the whole frame (up to 1 MiB) with it.
+      pad = String.duplicate("x", 20_000)
+      json = Jason.encode!(%{"content" => " slow down ", "pad" => pad})
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("notice", json)}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}
+      assert notice.message == "slow down"
+      assert :binary.referenced_byte_size(notice.message) == byte_size(notice.message)
+      assert :binary.referenced_byte_size(notice.details.venue_notice["content"]) < 100
+
+      text = "  slow down" <> String.duplicate(" ", 20_000)
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("notice", text)}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{} = unparsed}
+      assert unparsed.message == "slow down"
+      assert :binary.referenced_byte_size(unparsed.message) == byte_size(unparsed.message)
+    end
+
+    test "an unrecognised topic's name does not pin its frame in the reported set" do
+      frame = publish("crypto-tick", String.duplicate("p", 20_000))
+
+      assert {:ok, state} = Socket.handle_frame({:binary, frame}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
+
+      assert [{:unrecognised_topic, topic}] = MapSet.to_list(state.drops_reported)
+      assert topic == "crypto-tick"
+      assert :binary.referenced_byte_size(topic) == byte_size(topic)
+    end
+
     test "a long notice is cut on a character boundary, with a marker, still one per frame" do
       # "a" then two-byte characters: byte 1024 falls inside one, so a byte-wise cut would
       # leave invalid UTF-8.
@@ -612,16 +642,35 @@ defmodule DpExchange.Webull.SocketTest do
       assert state.buffer == <<>>
     end
 
-    test "an unresynchronisable stream drops the buffer and SAYS so" do
-      # Retaining bytes that can never parse leaves a live socket delivering nothing,
-      # which is the failure mode this family ranks worst.
+    test "an unresynchronisable stream SAYS so and closes the connection" do
+      # MQTT 3.1.1 section 2.2: invalid header, close. Retaining the bytes leaves a live
+      # socket delivering nothing; emptying the buffer and carrying on reads from an
+      # unknown offset.
       garbage = <<3::4, 0::4, 0x80, 0x80, 0x80, 0x80, 0x80>>
 
-      assert {:ok, state} = Socket.handle_frame({:binary, garbage}, state())
+      assert {:close, state} = Socket.handle_frame({:binary, garbage}, state())
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality} = notice}
       assert notice.details.dropped == :malformed_frame
+      assert notice.details.reason == :malformed_length
+      assert notice.message =~ "closing the connection"
       assert state.buffer == <<>>
+
+      # The close takes the ordinary disconnect path: link_down, then a reconnect.
+      status = %{reason: {:local, :normal}}
+      assert {:reconnect, reconnected} = Socket.handle_disconnect(status, state)
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      assert reconnected.buffer == <<>>
+      refute reconnected.connected?
+    end
+
+    test "a header no broker may send also closes, and owed acks are not sent" do
+      pingresp_with_body = <<13::4, 0::4, 26>>
+      owed = Map.put(state(), :acks, [<<4::4, 0::4, 2, 1::16>>])
+
+      assert {:close, closed} = Socket.handle_frame({:binary, pingresp_with_body}, owed)
+      assert_receive {:dp_exchange, :webull, %Notice{details: %{reason: :malformed_header}}}
+      assert closed.acks == []
     end
 
     test "a header declaring an impossible length does not swallow every frame after it" do
@@ -630,10 +679,11 @@ defmodule DpExchange.Webull.SocketTest do
       # 2026-09-26. See `MqttPacket`'s `@max_packet_bytes`.
       bad_header = <<3::4, 0::4>> <> varint(200_000_000)
 
-      assert {:ok, after_bad} = Socket.handle_frame({:binary, bad_header}, state())
+      assert {:close, after_bad} = Socket.handle_frame({:binary, bad_header}, state())
       assert_receive {:dp_exchange, :webull, %Notice{details: %{dropped: :malformed_frame}}}
       assert after_bad.buffer == <<>>
 
+      # A fresh connection (the state a reconnect hands on) parses normally.
       good = publish("snapshot", snapshot_payload("BTCUSD", "77845.79"))
       assert {:ok, _state} = Socket.handle_frame({:binary, good}, after_bad)
       assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}

@@ -22,6 +22,49 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An answered call left its `{:caller_due, from}` deadline running.** `Feed` armed one timer
+  per `subscribe`/`unsubscribe`/`update_symbols` call at `connack_timeout_ms` (10s) and never
+  cancelled it, so a busy caller kept ten seconds' worth of timers, each holding its `from`,
+  and each firing into a no-op. The reference is now kept in `state.caller_timers` and
+  cancelled by every path that answers the caller (`reply_caller/3`, `reply_all/3`).
+- **Every failed shard open started its own retry chain.** With the slot still empty, each
+  reshard's `{:open_shard, ...}` that failed scheduled another `{:reopen_shard, ...}` chain, so
+  an outage of N calls dialled the venue from N chains at once. The slot now holds at most one
+  live chain (`state.open_chains`, a token per slot); a failure while one is live joins it,
+  and a `{:reopen_shard, ..., token}` whose token is not the slot's is ignored. Two chains
+  could never open two sockets for one slot (the slot check is in the one process), so this
+  removes load, not a duplicate connection.
+- **A stream that lost MQTT framing was kept open.** On a malformed remaining length or an
+  invalid fixed header `Socket` dropped its buffer and carried on, reading the next frame from
+  an unknown offset (it could swallow real packets as the body of a bogus one) and raising a
+  notice for every bad frame. MQTT 3.1.1 section 2.2 says a receiver MUST close on an invalid
+  header. It now raises one `:data_quality` notice (`details.dropped: :malformed_frame`, with
+  `reason` and `session_id`; the message says the connection is being closed) and closes, so the
+  ordinary path runs: `:link_down`, backoff, reconnect, CONNECT, resubscribe. Acks owed on the
+  dead connection are discarded.
+- **Background shards of one plan were all opened at the same instant.** `@shard_spacing_ms`
+  is documented as the gap between opening each shard's socket, but every shard a plan opened
+  in the background waited the same five seconds, so three or four sockets were dialled
+  together (a connect burst against a five-connection ceiling). The n-th waits n spacings
+  (`:shard_spacing_ms` init option, default 5,000). The second shard of a plan is unchanged.
+- **`Subscription` kept a compiled regex in a module attribute**, which Elixir 1.19 deprecates.
+  It is built by a private function now. Behaviour is unchanged.
+- **`MqttPacket.connect/4` wrote a keep-alive or a string it could not represent as if it
+  could.** The keep-alive is a 16-bit field and each string carries a 16-bit length; a
+  value outside that range was truncated modulo 65,536 and the CONNECT went out corrupt, the
+  broker reading the overflow as the next field. A keep-alive outside `1..65_535` is now a
+  `FunctionClauseError` and a string over 65,535 bytes an `ArgumentError`, where it is built.
+  Nothing in this package passes either (the keep-alive is 60 and the strings are a session
+  id and an App Key), so no behaviour a consumer could reach changes.
+- **A `notice`, or the name of an unrecognised topic, pinned the frame it arrived in.**
+  `String.trim/1`, `binary_part/3` and Jason's default string handling return views into the
+  payload, so a consumer keeping one notice (or `Socket` keeping the reported-topic key for
+  the life of the connection, up to 64 of them) kept a frame of up to 1 MiB alive for a
+  40-byte message. Notice text is now copied, the JSON body is decoded with `strings: :copy`
+  and the topic key is copied. Values are unchanged.
+
 ## [0.4.126] - 2026-10-11
 
 ### Fixed

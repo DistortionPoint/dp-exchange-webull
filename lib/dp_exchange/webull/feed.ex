@@ -56,7 +56,7 @@ defmodule DpExchange.Webull.Feed do
 
   ## A reconcile that fails leaves its shard dirty, not believed-subscribed
 
-  `touch_primary_shard/7` and `touch_background_shard/4` record the shard's NEW symbol list
+  `touch_primary_shard/7` and `touch_background_shard/5` record the shard's NEW symbol list
   before the HTTP reconcile has answered. Found 2026-10-10 by reading the path: when that
   reconcile failed for any reason that does not tear the shard down (a transport error, a
   `:reconcile_timeout`, `:reconcile_pending`, a 429, `:oversubscribed`, `INVALID_SYMBOL`) the
@@ -381,7 +381,7 @@ defmodule DpExchange.Webull.Feed do
   connecting, or reconnecting after a drop (the socket backs off for up to 30s), the session
   was not registered with the venue; the answer was `INVALID_SESSION`, which this module takes
   to mean the session is dead, and the shard was torn down and reopened on a fresh session.
-  `touch_background_shard/4` now records the new list and sends nothing, as
+  `touch_background_shard/5` now records the new list and sends nothing, as
   `touch_primary_shard/7` always did: `on_link_up/2` replays the whole list on the CONNACK.
   The deferred `{:reconcile_shard, ...}` message re-checks the session and `connected?` when
   it runs, for the same reason.
@@ -728,6 +728,12 @@ defmodule DpExchange.Webull.Feed do
        # `{:reconcile_done, ...}` clause settles it. See the moduledoc's "A reconcile that
        # fails leaves its shard dirty".
        settled: %{},
+       # from => timer reference of the `{:caller_due, from}` deadline `reshard/3` armed, held
+       # until the caller is answered and cancelled then. See `reply_caller/3`.
+       caller_timers: %{},
+       # index => token of the one live open-retry chain for that slot. See the
+       # `{:reopen_shard, ...}` clauses.
+       open_chains: %{},
        # Shard indices whose last primary/background reconcile failed and was reverted, so
        # the next `:resubscribe` tick re-plans them even with no caller and no rejection.
        unsettled: MapSet.new(),
@@ -736,7 +742,10 @@ defmodule DpExchange.Webull.Feed do
        # Overridable for the same reason every other cadence here is: a test proving the
        # retry actually recurs should not have to wait out a real second to see it.
        open_retry_base_ms: Config.opt(opts, :open_retry_base_ms, @open_retry_base_ms),
-       open_retry_max_ms: Config.opt(opts, :open_retry_max_ms, @open_retry_max_ms)
+       open_retry_max_ms: Config.opt(opts, :open_retry_max_ms, @open_retry_max_ms),
+       # See `@shard_spacing_ms`. Overridable so a test proving the stagger need not wait
+       # out several real five-second gaps.
+       shard_spacing_ms: Config.opt(opts, :shard_spacing_ms, @shard_spacing_ms)
      }}
   end
 
@@ -1070,7 +1079,7 @@ defmodule DpExchange.Webull.Feed do
   def handle_info({:connack_timeout, index, session_id}, state) do
     case Map.get(state.shards, index) do
       %{session_id: ^session_id, connected?: false, reply_to: [_first | _rest] = waiters} ->
-        reply_all(waiters, {:error, {:connack_timeout, state.connack_timeout_ms}})
+        state = reply_all(state, waiters, {:error, {:connack_timeout, state.connack_timeout_ms}})
         {:noreply, put_in(state.shards[index].reply_to, nil)}
 
       _connected_refused_or_replaced ->
@@ -1142,15 +1151,22 @@ defmodule DpExchange.Webull.Feed do
   # the slot with ITS plan-time list while the other found the slot taken and did nothing,
   # so a symbol added in between was never subscribed. `symbols_to_open/3` re-derives the
   # list from `wanted` at open time. A list that has become empty opens nothing.
-  def handle_info({:reopen_shard, index, symbols, opts, attempt}, state) do
-    case Map.get(state.shards, index) do
-      nil ->
-        planned = symbols_to_open(state, index, symbols)
-        {:noreply, reopen_planned(state, index, planned, opts, attempt)}
+  #
+  # **At most one retry chain per slot.** A chain is the run of `{:reopen_shard, ..., token}`
+  # messages one failed open starts; `state.open_chains[index]` holds its token. Every later
+  # failure while a chain is live (another reshard's `{:open_shard, ...}` finding the slot
+  # still empty, a hand-sent untokened reopen) leaves it to that chain instead of starting a
+  # second, so an outage of N calls no longer ran N chains side by side, each dialling the
+  # venue at its own cadence. A tokened message whose token is not the slot's current one
+  # belongs to a chain that has ended (the slot opened, or filled by another route) and is
+  # ignored. The untokened form is the first attempt of a chain and is always handled.
+  def handle_info({:reopen_shard, index, symbols, opts, attempt}, state),
+    do: {:noreply, reopen(state, index, symbols, opts, attempt, nil)}
 
-      _opened_by_something_else ->
-        {:noreply, clear_open_failure(state, index)}
-    end
+  def handle_info({:reopen_shard, index, symbols, opts, attempt, token}, state) do
+    if Map.get(state.open_chains, index) == token,
+      do: {:noreply, reopen(state, index, symbols, opts, attempt, token)},
+      else: {:noreply, state}
   end
 
   def handle_info({:open_shard, index, symbols, opts}, state) do
@@ -1271,8 +1287,7 @@ defmodule DpExchange.Webull.Feed do
         {:noreply, reshard_step(state, opts, from, retries_left - 1)}
 
       _settled ->
-        GenServer.reply(from, combine_overflow(result, overflow))
-        {:noreply, state}
+        {:noreply, reply_caller(state, from, combine_overflow(result, overflow))}
     end
   end
 
@@ -1644,9 +1659,34 @@ defmodule DpExchange.Webull.Feed do
   # a connecting shard) left the first timer matching nothing and the next one armed from the
   # retry, which can fall after the caller's own `@call_timeout`. The caller then exited and
   # took its process down. `answer_overdue_caller/2` finds it wherever it is.
+  #
+  # The timer's reference is kept in `state.caller_timers` until the caller is answered, and
+  # every reply goes through `reply_caller/3` or `reply_all/3`, which cancel it. Left to fire,
+  # each call held a timer, and the `from` it names, for the full `connack_timeout_ms` after
+  # it had been answered; under a high call rate they piled up.
   defp reshard(state, opts, from) do
-    Process.send_after(self(), {:caller_due, from}, state.connack_timeout_ms)
+    timer = Process.send_after(self(), {:caller_due, from}, state.connack_timeout_ms)
+    state = %{state | caller_timers: Map.put(state.caller_timers, from, timer)}
     {:noreply, reshard_step(state, opts, from, @max_shards)}
+  end
+
+  # Answers `from` and cancels its deadline. A timer that has already fired cancels to
+  # `false` and its message has been (or is about to be) handled by `answer_overdue_caller/2`,
+  # which finds nobody waiting and does nothing, so no flush is needed.
+  defp reply_caller(state, from, result) do
+    GenServer.reply(from, result)
+    release_caller(state, from)
+  end
+
+  defp release_caller(state, from) do
+    case Map.pop(state.caller_timers, from) do
+      {nil, _timers} ->
+        state
+
+      {timer, timers} ->
+        Process.cancel_timer(timer)
+        %{state | caller_timers: timers}
+    end
   end
 
   # Answers `from` if it is still waiting: parked on a shard for its `link_up` (removed from
@@ -1659,7 +1699,8 @@ defmodule DpExchange.Webull.Feed do
         {Map.put(acc, index, shard), found || result}
       end)
 
-    state = %{state | shards: shards}
+    # Its deadline has fired, so there is nothing left to cancel; only the record goes.
+    state = %{state | shards: shards, caller_timers: Map.delete(state.caller_timers, from)}
 
     case parked || primary_overflow(state, from) do
       {:parked, overflow} ->
@@ -1703,15 +1744,16 @@ defmodule DpExchange.Webull.Feed do
 
     case touched do
       [] ->
-        GenServer.reply(from, combine_overflow(:ok, overflow))
-        state
+        reply_caller(state, from, combine_overflow(:ok, overflow))
 
       [primary | rest] ->
         state =
           touch_primary_shard(state, primary, new_shards, opts, from, overflow, retries_left)
 
-        Enum.reduce(rest, state, fn index, state ->
-          touch_background_shard(state, index, new_shards, opts)
+        rest
+        |> Enum.with_index(1)
+        |> Enum.reduce(state, fn {index, position}, state ->
+          touch_background_shard(state, index, new_shards, opts, position)
         end)
     end
   end
@@ -1723,8 +1765,10 @@ defmodule DpExchange.Webull.Feed do
   defp resync(state) do
     {touched, new_shards, _overflow} = plan_reshard(state)
 
-    Enum.reduce(touched, state, fn index, state ->
-      touch_background_shard(state, index, new_shards, state.resubscribe_opts)
+    touched
+    |> Enum.with_index(1)
+    |> Enum.reduce(state, fn {index, position}, state ->
+      touch_background_shard(state, index, new_shards, state.resubscribe_opts, position)
     end)
   end
 
@@ -1835,17 +1879,25 @@ defmodule DpExchange.Webull.Feed do
         put_in(state.shards[index], shard)
 
       {:error, reason} ->
-        GenServer.reply(from, combine_overflow({:error, reason}, overflow))
-        state
+        reply_caller(state, from, combine_overflow({:error, reason}, overflow))
     end
   end
 
-  defp touch_background_shard(state, index, new_shards, opts) do
+  # `position` is this shard's place among the background shards one plan touches, counted
+  # from 1. A shard that has to be OPENED waits `position` spacings: the constant it used to
+  # wait was the same for every shard of the plan, so three or four sockets were dialled in
+  # the same instant - the connect burst `@shard_spacing_ms` exists to avoid.
+  defp touch_background_shard(state, index, new_shards, opts, position) do
     wanted_symbols = Map.fetch!(new_shards, index)
 
     case Map.get(state.shards, index) do
       nil ->
-        Process.send_after(self(), {:open_shard, index, wanted_symbols, opts}, @shard_spacing_ms)
+        Process.send_after(
+          self(),
+          {:open_shard, index, wanted_symbols, opts},
+          state.shard_spacing_ms * position
+        )
+
         state
 
       %{connected?: false} ->
@@ -1931,7 +1983,7 @@ defmodule DpExchange.Webull.Feed do
   defp answer_refused_shard(state, index, details) do
     case Map.get(state.shards, index) do
       %{reply_to: [_first | _rest] = waiters} ->
-        reply_all(waiters, {:error, {:connection_refused, details}})
+        state = reply_all(state, waiters, {:error, {:connection_refused, details}})
         put_in(state.shards[index].reply_to, nil)
 
       _no_one_waiting ->
@@ -1950,7 +2002,7 @@ defmodule DpExchange.Webull.Feed do
         state
 
       %{reply_to: [_first | _rest] = waiters} ->
-        reply_all(waiters, result)
+        state = reply_all(state, waiters, result)
         put_in(state.shards[index].reply_to, nil)
 
       nil ->
@@ -2229,7 +2281,7 @@ defmodule DpExchange.Webull.Feed do
        )}
     )
 
-    answer_parked_caller(shard, {:error, {:shard_crashed, reason}})
+    state = answer_parked_caller(state, shard, {:error, {:shard_crashed, reason}})
 
     # A crash tears this index's shard identity down wholesale and rebuilds it as a fresh
     # open below — the same treatment a brand-new shard gets. Any resubscribe-failure latch
@@ -2558,7 +2610,7 @@ defmodule DpExchange.Webull.Feed do
         # Answered BEFORE the delete, for the reason `answer_parked_caller/2` carries: after
         # this the shard is gone, and `complete_link_up/3` reads a missing shard as one whose
         # caller has already been dealt with.
-        answer_parked_caller(shard, {:error, {:invalid_session, named}})
+        state = answer_parked_caller(state, shard, {:error, {:invalid_session, named}})
 
         state = %{
           supersede_reconcile(state, {:resubscribe, index})
@@ -2638,17 +2690,33 @@ defmodule DpExchange.Webull.Feed do
         # the open was scheduled on ANOTHER shard; nothing else would touch that one.
         state
         |> put_in([:shards, index], new_shard(session_id, socket, planned))
+        |> end_open_chain(index)
         |> resync()
 
       {:error, reason} ->
-        retry_shard_open(state, index, planned, opts, 1, reason)
+        retry_shard_open(state, index, planned, opts, 1, reason, nil)
     end
   end
 
-  defp reopen_planned(state, index, [], _opts, _attempt),
-    do: %{state | open_failed: MapSet.delete(state.open_failed, index)}
+  # An open attempt from a retry message. `token` is the chain's, or `nil` for an untokened
+  # message; see the `{:reopen_shard, ...}` clauses.
+  defp reopen(state, index, symbols, opts, attempt, token) do
+    case Map.get(state.shards, index) do
+      nil ->
+        planned = symbols_to_open(state, index, symbols)
+        reopen_planned(state, index, planned, opts, attempt, token)
 
-  defp reopen_planned(state, index, planned, opts, attempt) do
+      _opened_by_something_else ->
+        state |> end_open_chain(index) |> clear_open_failure(index)
+    end
+  end
+
+  defp reopen_planned(state, index, [], _opts, _attempt, _token) do
+    state = end_open_chain(state, index)
+    %{state | open_failed: MapSet.delete(state.open_failed, index)}
+  end
+
+  defp reopen_planned(state, index, planned, opts, attempt, token) do
     case open_socket(state, opts) do
       {:ok, session_id, socket} ->
         Logger.info(
@@ -2658,13 +2726,19 @@ defmodule DpExchange.Webull.Feed do
 
         state
         |> put_in([:shards, index], new_shard(session_id, socket, planned))
+        |> end_open_chain(index)
         |> clear_open_failure(index)
         |> resync()
 
       {:error, reason} ->
-        retry_shard_open(state, index, planned, opts, attempt + 1, reason)
+        retry_shard_open(state, index, planned, opts, attempt + 1, reason, token)
     end
   end
+
+  # The chain for `index` is over: its token no longer matches anything, so a message still in
+  # flight for it is ignored.
+  defp end_open_chain(state, index),
+    do: %{state | open_chains: Map.delete(state.open_chains, index)}
 
   defp new_shard(session_id, socket, symbols) do
     %{session_id: session_id, socket: socket, connected?: false, symbols: symbols, reply_to: nil}
@@ -2693,7 +2767,7 @@ defmodule DpExchange.Webull.Feed do
   # in the log — while the notice fires once per outage, which is the same split
   # `latch_resubscribe_failure/4` below already makes and for the same reason: a notice per
   # attempt on a venue that is down is a storm, just a slower one.
-  defp retry_shard_open(state, index, symbols, opts, attempt, reason) do
+  defp retry_shard_open(state, index, symbols, opts, attempt, reason, token) do
     # The exponent is clamped before the power, as `reopen_after_crash/3` does: `attempt`
     # counts every failed open of an outage and has no ceiling of its own, and the cap is
     # reached long before 2^30 for any sane `open_retry_base_ms`.
@@ -2705,8 +2779,27 @@ defmodule DpExchange.Webull.Feed do
         "#{delay}ms"
     )
 
-    Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt}, delay)
-    latch_open_failure(state, index, symbols, reason)
+    state
+    |> schedule_open_retry(index, symbols, opts, attempt, delay, token)
+    |> latch_open_failure(index, symbols, reason)
+  end
+
+  # The chain's own next link keeps its token. A failure from anywhere else starts a chain only
+  # if the slot has none: otherwise the live one already retries it, and a second would dial the
+  # venue again at its own cadence for as long as the outage lasted.
+  defp schedule_open_retry(state, index, symbols, opts, attempt, delay, nil) do
+    if Map.has_key?(state.open_chains, index) do
+      state
+    else
+      token = make_ref()
+      Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt, token}, delay)
+      %{state | open_chains: Map.put(state.open_chains, index, token)}
+    end
+  end
+
+  defp schedule_open_retry(state, index, symbols, opts, attempt, delay, token) do
+    Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt, token}, delay)
+    state
   end
 
   # Same latch shape as `latch_resubscribe_failure/4`, and deliberately a SEPARATE map: a
@@ -2939,16 +3032,17 @@ defmodule DpExchange.Webull.Feed do
   # drifting apart is the whole of what went wrong: both of them delete a shard, and only
   # one of them remembered what that means for a caller. A third teardown must come through
   # here too.
-  defp answer_parked_caller(%{reply_to: nil}, _result), do: :ok
+  defp answer_parked_caller(state, %{reply_to: nil}, _result), do: state
 
-  defp answer_parked_caller(%{reply_to: waiters}, result) when is_list(waiters),
-    do: reply_all(waiters, result)
+  defp answer_parked_caller(state, %{reply_to: waiters}, result) when is_list(waiters),
+    do: reply_all(state, waiters, result)
 
   # Every caller parked on one shard gets the same outcome, each with its OWN overflow:
-  # what one call could not place is not another call's failure.
-  defp reply_all(waiters, result) do
-    Enum.each(waiters, fn {from, overflow} ->
-      GenServer.reply(from, combine_overflow(result, overflow))
+  # what one call could not place is not another call's failure. Each one's deadline is
+  # cancelled with its answer; see `reshard/3`.
+  defp reply_all(state, waiters, result) do
+    Enum.reduce(waiters, state, fn {from, overflow}, state ->
+      reply_caller(state, from, combine_overflow(result, overflow))
     end)
   end
 

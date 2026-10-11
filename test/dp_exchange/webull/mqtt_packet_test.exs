@@ -33,6 +33,26 @@ defmodule DpExchange.Webull.MqttPacketTest do
     end
   end
 
+  describe "CONNECT bounds" do
+    test "a keep-alive outside the 16-bit range is refused, not truncated" do
+      for bad <- [0, -1, 65_536, 70_000] do
+        assert_raise FunctionClauseError, fn -> MqttPacket.connect("s", "u", "p", bad) end
+      end
+
+      assert <<1::4, 0::4, _len, 4::16, "MQTT", 4, _flags, 65_535::16, _rest::binary>> =
+               MqttPacket.connect("s", "u", "p", 65_535)
+    end
+
+    test "a string longer than its 16-bit length is refused, not written with a wrapped one" do
+      assert_raise ArgumentError, ~r/65,535 bytes/, fn ->
+        MqttPacket.connect(String.duplicate("t", 65_536), "u", "p")
+      end
+
+      assert <<1::4, 0::4, _rest::binary>> =
+               MqttPacket.connect(String.duplicate("t", 65_535), "u", "p")
+    end
+  end
+
   # SUBSCRIBE and SUBACK used to be here. Deleted, not merely unused: this venue's own
   # documentation states subscriptions are HTTP calls, not MQTT ones (see
   # `DpExchange.Webull.Subscription` and `MqttPacket`'s own moduledoc), and nothing in

@@ -105,7 +105,8 @@ defmodule DpExchange.Webull.MqttPacket do
   # connection stayed up, delivered nothing, and grew its buffer, and the silence check
   # never fired because frames kept arriving. Measured 2026-09-26: after one such header,
   # 50 valid snapshots delivered 0 messages. Past this bound the stream is out of sync, which
-  # the socket already knows how to answer: drop the buffer and say so.
+  # the socket answers as MQTT 3.1.1 section 2.2 requires: say so and close the
+  # connection, so the reconnect starts a stream from a known offset.
   @max_packet_bytes 1_048_576
 
   @doc """
@@ -121,8 +122,9 @@ defmodule DpExchange.Webull.MqttPacket do
   resumed session would replay stale queued prices on reconnect. The venue does not restore
   subscriptions across a reconnect anyway.
   """
-  @spec connect(String.t(), String.t(), String.t(), pos_integer()) :: binary()
-  def connect(client_id, username, password, keep_alive_s \\ 60) do
+  @spec connect(String.t(), String.t(), String.t(), 1..65_535) :: binary()
+  def connect(client_id, username, password, keep_alive_s \\ 60)
+      when keep_alive_s in 1..65_535 do
     # bit 7 username, bit 6 password, bit 1 clean session
     flags = 0b1100_0010
     payload = encode_string(client_id) <> encode_string(username) <> encode_string(password)
@@ -293,7 +295,17 @@ defmodule DpExchange.Webull.MqttPacket do
 
   defp fixed_header(type, flags), do: <<type::4, flags::4>>
 
-  defp encode_string(value) when is_binary(value), do: <<byte_size(value)::16>> <> value
+  # An MQTT string carries a 16-bit length (§1.5.3). A longer one used to be written with its
+  # length truncated modulo 65,536 - a CONNECT whose declared string ended inside the string,
+  # so the broker read the rest as the next field and the stream was corrupt from its first
+  # packet, with nothing pointing at the string. Refused where it is built.
+  defp encode_string(value) when is_binary(value) and byte_size(value) <= 65_535,
+    do: <<byte_size(value)::16>> <> value
+
+  defp encode_string(value) when is_binary(value) do
+    raise ArgumentError,
+          "an MQTT string is at most 65,535 bytes (3.1.1 section 1.5.3), got #{byte_size(value)}"
+  end
 
   # Base-128 varint, seven bits per byte, high bit continues. At most four bytes.
   defp encode_remaining_length(length) when length < 128, do: <<length>>

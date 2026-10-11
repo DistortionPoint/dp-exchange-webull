@@ -264,7 +264,9 @@ defmodule DpExchange.Webull.Subscription do
   # non-empty list in. See the moduledoc: a rejection this module cannot attribute to a
   # symbol must fall through to the opaque `exchange_error` shape, not be reported as
   # zero rejected symbols.
-  @invalid_symbol_list ~r/\[([^\]]+)\]/
+  #
+  # A function, not a module attribute: Elixir 1.19 deprecates a regex stored in one.
+  defp invalid_symbol_list_re, do: ~r/\[([^\]]+)\]/
 
   # `"Mqtt connection not exist for session:3c4fdabd54097164fbd0f66d95743aae"` — the venue
   # names the dead session in prose, so this reads it out of prose. Deliberately tolerant:
@@ -281,7 +283,7 @@ defmodule DpExchange.Webull.Subscription do
   defp session_id_from(_no_message), do: nil
 
   defp invalid_symbols(%{"message" => message}) when is_binary(message) do
-    case Regex.run(@invalid_symbol_list, message) do
+    case Regex.run(invalid_symbol_list_re(), message) do
       [_match, listed] ->
         case listed
              |> String.split(",")
