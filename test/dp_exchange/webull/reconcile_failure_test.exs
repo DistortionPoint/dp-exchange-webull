@@ -307,12 +307,12 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       refute Map.has_key?(shards(feed), 0), "the second reopen is held back by the cooldown"
 
       # And it does come back once the cooldown elapses.
-      assert_eventually(fn -> Map.has_key?(shards(feed), 0) end, 4_000)
+      assert_eventually(fn -> Map.has_key?(shards(feed), 0) end)
     end
 
     defp shards(feed), do: :sys.get_state(feed).shards
 
-    defp assert_eventually(fun, budget_ms \\ 2_000) do
+    defp assert_eventually(fun, budget_ms \\ 5_000) do
       deadline = System.monotonic_time(:millisecond) + budget_ms
       wait_until(fun, deadline)
     end

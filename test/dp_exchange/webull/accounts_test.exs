@@ -543,6 +543,48 @@ defmodule DpExchange.Webull.AccountsTest do
                )
     end
 
+    test "a time bound that is not a DateTime is refused before the request, real and fake" do
+      exploding = fn _conn -> raise "must not send an unreadable time bound" end
+
+      for {key, bad} <- [
+            start: 1_767_225_600_000,
+            end: ~N[2026-01-02 00:00:00],
+            start: "2026-01-01",
+            end: ~D[2026-01-02]
+          ] do
+        opts = [{key, bad}, plug: exploding, account_id: @account, retry_attempts: 0]
+
+        assert {:error, {:invalid_time, ^key, ^bad}} = Rest.get_transfers(@credentials, opts)
+        assert {:error, {:invalid_time, ^key, ^bad}} = Rest.get_transactions(@credentials, opts)
+
+        fake_opts = [{key, bad}, account_id: @account]
+        assert {:error, {:invalid_time, ^key, ^bad}} = Fake.get_transfers(@credentials, fake_opts)
+      end
+    end
+
+    test "an order history window must be DateTimes, and an open listing ignores it" do
+      exploding = fn _conn -> raise "must not send an unreadable time bound" end
+
+      for {key, bad} <- [since: 1_767_225_600_000, until: ~N[2026-01-02 00:00:00]] do
+        opts = [{key, bad}, history: true, plug: exploding, account_id: @account]
+
+        assert {:error, {:invalid_time, ^key, ^bad}} =
+                 Rest.get_orders(@credentials, [{:retry_attempts, 0} | opts])
+
+        assert {:error, {:invalid_time, ^key, ^bad}} =
+                 Fake.get_orders(@credentials, [{key, bad}, history: true, account_id: @account])
+      end
+
+      # The open-orders page names no time parameters, so nothing is sent or checked there.
+      assert {:ok, []} =
+               Rest.get_orders(@credentials,
+                 since: 1_767_225_600_000,
+                 plug: responding([]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
     test "a cross-year range is refused before the request" do
       # The venue says cross-year queries are not supported. Sending one and reading the
       # answer would give a real list missing whichever half it dropped.

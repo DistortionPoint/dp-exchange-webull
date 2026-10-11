@@ -246,7 +246,7 @@ defmodule DpExchange.Webull.Subscription do
         end
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-        {:error, {:refused, status, response}}
+        {:error, {:refused, status, bound_body(response)}}
 
       {:ok, %{status: status, body: response}} ->
         {:error,
@@ -257,6 +257,28 @@ defmodule DpExchange.Webull.Subscription do
         {:error, reason}
     end
   end
+
+  # How much of a refusing body the error term carries. A refusal's body is the venue's, or a
+  # gateway's: a 403 from a CDN is an HTML page, and `{:error, {:refused, 403, page}}` is
+  # logged, put into notices and held by whoever keeps the last error. A decoded JSON body is
+  # small and is kept as it is; text over the bound is cut (on a character boundary where it
+  # is valid UTF-8, at most 2,048 bytes either way) and copied, so a 40-byte reason does not
+  # pin a response of up to 16 MiB.
+  @max_refusal_text_bytes 2_048
+
+  defp bound_body(body) when is_binary(body) and byte_size(body) > @max_refusal_text_bytes do
+    # A character is at most four bytes, so a quarter of the byte bound in characters never
+    # exceeds it.
+    cut =
+      if String.valid?(body),
+        do: String.slice(body, 0, div(@max_refusal_text_bytes, 4)),
+        else: binary_part(body, 0, @max_refusal_text_bytes)
+
+    :binary.copy(cut) <> "... [truncated, #{byte_size(body)} bytes in all]"
+  end
+
+  defp bound_body(body) when is_binary(body), do: :binary.copy(body)
+  defp bound_body(body), do: body
 
   # Pulls the bracketed, comma-separated symbol list out of an `INVALID_SYMBOL` body's
   # `message` — `"The symbols does not exist in the category. [BNBUSD]"` for one symbol,

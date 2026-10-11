@@ -317,6 +317,23 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                )
     end
 
+    test "a refusal whose body is a long page carries a bounded piece", %{limiter: limiter} do
+      page = String.duplicate("<p>blocked</p>", 20_000)
+
+      assert {:error, {:refused, 403, carried}} =
+               Subscription.subscribe("session-1", ["BTC-USD"],
+                 credentials: @credentials,
+                 limiter: limiter,
+                 plug: raw(page, 403),
+                 retry_attempts: 0
+               )
+
+      assert is_binary(carried)
+      assert byte_size(carried) < 2_200
+      assert carried =~ "<p>blocked</p>"
+      assert carried =~ "truncated, #{byte_size(page)} bytes in all"
+    end
+
     test "an unexpected status is an error naming it", %{limiter: limiter} do
       assert {:error, {:exchange_error, :webull, message}} =
                Subscription.subscribe("session-1", ["BTC-USD"],

@@ -553,6 +553,20 @@ defmodule DpExchange.Webull.SocketTest do
       assert :binary.referenced_byte_size(unparsed.message) == byte_size(unparsed.message)
     end
 
+    test "a notice body past 64 KiB is reported by size, its words kept in the message" do
+      pad = String.duplicate("x", 200_000)
+      json = Jason.encode!(%{"content" => "slow down", "pad" => pad})
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("notice", json)}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{} = notice}, 5_000
+
+      assert notice.message == "slow down"
+      assert notice.severity == :warning
+
+      assert %{"truncated" => true, "approx_bytes" => size} = notice.details.venue_notice
+      assert size > 200_000
+    end
+
     test "an unrecognised topic's name does not pin its frame in the reported set" do
       frame = publish("crypto-tick", String.duplicate("p", 20_000))
 

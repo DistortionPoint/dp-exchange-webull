@@ -579,8 +579,11 @@ to sort what you receive, and you should not assume the venue's row order means 
 
 A level whose price this package cannot read is dropped rather than passed on with a `nil`
 price, because `level/0` is `{Decimal.t(), Decimal.t()}` and `hd(bids)` must be able to
-answer with a real number. A level with a readable price and no size keeps a `nil` size —
-that is a real shape, not an unreadable one.
+answer with a real number. A level with a readable price and **no readable size refuses the
+whole book** - `{:error, {:missing_required_field, :size}}`, or `{:error, {:invalid_decimal,
+:size, value}}` for text that is not a number - because `level/0` is a pair of Decimals, and
+dropping the level would publish a hole in the book as "no liquidity at that price". (Earlier
+releases passed `{price, nil}` through, a pair `OrderBook.new/1` refuses.)
 
 ## A row the venue did not identify is dropped, not given an empty id
 
@@ -988,6 +991,17 @@ and never a JSON number). `replace_order/4` holds its `changes` to the same rule
 `client_order_id` as `{:error, {:invalid_client_order_id, id}}`. `get_order_book/3` on
 `US_FUTURES` takes `depth` 1 to 10 (`{:depth_out_of_range, n, max: 10}`), as the venue's page
 states. The fake refuses all of these identically.
+
+**An order's `expire_date` and `event_outcome` are checked before a request**, in
+`place_order/3` and `preview_order/3` (and the fake). A GTD `expire_date` is a `Date` or one
+real `yyyy-MM-dd` string (`{:error, {:invalid_expire_date, v}}` otherwise; a missing one is
+still left missing); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
+(`{:error, {:invalid_event_outcome, v}}`). **Time bounds** (`:start`/`:end` on
+`get_transfers/2` and `get_transactions/2`, `:since`/`:until` on a `history: true`
+`get_orders/2`) are `DateTime`s or absent: anything else is
+`{:error, {:invalid_time, key, value}}`. A `get_positions/2` side is read from the sign of
+`quantity` (negative is `:short`), which the vendor page does not document and which has not
+been measured against a live short position.
 
 **`opts[:account_id]` must be non-empty text** on every account and order call; `nil`, a number,
 `false` and `""` are `{:error, :account_id_required}`, here and in the fake (`place_orders/3`

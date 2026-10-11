@@ -1432,8 +1432,11 @@ defmodule DpExchange.Webull.Rest do
   Requires `opts[:account_id]`.
 
   **This venue states no side.** Every documented field is a quantity, a price or a P&L, and
-  direction is carried in the sign of `quantity` — so `Position.from_signed_quantity/1` does
-  the conversion, which is exactly what it exists for. A package that assumed `:long`
+  `account-position.md` describes `quantity` only as "Quantity of the position" - it
+  documents no sign convention. Direction is therefore read from the sign of `quantity`
+  through `Position.from_signed_quantity/1` (a negative is `:short`), **an assumption
+  that has not been measured against a live short position** and needs a credential this
+  repository never holds. A package that assumed `:long`
   because equities are usually long would produce a short position that is exactly backwards
   with every number in it still plausible.
 
@@ -1736,8 +1739,38 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_activity_range(keyword()) :: :ok | {:error, term()}
   def validate_activity_range(opts) do
-    with :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)),
+    with :ok <- window_times(opts, [:start, :end]),
+         :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)),
          do: valid_activity_types(Keyword.get(opts, :activity_types))
+  end
+
+  @doc """
+  Whether `opts[:since]`/`opts[:until]` are times `get_orders/2` can send: absent, or a
+  `DateTime`. For `DpExchange.Webull.Fake`, which refuses exactly as the real path does.
+
+  Only the history listing reads them (the open-orders page names no time parameters), so an
+  open listing is not checked: `{:error, {:invalid_time, key, value}}` is for a history read.
+  """
+  @spec validate_orders_window(keyword()) :: :ok | {:error, term()}
+  def validate_orders_window(opts) do
+    if Keyword.get(opts, :history, false), do: window_times(opts, [:since, :until]), else: :ok
+  end
+
+  # **A time bound is a `DateTime`, or the call is refused.** `iso_millis/1` wrote any other
+  # term to the wire as it was (an epoch integer as a number, a `NaiveDateTime` as
+  # `"2026-01-01 00:00:00"`, a `Date` as a bare date), none of them the page's
+  # `yyyy-MM-dd'T'HH:mm:ss.SSS'Z'`, and `same_year/2` waved such a range through, so the
+  # cross-year guard was off for exactly the values it could not read. The venue answers an
+  # unreadable bound with a refusal about nothing the caller can see, or reads it as another
+  # instant; neither is a substitute worth sending.
+  defp window_times(opts, keys) do
+    Enum.find_value(keys, :ok, fn key ->
+      case Keyword.get(opts, key) do
+        nil -> nil
+        %DateTime{} -> nil
+        other -> {:error, {:invalid_time, key, other}}
+      end
+    end)
   end
 
   # The venue's documented format: yyyy-MM-dd'T'HH:mm:ss.SSS'Z'. Always UTC and always three
@@ -2103,18 +2136,21 @@ defmodule DpExchange.Webull.Rest do
   # The guarantee that mattered is kept and is what the test now asserts directly: an
   # undated book is `nil` here, never this package's clock.
   defp to_order_book(row, symbol) do
-    {:ok,
-     %OrderBook{
-       symbol: symbol,
-       bids: book_levels(value(row, ["bids"]), :desc),
-       asks: book_levels(value(row, ["asks"]), :asc),
-       venue_time: top_of_book_time(row),
-       observed_at: DateTime.utc_now(),
-       # No sequence on this endpoint. `nil` means the venue did not say, so a caller
-       # cannot use this book to detect a gap in a stream.
-       sequence: nil,
-       provider: :webull
-     }}
+    with {:ok, bids} <- book_levels(value(row, ["bids"]), :desc),
+         {:ok, asks} <- book_levels(value(row, ["asks"]), :asc) do
+      {:ok,
+       %OrderBook{
+         symbol: symbol,
+         bids: bids,
+         asks: asks,
+         venue_time: top_of_book_time(row),
+         observed_at: DateTime.utc_now(),
+         # No sequence on this endpoint. `nil` means the venue did not say, so a caller
+         # cannot use this book to detect a gap in a stream.
+         sequence: nil,
+         provider: :webull
+       }}
+    end
   end
 
   # The level's own size, not a sum over its `order` array. Those are different numbers when
@@ -2136,18 +2172,43 @@ defmodule DpExchange.Webull.Rest do
   # one book path per transport and each needs checking.
   #
   # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
+  #
+  # **A level that names a price must state a readable size, or the book is refused.**
+  # `Core.Types.OrderBook` types a level `{Decimal.t(), Decimal.t()}` and `OrderBook.new/1`
+  # raises on anything else; this built the struct as a literal and let `{price, nil}` through
+  # for a level with no `size` (or `"null"`, or `"NaN"`). Dropping the level instead would
+  # publish a book with a hole in it as though the venue had shown no liquidity at that price,
+  # which is a meaning the venue never stated; so the whole answer is
+  # `{:missing_required_field, :size}` / `{:invalid_decimal, :size, value}`.
   defp book_levels(rows, direction) when is_list(rows) do
     rows
-    |> Enum.flat_map(fn row ->
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, levels} ->
       case decimal(value(row, ["price"])) do
-        nil -> []
-        price -> [{price, decimal(value(row, ["size"]))}]
+        nil ->
+          {:cont, {:ok, levels}}
+
+        price ->
+          case required_decimal(value(row, ["size"]), :size) do
+            {:ok, size} -> {:cont, {:ok, [{price, size} | levels]}}
+            {:error, _reason} = error -> {:halt, error}
+          end
       end
     end)
-    |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})
+    |> case do
+      {:ok, levels} ->
+        sorted =
+          levels
+          |> Enum.reverse()
+          |> Enum.sort_by(fn {price, _size} -> price end, {direction, Decimal})
+
+        {:ok, sorted}
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
-  defp book_levels(_absent, _direction), do: []
+  defp book_levels(_absent, _direction), do: {:ok, []}
 
   # The venue's footprint granularities. **Deliberately narrower than `timeframes/0`** —
   # the footprint endpoint serves five widths and the bars endpoint serves more, and a
@@ -5597,6 +5658,8 @@ defmodule DpExchange.Webull.Rest do
          {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
          :ok <- required_order_prices(request, order_type),
          :ok <- positive_numbers(request, sent_price_fields(order_type)),
+         {:ok, expire} <- expire_date(request, tif),
+         {:ok, outcome} <- event_outcome(request),
          {:ok, session} <- support_trading_session(request) do
       leaf =
         %{
@@ -5613,8 +5676,8 @@ defmodule DpExchange.Webull.Rest do
         |> put_number("limit_price", price_for(request, order_type))
         |> put_number("stop_price", stop_for(request, order_type))
         |> put_number("trailing_stop_step", trailing_stop_step_for(request, order_type))
-        |> put_present("expire_date", expire_date(request, tif))
-        |> put_present("event_outcome", Map.get(request, :event_outcome))
+        |> put_present("expire_date", expire)
+        |> put_present("event_outcome", outcome)
         |> put_present("support_trading_session", session)
 
       {:ok, leaf}
@@ -5656,8 +5719,47 @@ defmodule DpExchange.Webull.Rest do
   # GTD is the only time-in-force with a date, and the venue requires one with it. Missing
   # is left missing rather than defaulted: a date chosen here would be an expiry the caller
   # never asked for.
-  defp expire_date(request, "GTD"), do: Map.get(request, :expire_date)
-  defp expire_date(_request, _tif), do: nil
+  #
+  # **What is sent is a `yyyy-MM-dd` date, or the order is refused.** The page types the field
+  # `string`, "format (UTC). The value must be in yyyy-MM-dd format"
+  # (`common-order-place.md`). It used to go to the wire as whatever the caller held, so a
+  # `DateTime` (JSON-encoded as a full timestamp), `"20261201"`, `"2026-12-01T00:00:00Z"` or a
+  # number reached the venue as a refusal about nothing the caller wrote. A `Date` is written
+  # in that form; a string must already be one real date in it.
+  defp expire_date(request, "GTD") do
+    case Map.get(request, :expire_date) do
+      nil -> {:ok, nil}
+      %Date{} = date -> {:ok, Date.to_iso8601(date)}
+      text when is_binary(text) -> expire_date_text(text)
+      other -> {:error, {:invalid_expire_date, other}}
+    end
+  end
+
+  defp expire_date(_request, _tif), do: {:ok, nil}
+
+  defp expire_date_text(text) do
+    with {:ok, date} <- Date.from_iso8601(text),
+         true <- Date.to_iso8601(date) == text do
+      {:ok, text}
+    else
+      _not_a_date -> {:error, {:invalid_expire_date, text}}
+    end
+  end
+
+  # `event_outcome` is `yes` or `no` on the page (`common-order-place.md`: "only applicable to
+  # event orders"), the two opposite exposures to one market. It went to the wire as whatever
+  # the caller held (`to_string/1` of an atom, a map raising), so `:maybe` or `"YES "` was a
+  # refusal the caller could not trace, on an order that moves money. Written lower-case, the
+  # form the page gives; anything but those two is refused before a request. Absent stays
+  # absent: the page does not mark the field required.
+  defp event_outcome(request) do
+    case Map.get(request, :event_outcome) do
+      nil -> {:ok, nil}
+      outcome when outcome in [:yes, :no] -> {:ok, Atom.to_string(outcome)}
+      outcome when outcome in ["yes", "no"] -> {:ok, outcome}
+      other -> {:error, {:invalid_event_outcome, other}}
+    end
+  end
 
   # `QTY` sizes in units, `AMOUNT` in cash. They are different orders and the venue names
   # them separately; a caller that gave neither gets an error rather than a default, and a
@@ -6017,7 +6119,8 @@ defmodule DpExchange.Webull.Rest do
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
   def get_orders(credentials, opts) do
-    with {:ok, account_id} <- account_id(opts) do
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- validate_orders_window(opts) do
       history? = Keyword.get(opts, :history, false)
 
       path =

@@ -798,7 +798,10 @@ defmodule DpExchange.Webull.Socket do
             # and `Feed` needs it (issue #11): a "Permission grabbed" notice on THIS
             # session is the evidence that its silence is a sibling's grab rather than a
             # lost subscription.
-            details: %{venue_notice: body, session_id: Map.get(state, :session_id)},
+            details: %{
+              venue_notice: bound_notice_body(body),
+              session_id: Map.get(state, :session_id)
+            },
             severity: venue_notice_severity(body)
           )
         )
@@ -813,6 +816,22 @@ defmodule DpExchange.Webull.Socket do
   end
 
   defp emit(_state, _topic, _payload), do: :ok
+
+  # The decoded body rides in the notice's `details`, and `bound_text/1` only bounds the
+  # words. The venue documents no notice size and a frame may be up to the 1 MiB `MqttPacket`
+  # allows, so one frame could still put a megabyte-sized term into a notice that a consumer
+  # keeps. Past 64 KiB (in `:erlang.external_size/1`, the term's own size, not the wire's) the
+  # body is replaced by a statement that it was too large, with its size: the message text,
+  # which is bounded separately, still carries the venue's words, and nothing is invented.
+  # Every notice the venue has been seen to send is far below this.
+  @max_notice_body_bytes 65_536
+
+  defp bound_notice_body(body) do
+    case :erlang.external_size(body) do
+      size when size <= @max_notice_body_bytes -> body
+      size -> %{"truncated" => true, "approx_bytes" => size}
+    end
+  end
 
   # No non-binary clause: dialyzer proves this call site always passes a binary, and a dead
   # fallback is the unreachable code assertion 16 exists to find. A non-binary would raise

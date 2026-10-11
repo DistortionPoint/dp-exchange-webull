@@ -84,7 +84,12 @@ defmodule DpExchangeWebull.MixProject do
       # before they reach the behaviour under test, and skipping. Green, and proving nothing.
       # That is the exact false pass the option was added to remove, so the floor is what
       # keeps it removed. Resolved and compiled against before this line was written.
-      {:dp_exchange_core, "~> 0.3.52"},
+      #
+      # `0.3.74` is the floor now: from there `Core.Types.Order.order_type` names
+      # `:trailing_stop` (and `:trailing_stop_limit`, `:market_on_close`, `:limit_on_close`),
+      # which `Rest.order_type_atom/1` returns for a `TRAILING_STOP_LOSS` order. Against an
+      # older Core an `Order` this package returned was one `Order.new/1` refuses.
+      {:dp_exchange_core, "~> 0.3.74"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

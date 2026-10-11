@@ -22,6 +22,63 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`get_order_book/3` built a level `Core.Types.OrderBook` refuses.** `OrderBook.level/0` is
+  `{Decimal.t(), Decimal.t()}` and `OrderBook.new/1` raises on anything else; a level with a
+  readable `price` and an absent, `"null"` or `"NaN"` `size` was passed on as `{price, nil}`
+  (`usage-rules.md` even called it "a real shape"). The book is now refused:
+  `{:error, {:missing_required_field, :size}}` or `{:error, {:invalid_decimal, :size, value}}`.
+  Dropping the level instead would have published a hole in the book as "no liquidity at that
+  price". A level with no readable `price` is dropped as before.
+- **`expire_date` and `event_outcome` of an order went to the wire as the caller held them.**
+  `common-order-place.md` types `expire_date` "yyyy-MM-dd" (UTC) and `event_outcome` `yes` or
+  `no`. A `DateTime` (JSON-encoded as a full timestamp), `"20261201"`, a number, `:maybe` or
+  `"YES"` was a refusal about nothing the caller wrote, on an order that moves money. A GTD
+  `expire_date` must now be a `Date` (written as `yyyy-MM-dd`) or one real `yyyy-MM-dd` string,
+  else `{:error, {:invalid_expire_date, value}}`; `event_outcome` must be `:yes`, `:no`,
+  `"yes"` or `"no"`, else `{:error, {:invalid_event_outcome, value}}`. Both are checked before
+  any request, in `place_order/3`, `preview_order/3` and the fake (one builder; the batch
+  endpoint takes neither field). A missing GTD date is still left missing, as documented.
+- **A time bound that was not a `DateTime` was sent as it came.** `get_transfers/2`,
+  `get_transactions/2` and `get_orders/2` (`history: true`) wrote `:start`, `:end`, `:since` and
+  `:until` through `iso_millis/1`'s pass-through clause, so an epoch integer, a `NaiveDateTime`
+  or a `Date` reached the venue in a form the page does not define, and the cross-year guard
+  skipped exactly those values. They are now `{:error, {:invalid_time, key, value}}` before a
+  request (new `Rest.validate_orders_window/1`; `Rest.validate_activity_range/1` gains the
+  check; `Fake` runs both, in the real path's order).
+- **A `notice` body of any size rode in `details.venue_notice`.** Only the words were bounded
+  (1 KiB), so one frame of up to the 1 MiB packet limit put a megabyte-sized term into a
+  notice a consumer may keep. Past 64 KiB (`:erlang.external_size/1`) `details.venue_notice`
+  is `%{"truncated" => true, "approx_bytes" => n}`; the bounded message and the severity are
+  still read from the whole body.
+- **`Subscription` returned a refusing body whole.** `{:error, {:refused, status, body}}`
+  carried a gateway's entire page (up to the 16 MiB response limit). Text over 2 KiB is cut
+  (on a character boundary where valid), copied and marked `... [truncated, N bytes in all]`;
+  a decoded JSON body is unchanged.
+
+- **`Feed` measured "did this shard deliver lately" on the host's clock.** `state.delivering`
+  and `state.rotated_at` were stamped and compared with `:os.system_time/1`, the one in-VM
+  duration left on the wall clock after the rejected-symbol TTL moved off it: an NTP step or a
+  resync forward made every delivering shard look silent (feeding the reopen gate) and one
+  backward kept a dead shard looking alive. They now use `System.system_time/1`, the VM's own
+  slewed time (still epoch-based because `0` is the "never" default they are read with).
+  Tests that plant a `delivering` stamp use the same call.
+
+### Changed
+
+- **`dp_exchange_core` floor is `~> 0.3.74`.** From there `Core.Types.Order.order_type` names
+  `:trailing_stop`, which `Rest.order_type_atom/1` returns for `TRAILING_STOP_LOSS`; against an
+  older Core an `Order` this package returned was one `Order.new/1` refuses. This closes the
+  gap recorded under "Not changed" in 0.4.128 (the first bullet there is now resolved by Core).
+- **Position side is declared an unmeasured assumption.** `account-position.md` describes
+  `quantity` only as "Quantity of the position" and documents no sign convention; reading a
+  negative as `:short` (`Position.from_signed_quantity/1`) is now stated in
+  `get_positions/2`'s `@doc` as not measured against a live short position. Behaviour unchanged.
+- Test waits: every explicit `assert_receive`, `Task.yield`, `Task.await` and polling budget
+  under 5 s that waited on a spawned process or timer is now 5 s (the `refute_receive` windows
+  stay short).
+
 ## [0.4.128] - 2026-10-11
 
 ### Fixed

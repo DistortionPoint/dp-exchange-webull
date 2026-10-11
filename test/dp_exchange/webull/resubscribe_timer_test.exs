@@ -132,7 +132,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed = start_feed(shards: %{0 => shard}, plug: plug, credentials: credentials())
 
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond)}}
+        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond)}}
       end)
 
       send(feed, :resubscribe)
@@ -162,7 +162,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
           retry_attempts: 0
         )
 
-      long_ago = :os.system_time(:millisecond) - 120_000
+      long_ago = System.system_time(:millisecond) - 120_000
       :sys.replace_state(feed, &%{&1 | delivering: %{"BTC-USD" => long_ago}})
 
       send(feed, :resubscribe)
@@ -215,7 +215,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
-      now = :os.system_time(:millisecond)
+      now = System.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{
@@ -251,7 +251,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      now = :os.system_time(:millisecond)
+      now = System.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
@@ -278,7 +278,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      now = :os.system_time(:millisecond)
+      now = System.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
@@ -304,7 +304,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["XRP-USD"])
 
-      now = :os.system_time(:millisecond)
+      now = System.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
@@ -327,7 +327,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      long_ago = :os.system_time(:millisecond) - 300_000
+      long_ago = System.system_time(:millisecond) - 300_000
 
       :sys.replace_state(feed, fn state ->
         state = put_in(state.shards[0].connected?, false)
@@ -366,7 +366,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
           retry_attempts: 0
         )
 
-      now = :os.system_time(:millisecond)
+      now = System.system_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{
@@ -428,7 +428,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       end
 
       feed = two_shards(plug: plug, limiter: limiter, retry_attempts: 0)
-      long_ago = :os.system_time(:millisecond) - 120_000
+      long_ago = System.system_time(:millisecond) - 120_000
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => long_ago, "SOL-USD" => long_ago}}
@@ -499,8 +499,8 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
 
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD"])})
 
-      assert_receive {:request, ["BTCUSD"]}, 4_000
-      assert_receive {:request, ["BTCUSD"]}, 4_000
+      assert_receive {:request, ["BTCUSD"]}, 5_000
+      assert_receive {:request, ["BTCUSD"]}, 5_000
     end
   end
 

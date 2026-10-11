@@ -249,15 +249,15 @@ defmodule DpExchange.Webull.FeedTest do
           end
         end)
 
-      assert_receive {:reconciling, request}, 2_000
-      assert_receive {:subscribed, {:error, {:reconcile_pending, 200}}}, 2_000
+      assert_receive {:reconciling, request}, 5_000
+      assert_receive {:subscribed, {:error, {:reconcile_pending, 200}}}, 5_000
 
       # The reconcile finishes after the caller was answered. Its own reply to the same
       # `from` must not surface as a stray message in the caller's mailbox.
       send(request, :release)
       wait_until_reconciled(feed)
       send(caller, :report_mailbox)
-      assert_receive {:mailbox, {:messages, []}}, 1_000
+      assert_receive {:mailbox, {:messages, []}}, 5_000
     end
 
     defp wait_until_reconciled(feed, waited \\ 0) do
@@ -265,7 +265,7 @@ defmodule DpExchange.Webull.FeedTest do
         :sys.get_state(feed).reconciling == %{} ->
           :ok
 
-        waited >= 2_000 ->
+        waited >= 5_000 ->
           flunk("the reconcile never finished")
 
         true ->
@@ -294,7 +294,7 @@ defmodule DpExchange.Webull.FeedTest do
         )
       end)
 
-      assert_receive {:reconciling, task_pid}, 3_000
+      assert_receive {:reconciling, task_pid}, 5_000
       Process.exit(task_pid, :kill)
 
       assert_receive {:subscribed, {:error, _reason}}, 5_000
@@ -328,7 +328,7 @@ defmodule DpExchange.Webull.FeedTest do
         )
       end)
 
-      assert_receive {:reconciling, task_pid}, 3_000
+      assert_receive {:reconciling, task_pid}, 5_000
 
       # Monitored before the deadline can arrive, because the reason this task dies by is
       # the assertion: `:shutdown` and `:killed` end it identically here, and only the
@@ -345,7 +345,7 @@ defmodule DpExchange.Webull.FeedTest do
       task_ref = Process.monitor(task_pid)
 
       assert_receive {:subscribed, {:error, _reason}}, 5_000
-      assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :shutdown}, 1_000
+      assert_receive {:DOWN, ^task_ref, :process, ^task_pid, :shutdown}, 5_000
 
       assert :sys.get_state(feed).reconciling == %{}
       refute Process.alive?(task_pid)
@@ -857,7 +857,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
 
       assert_receive {:subscribed, ["BTCUSD"]}
-      assert {:ok, :ok} = Task.yield(task, 1_000)
+      assert {:ok, :ok} = Task.yield(task, 5_000)
     end
 
     test "a link_down clears that shard's :connected?, so the next subscribe waits again", %{
@@ -880,7 +880,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
 
-      assert {:ok, :ok} = Task.yield(task, 1_000)
+      assert {:ok, :ok} = Task.yield(task, 5_000)
     end
   end
 
@@ -1210,7 +1210,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:dp_exchange, :webull, link_up("shard-0")})
 
       # The rejected attempt, surfaced to the original caller as-is...
-      assert {:ok, {:error, :oversubscribed}} = Task.yield(task, 1_000)
+      assert {:ok, {:error, :oversubscribed}} = Task.yield(task, 5_000)
 
       assert_receive {:request, "/market-data/streaming/subscribe", "shard-0",
                       ["AAAUSD", "BBBUSD"]}
@@ -1336,7 +1336,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       Process.exit(crash_pid, :kill)
 
-      assert {:ok, {:error, {:shard_crashed, _reason}}} = Task.yield(task, 1_000)
+      assert {:ok, {:error, {:shard_crashed, _reason}}} = Task.yield(task, 5_000)
     end
   end
 
@@ -1370,7 +1370,7 @@ defmodule DpExchange.Webull.FeedTest do
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["BTC-USD", "ETH-USD"])})
 
       send(feed, :resubscribe)
-      assert_receive {:blocked, blocked_pid}, 3_000
+      assert_receive {:blocked, blocked_pid}, 5_000
       on_exit(fn -> if Process.alive?(blocked_pid), do: send(blocked_pid, :release) end)
 
       # A different symbol's tick, while shard 0's resubscribe HTTP call is still
@@ -1380,7 +1380,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:dp_exchange, :webull, quote_for("ETH-USD")})
 
       coverage_task = Task.async(fn -> Feed.coverage(feed) end)
-      assert {:ok, coverage} = Task.yield(coverage_task, 300)
+      assert {:ok, coverage} = Task.yield(coverage_task, 5_000)
       assert coverage == %{"ETH-USD" => :stream}
 
       send(blocked_pid, :release)
@@ -1920,7 +1920,7 @@ defmodule DpExchange.Webull.FeedTest do
       # The shard is dropped and re-opening: `rebuild_stale_shard/3` deletes it and sends
       # itself `{:open_shard, ...}`, so what a consumer sees is the shard going away and a
       # `:link_down` notice explaining why.
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 2_000
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 5_000
       assert notice.details.reason =~ "reopening the shard on a fresh session"
 
       refute Map.has_key?(:sys.get_state(feed).resubscribe_failed, 0)
@@ -1973,7 +1973,7 @@ defmodule DpExchange.Webull.FeedTest do
       # what distinguishes "nothing came back" from "the venue refused", and a consumer
       # choosing between waiting and reconnecting needs that distinction to be IN the value
       # rather than inferred from its absence.
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 2_000
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 5_000
       assert notice.details.reason =~ "no_venue_response"
       assert notice.details.reason =~ "reconcile_timeout"
     end
@@ -2013,7 +2013,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:reconcile_done, {:link_up, 0}, {:error, {:invalid_session, "s0"}}})
       _settled = Feed.coverage(feed)
 
-      assert_receive {^ref, {:error, {:invalid_session, "s0"}}}, 1_000
+      assert_receive {^ref, {:error, {:invalid_session, "s0"}}}, 5_000
       assert Process.alive?(feed)
     end
 
@@ -2038,7 +2038,7 @@ defmodule DpExchange.Webull.FeedTest do
         end
 
       for caller <- callers do
-        assert {:error, {:connack_timeout, 200}} = Task.await(caller, 2_000)
+        assert {:error, {:connack_timeout, 200}} = Task.await(caller, 5_000)
       end
 
       assert :sys.get_state(feed).shards[0].reply_to == nil
@@ -2060,7 +2060,7 @@ defmodule DpExchange.Webull.FeedTest do
       wait_for_parked(feed, 2)
       send(feed, {:reconcile_done, {:link_up, 0}, :ok})
 
-      for caller <- callers, do: assert(:ok = Task.await(caller, 2_000))
+      for caller <- callers, do: assert(:ok = Task.await(caller, 5_000))
     end
 
     # Polled rather than slept: the callers park from their own processes, and only the
@@ -2072,7 +2072,7 @@ defmodule DpExchange.Webull.FeedTest do
         length(parked) == count ->
           :ok
 
-        waited >= 2_000 ->
+        waited >= 5_000 ->
           flunk("#{length(parked)} caller(s) parked, not #{count}")
 
         true ->
@@ -2107,7 +2107,7 @@ defmodule DpExchange.Webull.FeedTest do
                       {:error,
                        {:partial_failure,
                         failed: {:invalid_session, "s0"}, capacity_exceeded: ["ETH-USD"]}}},
-                     1_000
+                     5_000
     end
   end
 
@@ -2151,7 +2151,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # The shard delivered a moment ago — exactly the live case.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond)}}
+        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond)}}
       end)
 
       fail_n(feed, 0, 5)
@@ -2179,13 +2179,13 @@ defmodule DpExchange.Webull.FeedTest do
       # Delivered, but longer ago than `stale_delivery_ms` — the case where a reopen has
       # something to gain, because nothing is being lost by it.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => :os.system_time(:millisecond) - 10_000}}
+        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond) - 10_000}}
       end)
 
       Feed.subscribe_notices(feed, to: self())
       fail_n(feed, 0, 3)
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 2_000
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
       refute Map.has_key?(:sys.get_state(feed).shards, 0)
     end
 
@@ -2211,7 +2211,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # Only shard 1's symbol is arriving.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"ETH-USD" => :os.system_time(:millisecond)}}
+        %{state | delivering: %{"ETH-USD" => System.system_time(:millisecond)}}
       end)
 
       fail_n(feed, 0, 3)

@@ -1656,8 +1656,10 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_orders(credentials, opts \\ []) do
     with_injection(fn ->
-      # Account first, credentials second — matching `Rest.get_orders/2`'s own order.
+      # Account, then the history window, credentials last — matching `Rest.get_orders/2`'s
+      # own order.
       with :ok <- fake_account(opts),
+           :ok <- Rest.validate_orders_window(opts),
            :ok <- credentialed(credentials) do
         # Open by default, history when asked — the venue has two endpoints, not a filter.
         #

@@ -212,6 +212,32 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert Decimal.equal?(price, Decimal.new("13.89"))
     end
 
+    test "a priced level with no readable size refuses the book, never a {price, nil} level" do
+      # `Core.Types.OrderBook` types a level `{Decimal.t(), Decimal.t()}`. A level with a price
+      # and no size used to ride out as `{price, nil}`, a tuple `OrderBook.new/1` raises on.
+      missing = depth_row(%{"bids" => [%{"price" => "13.89"}]})
+      unreadable = depth_row(%{"asks" => [%{"price" => "13.91", "size" => "null"}]})
+      not_a_number = depth_row(%{"asks" => [%{"price" => "13.91", "size" => "NaN"}]})
+
+      assert {:error, {:missing_required_field, :size}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([missing]),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:invalid_decimal, :size, "null"}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([unreadable]),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:invalid_decimal, :size, "NaN"}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([not_a_number]),
+                 retry_attempts: 0
+               )
+    end
+
     test "an empty response is unreadable, not an empty book" do
       # No row means the venue said nothing about this symbol. An empty book would claim it
       # said there is no depth.

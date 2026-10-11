@@ -407,6 +407,94 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert_receive {:sent, body, _path}
       refute body["new_orders"] |> List.first() |> Map.has_key?("expire_date")
     end
+
+    test "a Date is written as the yyyy-MM-dd the page requires" do
+      me = self()
+
+      assert {:ok, _order} =
+               Rest.place_order(
+                 @credentials,
+                 equity_request(%{
+                   instrument_type: :event,
+                   time_in_force: :gtd,
+                   expire_date: ~D[2026-12-01]
+                 }),
+                 plug: capturing([%{"client_order_id" => "c1"}], me),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert_receive {:sent, body, _path}
+      assert body["new_orders"] |> List.first() |> Map.get("expire_date") == "2026-12-01"
+    end
+
+    test "an expire date that is not one real yyyy-MM-dd date is refused before any request" do
+      me = self()
+
+      for bad <- [
+            "20261201",
+            "2026-12-01T00:00:00Z",
+            "2026-02-30",
+            "tomorrow",
+            "",
+            20_261_201,
+            ~U[2026-12-01 00:00:00Z]
+          ] do
+        request =
+          equity_request(%{instrument_type: :event, time_in_force: :gtd, expire_date: bad})
+
+        assert {:error, {:invalid_expire_date, ^bad}} =
+                 Rest.place_order(@credentials, request,
+                   plug: capturing([%{"client_order_id" => "c1"}], me),
+                   account_id: @account,
+                   retry_attempts: 0
+                 )
+      end
+
+      refute_receive {:sent, _body, _path}, 50
+    end
+  end
+
+  describe "event_outcome is yes or no" do
+    test "an atom or text outcome is written lower-case" do
+      me = self()
+
+      for {given, wire} <- [{:yes, "yes"}, {:no, "no"}, {"yes", "yes"}, {"no", "no"}] do
+        assert {:ok, _order} =
+                 Rest.place_order(
+                   @credentials,
+                   equity_request(%{
+                     instrument_type: :event,
+                     time_in_force: :gtc,
+                     event_outcome: given
+                   }),
+                   plug: capturing([%{"client_order_id" => "c1"}], me),
+                   account_id: @account,
+                   retry_attempts: 0
+                 )
+
+        assert_receive {:sent, body, _path}
+        assert body["new_orders"] |> List.first() |> Map.get("event_outcome") == wire
+      end
+    end
+
+    test "anything else is refused before any request" do
+      me = self()
+
+      for bad <- [:maybe, "YES", "yes ", "", 1, %{"x" => 1}] do
+        request =
+          equity_request(%{instrument_type: :event, time_in_force: :gtc, event_outcome: bad})
+
+        assert {:error, {:invalid_event_outcome, ^bad}} =
+                 Rest.place_order(@credentials, request,
+                   plug: capturing([%{"client_order_id" => "c1"}], me),
+                   account_id: @account,
+                   retry_attempts: 0
+                 )
+      end
+
+      refute_receive {:sent, _body, _path}, 50
+    end
   end
 
   describe "preview_order/3" do

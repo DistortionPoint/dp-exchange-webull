@@ -706,7 +706,7 @@ defmodule DpExchange.Webull.Feed do
        # option, so a test can exercise rebalancing without needing @pairs_per_socket
        # real symbols to do it.
        shard_capacity: Config.opt(opts, :shard_capacity, %{}),
-       # symbol => expiry (`:os.system_time(:millisecond)`). Excluded from
+       # symbol => expiry (`System.monotonic_time(:millisecond)`). Excluded from
        # `plan_reshard/1`'s effective wanted set while unexpired — see the moduledoc's "A
        # venue-rejected symbol is excluded, timed, and reported". Never removed from
        # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
@@ -1581,7 +1581,7 @@ defmodule DpExchange.Webull.Feed do
       true ->
         {index, shard} = Enum.min_by(quiet, fn {index, _shard} -> rotation_key(state, index) end)
         announce_rotation(state, index, shard)
-        state = put_in(state.rotated_at[index], :os.system_time(:millisecond))
+        state = put_in(state.rotated_at[index], now_ms())
         reassert_shard({index, shard}, state)
     end
   end
@@ -2964,7 +2964,7 @@ defmodule DpExchange.Webull.Feed do
         false
 
       {:ok, %{symbols: symbols}} ->
-        cutoff = :os.system_time(:millisecond) - window_ms
+        cutoff = now_ms() - window_ms
         Enum.any?(symbols, fn symbol -> Map.get(state.delivering, symbol, 0) > cutoff end)
     end
   end
@@ -3286,7 +3286,7 @@ defmodule DpExchange.Webull.Feed do
   defp record_quote(state, message, quote_struct) do
     state = deliver(state, message)
 
-    now = :os.system_time(:millisecond)
+    now = now_ms()
     symbol = quote_struct.symbol
     delivering = Map.put(state.delivering, symbol, now)
 
@@ -3312,4 +3312,16 @@ defmodule DpExchange.Webull.Feed do
 
     {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
   end
+
+  # The scale `state.delivering` and `state.rotated_at` are written and compared on:
+  # milliseconds since the epoch on the VM's own system time (`System.system_time/1`), not
+  # `:os.system_time/1`. Both fields are in-VM durations ("did this shard deliver in the last
+  # five minutes", "which shard was rotated longest ago"), and `:os.system_time/1` is the
+  # host's clock: an NTP step or a resync after a bad RTC moved it by whatever distance, so a
+  # forward step made every delivering shard look silent (and a quiet one eligible for a
+  # reopen) and a backward step made a dead shard look alive for that long. The VM's system
+  # time is slewed, never stepped, in the default `no_time_warp` mode. Kept epoch-based, not
+  # monotonic, because `0` is the "never" default these maps are read with and a monotonic
+  # reading can be negative.
+  defp now_ms, do: System.system_time(:millisecond)
 end

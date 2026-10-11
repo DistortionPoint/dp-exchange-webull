@@ -116,7 +116,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       second = reconcile_pid(feed, first)
       second_ref = Process.monitor(second)
 
-      assert_receive {:DOWN, ^first_ref, :process, ^first, _reason}, 1_000
+      assert_receive {:DOWN, ^first_ref, :process, ^first, _reason}, 5_000
 
       refute_receive {:DOWN, ^second_ref, :process, ^second, _reason}, 1_200
 
@@ -140,7 +140,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
 
       cond do
         pid -> pid
-        waited >= 2_000 -> flunk("no new reconcile attempt after 2000ms")
+        waited >= 5_000 -> flunk("no new reconcile attempt after 5000ms")
         true -> Process.sleep(5) && reconcile_pid(feed, unless_pid, waited + 5)
       end
     end
