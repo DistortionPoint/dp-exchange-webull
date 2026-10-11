@@ -816,9 +816,10 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def subscribe(symbols, opts \\ []) do
-    case check_symbols(symbols) do
-      :ok -> symbols |> canonical_case() |> subscribe_checked(opts)
-      {:error, _reason} = refused -> refused
+    # Refused in the real `Feed`'s order: the symbol list, then the subscriber.
+    with :ok <- check_symbols(symbols),
+         :ok <- DpExchange.Webull.Feed.check_subscriber(Config.opt(opts, :to, self())) do
+      symbols |> canonical_case() |> subscribe_checked(opts)
     end
   end
 
@@ -890,8 +891,12 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def subscribe_notices(opts \\ []) do
-    send(Config.opt(opts, :to, self()), {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
-    :ok
+    target = Config.opt(opts, :to, self())
+
+    with :ok <- DpExchange.Webull.Feed.check_subscriber(target) do
+      send(target, {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
+      :ok
+    end
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())

@@ -591,9 +591,23 @@ defmodule DpExchange.Webull.Feed do
   # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
   # uses to *hear that something is wrong* was the one call that could kill the host's
   # calling process for asking during exactly the conditions it exists to report.
-  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok
+  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok | {:error, term()}
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
+
+  @doc """
+  Whether `to` can name a subscriber: a pid or a registered name (an atom).
+
+  Anything else is `{:error, {:invalid_subscriber, to}}`. `Core.Fanout.resolve/1` has a
+  clause for a pid and one for an atom and no other, so a subscriber such as a string or a
+  `{:global, name}` tuple that reached `subscribers` raised `FunctionClauseError` inside this
+  one named process on the first delivery, and the restart that followed dropped every other
+  consumer's subscriptions with it. `subscribe/3` and `subscribe_notices/2` refuse it here
+  instead, and `DpExchange.Webull.Fake` calls the same function so the two cannot drift.
+  """
+  @spec check_subscriber(term()) :: :ok | {:error, {:invalid_subscriber, term()}}
+  def check_subscriber(subscriber) when is_pid(subscriber) or is_atom(subscriber), do: :ok
+  def check_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
   # --- server -------------------------------------------------------------
 
@@ -751,8 +765,10 @@ defmodule DpExchange.Webull.Feed do
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber, opts}, from, state) do
-    case check_symbols(symbols) do
-      :ok -> apply_subscribe(symbols, subscriber, opts, from, state)
+    with :ok <- check_symbols(symbols),
+         :ok <- check_subscriber(subscriber) do
+      apply_subscribe(symbols, subscriber, opts, from, state)
+    else
       {:error, _reason} = refused -> {:reply, refused, state}
     end
   end
@@ -785,13 +801,19 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_call({:subscribe_notices, subscriber}, _from, state) do
-    state = %{
-      state
-      | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
-        monitors: Fanout.watch(subscriber, state.monitors)
-    }
+    case check_subscriber(subscriber) do
+      :ok ->
+        state = %{
+          state
+          | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
+            monitors: Fanout.watch(subscriber, state.monitors)
+        }
 
-    {:reply, :ok, state}
+        {:reply, :ok, state}
+
+      {:error, _reason} = refused ->
+        {:reply, refused, state}
+    end
   end
 
   def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}

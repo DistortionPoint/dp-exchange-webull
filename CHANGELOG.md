@@ -22,6 +22,23 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `to:` that was not a pid or a registered name crashed the shared `Feed` on the first
+  delivery.** `subscribe/2` and `subscribe_notices/1` stored any term as the subscriber, and
+  `Core.Fanout.resolve/1` has clauses for a pid and an atom only, so a string, a
+  `{:global, name}` tuple or a number raised `FunctionClauseError` inside the one named
+  process. The restart that followed dropped every other consumer's subscriptions. Both are
+  now refused up front with `{:error, {:invalid_subscriber, to}}` and nothing is recorded
+  (`Feed.check_subscriber/1`, shared with `DpExchange.Webull.Fake`, which refuses the same
+  values in the same order: symbol list first, then subscriber).
+- **`coverage/1` and `coverage_by_kind/1` raised `FunctionClauseError` for a `feed:` given as
+  `{:global, name}`, `{:via, module, name}` or `{name, node}`.** Their specs promise a map. Any
+  `GenServer.server()` form is accepted now, and a name that resolves to no local process reads
+  as the empty map.
+- **The `DpExchange.Webull` moduledoc named `get_historical_prices/5`**, an arity the facade
+  does not have (`Rest.get_historical_prices/5` is the internal one). It says `/4`.
+
 ## [0.4.130] - 2026-10-11
 
 ### Fixed

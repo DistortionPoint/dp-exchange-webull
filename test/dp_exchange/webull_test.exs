@@ -164,6 +164,20 @@ defmodule DpExchange.WebullTest do
     test "an unstarted feed reports an empty map, not a crash" do
       assert Webull.coverage(feed: :no_such_feed_process) == %{}
     end
+
+    test "a feed named by any GenServer.server() form is read, started or not" do
+      name = {:global, {:webull_coverage_test, make_ref()}}
+
+      assert Webull.coverage(feed: name) == %{}
+      assert Webull.coverage_by_kind(feed: name) == %{}
+
+      {:ok, pid} = DpExchange.Webull.Feed.start_link(name: name)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      assert Webull.coverage(feed: name) == %{}
+      assert Webull.coverage_by_kind(feed: name) == %{}
+      assert Webull.coverage(feed: pid) == %{}
+    end
   end
 
   describe "coverage_by_kind/1" do

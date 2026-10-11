@@ -278,6 +278,10 @@ by a session identifier this package generates and gives to both.
 :ok = DpExchange.Webull.subscribe(["BTC-USD"], credentials: creds, to: self())
 ```
 
+`to:` names who receives the stream and defaults to the caller. It must be a pid or a
+registered name (an atom); anything else is `{:error, {:invalid_subscriber, to}}` and nothing
+is subscribed. `subscribe_notices/1` takes `to:` under the same rule.
+
 **The venue does not restore subscriptions after a reconnect.** This package replays them
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
 the credentials you supplied — at start, or on the subscribe call.

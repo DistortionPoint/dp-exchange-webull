@@ -66,7 +66,7 @@ defmodule DpExchange.Webull do
   `Core.Capabilities` has one flat list for the whole package, with no room to say "these
   three only on these asset classes," so the declaration is the union of what any active
   path serves. (`1y` was withheld until `dp_exchange_core` 0.1.57 widened
-  `Timeframe.nameable/0`; it is declared now.) `get_historical_prices/5` still refuses
+  `Timeframe.nameable/0`; it is declared now.) `get_historical_prices/4` still refuses
   `1w`/`1M`/`1y` per-call on a crypto or event-contract category rather than degrading to
   the nearest width it does serve.
 
@@ -899,8 +899,13 @@ defmodule DpExchange.Webull do
 
   defp feed(opts), do: Config.opt(opts, :feed, DpExchange.Webull.Supervisor.feed_name(opts))
 
-  defp alive?(name) when is_atom(name), do: is_pid(GenServer.whereis(name))
-  defp alive?(pid) when is_pid(pid), do: Process.alive?(pid)
+  # Every `GenServer.server()` form: a pid, a registered name, `{:global, term}`,
+  # `{:via, module, term}` and `{name, node}`. Only the first two used to be accepted, so
+  # `coverage(feed: {:global, name})` raised `FunctionClauseError` from a function whose spec is
+  # a map. A name that resolves to no local pid, or to a remote one, reads as "not alive" and
+  # takes the empty answer; `feed_read/2` still catches the exit of a call that fails anyway.
+  defp alive?(pid) when is_pid(pid), do: node(pid) != node() or Process.alive?(pid)
+  defp alive?(server), do: is_pid(GenServer.whereis(server))
 
   # **A streaming call answers; it does not exit in the caller's process.** Every
   # streaming callback's spec is a value (`:ok | {:error, term()}`, or a map). A bare
