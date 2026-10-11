@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.122] - 2026-10-11
+
 ### Fixed
 
 - **A QoS 1 or 2 `PUBLISH` was never acknowledged.** The MQTT module stated "QoS 0
