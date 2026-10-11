@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.127] - 2026-10-11
+
 ### Fixed
 
 - **An answered call left its `{:caller_due, from}` deadline running.** `Feed` armed one timer
