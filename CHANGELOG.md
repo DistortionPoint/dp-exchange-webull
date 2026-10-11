@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.130] - 2026-10-11
+
 ### Fixed
 
 - **An equity, option, future or event symbol was split like a crypto pair.** `SymbolFormat`
