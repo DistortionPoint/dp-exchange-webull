@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.124] - 2026-10-11
+
 ### Fixed
 
 - **A count over a maximum the endpoint's page states went to the venue.** Refused locally
