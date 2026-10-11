@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.132] - 2026-10-11
+
 ### Fixed
 
 - **A `pagination_key` that was not text was sent back as the next cursor.** The key was taken
