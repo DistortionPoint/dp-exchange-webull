@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.126] - 2026-10-11
+
 ### Fixed
 
 - **An order's numbers went to the wire as typed.** `quantity`, `amount` and the price the
