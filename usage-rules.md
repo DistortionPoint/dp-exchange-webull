@@ -989,6 +989,34 @@ and never a JSON number). `replace_order/4` holds its `changes` to the same rule
 `US_FUTURES` takes `depth` 1 to 10 (`{:depth_out_of_range, n, max: 10}`), as the venue's page
 states. The fake refuses all of these identically.
 
+**`opts[:account_id]` must be non-empty text** on every account and order call; `nil`, a number,
+`false` and `""` are `{:error, :account_id_required}`, here and in the fake (`place_orders/3`
+included). `:activity_types` on `get_transfers/2` and `get_transactions/2` is a non-empty list
+of text or the venue's own comma-joined string; anything else is
+`{:error, {:invalid_activity_types, value}}`.
+
+**An `Order` that `place_order/3` hands back is in the contract's vocabulary, not in your
+spelling of the request**: `side` is `:buy` or `:sell` (`nil` for `SHORT`, which `Order` has no
+word for, as a read-back of one is), and `quantity`, `price` and `stop_price` are `Decimal`s
+whatever you sent (an integer, a numeric string). The fake builds its orders with the same
+function. **A replace the venue accepted whose read-back then fails** is
+`{:error, {:replace_accepted_unread, client_order_id, reason}}`: the amendment took effect,
+so read the order with `get_order/3` rather than sending the replace again.
+
+**`get_positions/1` refuses a row with no readable `quantity`** (`{:error,
+{:missing_required_field, :quantity}}`, or `{:invalid_decimal, :quantity, value}`) for the
+whole list: the venue's page lists it as required and `Position` has no `nil` quantity or side.
+
+**The fake narrows what the venue narrows.** `Fake.get_option_chain/2` and
+`Fake.get_option_expirations/2` honour `:expiry` and `:strike`; `Fake.get_price/2` and
+`Fake.get_top_of_book/2` refuse a snapshot category the venue has no endpoint for
+(`{:unsupported_snapshot_category, c}`) and `Fake.get_top_of_book/2` refuses `US_EVENT`;
+`Fake.get_historical_prices/4` checks the category, width, range and `:limit` of whichever of
+the five bars endpoints the category names; `Fake.get_trades/2` checks the category and
+`:limit`; `Fake.get_financials/3` refuses a `:count` over 20; and `Fake.get_news/1` has no
+`headline`, as the real stream names none. A request those endpoints would accept for a symbol
+the fake does not model is `{:refused, :not_listed}`.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

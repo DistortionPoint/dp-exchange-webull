@@ -22,6 +22,86 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Error text quotes a venue body bounded.** Six unexpected-status branches in `Rest` and
+  `Subscription` put `inspect(body)` / `inspect(response)` into
+  `{:exchange_error, :webull, _}`, so a CDN error page became the message. Quoted bounded
+  now (`limit: 50`, `printable_limit: 2_048`), as Core does.
+
+- **`place_order/3` handed back the request as the caller typed it.** `Order.side` is
+  `:buy | :sell` and its sizes are `Decimal`s, and the answer carried `side: "buy"` (or
+  `:short`) and `quantity: 5` / `price: "180.5"` unchanged, inside a struct `Order.new/1`
+  refuses. The side is now read through the same `BUY`/`SELL` table a read-back uses (`SHORT`
+  has no slot, so it is `nil`, as a read-back of it is) and `quantity`, `price` and
+  `stop_price` are `Decimal`s. `Fake.place_order/3` and `Fake.place_orders/3` build their
+  orders with the same function (`Rest.order_from_request/2`); `Fake.replace_order/4` reads
+  amended numbers back as `Decimal`s.
+- **A failed read-back after an accepted `replace_order/4` looked like a failed replace.** The
+  venue had taken the amendment; the read's own `{:error, _}` / `{:refused, _}` came back
+  unchanged, so a caller retried a replace that had already taken effect. It is now
+  `{:error, {:replace_accepted_unread, client_order_id, reason}}` (the id goes back as
+  `place_order/3`'s `{:order_unconfirmed, id, reason}` does). Read the order with `get_order/3`.
+- **`get_positions/2` built a position with no quantity and no side.** A row whose `quantity`
+  was absent or not a number became `%Position{side: nil, quantity: nil}`, which
+  `Core.Types.Position` forbids (it enforces both, and states the quantity is always
+  positive); the page lists `quantity` as required. The whole list is now refused:
+  `{:error, {:missing_required_field, :quantity}}`, or `{:invalid_decimal, :quantity, value}`
+  (`"NaN"` included).
+- **`opts[:account_id]` was accepted as any non-`nil` term.** A number went into a JSON body as
+  a number where the venue types the account id as text, and `""` and `false` were accepted
+  by `Rest` and refused by `Fake` (and `Fake.place_orders/3` refused a non-binary that `Rest`
+  accepted). One validator, `Rest.validate_account/1`, now serves both: non-empty text, else
+  `{:error, :account_id_required}`.
+- **`get_transfers/2` raised on `activity_types: "DEPOSIT,TRANSFER"`** (`Enum.join/2` over a
+  string), and a list with a non-text member, or a number, raised or went to the wire as
+  `to_string/1` made of it. The venue's comma-joined string is sent as it is, and anything but
+  a non-empty list of text or such a string is `{:error, {:invalid_activity_types, value}}`
+  (`get_transactions/2` likewise). `Fake.get_transfers/2` filters by the string as it does by
+  a list.
+- **Core text fields received objects and numbers.** `FinancialStatement.currency`,
+  `CorporateEvent.currency`, `Filing` (`id`, `form_type`, `title`, `url`), `OptionContract`
+  (`venue_symbol`, `settlement_type`, `expiration_type`), `Watchlist.name` and the members of
+  `Watchlist.symbols` are `String.t() | nil` / `[String.t()]`, and were taken from the venue's
+  JSON as it came. Text is kept, a whole-number filing id becomes its string, anything else is
+  `nil` (a member that is not text is dropped). A watchlist row whose `watchlist_id` is not
+  text is dropped from `list_watchlists/2` and refused by `create_watchlist/4`.
+- **A watchlist was created before its arguments were checked.** `create_watchlist/4` created
+  the list and only then found a member was not text (the add failed), leaving an empty
+  watchlist for a mistake knowable from the arguments; and `sort` of text went out as a JSON
+  string where the pages type an integer. Members (`{:invalid_symbols, symbols}`) and sort
+  (`{:invalid_sort, sort}`) are checked before any request, on create, update and the
+  add/remove writes; `sort_watchlist_instruments/3` refuses a position that is not a whole
+  number (`{:invalid_sorts, sorts}`). The fake runs the same validators.
+- **`extended_hours: nil`, `overnight: nil` and `real_time: nil` were sent as an empty string
+  or JSON `null`**, where `nil` means the default everywhere else (`Config.opt/3`).
+- **`get_event_order_book/3` sent any `:depth`.** A value that is not a whole number of levels
+  is `{:error, {:depth_out_of_range, depth, min: 1}}` before a request.
+
+### Changed
+
+- **`DpExchange.Webull.Fake` refuses and narrows as `Rest` does**, each rule from a public
+  `Rest` validator rather than a copy: `get_price/2` and `get_top_of_book/2` refuse a
+  snapshot category the venue has no endpoint for (and `US_EVENT` for the top of book) before
+  credentials, and answer `{:refused, :not_listed}` for a category the venue serves but the
+  fake models no symbol on, where they answered a crypto price; `get_historical_prices/4`
+  checks the category, width, range and `:limit` of whichever of the five bars endpoints the
+  category names; `get_order_book/2` serves `US_FUTURES` and holds `:depth` to the venue's
+  range; `get_trades/2` checks the category and the per-tape `:limit`; `get_financials/3`
+  refuses a `:count` over 20; `get_option_chain/2` and `get_option_expirations/2` honour
+  `:expiry` and `:strike`; `get_news/1` has no `headline`, as the real stream names none.
+
+### Not changed, and why
+
+- `order_type_atom/1` still decodes `TRAILING_STOP_LOSS` to `:trailing_stop`, which
+  `Core.Types.Order`'s `order_type` list (`Order.new/1`) does not contain, though
+  `Core.Capabilities` does and `capabilities/0` declares it. That is an inconsistency inside
+  Core, not a venue fact; this package keeps the round trip a previous release chose and
+  records the gap here for Core.
+- Bars are not checked against the `symbol` each group names. Needs a live measurement of how
+  the venue spells a stock symbol in a group (class shares); the vendor's own example pages
+  carry symbols that do not match the request they document.
+
 ## [0.4.127] - 2026-10-11
 
 ### Fixed

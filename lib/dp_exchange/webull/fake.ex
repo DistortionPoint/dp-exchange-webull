@@ -143,8 +143,14 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_price(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- authenticated(opts) do
-        case Map.fetch(@price, symbol) do
+      category = Config.opt(opts, :category, "US_CRYPTO")
+
+      # The category before credentials, from `Rest`'s own list: a category the real path has
+      # no snapshot endpoint for is refused by name, not answered with a crypto price. One it
+      # does serve, other than crypto, is an endpoint this fake models no symbol on.
+      with :ok <- Rest.validate_snapshot_category(category),
+           :ok <- authenticated(opts) do
+        case category == "US_CRYPTO" && Map.fetch(@price, symbol) do
           {:ok, price} ->
             {:ok,
              %Types.Quote{
@@ -163,7 +169,7 @@ defmodule DpExchange.Webull.Fake do
                provider: :webull
              }}
 
-          :error ->
+          _not_listed ->
             {:refused, :not_listed}
         end
       end
@@ -185,8 +191,13 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- authenticated(opts) do
-        case Map.fetch(@price, symbol) do
+      category = Config.opt(opts, :category, "US_CRYPTO")
+
+      # `US_EVENT` is refused as `Rest.get_top_of_book/3` refuses it (it has two books, not a
+      # top of one), then the snapshot category, both before credentials.
+      with :ok <- Rest.validate_top_of_book_category(category),
+           :ok <- authenticated(opts) do
+        case category == "US_CRYPTO" && Map.fetch(@price, symbol) do
           {:ok, price} ->
             {:ok,
              %Types.TopOfBook{
@@ -202,7 +213,7 @@ defmodule DpExchange.Webull.Fake do
                provider: :webull
              }}
 
-          :error ->
+          _not_listed ->
             {:refused, :not_listed}
         end
       end
@@ -212,17 +223,18 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
-      # The width and the `:limit` are checked BEFORE credentials, as `Rest`'s crypto path
-      # does (`timespan/1` and the count check run before `get/4` reaches `Auth.headers/2`),
-      # through the real validator rather than a copy. `@symbols` is crypto-only, so this is
-      # the crypto default set (`Rest.timeframes/0`) — not `Rest.wide_timeframes/0`: `12h`
-      # is unserved anywhere, and `1w`/`1M`/`1y`, which the venue's *equity, option and
-      # futures* bars serve, its crypto bars refuse deliberately. This fake models no
-      # non-crypto symbol, so it never has to accept them. A `:limit` over 1200 is refused
-      # as `{:limit_out_of_range, n, max: 1200}`, which the fake used to accept.
-      with :ok <- Rest.validate_crypto_bars_request(timeframe, opts),
+      # The category, width, range and `:limit` are checked BEFORE credentials, as `Rest`'s
+      # paths do (the width and count checks run before `get/4` reaches `Auth.headers/2`),
+      # through the real validator rather than a copy. For the default crypto category that
+      # is the crypto set (`Rest.timeframes/0`) — not `Rest.wide_timeframes/0`: `12h` is
+      # unserved anywhere, and `1w`/`1M`/`1y`, which the venue's *equity, option and futures*
+      # bars serve, its crypto bars refuse deliberately. A `:limit` over 1200 is refused as
+      # `{:limit_out_of_range, n, max: 1200}`, and an option, futures or event request that
+      # names a range is refused as it is there. This fake models no non-crypto symbol, so a
+      # request those endpoints would accept is `{:refused, :not_listed}`, never a crypto bar.
+      with :ok <- Rest.validate_bars_request(timeframe, range, opts),
            :ok <- authenticated(opts) do
-        if symbol in @symbols do
+        if symbol in @symbols and Config.opt(opts, :category, "US_CRYPTO") == "US_CRYPTO" do
           {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
         else
           {:refused, :not_listed}
@@ -249,49 +261,58 @@ defmodule DpExchange.Webull.Fake do
     with_injection(symbol, fn ->
       category = Config.opt(opts, :category, "US_STOCK")
 
-      cond do
-        category not in ["US_STOCK", "US_ETF"] ->
-          {:error, {:unsupported_book_category, category}}
-
-        # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same
-        # way the real package does rather than inventing a book.
-        String.contains?(symbol, "-") ->
-          {:error, {:unsupported_book_category, category}}
-
-        true ->
-          with :ok <- authenticated(opts) do
-            {:ok,
-             %Types.OrderBook{
-               symbol: symbol,
-               bids: [
-                 {Decimal.new("13.90"), Decimal.new("5")},
-                 {Decimal.new("13.89"), Decimal.new("12")}
-               ],
-               asks: [
-                 {Decimal.new("13.91"), Decimal.new("3")},
-                 {Decimal.new("13.92"), Decimal.new("20")}
-               ],
-               venue_time: @at,
-               observed_at: @at,
-               sequence: nil,
-               provider: :webull
-             }}
-          end
+      # The category and `:depth` from `Rest`'s own validator, before credentials: a depth the
+      # venue's page gives a range for (futures: 1 to 10) or a non-number was accepted here,
+      # and `US_FUTURES`, which `Rest` serves, was refused as an unknown category.
+      with :ok <- Rest.validate_book_request(category, opts),
+           :ok <- fake_book_symbol(symbol, category),
+           :ok <- authenticated(opts) do
+        {:ok,
+         %Types.OrderBook{
+           symbol: symbol,
+           bids: [
+             {Decimal.new("13.90"), Decimal.new("5")},
+             {Decimal.new("13.89"), Decimal.new("12")}
+           ],
+           asks: [
+             {Decimal.new("13.91"), Decimal.new("3")},
+             {Decimal.new("13.92"), Decimal.new("20")}
+           ],
+           venue_time: @at,
+           observed_at: @at,
+           sequence: nil,
+           provider: :webull
+         }}
       end
     end)
+  end
+
+  # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same way
+  # the real package does rather than inventing a book.
+  defp fake_book_symbol(symbol, category) do
+    if String.contains?(symbol, "-"),
+      do: {:error, {:unsupported_book_category, category}},
+      else: :ok
   end
 
   @impl true
   def get_trades(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      # A crypto pair. This venue's tick endpoint is equities-only, and the fake refuses
-      # rather than inventing a tape.
-      if String.contains?(symbol, "-") do
-        {:error, {:unsupported_book_category, "US_CRYPTO"}}
-      else
-        with :ok <- authenticated(opts), do: {:ok, fake_ticks(symbol)}
-      end
+      # The category (a tape endpoint exists for stocks, ETFs, options and futures) and the
+      # `:limit` against that endpoint's stated maximum, from `Rest`'s validator, before
+      # credentials. Then a crypto pair: this venue's tick endpoint is equities-only, and the
+      # fake refuses rather than inventing a tape.
+      with :ok <- Rest.validate_trades_request(opts),
+           :ok <- fake_tape_symbol(symbol),
+           :ok <- authenticated(opts),
+           do: {:ok, fake_ticks(symbol)}
     end)
+  end
+
+  defp fake_tape_symbol(symbol) do
+    if String.contains?(symbol, "-"),
+      do: {:error, {:unsupported_book_category, "US_CRYPTO"}},
+      else: :ok
   end
 
   defp fake_ticks(symbol) do
@@ -544,7 +565,7 @@ defmodule DpExchange.Webull.Fake do
           }
         ]
 
-        {:ok, Enum.filter(rows, &(&1["activity_type"] in types))}
+        {:ok, filter_activity_types(rows, types)}
       end
     end)
   end
@@ -713,11 +734,18 @@ defmodule DpExchange.Webull.Fake do
       fn field, order ->
         case Map.get(changes, field) do
           nil -> order
-          new -> Map.put(order, field, new)
+          new -> Map.put(order, field, amended_value(field, new))
         end
       end
     )
   end
+
+  # The read-back holds `Decimal`s, whatever the amendment spelled them as (an integer, a
+  # numeric string): the real path sends the venue's string and reads the order back.
+  defp amended_value(field, new) when field in [:quantity, :price, :stop_price],
+    do: Rest.number_to_decimal(new)
+
+  defp amended_value(_field, new), do: new
 
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
@@ -1020,19 +1048,10 @@ defmodule DpExchange.Webull.Fake do
   def get_option_chain(underlying, opts \\ []) do
     with_injection(underlying, fn ->
       with :ok <- authenticated(opts) do
-        # A strike with only a call on it, because that is the case a consumer iterating strikes
-        # has to see. A fake whose grid was always complete would let one ship code that skips it.
-        call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
-        put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
-        lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
-
         {:ok,
          %Types.OptionChain{
            underlying: underlying,
-           expiries: %{
-             ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
-             ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
-           },
+           expiries: fake_option_grid(underlying, opts),
            # The contract list does not quote the underlying, and a fake that filled this in
            # would teach a consumer to rely on a field that is nil in production.
            underlying_price: nil,
@@ -1046,9 +1065,57 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
     with_injection(underlying, fn ->
-      with :ok <- authenticated(opts), do: {:ok, [~D[2026-03-20], ~D[2026-06-19]]}
+      with :ok <- authenticated(opts) do
+        {:ok, underlying |> fake_option_grid(opts) |> Map.keys() |> Enum.sort(Date)}
+      end
     end)
   end
+
+  # The fake's two expiries, narrowed by `opts[:expiry]` and `opts[:strike]` as the venue narrows
+  # the contract list (`Rest.get_option_chain/3` sends both to it): a request for one expiry
+  # got both here. A request nothing matches is an empty grid, as an empty list is there.
+  #
+  # A strike with only a call on it stays in, because that is the case a consumer iterating
+  # strikes has to see. A fake whose grid was always complete would let one ship code that
+  # skips it.
+  defp fake_option_grid(underlying, opts) do
+    call = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :call)
+    put = fake_contract(underlying, ~D[2026-03-20], Decimal.new("100"), :put)
+    lone = fake_contract(underlying, ~D[2026-06-19], Decimal.new("120"), :call)
+
+    grid = %{
+      ~D[2026-03-20] => %{Decimal.new("100") => %{call: call, put: put}},
+      ~D[2026-06-19] => %{Decimal.new("120") => %{call: lone, put: nil}}
+    }
+
+    grid
+    |> narrow_expiry(Keyword.get(opts, :expiry))
+    |> narrow_strike(Keyword.get(opts, :strike))
+  end
+
+  defp narrow_expiry(grid, nil), do: grid
+
+  defp narrow_expiry(grid, expiry),
+    do: Map.filter(grid, fn {date, _strikes} -> expiry_matches?(date, expiry) end)
+
+  defp expiry_matches?(date, %Date{} = expiry), do: date == expiry
+  defp expiry_matches?(date, expiry) when is_binary(expiry), do: Date.to_iso8601(date) == expiry
+  defp expiry_matches?(_date, _unreadable), do: false
+
+  defp narrow_strike(grid, nil), do: grid
+
+  defp narrow_strike(grid, strike) do
+    wanted = Rest.number_to_decimal(strike)
+
+    grid
+    |> Map.new(fn {date, strikes} ->
+      {date, Map.filter(strikes, fn {key, _row} -> strike_matches?(key, wanted) end)}
+    end)
+    |> Map.reject(fn {_date, strikes} -> map_size(strikes) == 0 end)
+  end
+
+  defp strike_matches?(_key, nil), do: false
+  defp strike_matches?(key, wanted), do: Decimal.equal?(key, wanted)
 
   defp fake_contract(underlying, expiry, strike, right) do
     %Types.OptionContract{
@@ -1141,12 +1208,17 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def create_watchlist(name, symbols, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
+      # The members and the sort first, from `Rest`'s own validators and before credentials, as
+      # `Rest.create_watchlist/4` checks them before it creates anything: a member that is
+      # not text, or a `sort` that is not a whole number, was accepted here.
+      with {:ok, members} <- Rest.validate_watchlist_symbols(symbols),
+           :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
+           :ok <- authenticated(opts) do
         # A new id per create, and the members it was created with, which `get_watchlist/2`
         # reads back.
         id = new_watchlist_id()
-        put_watchlist(id, %{name: name, symbols: symbols})
-        {:ok, watchlist_struct(id, name, symbols)}
+        put_watchlist(id, %{name: name, symbols: members})
+        {:ok, watchlist_struct(id, name, members)}
       end
     end)
   end
@@ -1170,7 +1242,8 @@ defmodule DpExchange.Webull.Fake do
         # `Rest.update_watchlist/3` checks it before it builds a request.
         {:error, :membership_not_updatable_here}
       else
-        with :ok <- authenticated(opts) do
+        with :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
+             :ok <- authenticated(opts) do
           rename_watchlist(id, Keyword.get(opts, :name))
           {:ok, watchlist_struct(id, Keyword.get(opts, :name), nil)}
         end
@@ -1203,6 +1276,8 @@ defmodule DpExchange.Webull.Fake do
       # not a statement (`:company_profile`, a typo) before it builds a request. This
       # answered a statement of whatever `kind` it was given.
       with :ok <- Rest.validate_statement_kind(kind),
+           # A `:count` over the 20 the statement pages state is refused before credentials.
+           :ok <- Rest.validate_statement_count(kind, opts),
            :ok <- authenticated(opts) do
         {:ok, [statement(symbol, kind)]}
       end
@@ -1348,7 +1423,10 @@ defmodule DpExchange.Webull.Fake do
              [
                %Types.NewsItem{
                  id: "n-1",
-                 headline: "Summary",
+                 # `nil`, as `Rest.get_news/2` has it: the venue's stream names no headline,
+                 # and a fake that supplied one would teach a consumer to read a field that
+                 # is empty in production.
+                 headline: nil,
                  summary: "A model's paraphrase, not the publisher's text.",
                  url: nil,
                  # The venue generated it; naming a publisher would attribute a paraphrase.
@@ -1426,28 +1504,12 @@ defmodule DpExchange.Webull.Fake do
   # Round-tripped through the real module's own encode then decode — not the caller's atom
   # echoed back — so a fake-based suite exercises the same wire names the real venue would
   # see, and would catch a decoder gap the way the real path does.
-  defp placed_order(request, id) do
-    order_type = Map.get(request, :order_type, :limit)
-    tif = Map.get(request, :time_in_force, :gtc)
-
-    %Types.Order{
-      id: id,
-      symbol: Map.fetch!(request, :symbol),
-      side: Map.fetch!(request, :side),
-      order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),
-      time_in_force: tif |> Rest.tif_name() |> Rest.tif_atom(),
-      quantity: Map.get(request, :quantity),
-      price: Map.get(request, :price),
-      # Mirrors the real `Rest.place_order/3`'s own echo — see its comment. The fake must
-      # never be differently capable than the real path (`dp_exchange_core`'s
-      # `usage-rules/testing.md`), and a consumer's suite asserting on a placed stop order's
-      # `stop_price` would have gone green against the fake while the real path returned
-      # `nil`.
-      stop_price: Map.get(request, :stop_price),
-      status: :pending,
-      provider: :webull
-    }
-  end
+  #
+  # Built by `Rest.order_from_request/2`, the very code `Rest.place_order/3` builds its answer
+  # with: side as `:buy | :sell`, sizes and prices as `Decimal`, the stop price echoed. The
+  # fake used to build its own and echo the request as typed, so a `"buy"` side or an integer
+  # quantity came back unchanged where the real path normalises both.
+  defp placed_order(request, id), do: Rest.order_from_request(id, request)
 
   defp client_order_id(request) do
     case Map.get(request, :client_order_id) do
@@ -1480,7 +1542,7 @@ defmodule DpExchange.Webull.Fake do
     # `credentialed/1` last — right before the `post/4` call it stands in for. The entry
     # checks used to be a local copy that knew only the instrument rule, so the fake
     # accepted `STOP_LOSS`, a `:gtc` entry and a price-less `LIMIT` the real path refuses.
-    with :ok <- fake_batch_account(opts),
+    with :ok <- fake_account(opts),
          :ok <- Rest.validate_batch_orders(requests),
          :ok <- credentialed(credentials) do
       {:ok,
@@ -1512,14 +1574,9 @@ defmodule DpExchange.Webull.Fake do
     %{"client_order_id" => id, "order_id" => next_issued(:system)}
   end
 
-  defp fake_batch_account(opts) do
-    if is_binary(Keyword.get(opts, :account_id)),
-      do: :ok,
-      else: {:error, :account_id_required}
-  end
-
+  # The real validator, not a copy: text and non-empty, or `:account_id_required`.
   defp fake_account(opts) do
-    if Keyword.get(opts, :account_id), do: :ok, else: {:error, :account_id_required}
+    with {:ok, _account_id} <- Rest.validate_account(opts), do: :ok
   end
 
   # The fake enforces the same per-instrument matrix the real package does, from the same

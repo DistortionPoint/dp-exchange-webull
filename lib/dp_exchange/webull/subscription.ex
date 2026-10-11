@@ -240,14 +240,18 @@ defmodule DpExchange.Webull.Subscription do
              {:invalid_symbols, Enum.map(native_symbols, &SymbolFormat.to_canonical_symbol/1)}}
 
           :error ->
-            {:error, {:exchange_error, :webull, "HTTP 417: #{inspect(response_body)}"}}
+            {:error,
+             {:exchange_error, :webull,
+              "HTTP 417: #{inspect(response_body, limit: 50, printable_limit: 2_048)}"}}
         end
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
         {:error, {:refused, status, response}}
 
       {:ok, %{status: status, body: response}} ->
-        {:error, {:exchange_error, :webull, "HTTP #{status}: #{inspect(response)}"}}
+        {:error,
+         {:exchange_error, :webull,
+          "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
 
       {:error, reason} ->
         {:error, reason}

@@ -274,16 +274,15 @@ defmodule DpExchange.Webull.AccountsTest do
       assert Decimal.positive?(position.quantity)
     end
 
-    test "a row with no quantity has no direction either" do
-      assert {:ok, [position]} =
+    test "a row with no quantity refuses the list, as the contract has no nil quantity or side" do
+      # `Core.Types.Position` enforces `:quantity` and `:side`; a `{nil, nil}` position was
+      # built here before, which a consumer's size arithmetic then raised on.
+      assert {:error, {:missing_required_field, :quantity}} =
                Rest.get_positions(@credentials,
                  plug: responding([position_row(%{"quantity" => nil})]),
                  account_id: @account,
                  retry_attempts: 0
                )
-
-      assert position.side == nil
-      assert position.quantity == nil
     end
 
     test "liquidation price and leverage stay nil, which is not the same as safe" do
@@ -764,23 +763,26 @@ defmodule DpExchange.Webull.AccountsTest do
                )
     end
 
-    test "an unreadable quantity is NOT refused — that absence is reasoned" do
-      # The other half. `signed_quantity/1` answers `{nil, nil}` for a quantity this package
-      # could not read, deliberately: a position with no quantity has no direction either, and
-      # `:long` would be a guess. Unlike a missing symbol it still leaves a caller knowing the
-      # position exists, so the symbol guard must not tighten into it.
+    test "an unreadable quantity is refused by name, never built as a nil-sided position" do
+      # The other half of the missing symbol: `Core.Types.Position` enforces `:quantity` and
+      # `:side`, and a `:long` would be a guess about direction, so a quantity that is not a
+      # number refuses the list and names the value.
       row = %{"symbol" => "BTCUSD", "quantity" => "not a number"}
 
-      assert {:ok, [position]} =
+      assert {:error, {:invalid_decimal, :quantity, "not a number"}} =
                Rest.get_positions(@credentials,
                  plug: responding([row]),
                  account_id: @account,
                  retry_attempts: 0
                )
 
-      assert position.symbol == "BTC-USD"
-      assert position.quantity == nil
-      assert position.side == nil
+      # `NaN` parses as a decimal and is no quantity either.
+      assert {:error, {:invalid_decimal, :quantity, "NaN"}} =
+               Rest.get_positions(@credentials,
+                 plug: responding([%{"symbol" => "BTCUSD", "quantity" => "NaN"}]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
     end
   end
 end
