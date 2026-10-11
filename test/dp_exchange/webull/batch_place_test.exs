@@ -344,7 +344,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
                Fake.place_orders(@credentials, [order(), order()], account_id: "a")
 
       assert first["order_id"]
-      assert second["code"]
+      assert second["error_code"]
     end
 
     test "the facade delegates" do

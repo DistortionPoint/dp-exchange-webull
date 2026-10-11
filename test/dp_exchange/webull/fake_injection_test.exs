@@ -64,10 +64,10 @@ defmodule DpExchange.Webull.FakeInjectionTest do
         Fake.place_order(@credentials, %{symbol: "BTC-USD", side: :buy}, account_id: "1")
       end,
       "cancel_order/3" => fn ->
-        Fake.cancel_order(@credentials, "fake-webull-order-1", account_id: "1")
+        Fake.cancel_order(@credentials, "5f1e9c0a7b2d4e68a3c4d5e6f7081920", account_id: "1")
       end,
       "get_order/3" => fn ->
-        Fake.get_order(@credentials, "fake-webull-order-1", account_id: "1")
+        Fake.get_order(@credentials, "5f1e9c0a7b2d4e68a3c4d5e6f7081920", account_id: "1")
       end,
       "get_orders/2" => fn -> Fake.get_orders(@credentials, account_id: "1") end
     }

@@ -146,12 +146,19 @@ defmodule DpExchange.Webull.Feed do
   The comment on `@reconcile_timeout_ms` said as much ("a reconcile that outlives the
   caller waiting on it has already lost that caller") and left it there.
 
-  Each primary reconcile now arms `{:primary_reply_due, index, from}` at
+  Each call arms ONE `{:caller_due, from}` when it arrives (`reshard/3`), at
   `@connack_timeout_ms`, the same two-thirds-of-`@call_timeout` budget a parked caller gets.
-  If the reconcile is still running then, the caller is answered
-  `{:error, {:reconcile_pending, ms}}`. The reconcile carries on and its result is applied.
-  Its own later reply to that `from` is dropped by `gen`, because the call has already
-  returned.
+  If the caller is still unanswered then, it is answered: `{:error, {:reconcile_pending, ms}}`
+  when it rides a primary reconcile, `{:error, {:connack_timeout, ms}}` when it is parked on a
+  shard (and it is removed from that shard's `reply_to`). The work carries on and its result
+  is applied. Its own later reply to that `from` is dropped by `gen`, because the call has
+  already returned.
+
+  The timer is keyed by `from`, not by shard index and not per reconcile. It used to be armed
+  for each primary reconcile and matched on the index, so an `:oversubscribed` or
+  `INVALID_SYMBOL` retry that moved the primary to another index, or parked the caller on a
+  connecting shard, left it matching nothing, and the timers armed by the retry could fall
+  after the caller's own `@call_timeout`.
 
   ## A subscribed, connected session can still go quiet on its own
 
@@ -160,7 +167,7 @@ defmodule DpExchange.Webull.Feed do
   say so. `dp_crypto_management`'s own pre-existing MQTT client found this the hard way,
   empirically: a blind, unconditional resubscribe on a timer, independent of whether the
   wanted set had changed, took its live coverage from 47 symbols back to ~240
-  (DpCryptoManagement's issue #17). `reshard/4` alone cannot recover from this — it only
+  (DpCryptoManagement's issue #17). `reshard/3` alone cannot recover from this — it only
   touches a shard whose *wanted* symbol set changed, and re-asking for exactly what is
   already wanted computes an empty diff and asserts nothing.
 
@@ -288,7 +295,7 @@ defmodule DpExchange.Webull.Feed do
   an uncaught exception inside a socket's own callbacks, or any other abnormal exit,
   propagates as a linked EXIT. `Feed` traps exits for exactly this reason: without it, one
   shard's crash killed every shard's connection and every symbol's coverage, not just the
-  one that failed — the opposite of the isolation `reshard/4`, `resync/1` and the
+  one that failed — the opposite of the isolation `reshard/3`, `resync/1` and the
   resubscribe timer above all work to provide. A crashed shard's socket is reopened at the
   same index with the same wanted symbols; the venue issues a fresh session, and the
   ordinary CONNACK-then-resubscribe path brings it back exactly as a first open would. A
@@ -354,6 +361,40 @@ defmodule DpExchange.Webull.Feed do
   pasted into issues, and must never carry a venue-native string a consumer has no mapping
   for.
 
+  `state.rejected` is pruned of expired entries on the resubscribe tick, after the re-plan
+  that returns them to a shard. `active_rejections/1` always ignored an expired entry, but
+  nothing removed it, so the map only grew.
+
+  ## A symbol list that cannot be used is refused, not crashed on
+
+  `subscribe/3`, `unsubscribe/3` and `update_symbols/3` take a list of non-empty strings and
+  answer `{:error, {:invalid_symbols, invalid}}` (at most five offenders; the whole value when
+  it is not a list) before any state moves. This is one named process for every caller, and a
+  raise inside `handle_call/3` restarted it from its static options with everyone's symbols
+  gone. The facade has long returned the same tuple when the VENUE refused a symbol, which is
+  what a caller who matches on it wants either way. `DpExchange.Webull.Fake` answers alike.
+
+  ## A shard that is not connected is never sent an HTTP call by a re-plan
+
+  A re-plan that changes a shard other than the one a caller is waiting on used to send its
+  subscribe or unsubscribe at once, whatever that shard was doing. For a shard still
+  connecting, or reconnecting after a drop (the socket backs off for up to 30s), the session
+  was not registered with the venue; the answer was `INVALID_SESSION`, which this module takes
+  to mean the session is dead, and the shard was torn down and reopened on a fresh session.
+  `touch_background_shard/4` now records the new list and sends nothing, as
+  `touch_primary_shard/7` always did: `on_link_up/2` replays the whole list on the CONNACK.
+  The deferred `{:reconcile_shard, ...}` message re-checks the session and `connected?` when
+  it runs, for the same reason.
+
+  ## An unsubscribe that races a whole-list subscribe is sent again
+
+  A blind resubscribe and a link-up replay send the shard's list as it stood when they were
+  spawned. An `unsubscribe/3` that completes while one is in flight can be overtaken at the
+  venue by the older, larger subscribe, leaving a symbol subscribed that nothing here tracks
+  and nothing will ever diff: it holds one of the session's 100 slots and can make a later
+  `TOO_MANY_SYMBOLS` cap the shard too low. When such an attempt answers `:ok`, whatever it
+  sent that the shard no longer carries is unsubscribed once more (`unsubscribe_stale/4`).
+
   ## Shard assignment is sticky, not recomputed from scratch
 
   A symbol already assigned to a shard keeps that shard for as long as it stays wanted,
@@ -364,7 +405,7 @@ defmodule DpExchange.Webull.Feed do
   already healthy. `derive_shards/3` instead starts from what each shard already carries,
   drops only what stopped being wanted or no longer fits that shard's measured capacity,
   and places everything else — new symbols, and anything just evicted by a capacity
-  reduction — into whichever shard (in index order) still has room. `reshard/4`'s
+  reduction — into whichever shard (in index order) still has room. `reshard_step/4`'s
   `touched` computation is what actually limits HTTP calls to changed shards; this is what
   makes that set small in the first place.
   """
@@ -701,6 +742,74 @@ defmodule DpExchange.Webull.Feed do
 
   @impl true
   def handle_call({:subscribe, symbols, subscriber, opts}, from, state) do
+    case check_symbols(symbols) do
+      :ok -> apply_subscribe(symbols, subscriber, opts, from, state)
+      {:error, _reason} = refused -> {:reply, refused, state}
+    end
+  end
+
+  def handle_call({:unsubscribe, symbols, opts}, from, state) do
+    case check_symbols(symbols) do
+      :ok -> apply_unsubscribe(symbols, opts, from, state)
+      {:error, _reason} = refused -> {:reply, refused, state}
+    end
+  end
+
+  def handle_call({:update_symbols, symbols, opts}, from, state) do
+    case check_symbols(symbols) do
+      :ok -> apply_update(symbols, opts, from, state)
+      {:error, _reason} = refused -> {:reply, refused, state}
+    end
+  end
+
+  def handle_call(:coverage, _from, state) do
+    {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+  end
+
+  def handle_call(:coverage_by_kind, _from, state) do
+    by_kind =
+      Map.new(state.delivering_by_kind, fn {kind, per_symbol} ->
+        {kind, Map.new(per_symbol, fn {symbol, _at} -> {symbol, :stream} end)}
+      end)
+
+    {:reply, by_kind, state}
+  end
+
+  def handle_call({:subscribe_notices, subscriber}, _from, state) do
+    state = %{
+      state
+      | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
+        monitors: Fanout.watch(subscriber, state.monitors)
+    }
+
+    {:reply, :ok, state}
+  end
+
+  def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
+
+  # **A symbol list that cannot be used is refused before any state moves.** This Feed is one
+  # named process for every caller of the instance. `MapSet.new/1` on a non-list raises, and so
+  # do `Map.drop/2` and `Map.take/2`, so one `subscribe(nil)` or `update_symbols("BTC-USD")`
+  # raised inside `handle_call/3`: the Feed crashed, its supervisor restarted it from the
+  # static options, and every symbol every caller had subscribed was gone, with `coverage/1`
+  # reading empty until each of them subscribed again. A non-binary element was worse in a
+  # quieter way: it entered `state.wanted`, was planned into a shard, and then raised inside
+  # every reconcile task that tried to send it, so the shard it landed on never settled. An
+  # empty string is refused as well: it is not a product and would be sent to the venue as one.
+  #
+  # The same shape `{:error, {:invalid_symbols, ...}}` that `Subscription` uses for a symbol the
+  # VENUE refused, because to a caller both mean "these symbols were not accepted"; the facade
+  # has always returned it from `subscribe/2` either way. At most five offenders are named.
+  defp check_symbols(symbols) when is_list(symbols) do
+    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+      [] -> :ok
+      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+    end
+  end
+
+  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  defp apply_subscribe(symbols, subscriber, opts, from, state) do
     # Wrapped before `opts` goes anywhere: it is captured by in-flight reconcile tags, by
     # `{:open_shard, ...}` messages and by the closures of every task, all of which sit in
     # `state` or the mailbox where a crash report prints them. Found 2026-10-10: only
@@ -728,7 +837,7 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  def handle_call({:unsubscribe, symbols, opts}, from, state) do
+  defp apply_unsubscribe(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
 
@@ -742,7 +851,7 @@ defmodule DpExchange.Webull.Feed do
     reshard(state, opts, from)
   end
 
-  def handle_call({:update_symbols, symbols, opts}, from, state) do
+  defp apply_update(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.new(symbols)
 
@@ -756,31 +865,6 @@ defmodule DpExchange.Webull.Feed do
 
     reshard(state, opts, from)
   end
-
-  def handle_call(:coverage, _from, state) do
-    {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
-  end
-
-  def handle_call(:coverage_by_kind, _from, state) do
-    by_kind =
-      Map.new(state.delivering_by_kind, fn {kind, per_symbol} ->
-        {kind, Map.new(per_symbol, fn {symbol, _at} -> {symbol, :stream} end)}
-      end)
-
-    {:reply, by_kind, state}
-  end
-
-  def handle_call({:subscribe_notices, subscriber}, _from, state) do
-    state = %{
-      state
-      | notice_subscribers: MapSet.put(state.notice_subscribers, subscriber),
-        monitors: Fanout.watch(subscriber, state.monitors)
-    }
-
-    {:reply, :ok, state}
-  end
-
-  def handle_call(_other, _from, state), do: {:reply, {:error, :unknown_call}, state}
 
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
   #
@@ -822,37 +906,18 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # A caller's own deadline, armed once by `reshard/3` when its call arrives and keyed by its
+  # `from`, so it holds wherever the call has got to. If the caller is still unanswered it is
+  # answered now, and the work carries on: its result is applied when it lands, and its own
+  # later reply to this `from` finds a call that has already returned. `gen` drops a reply to
+  # a completed call's alias, so it reaches no mailbox. See the moduledoc's "A caller waiting
+  # on a reconcile is answered before its call times out".
+  def handle_info({:caller_due, from}, state), do: {:noreply, answer_overdue_caller(state, from)}
+
   # A reconcile task that is still alive and has stopped answering. No `:DOWN` can catch
   # that, and only a timer tells it apart from one about to succeed. A timer for a tag that
   # already answered finds nothing tracked and is ignored, so a slow-but-successful reconcile
   # is never torn down by its own deadline arriving late.
-  # A caller is still waiting on its primary reconcile, and would outlive its own
-  # `GenServer.call` if it went on waiting. It is answered now, and the reconcile carries on:
-  # its result is applied when it lands, and its own reply to this `from` then finds a call
-  # that has already returned. `gen` drops a reply to a completed call's alias, so it reaches
-  # no mailbox. See the moduledoc's "A caller waiting on a reconcile is answered before its
-  # call times out".
-  def handle_info({:primary_reply_due, index, from}, state) do
-    pending =
-      Enum.find(
-        Map.keys(state.reconciling),
-        &match?({:primary, ^index, ^from, _overflow, _retries, _opts}, &1)
-      )
-
-    case pending do
-      {:primary, _index, _from, overflow, _retries_left, _opts} ->
-        GenServer.reply(
-          from,
-          combine_overflow({:error, {:reconcile_pending, state.connack_timeout_ms}}, overflow)
-        )
-
-      nil ->
-        :ok
-    end
-
-    {:noreply, state}
-  end
-
   def handle_info({:reconcile_timeout, tag, attempt}, state) do
     case Map.fetch(state.reconciling, tag) do
       {:ok, %{pid: pid, attempt: ^attempt}} ->
@@ -1055,7 +1120,7 @@ defmodule DpExchange.Webull.Feed do
   # "first attempt", and giving them all an attempt number to carry would put the retry
   # count in the hands of code that has nothing to do with retrying.
   #
-  # Answers nothing if the slot has since been filled. A `reshard/4` or a `subscribe/2`
+  # Answers nothing if the slot has since been filled. A `reshard/3` or a `subscribe/2`
   # arriving between two attempts opens the shard by its own route, and the guard below is
   # the same one the first attempt uses.
   #
@@ -1099,20 +1164,32 @@ defmodule DpExchange.Webull.Feed do
     # HTTP never runs on the mailbox that also carries ticks" — so this handler only spawns
     # it; `handle_info({:reconcile_done, {:background, ^index}, result}, state)` below does
     # what this used to do inline once the real answer comes back.
-    {:noreply,
-     spawn_reconcile(
-       state,
-       {:background, index},
-       fn -> reconcile_by_session(session_id, added, removed, opts) end,
-       %{session_id: session_id, added: added, removed: removed}
-     )}
+    #
+    # Only against the session that was planned for, and only while it is up. This message is
+    # sent at plan time and handled later: the shard may have dropped in between (the delta is
+    # already on `shard.symbols`, and `on_link_up/2` replays it), or been replaced by a new
+    # session that replays its own full list. A request to the old session would be answered
+    # INVALID_SESSION and, taken at face value, tear down a healthy replacement.
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id, connected?: true} ->
+        {:noreply,
+         spawn_reconcile(
+           state,
+           {:background, index},
+           fn -> reconcile_by_session(session_id, added, removed, opts) end,
+           %{session_id: session_id, added: added, removed: removed}
+         )}
+
+      _replaced_or_not_connected ->
+        {:noreply, state}
+    end
   end
 
   # This venue keeps a session's MQTT connection alive and subscribed while quietly
   # stopping publication to it — no error, no disconnect, no unsubscribe, nothing a
   # health check can see. The only recovery ever found for it is re-issuing the
   # subscription for symbols already believed subscribed, unconditionally, on a timer —
-  # see the moduledoc and DpCryptoManagement's issue #17. `reshard/4` alone cannot do
+  # see the moduledoc and DpCryptoManagement's issue #17. `reshard/3` alone cannot do
   # this: it only touches a shard whose *wanted* symbol set changed, and re-asking for
   # exactly what is already wanted computes an empty diff.
   def handle_info(:resubscribe, state) do
@@ -1136,7 +1213,9 @@ defmodule DpExchange.Webull.Feed do
         do: state,
         else: %{resync(state) | unsettled: MapSet.new()}
 
-    {:noreply, state}
+    # After the re-plan above, which is what returns an expired symbol to a shard. The entry
+    # itself is dead weight from the moment it expires; see `prune_rejections/1`.
+    {:noreply, prune_rejections(state)}
   end
 
   # A shard's socket links here (`Socket.start_link/1` -> `WebSockex.start_link/4`), and
@@ -1198,14 +1277,18 @@ defmodule DpExchange.Webull.Feed do
     state = %{state | settled: settled}
 
     if current_session?(state, index, context) do
-      {:noreply, complete_link_up(state, index, result)}
+      state = complete_link_up(state, index, result)
+      {:noreply, unsubscribe_stale(state, index, context, result)}
     else
       {state, rebalanced?} = settle_stale(state, index, result)
       {:noreply, if(rebalanced?, do: resync(state), else: state)}
     end
   end
 
-  def handle_info({:reconcile_done, {:resubscribe, index}, result}, state) do
+  def handle_info({:reconcile_done, {:resubscribe, index} = tag, result}, state) do
+    {context, settled} = Map.pop(state.settled, tag)
+    state = %{state | settled: settled}
+
     state =
       case result do
         {:error, reason} ->
@@ -1233,7 +1316,7 @@ defmodule DpExchange.Webull.Feed do
 
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state
-    {:noreply, state}
+    {:noreply, unsubscribe_stale(state, index, context, result)}
   end
 
   def handle_info(_other, state), do: {:noreply, state}
@@ -1493,10 +1576,23 @@ defmodule DpExchange.Webull.Feed do
   defp rotation_key(state, index),
     do: {max(last_delivery(state, index), Map.get(state.rotated_at, index, 0)), index}
 
+  # `opts` and `symbols` are bound outside the closure so it captures those and not the whole
+  # `state`, which would be copied into the task's heap on every tick: every delivery record,
+  # every shard and every tracked reconcile, to send one request.
+  #
+  # The context records what was sent, so the answer can be checked against what the shard
+  # wants by then. See `unsubscribe_stale/4`.
   defp reassert_shard({index, shard}, state) do
-    spawn_reconcile(state, {:resubscribe, index}, fn ->
-      Subscription.subscribe(shard.session_id, shard.symbols, state.resubscribe_opts)
-    end)
+    opts = state.resubscribe_opts
+    session_id = shard.session_id
+    symbols = shard.symbols
+
+    spawn_reconcile(
+      state,
+      {:resubscribe, index},
+      fn -> Subscription.subscribe(session_id, symbols, opts) end,
+      %{session_id: session_id, sent: symbols}
+    )
   end
 
   defp last_delivery(state, index) do
@@ -1529,7 +1625,66 @@ defmodule DpExchange.Webull.Feed do
   # call's eventual reply (same observable contract as the single-connection design this
   # replaces — the caller still waits for the real outcome) and stages the rest — see the
   # moduledoc and the design doc §3 for the full rationale.
-  defp reshard(state, opts, from), do: {:noreply, reshard_step(state, opts, from, @max_shards)}
+  #
+  # **The caller's deadline is armed here, once, and keyed by `from`.** It used to be armed per
+  # primary reconcile and matched on the shard INDEX, so a retry hop (`:oversubscribed` or
+  # `INVALID_SYMBOL` re-plans and may put the primary on another index, or park the caller on
+  # a connecting shard) left the first timer matching nothing and the next one armed from the
+  # retry, which can fall after the caller's own `@call_timeout`. The caller then exited and
+  # took its process down. `answer_overdue_caller/2` finds it wherever it is.
+  defp reshard(state, opts, from) do
+    Process.send_after(self(), {:caller_due, from}, state.connack_timeout_ms)
+    {:noreply, reshard_step(state, opts, from, @max_shards)}
+  end
+
+  # Answers `from` if it is still waiting: parked on a shard for its `link_up` (removed from
+  # `reply_to`, so the late `link_up` does not reply to a returned call), or riding a primary
+  # reconcile (left running; see the `{:caller_due, _}` clause).
+  defp answer_overdue_caller(state, from) do
+    {shards, parked} =
+      Enum.reduce(state.shards, {%{}, nil}, fn {index, shard}, {acc, found} ->
+        {shard, result} = unpark(shard, from)
+        {Map.put(acc, index, shard), found || result}
+      end)
+
+    state = %{state | shards: shards}
+
+    case parked || primary_overflow(state, from) do
+      {:parked, overflow} ->
+        GenServer.reply(
+          from,
+          combine_overflow({:error, {:connack_timeout, state.connack_timeout_ms}}, overflow)
+        )
+
+      {:reconciling, overflow} ->
+        GenServer.reply(
+          from,
+          combine_overflow({:error, {:reconcile_pending, state.connack_timeout_ms}}, overflow)
+        )
+
+      nil ->
+        :ok
+    end
+
+    state
+  end
+
+  defp unpark(%{reply_to: waiters} = shard, from) when is_list(waiters) do
+    case List.keytake(waiters, from, 0) do
+      {{^from, overflow}, []} -> {%{shard | reply_to: nil}, {:parked, overflow}}
+      {{^from, overflow}, rest} -> {%{shard | reply_to: rest}, {:parked, overflow}}
+      nil -> {shard, nil}
+    end
+  end
+
+  defp unpark(shard, _from), do: {shard, nil}
+
+  defp primary_overflow(state, from) do
+    Enum.find_value(Map.keys(state.reconciling), fn
+      {:primary, _index, ^from, overflow, _retries_left, _opts} -> {:reconciling, overflow}
+      _other_tag -> nil
+    end)
+  end
 
   defp reshard_step(state, opts, from, retries_left) do
     {touched, new_shards, overflow} = plan_reshard(state)
@@ -1614,10 +1769,7 @@ defmodule DpExchange.Webull.Feed do
             %{session_id: shard.session_id, added: added, removed: removed}
           )
 
-        # The caller is waiting on an HTTP round trip that may legitimately outlast its own
-        # `GenServer.call`. See the moduledoc's "A caller waiting on a reconcile is answered
-        # before its call times out".
-        Process.send_after(self(), {:primary_reply_due, index, from}, state.connack_timeout_ms)
+        # The caller's deadline is armed once, by `reshard/3`; see there.
         state
 
       %{session_id: session_id} = still_connecting ->
@@ -1684,6 +1836,20 @@ defmodule DpExchange.Webull.Feed do
         Process.send_after(self(), {:open_shard, index, wanted_symbols, opts}, @shard_spacing_ms)
         state
 
+      %{connected?: false} ->
+        # **Never an HTTP call against a session that is not up.** `touch_primary_shard/7`
+        # has always deferred such a shard to `on_link_up/2` ("issue #9"); this path did not,
+        # so any re-plan that touched a shard while it was connecting or reconnecting (the
+        # socket backs off for up to 30s) sent its subscribe or unsubscribe at a session the
+        # venue had not registered, or had already discarded. The venue answers that
+        # `INVALID_SESSION`, and `handle_subscribe_result/3` takes `INVALID_SESSION` to mean the
+        # session is dead and tears the shard down to reopen it: a socket that was about to come
+        # good, replaced on a fresh session, against a five-connection ceiling.
+        #
+        # Recording the new list is all that is needed. `on_link_up/2` replays the shard's whole
+        # `symbols` when the CONNACK arrives, so the delta is carried by the replay.
+        put_in(state.shards[index].symbols, wanted_symbols)
+
       shard ->
         added = wanted_symbols -- shard.symbols
         removed = shard.symbols -- wanted_symbols
@@ -1707,17 +1873,18 @@ defmodule DpExchange.Webull.Feed do
         complete_link_up(state, index, :ok)
 
       symbols ->
+        # Bound outside the closure for the reason `reassert_shard/2` gives.
+        opts = state.resubscribe_opts
+        session_id = shard.session_id
+
         spawn_reconcile(
           state,
           {:link_up, index},
-          fn -> Subscription.subscribe(shard.session_id, symbols, state.resubscribe_opts) end,
-          %{session_id: shard.session_id}
+          fn -> Subscription.subscribe(session_id, symbols, opts) end,
+          %{session_id: session_id, sent: symbols}
         )
     end
   end
-
-  # The tail of `on_link_up/2`, shared with the async completion of the HTTP subscribe it
-  # may have started — see `handle_info({:reconcile_done, {:link_up, index}, result}, ...)`.
 
   # Answers a caller parked on the shard whose session the venue just refused.
   #
@@ -1760,6 +1927,8 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # The tail of `on_link_up/2`, shared with the async completion of the HTTP subscribe it
+  # may have started — see `handle_info({:reconcile_done, {:link_up, index}, result}, ...)`.
   defp complete_link_up(state, index, result) do
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state
@@ -1808,10 +1977,43 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  # Runs `fun` in its own supervised task rather than inline, so a control-plane HTTP call
-  # never blocks this GenServer's mailbox — see the moduledoc. The result comes back as
-  # `{:reconcile_done, tag, result}`, handled above; `tag` carries whatever the caller of
-  # this function needs to know what to do with it.
+  # **An unsubscribe that landed while a whole-list subscribe was in flight is sent again.**
+  # A blind resubscribe (`reassert_shard/2`) and a link-up replay both send the shard's list as
+  # it stood when they were spawned, over HTTP, in a task. A caller's `unsubscribe/2` or
+  # `update_symbols/2` runs its own task meanwhile and removes a symbol from `shard.symbols`
+  # and from the venue. If the older, larger subscribe is the one the venue processes LAST, the
+  # symbol is subscribed again venue-side while this package believes it gone: nothing diffs
+  # it (the shard's list no longer holds it), the late frames are dropped as `unwanted?/2`,
+  # and it keeps occupying one of the session's 100 slots, so a later `TOO_MANY_SYMBOLS`
+  # caps the shard below what it can really carry.
+  #
+  # So when such an attempt ANSWERS `:ok`, anything it sent that the shard no longer carries is
+  # unsubscribed once more, against the same session. Over-sending is idempotent; under-sending
+  # is the bug. Only on `:ok`: an `INVALID_SYMBOL` answer has already been trimmed from the list
+  # by `resync/1`, and unsubscribing those would draw a second refusal for the same names.
+  # Best effort, like the blind resubscribe it follows: a failure is not retried here.
+  defp unsubscribe_stale(state, index, %{session_id: session_id, sent: sent}, :ok) do
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id, symbols: current} ->
+        case sent -- current do
+          [] -> state
+          stale -> spawn_cleanup(state, index, session_id, stale)
+        end
+
+      _replaced_or_gone ->
+        state
+    end
+  end
+
+  defp unsubscribe_stale(state, _index, _no_record_of_what_was_sent, _result), do: state
+
+  defp spawn_cleanup(state, index, session_id, stale) do
+    opts = state.resubscribe_opts
+
+    spawn_reconcile(state, {:cleanup, index}, fn ->
+      Subscription.unsubscribe(session_id, stale, opts)
+    end)
+  end
 
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
   #
@@ -1859,6 +2061,14 @@ defmodule DpExchange.Webull.Feed do
       {%{ref: ref} = entry, reconciling} ->
         Process.demonitor(ref, [:flush])
 
+        # Entries written by tests carry no `:timer`. A timer that has already fired (the
+        # `{:reconcile_timeout, ...}` clause forgets the attempt it just timed out) cancels to
+        # `false`, and the message it sent was matched against `attempt` and handled already.
+        case Map.get(entry, :timer) do
+          nil -> :ok
+          timer -> Process.cancel_timer(timer)
+        end
+
         # The attempt's context moves to `settled`, where the clause that settles this tag
         # pops it. Entries written by tests carry no `:context`; that is `nil`, which
         # `current_session?/3` treats as "no claim about a session".
@@ -1872,6 +2082,10 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # Runs `fun` in its own supervised task rather than inline, so a control-plane HTTP call
+  # never blocks this GenServer's mailbox — see the moduledoc. The result comes back as
+  # `{:reconcile_done, tag, result}`, handled above; `tag` carries whatever the caller of
+  # this function needs to know what to do with it.
   defp spawn_reconcile(state, tag, fun, context \\ nil) do
     me = self()
     state = supersede_reconcile(state, tag)
@@ -1904,9 +2118,26 @@ defmodule DpExchange.Webull.Feed do
     # because each successor was killed microseconds after it started by its predecessor's
     # deadline, and the blind resubscribe is the ONLY recovery this venue has for a session
     # it has silently stopped publishing to.
-    Process.send_after(self(), {:reconcile_timeout, tag, attempt}, state.reconcile_timeout_ms)
+    #
+    # The timer's reference is kept so `forget_reconcile/2` can cancel it. It used to run its
+    # full `@reconcile_timeout_ms` (60s) after every reconcile that answered in a hundred
+    # milliseconds, each one holding its `tag`: on the primary path that is the caller's `from`
+    # and its whole `opts`, credentials struct included. Harmless when it fired (nothing was
+    # tracked, so it was ignored), but a busy feed carried a minute's worth of them.
+    timer =
+      Process.send_after(
+        self(),
+        {:reconcile_timeout, tag, attempt},
+        state.reconcile_timeout_ms
+      )
 
-    put_in(state.reconciling[tag], %{ref: ref, pid: pid, attempt: attempt, context: context})
+    put_in(state.reconciling[tag], %{
+      ref: ref,
+      pid: pid,
+      attempt: attempt,
+      context: context,
+      timer: timer
+    })
   end
 
   # An attempt being replaced under a tag that is still tracking one. Torn down here rather
@@ -2016,7 +2247,7 @@ defmodule DpExchange.Webull.Feed do
   end
 
   # Reopens a crashed shard — at once the first time, then on the `@crash_window_ms` ladder.
-  # The shard's slot stays empty meanwhile, which is the honest state: a `reshard/4` arriving
+  # The shard's slot stays empty meanwhile, which is the honest state: a `reshard/3` arriving
   # in the gap opens it by its own route, and the delayed message then finds it taken.
   defp reopen_after_crash(state, index, symbols) do
     now = System.monotonic_time(:millisecond)
@@ -2279,10 +2510,13 @@ defmodule DpExchange.Webull.Feed do
   # unrecoverable one. No MQTT `DISCONNECT` is sent first: `Socket.disconnect/2` addresses
   # the session, and the session is precisely what no longer exists.
   #
-  # No reply is sent to `shard.reply_to` here, deliberately — unlike `isolate_crashed_shard/3`,
-  # which is reached from an `{:EXIT, ...}` nobody is waiting on. This runs inside a
-  # `{:reconcile_done, ...}` clause that already owns the caller's reply and answers it with
-  # this same error, so replying again would be a double `GenServer.reply/2`.
+  # Callers parked on the shard (`shard.reply_to`) ARE answered here, through
+  # `answer_parked_caller/2`, before the shard is deleted. That is not a double reply: the
+  # `{:reconcile_done, ...}` clause that reached this owns only the caller whose `from` rode in
+  # its own tag, and a parked caller is a different one, waiting for this shard's `link_up`,
+  # which can no longer arrive for a session that has just been discarded. An earlier version
+  # of this comment said no reply was sent here; the code stopped agreeing with it when
+  # `complete_link_up/3` was found to read a deleted shard as "nobody left to answer".
   defp rebuild_stale_shard(state, index, session_id) do
     case Map.fetch(state.shards, index) do
       :error ->
@@ -2383,16 +2617,6 @@ defmodule DpExchange.Webull.Feed do
   defp generic_resubscribe_error?({:invalid_session, _session_id}), do: false
   defp generic_resubscribe_error?(_other), do: true
 
-  # Fires once per transition into a shard's blind-resubscribe failing generically — see
-  # the moduledoc's "A generic resubscribe failure is reported too, latched per shard" and
-  # DpCryptoManagement's issue #23 (58 consecutive failures across 13 minutes, all of it
-  # invisible outside a log grep). Latched per shard, not globally: each shard is its own
-  # MQTT session with its own independent failure and recovery schedule, and a global latch
-  # would either miss a second shard's own transition or fire on every tick once ANY shard
-  # is already latched. A latched shard's every later tick re-enters this same branch (the
-  # `Logger.warning` above keeps firing with it, unchanged, by design) but short-circuits
-  # here rather than notifying again — a notice per tick on a sustained outage is still a
-  # storm, just a slower one.
   defp open_planned(state, _index, [], _opts), do: state
 
   defp open_planned(state, index, planned, opts) do
@@ -2510,6 +2734,16 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # Fires once per transition into a shard's blind-resubscribe failing generically — see
+  # the moduledoc's "A generic resubscribe failure is reported too, latched per shard" and
+  # DpCryptoManagement's issue #23 (58 consecutive failures across 13 minutes, all of it
+  # invisible outside a log grep). Latched per shard, not globally: each shard is its own
+  # MQTT session with its own independent failure and recovery schedule, and a global latch
+  # would either miss a second shard's own transition or fire on every tick once ANY shard
+  # is already latched. A latched shard's every later tick re-enters this same branch (the
+  # `Logger.warning` in the `{:resubscribe, _}` handler keeps firing with it, unchanged, by
+  # design) but short-circuits here rather than notifying again — a notice per tick on a
+  # sustained outage is still a storm, just a slower one.
   defp latch_resubscribe_failure(state, index, symbols, reason) do
     if Map.has_key?(state.resubscribe_failed, index) do
       state
@@ -2662,9 +2896,20 @@ defmodule DpExchange.Webull.Feed do
     |> MapSet.new(fn {symbol, _expires_at} -> symbol end)
   end
 
-  # The only case §3.5 says cannot be absorbed internally: every shard already at
-  # capacity and there is nowhere left to put a symbol. Reported, never silently dropped
-  # or silently subscribed somewhere already full.
+  # `active_rejections/1` ignores an expired entry but nothing ever REMOVED one, so
+  # `state.rejected` only grew: a consumer that rotates through a changing universe over weeks
+  # (every symbol the venue ever refused, 24 hours apart) kept each of them for the life of the
+  # feed, and `active_rejections/1` filtered the whole map on every reshard. Pruned on the
+  # resubscribe tick, after the re-plan that returns an expired symbol to a shard has run.
+  defp prune_rejections(%{rejected: rejected} = state) when map_size(rejected) == 0, do: state
+
+  defp prune_rejections(state) do
+    now = System.monotonic_time(:millisecond)
+
+    live = Map.filter(state.rejected, fn {_symbol, expires_at} -> expires_at > now end)
+    %{state | rejected: live}
+  end
+
   # Every path that removes a shard answers whoever was parked on it, through here.
   #
   # `complete_link_up/3` reads the shard back after `handle_subscribe_result/3` may have
@@ -2692,6 +2937,9 @@ defmodule DpExchange.Webull.Feed do
     end)
   end
 
+  # The only case §3.5 says cannot be absorbed internally: every shard already at capacity and
+  # there is nowhere left to put a symbol. Reported, never silently dropped or silently
+  # subscribed somewhere already full.
   defp combine_overflow(:ok, []), do: :ok
   defp combine_overflow(:ok, overflow), do: {:error, {:capacity_exceeded, overflow}}
   defp combine_overflow({:error, reason}, []), do: {:error, reason}
@@ -2901,11 +3149,15 @@ defmodule DpExchange.Webull.Feed do
   defp kind_for(_other), do: :error
 
   defp drop_symbols_by_kind(delivering_by_kind, symbols) do
-    Map.new(delivering_by_kind, fn {kind, per_symbol} -> {kind, Map.drop(per_symbol, symbols)} end)
+    Map.new(delivering_by_kind, fn {kind, per_symbol} ->
+      {kind, Map.drop(per_symbol, symbols)}
+    end)
   end
 
   defp take_symbols_by_kind(delivering_by_kind, symbols) do
-    Map.new(delivering_by_kind, fn {kind, per_symbol} -> {kind, Map.take(per_symbol, symbols)} end)
+    Map.new(delivering_by_kind, fn {kind, per_symbol} ->
+      {kind, Map.take(per_symbol, symbols)}
+    end)
   end
 
   # See the `{:dp_exchange, :webull, quote_struct}` clause of `handle_info/2`.

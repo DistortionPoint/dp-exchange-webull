@@ -18,6 +18,7 @@ defmodule DpExchange.Webull.SocketTest do
       session_id: "s1",
       app_key: "k",
       buffer: <<>>,
+      qos2_pending: MapSet.new(),
       connected?: false,
       ping: nil,
       last_heard_at: nil
@@ -1073,6 +1074,140 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, owing)
 
       assert reconnected.acks == []
+    end
+  end
+
+  describe "QoS 2 is delivered once — MQTT 3.1.1 §4.3.3" do
+    # Sets the DUP bit (bit 3 of the fixed header's first byte), as a broker does when it
+    # retransmits a PUBLISH whose acknowledgement it never saw.
+    defp dup(<<first, rest::binary>>), do: <<bor(first, 0x08), rest::binary>>
+
+    defp pubrec(id), do: <<5::4, 0::4, 2, id::16>>
+    defp pubcomp(id), do: <<7::4, 0::4, 2, id::16>>
+    defp pubrel(id), do: <<6::4, 2::4, 2, id::16>>
+
+    test "a QoS 2 PUBLISH retransmitted with DUP is re-acknowledged and not delivered again" do
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 9)
+
+      assert {:reply, {:binary, first_ack}, state} =
+               Socket.handle_frame({:binary, frame}, state())
+
+      assert first_ack == pubrec(9)
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+
+      assert {:reply, {:binary, second_ack}, state} =
+               Socket.handle_frame({:binary, dup(frame)}, state)
+
+      assert second_ack == pubrec(9), "the broker is still owed its PUBREC"
+      refute_receive {:dp_exchange, :webull, _message}, 50
+      assert MapSet.member?(state.qos2_pending, 9)
+    end
+
+    test "a second QoS 2 PUBLISH with the same id before the PUBREL is not delivered either" do
+      # No DUP flag: a broker reusing an id it has not seen released. The set, not the flag,
+      # decides — and both are in ONE frame, so the state must be threaded through the drain.
+      frame =
+        publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 4) <>
+          publish_qos("snapshot", snapshot_payload("BTCUSD", "2"), 2, 4)
+
+      assert {:reply, {:binary, acks}, state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert acks == pubrec(4) <> pubrec(4)
+      assert_receive {:dp_exchange, :webull, %Quote{} = delivered}
+      assert Decimal.equal?(delivered.price, Decimal.new("1"))
+      refute_receive {:dp_exchange, :webull, _message}, 50
+      assert state.qos2_pending == MapSet.new([4])
+    end
+
+    test "distinct packet ids are each delivered" do
+      frame =
+        publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 1) <>
+          publish_qos("snapshot", snapshot_payload("ETHUSD", "2"), 2, 2)
+
+      assert {:reply, {:binary, acks}, state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert acks == pubrec(1) <> pubrec(2)
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "ETH-USD"}}
+      assert state.qos2_pending == MapSet.new([1, 2])
+    end
+
+    test "a PUBREL releases the id: it is answered, and the same id is then a new publication" do
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 9)
+
+      assert {:reply, {:binary, _pubrec}, state} = Socket.handle_frame({:binary, frame}, state())
+      assert_receive {:dp_exchange, :webull, %Quote{}}
+
+      assert {:reply, {:binary, comp}, state} = Socket.handle_frame({:binary, pubrel(9)}, state)
+      assert comp == pubcomp(9)
+      refute MapSet.member?(state.qos2_pending, 9)
+
+      assert {:reply, {:binary, again}, _state} = Socket.handle_frame({:binary, frame}, state)
+      assert again == pubrec(9)
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+    end
+
+    test "a PUBREL for an id never held is still answered with a PUBCOMP" do
+      # Our PUBCOMP can be lost; the broker then retransmits the PUBREL, and an unanswered
+      # one is retried for as long as the connection lives.
+      assert {:reply, {:binary, comp}, state} =
+               Socket.handle_frame({:binary, pubrel(77)}, state())
+
+      assert comp == pubcomp(77)
+      assert state.qos2_pending == MapSet.new()
+    end
+
+    test "QoS 1 is NOT deduplicated: a repeat of the id is acknowledged and delivered again" do
+      # §4.3.2: after the PUBACK, the same id "is a new publication, irrespective of the
+      # setting of its DUP flag". At-least-once is the contract at this QoS.
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 1, 3)
+
+      assert {:reply, {:binary, first_ack}, state} =
+               Socket.handle_frame({:binary, frame}, state())
+
+      assert first_ack == <<4::4, 0::4, 2, 3::16>>
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+
+      assert {:reply, {:binary, second_ack}, state} =
+               Socket.handle_frame({:binary, dup(frame)}, state)
+
+      assert second_ack == <<4::4, 0::4, 2, 3::16>>
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+      assert state.qos2_pending == MapSet.new(), "QoS 1 ids are never tracked"
+    end
+
+    test "the held ids are cleared on disconnect, so the next connection delivers a reused id" do
+      held = state() |> stable_since() |> Map.put(:qos2_pending, MapSet.new([9]))
+
+      assert {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, held)
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      assert reconnected.qos2_pending == MapSet.new()
+
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 9)
+
+      assert {:reply, {:binary, ack}, _state} =
+               Socket.handle_frame({:binary, frame}, reconnected)
+
+      assert ack == pubrec(9)
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+    end
+
+    test "the held set is bounded by the id space: past it a PUBLISH is refused" do
+      # 65,535 usable ids (0 is not a valid identifier), so a conforming broker cannot reach
+      # this; id 0 can. Neither delivered nor acknowledged: delivering would lose the
+      # exactly-once guarantee silently, acknowledging would tell the broker to forget a
+      # message nothing here can track.
+      full = Map.put(state(), :qos2_pending, MapSet.new(1..65_535))
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 0)
+
+      assert {:ok, state} = Socket.handle_frame({:binary, frame}, full)
+
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{kind: :data_quality, details: %{dropped: {:qos2, :window_full}}}}
+
+      refute_receive {:dp_exchange, :webull, _message}, 50
+      assert MapSet.size(state.qos2_pending) == 65_535
+      refute MapSet.member?(state.qos2_pending, 0)
     end
   end
 

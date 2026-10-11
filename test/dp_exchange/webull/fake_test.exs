@@ -18,6 +18,9 @@ defmodule DpExchange.Webull.FakeTest do
   @opts [credentials: @credentials]
   @order_opts [credentials: @credentials, account_id: "93IUJ28O9VO2KBGHDHR4H9"]
 
+  # The one order the fake always knows (its `get_orders/2` row), a 32-hex `client_order_id`.
+  @known_order_id "5f1e9c0a7b2d4e68a3c4d5e6f7081920"
+
   describe "the credentials gate" do
     test "reads refuse without credentials rather than answering" do
       # `{:error, {:missing_credentials, :webull}}`, not `{:refused, _}` — a missing
@@ -66,8 +69,8 @@ defmodule DpExchange.Webull.FakeTest do
       }
 
       assert missing == Fake.place_orders(%{}, [batch_entry], account)
-      assert missing == Fake.cancel_order(%{}, "fake-webull-order-1", account)
-      assert missing == Fake.get_order(%{}, "fake-webull-order-1", account)
+      assert missing == Fake.cancel_order(%{}, @known_order_id, account)
+      assert missing == Fake.get_order(%{}, @known_order_id, account)
       assert missing == Fake.get_orders(%{}, account)
 
       assert missing ==
@@ -295,12 +298,102 @@ defmodule DpExchange.Webull.FakeTest do
       only_credentials = [credentials: @credentials]
 
       assert {:error, :account_id_required} =
-               Fake.cancel_order(@credentials, "fake-webull-order-1", only_credentials)
+               Fake.cancel_order(@credentials, @known_order_id, only_credentials)
 
       assert {:error, :account_id_required} =
-               Fake.get_order(@credentials, "fake-webull-order-1", only_credentials)
+               Fake.get_order(@credentials, @known_order_id, only_credentials)
 
       assert {:error, :account_id_required} = Fake.get_orders(@credentials, only_credentials)
+    end
+  end
+
+  describe "issued order ids are the venue's format, unique, and round-trip" do
+    @client_id ~r/\A[0-9a-f]{32}\z/
+
+    test "two placements that name no id get two 32-hex ids and neither overwrites the other" do
+      assert {:ok, first} = Fake.place_order(@credentials, request(%{}), @order_opts)
+      assert {:ok, second} = Fake.place_order(@credentials, request(%{}), @order_opts)
+
+      # `Rest` generates 32 lower-case hex characters per order.
+      assert first.id =~ @client_id
+      assert second.id =~ @client_id
+      refute first.id == second.id
+      refute first.id == @known_order_id
+
+      # Cancelling the first leaves the second working.
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, first.id, @order_opts)
+      assert {:ok, %{status: :cancelled}} = Fake.get_order(@credentials, first.id, @order_opts)
+      assert {:ok, %{status: :pending}} = Fake.get_order(@credentials, second.id, @order_opts)
+    end
+
+    test "the order the fake always lists carries a 32-hex id that get_order takes back" do
+      assert {:ok, [listed]} = Fake.get_orders(@credentials, @order_opts)
+      assert listed.id =~ @client_id
+      assert {:ok, read} = Fake.get_order(@credentials, listed.id, @order_opts)
+      assert read.id == listed.id
+    end
+
+    test "place_orders -> get_order -> cancel_order runs on the rows' client_order_id" do
+      entry = %{
+        symbol: "AAPL",
+        side: :buy,
+        order_type: :limit,
+        quantity: Decimal.new("1"),
+        price: Decimal.new("180"),
+        support_trading_session: :core
+      }
+
+      assert {:ok, [accepted, refused]} =
+               Fake.place_orders(@credentials, [entry, entry], @order_opts)
+
+      # `order-batch-place.md`: every row names the `client_order_id`; an accepted one adds
+      # the system `order_id`, a refused one `error_code` and `message`.
+      assert accepted["client_order_id"] =~ @client_id
+      assert accepted["order_id"] =~ ~r/\A[0-9A-Z]{26}\z/
+      assert refused["client_order_id"] =~ @client_id
+      assert refused["error_code"]
+      assert refused["message"]
+      refute accepted["client_order_id"] == refused["client_order_id"]
+
+      id = accepted["client_order_id"]
+      assert {:ok, %{id: ^id, symbol: "AAPL"}} = Fake.get_order(@credentials, id, @order_opts)
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, id, @order_opts)
+
+      # The refused order was never placed.
+      assert {:refused, :not_found} =
+               Fake.get_order(@credentials, refused["client_order_id"], @order_opts)
+    end
+  end
+
+  describe "a watchlist the fake created is the one it reads back" do
+    test "create -> get returns the created symbols; list names it; rename and delete follow" do
+      assert {:ok, created} = Fake.create_watchlist("Energy", ["XOM", "CVX"], @opts)
+      assert created.symbols == ["XOM", "CVX"]
+
+      assert {:ok, read} = Fake.get_watchlist(created.id, @opts)
+      assert read.id == created.id
+      assert read.symbols == ["XOM", "CVX"]
+
+      assert {:ok, listed} = Fake.list_watchlists(@opts)
+      assert Enum.find(listed, &(&1.id == created.id)).name == "Energy"
+
+      assert {:ok, _renamed} = Fake.update_watchlist(created.id, [name: "Oil"] ++ @opts)
+      assert {:ok, relisted} = Fake.list_watchlists(@opts)
+      assert Enum.find(relisted, &(&1.id == created.id)).name == "Oil"
+
+      assert {:ok, :ok} = Fake.delete_watchlist(created.id, @opts)
+      assert {:error, :unexpected_response_shape} = Fake.get_watchlist(created.id, @opts)
+      assert {:ok, [only_canned]} = Fake.list_watchlists(@opts)
+      assert only_canned.id == "wl-1"
+    end
+
+    test "two creates are two watchlists with their own members" do
+      assert {:ok, first} = Fake.create_watchlist("A", ["AAPL"], @opts)
+      assert {:ok, second} = Fake.create_watchlist("B", ["MSFT"], @opts)
+      refute first.id == second.id
+
+      assert {:ok, %{symbols: ["AAPL"]}} = Fake.get_watchlist(first.id, @opts)
+      assert {:ok, %{symbols: ["MSFT"]}} = Fake.get_watchlist(second.id, @opts)
     end
   end
 

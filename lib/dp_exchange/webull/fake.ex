@@ -92,9 +92,21 @@ defmodule DpExchange.Webull.Fake do
   # Fixed, not `utc_now/0`.
   @at ~U[2026-08-28 12:00:00Z]
 
-  # The id the fake issues when a placed order names none, and the one `get_orders/2`
-  # always lists.
-  @default_order_id "fake-webull-order-1"
+  # The id of the one order `get_orders/2` always lists, in the venue's own `client_order_id`
+  # format: the 32 lower-case hex characters `Rest` generates for an order that names none
+  # (a 32-character maximum, unique per account). This was `fake-webull-order-1`, which is
+  # neither, and it was also what `place_order/3` issued for EVERY order that named no id, so
+  # two placements in a test shared it and the second overwrote the first.
+  @default_order_id "5f1e9c0a7b2d4e68a3c4d5e6f7081920"
+
+  # `place_order/3` and `place_orders/3` issue ids from this prefix plus a per-process count:
+  # 20 hex characters and a 12-character counter, 32 in all, a new one per order, and
+  # deterministic so a consumer's test can be reproduced. The system `order_id` the batch
+  # endpoint also returns is 26 upper-case alphanumerics (`order-batch-place.md`'s example,
+  # `80HG7CPSFDPCAL3TP66LKBAS69`).
+  @issued_prefix "3a9f5c2e8b1d47a6905c"
+  @issued_key {__MODULE__, :issued}
+  @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
 
   @impl true
   def child_spec(opts),
@@ -738,7 +750,13 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def subscribe(symbols, opts \\ []) do
-    symbols = canonical_case(symbols)
+    case check_symbols(symbols) do
+      :ok -> symbols |> canonical_case() |> subscribe_checked(opts)
+      {:error, _reason} = refused -> refused
+    end
+  end
+
+  defp subscribe_checked(symbols, opts) do
     environment = Environment.resolve(opts)
 
     if Environment.streaming?(environment) do
@@ -777,16 +795,20 @@ defmodule DpExchange.Webull.Fake do
 
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
-    symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
-    :ok
+    with :ok <- check_symbols(symbols) do
+      symbols = canonical_case(symbols)
+      Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
+      :ok
+    end
   end
 
   @impl true
   def update_symbols(symbols, _opts \\ []) do
-    symbols = canonical_case(symbols)
-    Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
-    :ok
+    with :ok <- check_symbols(symbols) do
+      symbols = canonical_case(symbols)
+      Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
+      :ok
+    end
   end
 
   @impl true
@@ -1027,33 +1049,52 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- authenticated(opts) do
         # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
         # membership, and a fake returning `[]` would teach a consumer that they are empty.
-        {:ok,
-         [
-           %Types.Watchlist{
-             id: "wl-1",
-             name: "My Tech Stocks",
-             symbols: nil,
-             venue_time: nil,
-             provider: :webull
-           }
-         ]}
+        #
+        # The canned `wl-1` (unless it was deleted here), then the watchlists this process
+        # created, so a create is visible in the listing as it is at the venue.
+        canned =
+          if Map.get(watchlists(), "wl-1") == :deleted,
+            do: [],
+            else: [watchlist_struct("wl-1", "My Tech Stocks", nil)]
+
+        created =
+          for {id, %{name: name}} <- Enum.sort(watchlists()),
+              do: watchlist_struct(id, name, nil)
+
+        {:ok, canned ++ created}
       end
     end)
   end
+
+  defp watchlist_struct(id, name, symbols) do
+    %Types.Watchlist{id: id, name: name, symbols: symbols, venue_time: nil, provider: :webull}
+  end
+
+  # Watchlists this process created (`id => %{name, symbols}`) or deleted (`id => :deleted`).
+  # The fake created one and then read back the canned `AAPL`/`GOOG` membership for it.
+  @watchlists_key {__MODULE__, :watchlists}
+
+  defp watchlists, do: Process.get(@watchlists_key, %{})
+
+  defp put_watchlist(id, value),
+    do: Process.put(@watchlists_key, Map.put(watchlists(), id, value))
 
   @impl true
   def get_watchlist(id, opts \\ []) do
     with_injection(fn ->
       with :ok <- authenticated(opts) do
         # And `name: nil` here, because the membership endpoint does not return it.
-        {:ok,
-         %Types.Watchlist{
-           id: id,
-           name: nil,
-           symbols: ["AAPL", "GOOG"],
-           venue_time: nil,
-           provider: :webull
-         }}
+        case Map.fetch(watchlists(), id) do
+          {:ok, %{symbols: symbols}} ->
+            {:ok, watchlist_struct(id, nil, symbols)}
+
+          # No rows: what `Rest.get_watchlist/3` reads as `:unexpected_response_shape`.
+          {:ok, :deleted} ->
+            {:error, :unexpected_response_shape}
+
+          :error ->
+            {:ok, watchlist_struct(id, nil, ["AAPL", "GOOG"])}
+        end
       end
     end)
   end
@@ -1062,14 +1103,11 @@ defmodule DpExchange.Webull.Fake do
   def create_watchlist(name, symbols, opts \\ []) do
     with_injection(fn ->
       with :ok <- authenticated(opts) do
-        {:ok,
-         %Types.Watchlist{
-           id: "wl-new",
-           name: name,
-           symbols: symbols,
-           venue_time: nil,
-           provider: :webull
-         }}
+        # A new id per create, and the members it was created with, which `get_watchlist/2`
+        # reads back.
+        id = "wl-new-#{map_size(watchlists()) + 1}"
+        put_watchlist(id, %{name: name, symbols: symbols})
+        {:ok, watchlist_struct(id, name, symbols)}
       end
     end)
   end
@@ -1084,23 +1122,28 @@ defmodule DpExchange.Webull.Fake do
         {:error, :membership_not_updatable_here}
       else
         with :ok <- authenticated(opts) do
-          {:ok,
-           %Types.Watchlist{
-             id: id,
-             name: Keyword.get(opts, :name),
-             symbols: nil,
-             venue_time: nil,
-             provider: :webull
-           }}
+          rename_watchlist(id, Keyword.get(opts, :name))
+          {:ok, watchlist_struct(id, Keyword.get(opts, :name), nil)}
         end
       end
     end)
   end
 
+  # A rename of a watchlist this process created shows in the next listing.
+  defp rename_watchlist(id, name) do
+    case Map.fetch(watchlists(), id) do
+      {:ok, %{} = created} when is_binary(name) -> put_watchlist(id, %{created | name: name})
+      _other -> :ok
+    end
+  end
+
   @impl true
-  def delete_watchlist(_id, opts \\ []) do
+  def delete_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts), do: {:ok, :ok}
+      with :ok <- authenticated(opts) do
+        put_watchlist(id, :deleted)
+        {:ok, :ok}
+      end
     end)
   end
 
@@ -1322,38 +1365,60 @@ defmodule DpExchange.Webull.Fake do
            # no price or a market order sized twice.
            :ok <- Rest.validate_order_request(request),
            :ok <- credentialed(credentials) do
-        # Round-tripped through the real module's own encode then decode — not the
-        # caller's atom echoed back — so a fake-based suite exercises the same wire
-        # names the real venue would see, and would catch a decoder gap the way the
-        # real path does.
-        order_type = Map.get(request, :order_type, :limit)
-        tif = Map.get(request, :time_in_force, :gtc)
-
-        # Remembered (per process), so the caller-chosen id this echoes can be cancelled
-        # and read back: it used to be echoed here and then refused as `:not_found` by
-        # `cancel_order/3` and `get_order/3`, which knew only the one fixed id.
-        {:ok,
-         remember_order(%Types.Order{
-           # The caller's own `client_order_id` when it gave one, as the venue echoes it. A
-           # fixed id made a place-then-cancel round trip on a caller-chosen id fail.
-           id: Map.get(request, :client_order_id) || @default_order_id,
-           symbol: Map.fetch!(request, :symbol),
-           side: Map.fetch!(request, :side),
-           order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),
-           time_in_force: tif |> Rest.tif_name() |> Rest.tif_atom(),
-           quantity: Map.get(request, :quantity),
-           price: Map.get(request, :price),
-           # Mirrors the real `Rest.place_order/3`'s own echo — see its comment. The fake
-           # must never be differently capable than the real path (`dp_exchange_core`'s
-           # `usage-rules/testing.md`),
-           # and a consumer's suite asserting on a placed stop order's `stop_price` would
-           # have gone green against the fake while the real path returned `nil`.
-           stop_price: Map.get(request, :stop_price),
-           status: :pending,
-           provider: :webull
-         })}
+        # Remembered (per process), so the id this issues can be cancelled and read back:
+        # the caller's own `client_order_id` when it gave one, as the venue echoes it, and
+        # otherwise a new one in the venue's format, as `Rest` generates. A fixed id made
+        # two placements share one order.
+        {:ok, remember_order(placed_order(request, client_order_id(request)))}
       end
     end)
+  end
+
+  # Round-tripped through the real module's own encode then decode — not the caller's atom
+  # echoed back — so a fake-based suite exercises the same wire names the real venue would
+  # see, and would catch a decoder gap the way the real path does.
+  defp placed_order(request, id) do
+    order_type = Map.get(request, :order_type, :limit)
+    tif = Map.get(request, :time_in_force, :gtc)
+
+    %Types.Order{
+      id: id,
+      symbol: Map.fetch!(request, :symbol),
+      side: Map.fetch!(request, :side),
+      order_type: order_type |> Rest.order_type_name() |> Rest.order_type_atom(),
+      time_in_force: tif |> Rest.tif_name() |> Rest.tif_atom(),
+      quantity: Map.get(request, :quantity),
+      price: Map.get(request, :price),
+      # Mirrors the real `Rest.place_order/3`'s own echo — see its comment. The fake must
+      # never be differently capable than the real path (`dp_exchange_core`'s
+      # `usage-rules/testing.md`), and a consumer's suite asserting on a placed stop order's
+      # `stop_price` would have gone green against the fake while the real path returned
+      # `nil`.
+      stop_price: Map.get(request, :stop_price),
+      status: :pending,
+      provider: :webull
+    }
+  end
+
+  defp client_order_id(request) do
+    case Map.get(request, :client_order_id) do
+      nil -> next_issued(:client)
+      given -> given
+    end
+  end
+
+  defp next_issued(kind) do
+    count = Process.get(@issued_key, 0) + 1
+    Process.put(@issued_key, count)
+
+    case kind do
+      :client -> @issued_prefix <> hex_counter(count, 12)
+      :system -> @system_order_prefix <> String.pad_leading(Integer.to_string(count), 4, "0")
+    end
+  end
+
+  defp hex_counter(count, width) do
+    count |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(width, "0")
   end
 
   @impl true
@@ -1372,12 +1437,30 @@ defmodule DpExchange.Webull.Fake do
       {:ok,
        requests
        |> Enum.with_index()
-       |> Enum.map(fn
-         # The second one refused, because a partial batch is the normal shape.
-         {_request, 1} -> %{"code" => "INSUFFICIENT_BUYING_POWER"}
-         {request, index} -> %{"order_id" => "batch-#{index}", "symbol" => request[:symbol]}
-       end)}
+       |> Enum.map(fn {request, index} -> batch_row(request, index) end)}
     end
+  end
+
+  # One row of `batch_orders` as `order-batch-place.md` documents it: every row names the
+  # order's `client_order_id`; an accepted one adds the system `order_id`, a refused one an
+  # `error_code` and a `message` (this said `code`, a key the venue never sends). The
+  # second is refused, because a partial batch is the normal shape. An accepted order is
+  # remembered under its `client_order_id`, the id `get_order/3` and `cancel_order/3` take,
+  # so a batch's order can be read back and cancelled as a placed one can. The row used to
+  # carry `order_id => "batch-N"`, an id nothing accepted back.
+  defp batch_row(request, 1) do
+    %{
+      "client_order_id" => client_order_id(request),
+      "error_code" => "INSUFFICIENT_BUYING_POWER",
+      "message" => "Insufficient buying power."
+    }
+  end
+
+  defp batch_row(request, _index) do
+    id = client_order_id(request)
+    remember_order(placed_order(Map.put_new(request, :time_in_force, :day), id))
+
+    %{"client_order_id" => id, "order_id" => next_issued(:system)}
   end
 
   defp fake_batch_account(opts) do
@@ -1526,4 +1609,17 @@ defmodule DpExchange.Webull.Fake do
     do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
 
   defp canonical_case(other), do: other
+
+  # The real `Feed` refuses a symbol list that is not a list of non-empty strings with
+  # `{:error, {:invalid_symbols, ...}}` rather than crashing the process every caller shares.
+  # This fake answers the same way: it may be less capable than the venue, never differently
+  # capable, and a consumer's test that passes `nil` here must see what production returns.
+  defp check_symbols(symbols) when is_list(symbols) do
+    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+      [] -> :ok
+      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+    end
+  end
+
+  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
 end

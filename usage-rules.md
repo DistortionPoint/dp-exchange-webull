@@ -172,7 +172,15 @@ also takes one symbol as a string), `Fake.get_screener/2` (`week52_high_low` req
 `Fake.get_historical_prices/4` (a `:limit` over 1200 is refused), and the cash-activity
 calls (a range across two calendar years is refused, and `get_transactions/2` honours
 `:activity_types`). A fake order placed under a caller-chosen `client_order_id` can now be
-read back and cancelled under it.
+read back and cancelled under it. An order placed with no `client_order_id` is issued a new
+one in the venue's format (32 lower-case hex characters, as `Rest` generates), and
+`Fake.place_orders/3` rows carry the `client_order_id` that `get_order/3` and
+`cancel_order/3` take, with the system `order_id` on an accepted row and `error_code` and
+`message` on a refused one, as `order-batch-place.md` documents. A watchlist made with
+`Fake.create_watchlist/3` gets its own id, is read back by `get_watchlist/2` with the symbols
+it was created with, appears in `list_watchlists/1` under its name (and its renames), and
+reads as no rows (`{:error, :unexpected_response_shape}`) once deleted; `wl-1` is the canned
+one before you create any.
 These were missed by the earlier sweep because `dp_exchange_core`'s assertion 17 checks a
 fixed list of nine callback names that predates this surface and does not include any of
 them — passing that assertion is not evidence that the rest of your fake gates credentials.
@@ -999,6 +1007,14 @@ the call is answered anyway, with one of these:
 - `{:error, {:reconcile_pending, ms}}`: the HTTP subscribe is still running.
 - `{:error, {:connack_timeout, ms}}`: the shard has not finished connecting.
 
+This holds wherever the call has got to, including after the package moved your symbols to
+another shard because the first was full or the venue refused one: the ten seconds run from
+when your call arrived, not from the latest internal retry.
+
+A list that is not made of non-empty strings is refused at once with
+`{:error, {:invalid_symbols, offenders}}` (at most five named; the whole value if it was not a
+list), and nothing is subscribed or removed.
+
 **Neither needs a retry.** Your symbols are already recorded. The subscribe finishes or
 the shard connects, and your symbols go out with it. `coverage/1` tells you when they
 start arriving.
@@ -1173,6 +1189,13 @@ the venue's table does not list; they used to be a bare `:link_down`.
 
 **MQTT acknowledgements.** The QoS a session is delivered at is the venue's choice, not this
 package's, and the documentation states none. A QoS 1 or 2 message is acknowledged
-(`PUBACK`, `PUBREC`, `PUBCOMP`) and delivered as any other; delivery is at-least-once, so a
-retransmitted message reaches you twice. Unacknowledged, a broker's in-flight window fills
-and delivery stops on a connection that still looks healthy.
+(`PUBACK`, `PUBREC`, `PUBCOMP`) and delivered as any other. Unacknowledged, a broker's
+in-flight window fills and delivery stops on a connection that still looks healthy.
+
+**Duplicates by QoS (MQTT 3.1.1 §4.3).** QoS 2 is delivered once: a retransmitted `PUBLISH`
+(`DUP` set, or a packet id reused before its `PUBREL`) is acknowledged again but not handed
+to you a second time. The packet ids held for that are bounded at 65,535 and dropped on
+disconnect. QoS 1 is at-least-once by the spec: a repeat of an acknowledged id is a new
+publication whatever `DUP` says, so it is delivered again. For a quote feed the newest value
+wins and a repeat is harmless; the venue's own `venue_time` is on every struct if you need to
+tell a repeat from a new value.

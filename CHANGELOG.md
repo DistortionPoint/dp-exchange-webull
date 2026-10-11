@@ -22,6 +22,82 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A watchlist the fake created read back the canned `AAPL`/`GOOG` members.**
+  `create_watchlist/3` answered `wl-new` every time and `get_watchlist/2` returned the same
+  two symbols for any id. The fake now remembers (per process) what it created: a new id
+  per create, `get_watchlist/2` returns the symbols it was created with, `list_watchlists/1`
+  names it (and its renames from `update_watchlist/2`), and after `delete_watchlist/2` it is
+  gone from the listing and reads as no rows, `{:error, :unexpected_response_shape}`, as
+  `Rest.get_watchlist/3` does. `wl-1` stays the canned watchlist before anything is created.
+- **The fake issued one order id for every placement, and a batch id nothing accepted
+  back.** `place_order/3` with no `client_order_id` answered the literal
+  `fake-webull-order-1` each time, so two placements in a test shared one order (the second
+  overwrote the first) and the id was not the 32 lower-case hex characters `Rest` generates.
+  Each placement now gets a new 32-hex id, and the fixed order `get_orders/2` lists has one
+  too. `place_orders/3` rows were `%{"order_id" => "batch-N", "symbol" => ...}` and, for the
+  refused row, `%{"code" => ...}`: no `client_order_id`, which is the id `get_order/3` and
+  `cancel_order/3` take, so a batch's order could be neither read nor cancelled. Rows now
+  follow `order-batch-place.md`: every row names its `client_order_id`, an accepted one adds
+  the 26-character system `order_id` and is remembered for `get_order/3` and
+  `cancel_order/3`, and a refused one carries `error_code` and `message` and is not placed.
+- **A QoS 2 `PUBLISH` was delivered again whenever the broker repeated it.** The socket
+  acknowledged QoS 2 but kept no record of it, so a `PUBLISH` retransmitted with `DUP`, or a
+  second one reusing a packet id before its `PUBREL`, reached the consumer twice. The socket
+  now implements MQTT 3.1.1 §4.3.3: it holds the packet ids that were delivered and answered
+  with a `PUBREC` and are not yet released, re-acknowledges a repeat of one with a `PUBREC`
+  without delivering it, and removes the id on `PUBREL`, answered with `PUBCOMP` whether or not
+  the id was held. The set is bounded by the 16-bit id space (65,535; a `PUBLISH` needing one
+  more is neither delivered nor acknowledged, and raises a `:data_quality` notice) and is
+  cleared on disconnect. **QoS 1 is deliberately not deduplicated:** §4.3.2 makes a repeat of
+  an acknowledged id "a new publication, irrespective of the setting of its DUP flag", so it
+  is acknowledged and delivered again.
+- **`subscribe`, `unsubscribe` and `update_symbols` crashed the shared `Feed` on a bad symbol
+  list.** `MapSet.new/1`, `Map.drop/2` and `Map.take/2` raise on a non-list, so one
+  `subscribe(nil)` restarted the process every caller shares and discarded every symbol
+  anyone had subscribed. A non-binary element was admitted to `wanted` and raised inside every
+  reconcile task that tried to send it. A list that is not all non-empty strings, or a value
+  that is not a list, is now refused with `{:error, {:invalid_symbols, ...}}` before any state
+  moves (the offenders, at most five, or the whole value). `Fake` answers the same way.
+- **A re-plan sent HTTP at a shard that was not connected.** `touch_background_shard/4`
+  subscribed or unsubscribed against a session that was still connecting, or reconnecting
+  after a drop (up to 30s of backoff). The venue answered `INVALID_SESSION`, which `Feed`
+  takes to mean the session is dead, so a socket about to come good was torn down and reopened
+  on a fresh session against the five-connection ceiling. The new list is now only recorded
+  (the link-up replay carries it), and the deferred `:reconcile_shard` message re-checks the
+  session and `connected?` when it runs.
+- **An unsubscribe could be undone by a blind resubscribe or link-up replay already in
+  flight.** Those send the shard's list as it was when they were spawned; the venue could
+  process the older, larger subscribe last and leave the symbol subscribed with nothing
+  tracking it, holding one of the session's 100 slots. When such an attempt answers `:ok`,
+  what it sent and the shard no longer carries is unsubscribed once more.
+- **`state.rejected` only grew, and every reconcile left its deadline timer running.**
+  Expired `INVALID_SYMBOL` rejections were ignored but never removed; they are now pruned on
+  the resubscribe tick. A reconcile's 60-second `:reconcile_timeout` timer (holding the tag,
+  with the caller's `from` and options) was left to fire after the reconcile had answered; it
+  is cancelled when the attempt is forgotten. Blind resubscribe and link-up tasks also no
+  longer capture the whole `Feed` state in their closures.
+- **A caller could outlive its own `GenServer.call` after an `:oversubscribed` or
+  `INVALID_SYMBOL` retry.** The reply-due timer was armed per primary reconcile and matched
+  on the shard index, so a retry that moved the primary to another index, or parked the
+  caller on a connecting shard, left the first timer matching nothing and the retry's own
+  timers fell after the 15s call timeout; the caller exited and took its process down. Each
+  call now arms one `{:caller_due, from}` deadline when it arrives, and it finds the caller
+  wherever it is: `{:error, {:reconcile_pending, ms}}` if it rides a reconcile,
+  `{:error, {:connack_timeout, ms}}` if it is parked (and it is removed from `reply_to`).
+
+### Documentation
+
+- `Feed`'s comment on `rebuild_stale_shard/3` said no reply is sent to parked callers; the
+  code answers them, correctly, and the comment now says why.
+- Four comment blocks in `Feed` had drifted away from the function they describe (the
+  `complete_link_up/3` tail note, `spawn_reconcile/4`, `latch_resubscribe_failure/4` and
+  `combine_overflow/2`) and are back above it; the `{:reconcile_timeout, ...}` handler's
+  comment no longer ends in another handler's. Moduledoc and comments said `reshard/4`; it is
+  `reshard/3`.
+- Two 99-character lines in `Feed` are reflowed to the 98-column limit.
+
 ## [0.4.122] - 2026-10-11
 
 ### Fixed

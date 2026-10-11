@@ -28,8 +28,11 @@ defmodule DpExchange.Webull.MqttPacket do
   and stops delivering when it fills with messages nobody acknowledged (MQTT 3.1.1 §4.3):
   a connection that stays up, passes keep-alive, and delivers less and then nothing. So a
   QoS 1 `PUBLISH` is acknowledged with `PUBACK`, a QoS 2 one with `PUBREC`, and the `PUBREL`
-  that follows with `PUBCOMP` (`ack/2`). Delivery is at-least-once: a retransmitted `PUBLISH`
-  is delivered again, which for a feed where the newest value wins costs nothing.
+  that follows with `PUBCOMP` (`ack/2`). What is delivered, and how often, is the socket's
+  decision and not this module's, which neither tracks packet ids nor exposes the `DUP` flag:
+  a QoS 1 `PUBLISH` is at-least-once (§4.3.2, a repeated id after the `PUBACK` is a new
+  publication whatever `DUP` says), and a QoS 2 one is delivered once per packet id until its
+  `PUBREL` (§4.3.3) — see `DpExchange.Webull.Socket`'s "QoS 2 is delivered once".
 
   ## No `SUBSCRIBE`, and this was checked rather than assumed
 

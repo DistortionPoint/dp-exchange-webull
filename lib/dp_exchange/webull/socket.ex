@@ -63,6 +63,40 @@ defmodule DpExchange.Webull.Socket do
   broker's in-flight window fills with unacknowledged messages and delivery stops while the
   connection, the keep-alive and the subscription all look healthy. See `MqttPacket`.
 
+  ## QoS 2 is delivered once; QoS 1 may be delivered again, and that is the spec
+
+  Acknowledging a QoS 2 `PUBLISH` is not enough to make it exactly-once. A broker that does
+  not see the `PUBREC` in time retransmits the `PUBLISH` with `DUP` set, and one that
+  reuses a packet id before the `PUBREL` produces a second `PUBLISH` the same way. Handled
+  naively, each is a second delivery of a price the consumer already has. MQTT 3.1.1 §4.3.3
+  says what a receiver does instead: until it has the `PUBREL`, it acknowledges every
+  further `PUBLISH` of that packet id with a `PUBREC` and "MUST NOT cause duplicate
+  messages to be delivered to any onward recipients".
+
+  So `state.qos2_pending` holds the packet ids that were delivered and answered with a
+  `PUBREC` and have not yet been released. A QoS 2 `PUBLISH` whose id is in the set is
+  re-acknowledged and NOT delivered. A `PUBREL` removes its id and is answered with
+  `PUBCOMP` whether or not the id was held, because §4.3.3 requires the `PUBCOMP`
+  regardless, and after it the same id is a new publication. The `DUP` flag is not consulted
+  and `MqttPacket` does not expose it: the set is the authority, and a `DUP` publish whose
+  id is not in it (the first attempt never arrived) is exactly the first delivery.
+
+  The set is bounded by the id space: a packet id is 16 bits, so at most 65,535 can be
+  outstanding (id 0 is not a valid identifier, §2.3.1). A `PUBLISH` that would need a
+  65,536th entry cannot come from a conforming broker; it is neither delivered nor
+  acknowledged, and a `:data_quality` notice says so. Delivering it would lose the
+  exactly-once guarantee silently; acknowledging it would tell the broker it is safe to
+  forget a message this socket cannot track. The set is cleared on disconnect, because the
+  CONNECT sets clean session and the broker discards its half of the exchange too.
+
+  **QoS 1 is deliberately NOT deduplicated.** §4.3.2: after sending the `PUBACK`, the
+  receiver "MUST treat any incoming PUBLISH packet that contains the same Packet Identifier
+  as being a new publication, irrespective of the setting of its DUP flag". At-least-once
+  is the contract at that QoS, and a retransmission is indistinguishable from a legitimate
+  reuse of the id. It is acknowledged again and delivered again, which for a feed where the
+  newest value wins costs nothing; a consumer that needs the difference has the venue's
+  own timestamp on every `Quote`, `TopOfBook` and `Trade`.
+
   ## Data this socket cannot read is reported
 
   A `snapshot`, `quote` or `tick` that cannot be turned into a `Quote`, `TopOfBook` or
@@ -144,6 +178,11 @@ defmodule DpExchange.Webull.Socket do
   # not the venue's: far more than the handful of real reasons, small enough that a venue
   # inventing a new one per message cannot grow the socket's state without bound.
   @max_reported_drops 64
+
+  # A QoS 2 packet id is 16 bits and 0 is not a valid identifier (MQTT 3.1.1 §2.3.1), so a
+  # conforming broker can have at most this many QoS 2 deliveries awaiting their PUBREL. It
+  # is the protocol's bound, not ours: see the moduledoc's "QoS 2 is delivered once".
+  @max_qos2_pending 65_535
 
   # Three missed PINGRESPs at the half-keep-alive cadence. See the moduledoc's "A PINGREQ
   # nobody answers ends the connection".
@@ -239,6 +278,9 @@ defmodule DpExchange.Webull.Socket do
       session_id: Keyword.fetch!(opts, :session_id),
       app_key: Keyword.fetch!(opts, :app_key),
       buffer: <<>>,
+      # QoS 2 packet ids delivered and PUBREC'd but not yet released by a PUBREL. See the
+      # moduledoc's "QoS 2 is delivered once".
+      qos2_pending: MapSet.new(),
       connected?: false,
       # Monotonic ms of the last CONNACK 0, for `stable_session?/1`.
       connected_at: nil,
@@ -402,6 +444,10 @@ defmodule DpExchange.Webull.Socket do
        buffer: <<>>,
        # Acknowledgements owed to a connection that no longer exists are owed to nobody.
        acks: [],
+       # The CONNECT sets clean session, so the broker has forgotten its half of every QoS 2
+       # exchange that was open on the dead connection. Keeping ours would suppress the first
+       # delivery of a reused packet id on the next one.
+       qos2_pending: MapSet.new(),
        connected?: false,
        connected_at: nil,
        ping: nil,
@@ -616,13 +662,42 @@ defmodule DpExchange.Webull.Socket do
     report_drop(state, {:unrecognised_topic, topic}, %{topic: topic, bytes: byte_size(payload)})
   end
 
-  # A QoS 1 or 2 PUBLISH: acknowledged, then handled exactly as a QoS 0 one is.
-  defp handle_packet(state, {:publish, topic, payload, {kind, packet_id}}) do
-    state |> owe_ack(kind, packet_id) |> handle_packet({:publish, topic, payload})
+  # A QoS 1 PUBLISH: acknowledged, then handled exactly as a QoS 0 one is. Always delivered,
+  # DUP or not: MQTT 3.1.1 §4.3.2 makes a repeat of the id after the PUBACK a new publication.
+  defp handle_packet(state, {:publish, topic, payload, {:puback, packet_id}}) do
+    state |> owe_ack(:puback, packet_id) |> handle_packet({:publish, topic, payload})
   end
 
-  # The PUBREL that completes a QoS 2 delivery. Nothing was held back for it.
-  defp handle_packet(state, {:pubrel, packet_id}), do: owe_ack(state, :pubcomp, packet_id)
+  # A QoS 2 PUBLISH. MQTT 3.1.1 §4.3.3: an id still awaiting its PUBREL is acknowledged again
+  # and not delivered again. The window-full branch is unreachable from a conforming broker;
+  # see the moduledoc.
+  defp handle_packet(state, {:publish, topic, payload, {:pubrec, packet_id}}) do
+    pending = Map.get(state, :qos2_pending, MapSet.new())
+
+    cond do
+      MapSet.member?(pending, packet_id) ->
+        owe_ack(state, :pubrec, packet_id)
+
+      MapSet.size(pending) >= @max_qos2_pending ->
+        report_drop(state, {:qos2, :window_full}, %{packet_id: packet_id, topic: topic})
+
+      true ->
+        state
+        |> Map.put(:qos2_pending, MapSet.put(pending, packet_id))
+        |> owe_ack(:pubrec, packet_id)
+        |> handle_packet({:publish, topic, payload})
+    end
+  end
+
+  # The PUBREL that completes a QoS 2 delivery. The id is released, and answered with a
+  # PUBCOMP whether or not it was held: §4.3.3 requires the PUBCOMP regardless, and a PUBREL
+  # for an id this connection never saw (a retransmission after our PUBCOMP was lost) must
+  # still be answered or the broker retries it forever.
+  defp handle_packet(state, {:pubrel, packet_id}) do
+    pending = state |> Map.get(:qos2_pending, MapSet.new()) |> MapSet.delete(packet_id)
+
+    state |> Map.put(:qos2_pending, pending) |> owe_ack(:pubcomp, packet_id)
+  end
 
   # A packet type this package neither sends a request for nor decodes (SUBACK, PUBACK,
   # a PUBLISH too short for its own identifier). It used to be dropped here without a trace,
