@@ -73,13 +73,82 @@ defmodule DpExchange.Webull.FakeFidelityTest do
       assert {:ok, order} =
                Fake.replace_order(
                  @credentials,
-                 "abc",
+                 # The fixed order every fake knows (its `get_orders/2` row).
+                 "5f1e9c0a7b2d4e68a3c4d5e6f7081920",
                  %{quantity: Decimal.new("2")},
                  @order_opts
                )
 
       assert Decimal.equal?(order.quantity, Decimal.new("2"))
       assert Decimal.equal?(order.price, Decimal.new("40000"))
+    end
+  end
+
+  describe "an id replace_order/4 returns is accepted by get_order/3 and cancel_order/3" do
+    test "replacing a placed order amends it in place and the amended order reads back" do
+      request = equity_request(%{client_order_id: "replace-1"})
+
+      assert {:ok, %Types.Order{id: "replace-1"}} =
+               Fake.place_order(@credentials, request, @order_opts)
+
+      assert {:ok, %Types.Order{id: "replace-1"} = replaced} =
+               Fake.replace_order(
+                 @credentials,
+                 "replace-1",
+                 %{quantity: Decimal.new("7")},
+                 @order_opts
+               )
+
+      assert Decimal.equal?(replaced.quantity, Decimal.new("7"))
+
+      assert {:ok, %Types.Order{symbol: "AAPL", id: "replace-1"} = read} =
+               Fake.get_order(@credentials, "replace-1", @order_opts)
+
+      assert Decimal.equal?(read.quantity, Decimal.new("7"))
+      assert Decimal.equal?(read.price, Decimal.new("180"))
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, "replace-1", @order_opts)
+    end
+
+    test "an id this process never placed is refused, not invented" do
+      assert {:refused, :not_found} =
+               Fake.replace_order(
+                 @credentials,
+                 "replace-unplaced",
+                 %{quantity: Decimal.new("2")},
+                 @order_opts
+               )
+
+      # Nothing was invented: the id still reads back as unknown.
+      assert {:refused, :not_found} =
+               Fake.get_order(@credentials, "replace-unplaced", @order_opts)
+
+      assert {:refused, :not_found} =
+               Fake.cancel_order(@credentials, "replace-unplaced", @order_opts)
+    end
+
+    test "the fixed order can be replaced and then reads back amended" do
+      fixed = "5f1e9c0a7b2d4e68a3c4d5e6f7081920"
+
+      assert {:ok, %Types.Order{id: ^fixed}} =
+               Fake.replace_order(
+                 @credentials,
+                 fixed,
+                 %{price: Decimal.new("41000")},
+                 @order_opts
+               )
+
+      assert {:ok, %Types.Order{id: ^fixed} = read} =
+               Fake.get_order(@credentials, fixed, @order_opts)
+
+      assert Decimal.equal?(read.price, Decimal.new("41000"))
+    end
+
+    test "a refused replace remembers nothing" do
+      assert {:error, :no_order_changes} =
+               Fake.replace_order(@credentials, "replace-refused", %{}, @order_opts)
+
+      assert {:refused, :not_found} =
+               Fake.get_order(@credentials, "replace-refused", @order_opts)
     end
   end
 

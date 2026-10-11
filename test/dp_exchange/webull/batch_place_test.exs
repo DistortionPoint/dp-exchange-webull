@@ -78,6 +78,33 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     end
   end
 
+  describe "a batch that is not a list of orders" do
+    test "is refused by name instead of raising, and nothing is sent" do
+      exploding = fn _conn -> raise "must not send a malformed batch" end
+
+      for bad <- [nil, %{}, "AAPL"] do
+        assert {:error, :invalid_batch} =
+                 Rest.place_orders(@credentials, bad,
+                   account_id: "acct-1",
+                   plug: exploding,
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "an entry that is not a map is refused by index" do
+      assert {:error, {:batch_order_rejected, 1, :not_an_order}} =
+               Rest.validate_batch_orders([order(), "AAPL"])
+    end
+
+    test "an entry whose client_order_id is over 32 characters is refused by index" do
+      too_long = String.duplicate("c", 33)
+
+      assert {:error, {:batch_order_rejected, 0, {:invalid_client_order_id, ^too_long}}} =
+               Rest.validate_batch_orders([order(%{client_order_id: too_long})])
+    end
+  end
+
   describe "one request" do
     test "every order goes in a single body under the venue's own key" do
       me = self()

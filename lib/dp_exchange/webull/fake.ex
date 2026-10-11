@@ -54,6 +54,16 @@ defmodule DpExchange.Webull.Fake do
   - **UAT has no stream.** `subscribe/2` under `environment: :uat` refuses, exactly as the
     real feed does, rather than delivering fake production data.
 
+  ## Remembered per process, and what is unmeasured
+
+  Orders from `place_order/3`, `place_orders/3` and `replace_order/4` are remembered, so
+  every id they return is accepted by this fake's `get_order/3` and `cancel_order/3`
+  (`close_position/3` is unsupported here, so it issues none). Watchlists from
+  `create_watchlist/3` read back their members; only the fixture's own `wl-1` returns canned
+  ones. `get_watchlist/2` for any other id is `{:refused, :not_found}` - **the real venue's
+  answer for an unknown watchlist id is unmeasured** (`get-watchlist-instruments.md` states
+  only the generic error bodies), so the fake fails closed rather than guess one.
+
   ## Failure injection and anonymous mode
 
   Every function below that has a real success path (not an unconditional
@@ -666,8 +676,22 @@ defmodule DpExchange.Webull.Fake do
     with :ok <- fake_replaceable(instrument),
          :ok <- Rest.validate_amendment(order_type, changes),
          :ok <- fake_account(opts),
-         :ok <- credentialed(credentials) do
-      {:ok, amended_order(client_order_id, changes)}
+         :ok <- credentialed(credentials),
+         {:ok, base} <- replaceable_order(client_order_id) do
+      # Remembered (per process) under the same id, as the venue amends in place and
+      # `Rest.replace_order/4` reads that order back: an id this returns is then accepted by
+      # `get_order/3` and `cancel_order/3`. The order keeps its own fields except the ones
+      # changed.
+      {:ok, base |> amended_order(changes) |> remember_order()}
+    end
+  end
+
+  # Only an order this process placed (or the fixed order) can be replaced. An id the fake
+  # never issued is refused as `get_order/3` and `cancel_order/3` refuse it, never invented.
+  defp replaceable_order(client_order_id) do
+    case lookup_order(client_order_id) do
+      {:ok, _order} = found -> found
+      :error -> {:refused, :not_found}
     end
   end
 
@@ -678,10 +702,10 @@ defmodule DpExchange.Webull.Fake do
   # the order back rather than echoing the request): the fields that changed are the new
   # values, and the rest are the order's own. A quantity-only edit used to blank the price,
   # and the quantity edit itself was dropped.
-  defp amended_order(client_order_id, changes) do
+  defp amended_order(%Types.Order{} = base, changes) do
     Enum.reduce(
       [:quantity, :price, :stop_price, :order_type, :time_in_force],
-      %{fake_order() | id: client_order_id},
+      base,
       fn field, order ->
         case Map.get(changes, field) do
           nil -> order
@@ -1074,6 +1098,9 @@ defmodule DpExchange.Webull.Fake do
   # The fake created one and then read back the canned `AAPL`/`GOOG` membership for it.
   @watchlists_key {__MODULE__, :watchlists}
 
+  # The one watchlist the fixture ships with, before anything is created or deleted.
+  @canned_watchlist_id "wl-1"
+
   defp watchlists, do: Process.get(@watchlists_key, %{})
 
   defp put_watchlist(id, value),
@@ -1092,8 +1119,16 @@ defmodule DpExchange.Webull.Fake do
           {:ok, :deleted} ->
             {:error, :unexpected_response_shape}
 
-          :error ->
+          # The fixture's own canned watchlist, and only that one.
+          :error when id == @canned_watchlist_id ->
             {:ok, watchlist_struct(id, nil, ["AAPL", "GOOG"])}
+
+          # An id this process never created. `get-watchlist-instruments.md` states no
+          # answer for an unknown id (only the generic error bodies), so the real shape is
+          # UNMEASURED; the fake fails closed with the refusal it already uses for an
+          # unknown order id rather than invent members for a watchlist that does not exist.
+          :error ->
+            {:refused, :not_found}
         end
       end
     end)
@@ -1105,11 +1140,21 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- authenticated(opts) do
         # A new id per create, and the members it was created with, which `get_watchlist/2`
         # reads back.
-        id = "wl-new-#{map_size(watchlists()) + 1}"
+        id = new_watchlist_id()
         put_watchlist(id, %{name: name, symbols: symbols})
         {:ok, watchlist_struct(id, name, symbols)}
       end
     end)
+  end
+
+  # Minted from a VM-wide monotonic counter, never from the size of the map: that size
+  # repeats a number once an id was deleted or touched without being created, and reissued
+  # an id the process had already used. An id the process already holds a record for
+  # (created, or deleted, or renamed by a caller who guessed it) is skipped, so a
+  # never-created or deleted id is never handed out again.
+  defp new_watchlist_id do
+    id = "wl-new-#{System.unique_integer([:positive, :monotonic])}"
+    if Map.has_key?(watchlists(), id), do: new_watchlist_id(), else: id
   end
 
   @impl true

@@ -22,6 +22,56 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A count over a maximum the endpoint's page states went to the venue.** Refused locally
+  as `{:error, {:limit_out_of_range, n, max: max}}`, the shape crypto bars already used:
+  stock bars 1200 (1650 for `1m`; `historical-bars.md`), option, futures and event bars
+  1200, the option, futures and event tapes 1200 and the stock tape 1000, footprint
+  `:count` 1200, and `:count` 20 on the balance-sheet, income, cash-flow, indicators and
+  fund-net-value endpoints. **Endpoints whose page states no maximum are deliberately
+  unchecked** (`capital-flows`, the depth endpoints, the other fundamentals) and the venue
+  decides. `Rest.validate_footprint_request/2` applies the same rule for the fake.
+  Also: `rest.ex`'s moduledoc named `get_volume_profile/3` (it is `/4`) and the `@max_pages`
+  comment had been separated from its attribute by the `@timespans` comment.
+- **`get_volume_profile/4` sent `category=US_ETF` to the stock footprint endpoint.**
+  `footprint.md`'s `category` enum is `US_STOCK` alone ("Only US_STOCK type queries are
+  supported"), so an ETF caller was sending a value the endpoint does not list. It is now
+  `{:error, {:unsupported_footprint_category, "US_ETF"}}` before any request. `US_FUTURES`
+  keeps its own endpoint.
+- **A caller's `client_order_id` over the venue's limit went to the wire.**
+  `common-order-place.md:175` states "Maximum length is 32 characters". An id that is empty,
+  over 32 characters or not text is now `{:error, {:invalid_client_order_id, id}}` from
+  `place_order/3`, `preview_order/3` and, by index, `place_orders/3`, with no request made.
+  The fake enforces the same rule through the shared validator.
+- **`place_orders/3` raised on a batch that was not a list or held a non-map entry.** A
+  `nil` batch or an entry that was a string reached `Enum.with_index/1` or `Map.get/3` and
+  raised in the caller's process on a money write. They are now `{:error, :invalid_batch}`
+  and `{:error, {:batch_order_rejected, index, :not_an_order}}`.
+- **`Subscription.subscribe/3` and `unsubscribe/3` raised or sent a body the venue rejects on
+  a bad `:sub_types`.** A tuple raised out of `Jason.encode!/1`; a string, `[]` or a list of
+  atoms went to the venue as a 417 naming nothing the caller wrote. Anything but a non-empty
+  list of strings is now `{:error, {:invalid_sub_types, value}}`, with no request made.
+- **The fake's `replace_order/4` returned an order nothing could read back.** The amended
+  order was built and returned but never remembered, so the id it answered for was refused by
+  the same fake's `get_order/3` and `cancel_order/3` (the round trip `dp_exchange_core`'s
+  assertion 31 extends to `replace_order/4`). It is now remembered per process under the
+  same id, built on the order this process placed under that id (so a quantity-only edit
+  keeps the placed symbol and price). **An id this process never placed, other than the
+  fixed order, is `{:refused, :not_found}`** as for `get_order/3` and `cancel_order/3`; the
+  fake does not invent an order for it. A refused replace remembers nothing.
+  `place_orders/3` rows were already remembered. `close_position/3` is `:unsupported` here,
+  so it has no id to round-trip.
+- **The fake could reissue a watchlist id.** `create_watchlist/3` minted `wl-new-<map
+  size + 1>`, which repeats once an id was deleted or never created, overwriting that
+  record. Ids now come from `System.unique_integer([:positive, :monotonic])`, skipping any
+  id the process already holds a record for.
+- **The fake's `get_watchlist/2` answered canned `AAPL`/`GOOG` members for any id.** Only the
+  fixture's own `wl-1` returns them now. An id the process never created is
+  `{:refused, :not_found}`, the refusal the fake uses for an unknown order id. **The real
+  shape for an unknown watchlist id is unmeasured:** `get-watchlist-instruments.md` documents
+  only the generic error bodies, so this fails closed rather than copying a guessed answer.
+
 ## [0.4.123] - 2026-10-11
 
 ### Fixed

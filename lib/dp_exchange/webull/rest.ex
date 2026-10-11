@@ -51,7 +51,7 @@ defmodule DpExchange.Webull.Rest do
   `futures-historical-bars.md:214`, `event-bars.md:236`); only the crypto bar schema
   (`crypto-bars.md`) carries none. `decode_bar/3` previously hard-coded `nil` for every
   caller, which understated the four documented cases the same way the old
-  `reports_trade_volume: false` understated the venue as a whole. `get_volume_profile/3`
+  `reports_trade_volume: false` understated the venue as a whole. `get_volume_profile/4`
   remains the separate equity endpoint that splits traded volume by price and side — this
   note is about the bars' own `volume` column, not that endpoint.
 
@@ -96,11 +96,6 @@ defmodule DpExchange.Webull.Rest do
   # should store here. That reasoning is about crypto's continuous, boundary-less week —
   # it does not carry over to equities, which trade on a fixed Monday-to-Friday calendar
   # the venue's own weekly bar aligns to, which is why `@stock_timespans` accepts it.
-  # Bounds the instrument pagination loop. 342 symbols were measured at a page size the
-  # venue no longer documents; 50 pages is far above any plausible catalogue and far below
-  # forever.
-  @max_pages 50
-
   @timespans %{
     "1m" => "M1",
     "5m" => "M5",
@@ -111,6 +106,11 @@ defmodule DpExchange.Webull.Rest do
     "4h" => "M240",
     "1d" => "D"
   }
+
+  # Bounds the instrument pagination loop. 342 symbols were measured at a page size the
+  # venue no longer documents; 50 pages is far above any plausible catalogue and far below
+  # forever.
+  @max_pages 50
 
   @doc "Canonical timeframes the crypto and event-contract bars serve, shortest first."
   @spec timeframes() :: [String.t()]
@@ -426,7 +426,8 @@ defmodule DpExchange.Webull.Rest do
   # came back as though they answered a window in the past.
   defp futures_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :future),
-         {:ok, timespan} <- stock_timespan(timeframe) do
+         {:ok, timespan} <- stock_timespan(timeframe),
+         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -453,7 +454,8 @@ defmodule DpExchange.Webull.Rest do
   # Takes no range either, and refuses one for the reason `futures_bars/5` does.
   defp event_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :event),
-         {:ok, timespan} <- event_timespan(timeframe) do
+         {:ok, timespan} <- event_timespan(timeframe),
+         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -500,7 +502,8 @@ defmodule DpExchange.Webull.Rest do
   # failure shape.
   defp option_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :option),
-         {:ok, timespan} <- stock_timespan(timeframe) do
+         {:ok, timespan} <- stock_timespan(timeframe),
+         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -583,9 +586,18 @@ defmodule DpExchange.Webull.Rest do
          do: crypto_count_within_limit(Keyword.get(opts, :limit))
   end
 
-  defp crypto_count_within_limit(nil), do: :ok
-  defp crypto_count_within_limit(n) when is_integer(n) and n in 1..@crypto_bar_max, do: :ok
-  defp crypto_count_within_limit(n), do: {:error, {:limit_out_of_range, n, max: @crypto_bar_max}}
+  defp crypto_count_within_limit(n), do: count_within_max(n, @crypto_bar_max)
+
+  # A bar or tick count over a maximum the endpoint's own page states is refused before the
+  # request, in the shape the crypto check above has always used. Only endpoints whose page
+  # STATES a maximum are checked (1200 for the bars and futures/option/event ticks, 1000
+  # for the stock tape, 20 for the statement endpoints); `capital-flows` and the depth
+  # endpoints state none and are left to the venue.
+  defp count_within_max(nil, _max), do: :ok
+
+  defp count_within_max(n, max) when is_integer(n) and n >= 1 and n <= max, do: :ok
+
+  defp count_within_max(n, max), do: {:error, {:limit_out_of_range, n, max: max}}
 
   # **A range older than the read reaches is refused, not answered short.** A full page
   # whose oldest bar is still after `:start` means older bars exist that this read did not
@@ -1984,7 +1996,8 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, path} <- footprint_path(category),
          {:ok, span} <- footprint_span(timeframe),
-         {:ok, session} <- footprint_session(Keyword.get(opts, :session)) do
+         {:ok, session} <- footprint_session(Keyword.get(opts, :session)),
+         :ok <- count_within_max(Keyword.get(opts, :count), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -2012,8 +2025,9 @@ defmodule DpExchange.Webull.Rest do
   # if the prose turns out to be right this is where a reader will look.
   defp footprint_path("US_FUTURES"), do: {:ok, "/market-data/futures/footprints/list"}
 
-  defp footprint_path(category) when category in ["US_STOCK", "US_ETF"],
-    do: {:ok, "/market-data/stocks/footprints/list"}
+  # `footprint.md`'s `category` enum is `US_STOCK` alone ("Only US_STOCK type queries are
+  # supported"); `US_ETF` was sent anyway, a value the endpoint does not list.
+  defp footprint_path("US_STOCK"), do: {:ok, "/market-data/stocks/footprints/list"}
 
   defp footprint_path(category), do: {:error, {:unsupported_footprint_category, category}}
 
@@ -2041,7 +2055,7 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, _path} <- footprint_path(Config.opt(opts, :category, "US_STOCK")),
          {:ok, _span} <- footprint_span(timeframe),
          {:ok, _session} <- footprint_session(Keyword.get(opts, :session)),
-         do: :ok
+         do: count_within_max(Keyword.get(opts, :count), 1_200)
   end
 
   defp decode_profiles(row, symbol, timeframe) do
@@ -2266,7 +2280,8 @@ defmodule DpExchange.Webull.Rest do
   def get_trades(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
-    with {:ok, path} <- tick_path(category) do
+    with {:ok, path} <- tick_path(category),
+         :ok <- count_within_max(Keyword.get(opts, :limit), tick_max(category)) do
       params =
         %{
           "symbol" => symbol,
@@ -2281,6 +2296,10 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  # `tick.md`: "maximum limit 1000"; `option-tick.md` and `futures-tick.md`: 1200.
+  defp tick_max(category) when category in ["US_OPTION", "US_FUTURES"], do: 1_200
+  defp tick_max(_category), do: 1_000
 
   # Options and futures each have their own tape endpoint. The stock one refuses both,
   # which is the venue's split rather than an absence.
@@ -2400,7 +2419,9 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_STOCK")
 
     with :ok <- book_category(category),
-         {:ok, timespan} <- stock_timespan(timeframe) do
+         {:ok, timespan} <- stock_timespan(timeframe),
+         # `historical-bars.md`: "maximum limit 1200 (M1 supports up to 1650)".
+         :ok <- count_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)) do
       body =
         %{
           "symbols" => [symbol],
@@ -2425,6 +2446,9 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  defp stock_bar_max("M1"), do: 1_650
+  defp stock_bar_max(_timespan), do: 1_200
 
   # A caller who asked for the forming bar (`real_time: true`) keeps it. Otherwise a bar whose
   # end has not happened yet is not a bar this package returns.
@@ -3145,12 +3169,24 @@ defmodule DpExchange.Webull.Rest do
           %{"symbol" => symbol, "category" => fundamental_category(opts)}
           |> put_allowed(allowed, opts)
 
-        fundamental_rows(kind, path, base_params, credentials, opts)
+        # The statement endpoints state "maximum value is 20" for `count`
+        # (`financial-balancesheet.md` and kin, `fund-net-value.md`). `capital-flows` states
+        # none and is left to the venue.
+        with :ok <- statement_count(kind, opts) do
+          fundamental_rows(kind, path, base_params, credentials, opts)
+        end
 
       :error ->
         {:error, {:unknown_fundamental, kind}}
     end
   end
+
+  @counted_to_20 [:balance_sheet, :cash_flow, :income_statement, :indicators, :fund_net_values]
+
+  defp statement_count(kind, opts) when kind in @counted_to_20,
+    do: count_within_max(Keyword.get(opts, :count), 20)
+
+  defp statement_count(_kind, _opts), do: :ok
 
   defp fundamental_rows(:fund_dividends, path, base_params, credentials, opts) do
     fetch_page = fn key ->
@@ -4057,7 +4093,9 @@ defmodule DpExchange.Webull.Rest do
       %{"symbol" => symbol, "category" => "US_EVENT"}
       |> put_present("count", Keyword.get(opts, :limit))
 
-    with {:ok, body} <-
+    # `event-tick.md`: "maximum limit 1200".
+    with :ok <- count_within_max(Keyword.get(opts, :limit), 1_200),
+         {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol) do
       list_value(row, ["result"])
@@ -4855,7 +4893,7 @@ defmodule DpExchange.Webull.Rest do
   Returns the venue's own rows, one per order, unnormalised: the venue validates per order
   and a batch where three of five were accepted is the normal shape, not the exception.
   """
-  @spec place_orders(map(), [map()], keyword()) ::
+  @spec place_orders(map(), [map()] | term(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def place_orders(credentials, requests, opts) do
     with {:ok, account_id} <- account_id(opts),
@@ -4887,6 +4925,10 @@ defmodule DpExchange.Webull.Rest do
   defp batch_size(requests) when length(requests) > @batch_limit,
     do: {:error, {:batch_too_large, length(requests), @batch_limit}}
 
+  # Not a list (`nil`, a map): `length/1` in the guard above is false for it, and the
+  # `Enum.with_index/1` that follows raised out of the caller's process on a money write.
+  defp batch_size(requests) when not is_list(requests), do: {:error, :invalid_batch}
+
   defp batch_size(_requests), do: :ok
 
   @doc """
@@ -4896,7 +4938,7 @@ defmodule DpExchange.Webull.Rest do
   exactly as the real path does — a fake that accepted a `STOP_LOSS` or price-less `LIMIT`
   entry would let a consumer ship a batch the venue path refuses.
   """
-  @spec validate_batch_orders([map()]) :: :ok | {:error, term()}
+  @spec validate_batch_orders([map()] | term()) :: :ok | {:error, term()}
   def validate_batch_orders(requests) do
     with :ok <- batch_size(requests),
          {:ok, _orders} <- batch_orders(requests),
@@ -4916,6 +4958,9 @@ defmodule DpExchange.Webull.Rest do
 
   # Equities only, by the venue's own note. A crypto order in a batch is refused by index so
   # a caller knows which of fifty it was, rather than reading a venue message about a field.
+  defp batch_order(request, index) when not is_map(request),
+    do: {:error, {:batch_order_rejected, index, :not_an_order}}
+
   defp batch_order(request, index) do
     case Map.get(request, :instrument_type, :equity) do
       :equity ->
@@ -5284,10 +5329,24 @@ defmodule DpExchange.Webull.Rest do
   # `Map.fetch!/2` on `:side` raised `KeyError` in the caller's process, on an order write.
   defp required_order_identity(request) do
     case Enum.find([:symbol, :side], &is_nil(Map.get(request, &1))) do
-      nil -> :ok
+      nil -> valid_client_order_id(Map.get(request, :client_order_id))
       field -> {:error, {:missing_required_field, field}}
     end
   end
+
+  # `common-order-place.md:175`: the caller's own id is "Maximum length is 32 characters".
+  # One longer (or empty, or not text) was sent as it stood and failed at the venue after the
+  # request; refused here it names the id and spends no write. Absent is fine: one is
+  # generated.
+  defp valid_client_order_id(nil), do: :ok
+
+  defp valid_client_order_id(id) when is_binary(id) do
+    if id != "" and String.length(id) <= 32,
+      do: :ok,
+      else: {:error, {:invalid_client_order_id, id}}
+  end
+
+  defp valid_client_order_id(id), do: {:error, {:invalid_client_order_id, id}}
 
   @doc """
   Whether `request` is an order this package would send: the venue's combination matrix,

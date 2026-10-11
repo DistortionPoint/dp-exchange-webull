@@ -387,6 +387,22 @@ defmodule DpExchange.Webull.FakeTest do
       assert only_canned.id == "wl-1"
     end
 
+    test "an id that was never created is refused, not given the canned members" do
+      assert {:refused, :not_found} = Fake.get_watchlist("never-created", @opts)
+      assert {:ok, %{id: "wl-1", symbols: ["AAPL", "GOOG"]}} = Fake.get_watchlist("wl-1", @opts)
+    end
+
+    test "a deleted id is never reissued to a later create" do
+      assert {:ok, first} = Fake.create_watchlist("A", ["AAPL"], @opts)
+      assert {:ok, :ok} = Fake.delete_watchlist(first.id, @opts)
+      assert {:ok, :ok} = Fake.delete_watchlist("never-created", @opts)
+      assert {:ok, second} = Fake.create_watchlist("B", ["MSFT"], @opts)
+
+      refute second.id == first.id
+      assert {:error, :unexpected_response_shape} = Fake.get_watchlist(first.id, @opts)
+      assert {:ok, %{symbols: ["MSFT"]}} = Fake.get_watchlist(second.id, @opts)
+    end
+
     test "two creates are two watchlists with their own members" do
       assert {:ok, first} = Fake.create_watchlist("A", ["AAPL"], @opts)
       assert {:ok, second} = Fake.create_watchlist("B", ["MSFT"], @opts)
@@ -498,12 +514,12 @@ defmodule DpExchange.Webull.FakeTest do
       assert {:ok, order} =
                Fake.replace_order(
                  @credentials,
-                 "abc",
+                 @known_order_id,
                  %{price: Decimal.new("41000")},
                  @order_opts
                )
 
-      assert order.id == "abc"
+      assert order.id == @known_order_id
       assert Decimal.equal?(order.price, Decimal.new("41000"))
     end
   end

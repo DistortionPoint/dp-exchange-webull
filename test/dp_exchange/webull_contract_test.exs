@@ -54,5 +54,22 @@ defmodule DpExchange.WebullContractTest do
     #
     # Naming a symbol this endpoint actually serves makes the assertion RUN. The refusal is
     # still correct and still covered — `order_book_test.exs` asserts it directly.
-    endpoint_symbols: %{{:get_order_book, 2} => "AAPL"}
+    endpoint_symbols: %{{:get_order_book, 2} => "AAPL"},
+    # A batch entry on this venue must be `DAY` (`Rest.batch_time_in_force/1` refuses the
+    # suite's generic `:gtc` rather than switch it), and it must name its
+    # `support_trading_session`, which has no documented default. So the batch is declared
+    # here.
+    order_args: %{
+      order_requests: [
+        %{
+          symbol: "AAPL",
+          side: :buy,
+          order_type: :limit,
+          time_in_force: :day,
+          support_trading_session: :core,
+          quantity: Decimal.new("1"),
+          price: Decimal.new("1")
+        }
+      ]
+    }
 end

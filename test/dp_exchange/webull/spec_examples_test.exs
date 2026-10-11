@@ -3819,6 +3819,20 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       refute Map.has_key?(body, "overnight_required")
     end
 
+    test "a :sub_types that is not a non-empty list of strings is refused without a call" do
+      exploding = fn _conn -> raise "must not call the venue for a bad sub_types" end
+
+      for bad <- ["SNAPSHOT", [], [:snapshot], {"SNAPSHOT"}] do
+        assert {:error, {:invalid_sub_types, ^bad}} =
+                 Subscription.subscribe("session-1", ["BTC-USD"],
+                   credentials: @credentials,
+                   sub_types: bad,
+                   plug: exploding,
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "an empty symbol list is :ok without spending a call" do
       exploding = fn _conn -> raise "must not call the venue for zero symbols" end
 

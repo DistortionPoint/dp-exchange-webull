@@ -218,6 +218,17 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
       assert {:error, {:unsupported_footprint_category, "US_CRYPTO"}} =
                Rest.get_volume_profile("BTC-USD", "1m", @credentials, category: "US_CRYPTO")
     end
+
+    test "US_ETF is refused: footprint.md's category enum is US_STOCK alone" do
+      exploding = fn _conn -> raise "must not send a category the endpoint does not list" end
+
+      assert {:error, {:unsupported_footprint_category, "US_ETF"}} =
+               Rest.get_volume_profile("SPY", "1m", @credentials,
+                 category: "US_ETF",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "event contracts refuse the shapes that do not fit" do

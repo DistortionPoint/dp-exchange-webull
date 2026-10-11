@@ -86,6 +86,41 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
   end
 
+  describe "a caller's own client_order_id" do
+    test "longer than the venue's 32 characters is refused, and nothing is sent" do
+      exploding = fn _conn -> raise "must not send an id the venue will refuse" end
+      too_long = String.duplicate("a", 33)
+
+      assert {:error, {:invalid_client_order_id, ^too_long}} =
+               place(limit_request(%{client_order_id: too_long}),
+                 plug: exploding,
+                 account_id: @account
+               )
+    end
+
+    test "empty or not text is refused" do
+      exploding = fn _conn -> raise "must not send an invalid id" end
+
+      for bad <- ["", 42] do
+        assert {:error, {:invalid_client_order_id, ^bad}} =
+                 place(limit_request(%{client_order_id: bad}),
+                   plug: exploding,
+                   account_id: @account
+                 )
+      end
+    end
+
+    test "exactly 32 characters is accepted" do
+      id = String.duplicate("b", 32)
+
+      assert {:ok, _order} =
+               place(limit_request(%{client_order_id: id}),
+                 plug: responding([%{"client_order_id" => id}]),
+                 account_id: @account
+               )
+    end
+  end
+
   describe "the type/time-in-force pairs the venue documents for crypto" do
     test "a market GTC is refused — MARKET takes IOC only" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end

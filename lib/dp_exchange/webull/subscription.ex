@@ -139,6 +139,17 @@ defmodule DpExchange.Webull.Subscription do
   defp post(_path, _session_id, [], _opts), do: :ok
 
   defp post(path, session_id, symbols, opts) do
+    # Checked before anything is built: a `:sub_types` that is not a list of strings would
+    # either raise out of `Jason.encode!/1` (a tuple) or go to the venue as a body it
+    # rejects with a 417 naming nothing the caller wrote. Refused locally and by name.
+    sub_types = Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
+
+    if is_list(sub_types) and sub_types != [] and Enum.all?(sub_types, &is_binary/1),
+      do: send_request(path, session_id, symbols, sub_types, opts),
+      else: {:error, {:invalid_sub_types, sub_types}}
+  end
+
+  defp send_request(path, session_id, symbols, sub_types, opts) do
     credentials = Keyword.get(opts, :credentials, %{})
     environment = Environment.resolve(opts)
     host = Environment.host(environment)
@@ -155,7 +166,7 @@ defmodule DpExchange.Webull.Subscription do
         # venue actually accepted for months from the prior in-repo client. `TICK` left the
         # default on 2026-09-29 (dp-exchange-core issue #40) and came back on 2026-10-02
         # (dp_exchange_webull issue #7) — see the moduledoc.
-        "sub_types" => Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
+        "sub_types" => sub_types
       })
 
     request = %{path: path, query_params: %{}, body: body, host: host}
