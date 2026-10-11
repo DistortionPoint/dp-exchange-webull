@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.125] - 2026-10-11
+
 ### Fixed
 
 - **An order's `side` and `symbol` were not checked.** `place_order/3`, `preview_order/3`,
