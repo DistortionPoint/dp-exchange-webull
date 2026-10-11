@@ -22,6 +22,67 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (error shape): a single-symbol read of a symbol that is `nil`, not a string, or
+  blank is `{:error, {:invalid_symbol, value}}`, decided locally.** `get_price/2`,
+  `get_top_of_book/2`, `get_order_book/2`, `get_trades/2` and `get_historical_prices/4`. On the
+  default `US_CRYPTO` category `get_price(nil)`, `get_top_of_book(:btc)` and bars raised
+  `FunctionClauseError` in the symbol mapper; on the others `""` was sent as `symbols=` and
+  `get_order_book(nil)` went to the wire unchecked. The check runs after the category's own
+  refusal and before credentials. `Rest.validate_symbol/1` is shared with the Fake. The same
+  now holds for every other single-symbol read: `get_volume_profile/3`,
+  `get_auction_imbalance/2`, `get_fundamental/3`, `get_financials/3`, `get_filings/2`,
+  `get_event_trades/2`, `get_event_order_book/2`, `quantization/2`, `get_option_chain/2`,
+  `get_option_expirations/2` and `Rest.get_stock_bars/5` (which also validates its `range`
+  itself). The Fake refuses identically, in the same order, for those it models.
+- **BREAKING (error shape): `get_prices/2` with a symbol list that is not a proper list is
+  `{:error, {:invalid_symbols, value}}`** (it raised `FunctionClauseError`), and a bad member
+  of a good list gets `{:error, {:invalid_symbol, member}}` as its own result with no request,
+  instead of raising or taking its chunk down.
+- **BREAKING (error shape): a historical `range` that is not a keyword list of `DateTime`
+  bounds is `{:error, {:invalid_range, range}}`, before any request.** A non-`DateTime`
+  `:start`/`:end` raised in `DateTime.compare/2` after the request had been made and charged;
+  on the option, futures and event paths a non-keyword range raised in `Keyword.get/2`.
+  `Rest.validate_range/1` runs first in `validate_bars_request/3`, which the Fake uses.
+- **BREAKING (error shape): `subscribe/2`, `unsubscribe/2`, `update_symbols/2` and
+  `subscribe_notices/1` validate their arguments in the caller, before
+  `{:error, :feed_not_started}`.** `unsubscribe(nil)` used to answer `:ok` with no feed, and a
+  bad list or subscriber answered `:feed_not_started`; they are now `{:invalid_symbols, _}` /
+  `{:invalid_subscriber, _}` whether or not the feed runs. A valid `unsubscribe` with no feed
+  is still `:ok`.
+- **BREAKING (error shape): `true` and `false` are refused as a subscriber**
+  (`{:error, {:invalid_subscriber, to}}`), by `Feed.check_subscriber/1`, the facade and the Fake.
+  They passed as atoms naming a process that does not exist.
+- **BREAKING (error shape): a whitespace-only symbol (`[" "]`) in a subscribe list is refused**
+  as `{:invalid_symbols, [" "]}`; only the empty string was refused before.
+  `Feed.check_symbols/1` is public and is the one validator the facade, `Feed` and the Fake use.
+- The streaming callbacks take `opts \\ []` on the facade (`subscribe/1`, `unsubscribe/1`,
+  `update_symbols/1`, `subscribe_notices/0`), as they do on the Fake and the other venues.
+
+### Fixed
+
+- **`Socket` with `ssl_options: nil` (or `[]`) connected without verifying the certificate.**
+  `websockex` reads a `nil` as "none", falling back to `verify: :verify_none`, and `put_new`
+  did not replace the `nil`. `nil`, `[]` and a non-keyword value now mean the verified defaults
+  (`verify_peer`, the system CA store, hostname check); a keyword list is merged over them, so
+  a caller overriding only `cacerts` keeps verification.
+- **`Feed.start_link/1` now wraps `:credentials`** (idempotent `Credentials.wrap_opt/1`), so
+  a `Feed` started directly, not through the supervisor, no longer hands raw credentials to
+  OTP's start arguments.
+- **`Fake.subscribe_notices/1` no longer sends `:link_up` on registration.** The real feed
+  sends one only when a link comes up; the fake has no link. A test that waited for it should
+  stop.
+- **`Fake` no longer raises sending to a `to:` atom that names no process;** it skips it, as
+  the real `Fanout` does, and reports no coverage for what nobody received.
+- **`Fake.update_symbols/2` reported coverage for symbols it never pushed.** It now delivers
+  the symbols it adds to the existing subscribers and covers only what was delivered; with no
+  subscriber it covers nothing.
+- **`Fake.coverage_by_kind/1` reported only `:quotes`.** The fake now pushes a `TopOfBook`
+  with each `Quote` and reports both `:quotes` and `:top_of_book`, as the real feed does.
+- **`Fake` checked credentials before the symbol** on the single-symbol reads; the order is
+  now category, range and request, symbol, credentials, as in `Rest`.
+
 ## [0.4.132] - 2026-10-11
 
 ### Fixed

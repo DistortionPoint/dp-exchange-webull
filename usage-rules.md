@@ -259,7 +259,10 @@ takes the ordinary failed-open or reconnect-with-backoff path.
 default is not to (`verify: :verify_none`), and until then this package connected with
 that default, accepting any certificate. It now uses the operating system's trust store and
 HTTPS hostname rules. On a host with no system CA bundle the connection fails with a TLS
-error rather than connecting unverified. Pass your own `:ssl_options` to override.
+error rather than connecting unverified. Pass your own `:ssl_options` to override: a list is
+merged over those defaults (so `cacerts:` alone keeps `verify_peer` and the hostname check),
+and `ssl_options: nil`, `[]` or anything that is not a keyword list means "none given", never
+"no verification". Only an explicit `verify:` of yours changes that.
 
 **What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
 the per-shard crash path, or anything that kills the `Feed` pid directly.
@@ -1059,6 +1062,26 @@ the five bars endpoints the category names; `Fake.get_trades/2` checks the categ
 `headline`, as the real stream names none. A request those endpoints would accept for a symbol
 the fake does not model is `{:refused, :not_listed}`.
 
+**A single-symbol read refuses a symbol it cannot send, locally.** `get_price/2`,
+`get_top_of_book/2`, `get_order_book/2`, `get_trades/2` and `get_historical_prices/4` answer
+`{:error, {:invalid_symbol, value}}` for a symbol that is `nil`, not a string, or blank after
+trimming - before credentials and before any request, on every category (the default
+`US_CRYPTO` used to raise `FunctionClauseError`, the others sent `symbols=`). The category's own
+refusal comes first. `get_prices/2` refuses a list that is not a proper list as
+`{:error, {:invalid_symbols, value}}`, and gives a bad member its own
+`{:error, {:invalid_symbol, member}}` result without a request, so the others still price.
+A historical `range` must be a keyword list whose `:start` and `:end` are `DateTime`s (or
+absent); anything else is `{:error, {:invalid_range, range}}`, before any request is charged
+(a non-`DateTime` bound used to raise after it). `Fake` answers all of these identically, in
+the same order: category, range and the rest of the request, symbol, then credentials.
+
+**`Fake` streaming matches the feed.** `subscribe/2` pushes a `Quote` and a `TopOfBook` for
+each symbol it models, and `coverage_by_kind/1` reports both (`:quotes` and `:top_of_book`).
+A symbol is covered only once it was delivered to a reachable subscriber; a `to:` atom that
+names no process is skipped, never raised on. `update_symbols/2` delivers the symbols it adds
+to the existing subscribers (it takes no `:to`, as the feed does), and covers nothing for a
+symbol it did not push. `subscribe_notices/1` sends no `:link_up`: the fake has no link.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.
@@ -1096,9 +1119,14 @@ This holds wherever the call has got to, including after the package moved your 
 another shard because the first was full or the venue refused one: the ten seconds run from
 when your call arrived, not from the latest internal retry.
 
-A list that is not made of non-empty strings is refused at once with
-`{:error, {:invalid_symbols, offenders}}` (at most five named; the whole value if it was not a
-list), and nothing is subscribed or removed.
+A list that is not made of non-blank strings (empty or whitespace-only is blank) is refused at
+once with `{:error, {:invalid_symbols, offenders}}` (at most five named; the whole value if it
+was not a list), and nothing is subscribed or removed. This is decided in **your** process,
+before `{:error, :feed_not_started}`: a malformed list answers the same whether or not the feed
+runs, and `unsubscribe(nil)` is refused rather than `:ok`. After the symbols, `subscribe/2` and
+`subscribe_notices/1` check `to:`: anything but a pid or a registered-name atom - `true` and
+`false` included - is `{:error, {:invalid_subscriber, to}}`. `subscribe/2`, `unsubscribe/2`,
+`update_symbols/2` and `subscribe_notices/1` all take `opts \\ []`.
 
 **Neither needs a retry.** Your symbols are already recorded. The subscribe finishes or
 the shard connects, and your symbols go out with it. `coverage/1` tells you when they

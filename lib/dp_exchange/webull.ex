@@ -753,29 +753,41 @@ defmodule DpExchange.Webull do
   # nothing in this venue's tree starts under, and fails closed with "Rate limiter
   # unavailable" on every call. Measured: `DpExchange.Webull.Feed.subscribe/3` called with
   # no `:limiter` against a connected shard returned exactly that error.
+  #
+  # **Arguments are validated in the CALLER, before `:feed_not_started`** (family convention
+  # 3): a malformed symbol list or subscriber answers the same whether or not the feed runs,
+  # and `unsubscribe(nil)` can no longer answer `:ok` merely because nothing is running.
+  # `Feed` repeats the check on arrival for direct callers.
   @impl true
-  def subscribe(symbols, opts) do
-    feed_call(
-      fn -> Feed.subscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
-      {:error, :feed_not_started}
-    )
+  def subscribe(symbols, opts \\ []) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
+      feed_call(
+        fn -> Feed.subscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
+        {:error, :feed_not_started}
+      )
+    end
   end
 
   @impl true
-  def unsubscribe(symbols, opts),
-    do:
+  def unsubscribe(symbols, opts \\ []) do
+    with :ok <- Feed.check_symbols(symbols) do
       feed_call(
         fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         :ok
       )
+    end
+  end
 
   @impl true
-  def update_symbols(symbols, opts),
-    do:
+  def update_symbols(symbols, opts \\ []) do
+    with :ok <- Feed.check_symbols(symbols) do
       feed_call(
         fn -> Feed.update_symbols(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         {:error, :feed_not_started}
       )
+    end
+  end
 
   # `with_limiter/1`, with the credentials wrapped (`Credentials`) before they cross into the
   # `Feed` process. They ride in the call message, then in reconcile tags, task closures and
@@ -835,8 +847,14 @@ defmodule DpExchange.Webull do
   end
 
   @impl true
-  def subscribe_notices(opts),
-    do: feed_call(fn -> Feed.subscribe_notices(feed(opts), opts) end, {:error, :feed_not_started})
+  def subscribe_notices(opts \\ []) do
+    with :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
+      feed_call(
+        fn -> Feed.subscribe_notices(feed(opts), opts) end,
+        {:error, :feed_not_started}
+      )
+    end
+  end
 
   # --- health ------------------------------------------------------------
 

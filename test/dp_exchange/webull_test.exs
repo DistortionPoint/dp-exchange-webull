@@ -2,6 +2,7 @@ defmodule DpExchange.WebullTest do
   use ExUnit.Case, async: false
 
   alias DpExchange.Core.{Capabilities, Venue}
+  alias DpExchange.Core.Types.{Quote, TopOfBook}
   alias DpExchange.Webull
   alias DpExchange.Webull.{Fake, Supervisor}
 
@@ -382,30 +383,62 @@ defmodule DpExchange.WebullTest do
       assert Fake.coverage() == %{}
     end
 
-    test "coverage_by_kind/1 reports the same symbol under :quotes, and only :quotes" do
-      # The fake's `subscribe/2` only ever builds a `Types.Quote` (from `get_price/2`) —
-      # never a `Types.TopOfBook` — so a single-key map here is the honest shape for what
-      # the fake actually delivers, not an oversight. The real venue genuinely streams a
-      # second kind (`:top_of_book`); the fake is allowed to be less capable, just never
-      # differently capable — see `coverage/1` above.
+    test "coverage_by_kind/1 reports the symbol under both streamed kinds, as the real feed" do
       assert :ok = Fake.subscribe(["BTC-USD"], to: self())
-      assert_receive {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}, 5_000
+      assert_receive {:dp_exchange, :webull, %TopOfBook{symbol: "BTC-USD"}}, 5_000
 
       by_kind = Fake.coverage_by_kind()
-      assert by_kind == %{quotes: %{"BTC-USD" => :stream}}
-      assert map_size(by_kind) == 1
+      assert by_kind == %{quotes: %{"BTC-USD" => :stream}, top_of_book: %{"BTC-USD" => :stream}}
 
       union = by_kind |> Map.values() |> Enum.flat_map(&Map.keys/1) |> Enum.uniq()
       assert Enum.sort(union) == Fake.coverage() |> Map.keys() |> Enum.sort()
     end
 
-    test "update_symbols narrows coverage, and notices reach a subscriber" do
+    test "update_symbols narrows coverage, and subscribe_notices sends no :link_up" do
       :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self())
       :ok = Fake.update_symbols(["BTC-USD"])
       assert Fake.coverage() == %{"BTC-USD" => :stream}
 
+      # The fake has no link, and the real feed sends a notice only when a link comes up.
       :ok = Fake.subscribe_notices(to: self())
-      assert_receive {:dp_exchange, :webull, %DpExchange.Core.Notice{kind: :link_up}}
+      refute_receive {:dp_exchange, :webull, %DpExchange.Core.Notice{}}, 100
+    end
+
+    test "update_symbols covers a symbol only once it was delivered to a subscriber" do
+      # Before any subscribe there is nobody to deliver to: nothing is covered.
+      :ok = Fake.update_symbols(["BTC-USD"])
+      assert Fake.coverage() == %{}
+
+      :ok = Fake.subscribe(["ETH-USD"], to: self())
+      :ok = Fake.update_symbols(["ETH-USD", "BTC-USD"])
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}, 5_000
+      assert Fake.coverage() == %{"ETH-USD" => :stream, "BTC-USD" => :stream}
+    end
+
+    test "a subscriber named by an atom that is registered to nobody is skipped, not raised on" do
+      nobody = :"webull_fake_nobody_#{System.unique_integer([:positive])}"
+
+      assert :ok = Fake.subscribe(["BTC-USD"], to: nobody)
+      assert Fake.coverage() == %{}
+    end
+
+    test "a registered atom subscriber receives the push" do
+      name = :"webull_fake_registered_#{System.unique_integer([:positive])}"
+      Process.register(self(), name)
+
+      assert :ok = Fake.subscribe(["BTC-USD"], to: name)
+      assert_receive {:dp_exchange, :webull, %Quote{}}, 5_000
+      assert Fake.coverage() == %{"BTC-USD" => :stream}
+    end
+
+    test "the fake refuses true/false subscribers and whitespace-only symbols" do
+      assert Fake.subscribe(["BTC-USD"], to: true) == {:error, {:invalid_subscriber, true}}
+      assert Fake.subscribe(["BTC-USD"], to: false) == {:error, {:invalid_subscriber, false}}
+      assert Fake.subscribe_notices(to: true) == {:error, {:invalid_subscriber, true}}
+      assert Fake.subscribe([" "]) == {:error, {:invalid_symbols, [" "]}}
+      assert Fake.unsubscribe(nil) == {:error, {:invalid_symbols, nil}}
+      assert Fake.coverage() == %{}
     end
 
     test "a range outside the fake's single bar filters it out" do

@@ -85,8 +85,8 @@ defmodule DpExchange.Webull.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Config, FakeInjection, Instrument, Notice, Types, Venue}
-  alias DpExchange.Webull.{Auth, Environment, Rest}
+  alias DpExchange.Core.{Config, FakeInjection, Instrument, Types, Venue}
+  alias DpExchange.Webull.{Auth, Environment, Feed, Rest}
 
   # `XRP-USD` is a real member of `@symbols` (so `get_symbols/1` lists it — this fake
   # would be lying about the venue if it silently dropped a non-tradable row, and the
@@ -119,6 +119,11 @@ defmodule DpExchange.Webull.Fake do
   # `80HG7CPSFDPCAL3TP66LKBAS69`).
   @issued_prefix "3a9f5c2e8b1d47a6905c"
   @issued_key {__MODULE__, :issued}
+
+  # Per-process streaming state: the symbols whose top of book was delivered (the quotes
+  # live under the module name, as they always have) and the subscribers delivered to.
+  @top_key {__MODULE__, :top}
+  @targets_key {__MODULE__, :targets}
   @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
 
   @impl true
@@ -149,6 +154,7 @@ defmodule DpExchange.Webull.Fake do
       # no snapshot endpoint for is refused by name, not answered with a crypto price. One it
       # does serve, other than crypto, is an endpoint this fake models no symbol on.
       with :ok <- Rest.validate_snapshot_category(category),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         case category == "US_CRYPTO" && Map.fetch(@price, symbol) do
           {:ok, price} ->
@@ -183,10 +189,26 @@ defmodule DpExchange.Webull.Fake do
   @spec get_prices([String.t()], keyword()) :: {:ok, map()} | {:error, term()}
   def get_prices(symbols, opts \\ []) do
     case Config.opt(opts, :category, "US_CRYPTO") do
-      "US_CRYPTO" -> {:ok, Map.new(Enum.uniq(symbols), &{&1, get_price(&1, opts)})}
-      other -> {:error, {:unsupported_category, other}}
+      "US_CRYPTO" ->
+        # A non-list or an improper list is `{:invalid_symbols, value}` on both this and
+        # `Rest.get_prices/3`; an element that is blank is refused per symbol by
+        # `get_price/2`, as it is there.
+        with :ok <- check_symbol_list(symbols) do
+          {:ok, Map.new(Enum.uniq(symbols), &{&1, get_price(&1, opts)})}
+        end
+
+      other ->
+        {:error, {:unsupported_category, other}}
     end
   end
+
+  defp check_symbol_list(symbols) do
+    if proper_list?(symbols), do: :ok, else: {:error, {:invalid_symbols, symbols}}
+  end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_other), do: false
 
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
@@ -196,6 +218,7 @@ defmodule DpExchange.Webull.Fake do
       # `US_EVENT` is refused as `Rest.get_top_of_book/3` refuses it (it has two books, not a
       # top of one), then the snapshot category, both before credentials.
       with :ok <- Rest.validate_top_of_book_category(category),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         case category == "US_CRYPTO" && Map.fetch(@price, symbol) do
           {:ok, price} ->
@@ -233,6 +256,7 @@ defmodule DpExchange.Webull.Fake do
       # names a range is refused as it is there. This fake models no non-crypto symbol, so a
       # request those endpoints would accept is `{:refused, :not_listed}`, never a crypto bar.
       with :ok <- Rest.validate_bars_request(timeframe, range, opts),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         if symbol in @symbols and Config.opt(opts, :category, "US_CRYPTO") == "US_CRYPTO" do
           {:ok, [candle(symbol, timeframe)] |> Enum.filter(&within?(&1, range))}
@@ -265,6 +289,7 @@ defmodule DpExchange.Webull.Fake do
       # venue's page gives a range for (futures: 1 to 10) or a non-number was accepted here,
       # and `US_FUTURES`, which `Rest` serves, was refused as an unknown category.
       with :ok <- Rest.validate_book_request(category, opts),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- fake_book_symbol(symbol, category),
            :ok <- authenticated(opts) do
         {:ok,
@@ -303,6 +328,7 @@ defmodule DpExchange.Webull.Fake do
       # credentials. Then a crypto pair: this venue's tick endpoint is equities-only, and the
       # fake refuses rather than inventing a tape.
       with :ok <- Rest.validate_trades_request(opts),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- fake_tape_symbol(symbol),
            :ok <- authenticated(opts),
            do: {:ok, fake_ticks(symbol)}
@@ -350,6 +376,7 @@ defmodule DpExchange.Webull.Fake do
       # own validator, all before credentials. A session outside PRE/RTH/ATH used to pass
       # here; only `OVN` was refused.
       with :ok <- Rest.validate_footprint_request(timeframe, opts),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         {:ok,
          [
@@ -379,7 +406,8 @@ defmodule DpExchange.Webull.Fake do
     with_injection(symbol, fn ->
       case Keyword.get(opts, :auction) do
         auction when auction in [:opening, :closing] ->
-          with :ok <- authenticated(opts) do
+          with :ok <- Rest.validate_symbol(symbol),
+               :ok <- authenticated(opts) do
             {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
           end
 
@@ -767,8 +795,9 @@ defmodule DpExchange.Webull.Fake do
     with_injection(symbol, fn ->
       # `Rest.quantization/3` reads the same `instruments/.../profiles/list` endpoint
       # every other market-data call does, so it needs the same `authenticated(opts)`
-      # gate they already carry.
-      with :ok <- authenticated(opts) do
+      # gate they already carry, after the symbol check `Rest.quantization/3` makes first.
+      with :ok <- Rest.validate_symbol(symbol),
+           :ok <- authenticated(opts) do
         cond do
           # A crypto pair the fake does not list is one the venue's catalogue would answer
           # with no row (`Rest.quantization/3`: no row to read). Increments for it would be a
@@ -817,8 +846,8 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def subscribe(symbols, opts \\ []) do
     # Refused in the real `Feed`'s order: the symbol list, then the subscriber.
-    with :ok <- check_symbols(symbols),
-         :ok <- DpExchange.Webull.Feed.check_subscriber(Config.opt(opts, :to, self())) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       symbols |> canonical_case() |> subscribe_checked(opts)
     end
   end
@@ -828,78 +857,121 @@ defmodule DpExchange.Webull.Fake do
 
     if Environment.streaming?(environment) do
       target = Config.opt(opts, :to, self())
+      Process.put(@targets_key, MapSet.put(targets(), target))
 
-      for symbol <- symbols, symbol in @symbols do
-        case get_price(symbol, credentials: %{app_key: "fake", app_secret: "fake"}) do
-          {:ok, quote_struct} -> send(target, {:dp_exchange, :webull, quote_struct})
-          _refused -> :ok
-        end
-      end
+      # Coverage is recorded by `push/2`, only for what it actually delivered, so a symbol
+      # whose subscriber is unreachable is not reported as arriving.
+      push(Enum.filter(symbols, &(&1 in @symbols)), [target])
 
-      # **Added to, never replacing.** This was the identical line `update_symbols/2`
-      # carries below — the two callbacks were byte-for-byte the same function — so a
-      # second `subscribe/2` dropped whatever the first had subscribed. The real
-      # facade unions (`wanted: MapSet.union(state.wanted, MapSet.new(symbols))` in
-      # `Feed`), so a consumer's tier-1 tests against this fake certified the opposite
-      # of what the venue does: subscribe twice, keep one symbol here, keep both there.
-      #
-      # The contract settles which is right without needing a new sentence in it.
-      # `c:DpExchange.Core.Venue.update_symbols/2` exists to "change a live
-      # subscription's symbol set", and `c:unsubscribe/2` to stop delivery for named
-      # symbols. Neither has any purpose if `subscribe/2` already replaces — you would
-      # just subscribe the new list. Two callbacks the contract distinguishes,
-      # implemented as one function, is the tell.
-      Process.put(
-        __MODULE__,
-        MapSet.union(subscribed(), MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
-      )
-
+      # **Added to, never replacing.** The real facade unions (`wanted:
+      # MapSet.union(state.wanted, MapSet.new(symbols))` in `Feed`), and `push/2` only ever
+      # adds to the covered sets, so a second `subscribe/2` keeps what the first subscribed.
+      # `c:DpExchange.Core.Venue.update_symbols/2` is the call that replaces.
       :ok
     else
       {:error, {:streaming_unavailable, environment}}
     end
   end
 
+  # What this fake pushes for a symbol, to every target: the quote (from `get_price/2`) and
+  # the top of book (from `get_top_of_book/2`), the two kinds the real feed streams. A kind
+  # counts as covered for a symbol only once it was DELIVERED to someone, as the real feed
+  # counts a symbol only once a payload for it arrived.
+  defp push(symbols, targets) do
+    opts = [credentials: %{app_key: "fake", app_secret: "fake"}]
+
+    for symbol <- symbols do
+      push_kind(get_price(symbol, opts), symbol, targets, __MODULE__)
+      push_kind(get_top_of_book(symbol, opts), symbol, targets, @top_key)
+    end
+
+    :ok
+  end
+
+  defp push_kind({:ok, payload}, symbol, targets, key) do
+    if deliver(targets, payload),
+      do: Process.put(key, MapSet.put(Process.get(key, MapSet.new()), symbol))
+  end
+
+  defp push_kind(_not_available, _symbol, _targets, _key), do: nil
+
+  # Whether anybody received it. A registered name that names no process is skipped, as the
+  # real `Core.Fanout` skips it, rather than raising `ArgumentError` from `send/2`.
+  defp deliver(targets, payload) do
+    Enum.reduce(targets, false, fn target, delivered? ->
+      send_to(target, {:dp_exchange, :webull, payload}) or delivered?
+    end)
+  end
+
+  defp send_to(pid, message) when is_pid(pid) do
+    send(pid, message)
+    true
+  end
+
+  defp send_to(name, message) when is_atom(name) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) ->
+        send(pid, message)
+        true
+
+      _nobody ->
+        false
+    end
+  end
+
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
-    with :ok <- check_symbols(symbols) do
-      symbols = canonical_case(symbols)
-      Process.put(__MODULE__, MapSet.difference(subscribed(), MapSet.new(symbols)))
+    with :ok <- Feed.check_symbols(symbols) do
+      gone = symbols |> canonical_case() |> MapSet.new()
+      Process.put(__MODULE__, MapSet.difference(subscribed(), gone))
+      Process.put(@top_key, MapSet.difference(top(), gone))
       :ok
     end
   end
 
+  # `:to` is not honoured here, as in the real `Feed`: an update changes the symbol set for
+  # the subscribers it already has. A symbol dropped stops being covered at once; one added is
+  # covered only when it has been pushed to a subscriber, so an update before any `subscribe/2`
+  # covers nothing.
   @impl true
   def update_symbols(symbols, _opts \\ []) do
-    with :ok <- check_symbols(symbols) do
-      symbols = canonical_case(symbols)
-      Process.put(__MODULE__, MapSet.new(Enum.filter(symbols, &(&1 in @symbols))))
-      :ok
+    with :ok <- Feed.check_symbols(symbols) do
+      wanted =
+        symbols |> canonical_case() |> Enum.filter(&(&1 in @symbols)) |> MapSet.new()
+
+      Process.put(__MODULE__, MapSet.intersection(subscribed(), wanted))
+      Process.put(@top_key, MapSet.intersection(top(), wanted))
+
+      added = Enum.reject(wanted, &MapSet.member?(subscribed(), &1))
+      push(added, MapSet.to_list(targets()))
     end
   end
 
   @impl true
-  def coverage(_opts \\ []), do: Map.new(subscribed(), &{&1, :stream})
+  def coverage(_opts \\ []),
+    do: Map.new(MapSet.union(subscribed(), top()), &{&1, :stream})
 
-  # This fake's `subscribe/2` only ever sends `Types.Quote` (built from `get_price/2`,
-  # above) — never a `Types.TopOfBook` — so, unlike the real venue, it has exactly one
-  # kind to report here. That is honest for what the fake actually delivers, not a
-  # simplification: "less capable is allowed, differently capable is not" means the fake
-  # must never *claim* a second kind it cannot produce.
+  # Both kinds the real feed streams (`capabilities/0`'s `streamable`), each reported only
+  # while it has covered symbols - the real feed's per-kind map likewise has no entry for a
+  # kind nothing has arrived for.
   @impl true
-  def coverage_by_kind(opts \\ []), do: %{quotes: coverage(opts)}
+  def coverage_by_kind(_opts \\ []) do
+    for {kind, symbols} <- [quotes: subscribed(), top_of_book: top()],
+        MapSet.size(symbols) > 0,
+        into: %{},
+        do: {kind, Map.new(symbols, &{&1, :stream})}
+  end
 
+  # No `:link_up` is sent on registration: the real feed sends one only when a link actually
+  # comes up (or replays one it has recorded), and this fake has no link.
   @impl true
   def subscribe_notices(opts \\ []) do
-    target = Config.opt(opts, :to, self())
-
-    with :ok <- DpExchange.Webull.Feed.check_subscriber(target) do
-      send(target, {:dp_exchange, :webull, Notice.new(:link_up, :webull)})
-      :ok
-    end
+    Feed.check_subscriber(Config.opt(opts, :to, self()))
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
+  defp top, do: Process.get(@top_key, MapSet.new())
+  defp targets, do: Process.get(@targets_key, MapSet.new())
 
   # The real venue signs every call and has no anonymous endpoint, so a fake that answered
   # without credentials would let a consumer's test pass while the real call returns 401.
@@ -1062,7 +1134,8 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_option_chain(underlying, opts \\ []) do
     with_injection(underlying, fn ->
-      with :ok <- authenticated(opts) do
+      with :ok <- Rest.validate_symbol(underlying),
+           :ok <- authenticated(opts) do
         {:ok,
          %Types.OptionChain{
            underlying: underlying,
@@ -1080,7 +1153,8 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
     with_injection(underlying, fn ->
-      with :ok <- authenticated(opts) do
+      with :ok <- Rest.validate_symbol(underlying),
+           :ok <- authenticated(opts) do
         {:ok, underlying |> fake_option_grid(opts) |> Map.keys() |> Enum.sort(Date)}
       end
     end)
@@ -1301,6 +1375,7 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- Rest.validate_statement_kind(kind),
            # A `:count` over the 20 the statement pages state is refused before credentials.
            :ok <- Rest.validate_statement_count(kind, opts),
+           :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         {:ok, [statement(symbol, kind)]}
       end
@@ -1413,7 +1488,8 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_filings(symbol, opts \\ []) do
     with_injection(symbol, fn ->
-      with :ok <- authenticated(opts) do
+      with :ok <- Rest.validate_symbol(symbol),
+           :ok <- authenticated(opts) do
         {:ok,
          [
            %Types.Filing{
@@ -1748,26 +1824,7 @@ defmodule DpExchange.Webull.Fake do
 
   defp canonical_case(other), do: other
 
-  # The real `Feed` refuses a symbol list that is not a list of non-empty strings with
-  # `{:error, {:invalid_symbols, ...}}` rather than crashing the process every caller shares.
-  # This fake answers the same way: it may be less capable than the venue, never differently
-  # capable, and a consumer's test that passes `nil` here must see what production returns.
-  defp check_symbols(symbols) when is_list(symbols) do
-    case invalid_symbols(symbols, []) do
-      [] -> :ok
-      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
-    end
-  end
-
-  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
-
-  # By hand, as `Feed` does, so an improper list is refused and not a raise.
-  defp invalid_symbols([symbol | rest], acc) do
-    if is_binary(symbol) and symbol != "",
-      do: invalid_symbols(rest, acc),
-      else: invalid_symbols(rest, [symbol | acc])
-  end
-
-  defp invalid_symbols([], acc), do: acc
-  defp invalid_symbols(improper_tail, acc), do: [improper_tail | acc]
+  # The symbol list is checked by `Feed.check_symbols/1` itself - the one validator the real
+  # facade and `Feed` use - so this fake answers `{:error, {:invalid_symbols, ...}}` exactly as
+  # production does and cannot drift from it.
 end

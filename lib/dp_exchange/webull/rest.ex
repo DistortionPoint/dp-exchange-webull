@@ -215,7 +215,8 @@ defmodule DpExchange.Webull.Rest do
   def get_price(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_CRYPTO")
 
-    with {:ok, path} <- snapshot_path(category) do
+    with {:ok, path} <- snapshot_path(category),
+         :ok <- validate_symbol(symbol) do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
 
@@ -225,6 +226,47 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  @doc """
+  Whether `symbol` is something a single-symbol read can ask the venue about: a string with
+  something in it after trimming. Anything else - `nil`, an atom, a number, `""`, `"  "` - is
+  `{:error, {:invalid_symbol, symbol}}`, decided locally before credentials and before any
+  request.
+
+  These used to raise `FunctionClauseError` in the symbol mapper (crypto) or go out as
+  `symbols=` for the venue to refuse (everything else). Shared with
+  `DpExchange.Webull.Fake`, so both answer a malformed symbol identically.
+  """
+  @spec validate_symbol(term()) :: :ok | {:error, {:invalid_symbol, term()}}
+  def validate_symbol(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, {:invalid_symbol, symbol}}, else: :ok
+  end
+
+  def validate_symbol(symbol), do: {:error, {:invalid_symbol, symbol}}
+
+  @doc """
+  Whether `range` is a keyword list whose `:start` and `:end`, where present, are
+  `DateTime`s: the check `get_historical_prices/5` makes before anything is signed, for
+  `DpExchange.Webull.Fake`. Anything else is `{:error, {:invalid_range, range}}`.
+
+  A non-`DateTime` bound used to raise in `DateTime.compare/2` after the request had been
+  made and charged against the endpoint's bucket.
+  """
+  @spec validate_range(term()) :: :ok | {:error, {:invalid_range, term()}}
+  def validate_range(range) do
+    if valid_range?(range), do: :ok, else: {:error, {:invalid_range, range}}
+  end
+
+  defp valid_range?(range) when is_list(range) do
+    Keyword.keyword?(range) and range_bound?(Keyword.get(range, :start)) and
+      range_bound?(Keyword.get(range, :end))
+  end
+
+  defp valid_range?(_other), do: false
+
+  defp range_bound?(nil), do: true
+  defp range_bound?(%DateTime{}), do: true
+  defp range_bound?(_other), do: false
 
   # One snapshot row as a `Quote`, shared by `get_price/3` and `get_prices/3`, so the batched
   # call cannot drift from the single one.
@@ -278,24 +320,40 @@ defmodule DpExchange.Webull.Rest do
   @spec get_prices([String.t()], map(), keyword()) ::
           {:ok, %{String.t() => {:ok, Quote.t()} | {:error, term()} | {:refused, term()}}}
           | {:error, term()}
-  def get_prices(symbols, credentials, opts) when is_list(symbols) do
+  def get_prices(symbols, credentials, opts) do
     case Config.opt(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" ->
-        {:ok, path} = snapshot_path("US_CRYPTO")
+        with {:ok, members} <- snapshot_members(symbols) do
+          {:ok, path} = snapshot_path("US_CRYPTO")
 
-        results =
-          symbols
-          |> Enum.uniq()
-          |> Enum.chunk_every(@snapshot_batch)
-          |> Enum.flat_map(&snapshot_chunk(&1, path, credentials, opts))
-          |> Map.new()
+          # An element that is not a usable symbol gets `{:error, {:invalid_symbol, v}}` of
+          # its own, without a request: it would otherwise raise in the symbol mapper, or
+          # reach the wire blank and cost the whole chunk its other members.
+          {valid, invalid} = Enum.split_with(members, &(validate_symbol(&1) == :ok))
 
-        {:ok, results}
+          results =
+            valid
+            |> Enum.chunk_every(@snapshot_batch)
+            |> Enum.flat_map(&snapshot_chunk(&1, path, credentials, opts))
+            |> Map.new()
+
+          {:ok, Enum.reduce(invalid, results, &Map.put(&2, &1, validate_symbol(&1)))}
+        end
 
       other ->
         {:error, {:unsupported_category, other}}
     end
   end
+
+  # The unique members of a symbol list, or `{:error, {:invalid_symbols, value}}` for what is
+  # not a proper list. By hand, so an improper list is refused rather than raised on.
+  defp snapshot_members(symbols), do: snapshot_members(symbols, symbols, [])
+
+  defp snapshot_members([member | rest], whole, acc),
+    do: snapshot_members(rest, whole, [member | acc])
+
+  defp snapshot_members([], _whole, acc), do: {:ok, acc |> Enum.reverse() |> Enum.uniq()}
+  defp snapshot_members(_not_a_list, whole, _acc), do: {:error, {:invalid_symbols, whole}}
 
   defp snapshot_chunk(symbols, path, credentials, opts) do
     # Grouped, not mapped one-to-one: two spellings of one pair (`"BTC-USD"`, `"BTCUSD"`)
@@ -410,12 +468,19 @@ defmodule DpExchange.Webull.Rest do
     # Crypto, stocks, options, futures and event contracts are five different endpoints —
     # and crypto is a different HTTP verb. `opts[:category]` picks, defaulting to crypto,
     # which is what this package served before its asset classes widened.
-    case Config.opt(opts, :category, "US_CRYPTO") do
-      "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
-      "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
-      "US_FUTURES" -> futures_bars(symbol, timeframe, range, credentials, opts)
-      "US_EVENT" -> event_bars(symbol, timeframe, range, credentials, opts)
-      _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
+    #
+    # The range, the category's own checks and the symbol are all decided locally first
+    # (`validate_bars_request/3`, `validate_symbol/1`), so a malformed argument answers the
+    # same way whatever the credentials and never after a charged request.
+    with :ok <- validate_bars_request(timeframe, range, opts),
+         :ok <- validate_symbol(symbol) do
+      case Config.opt(opts, :category, "US_CRYPTO") do
+        "US_CRYPTO" -> crypto_bars(symbol, timeframe, range, credentials, opts)
+        "US_OPTION" -> option_bars(symbol, timeframe, range, credentials, opts)
+        "US_FUTURES" -> futures_bars(symbol, timeframe, range, credentials, opts)
+        "US_EVENT" -> event_bars(symbol, timeframe, range, credentials, opts)
+        _stock -> get_stock_bars(symbol, timeframe, range, credentials, opts)
+      end
     end
   end
 
@@ -599,6 +664,10 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_bars_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
   def validate_bars_request(timeframe, range, opts) do
+    with :ok <- validate_range(range), do: validate_category_bars(timeframe, range, opts)
+  end
+
+  defp validate_category_bars(timeframe, range, opts) do
     limit = Keyword.get(opts, :limit)
 
     case Config.opt(opts, :category, "US_CRYPTO") do
@@ -737,7 +806,8 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_CRYPTO")
 
     with :ok <- refuse_event_top_of_book(category),
-         {:ok, path} <- snapshot_path(category) do
+         {:ok, path} <- snapshot_path(category),
+         :ok <- validate_symbol(symbol) do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
 
@@ -1112,6 +1182,10 @@ defmodule DpExchange.Webull.Rest do
   @spec quantization(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def quantization(symbol, credentials, opts) do
+    with :ok <- validate_symbol(symbol), do: quantization_checked(symbol, credentials, opts)
+  end
+
+  defp quantization_checked(symbol, credentials, opts) do
     category = if String.contains?(symbol, "-"), do: "US_CRYPTO", else: "US_STOCK"
     native = if category == "US_CRYPTO", do: SymbolFormat.to_exchange_symbol(symbol), else: symbol
 
@@ -2109,7 +2183,8 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- book_path(category),
-         :ok <- book_depth(category, Keyword.get(opts, :depth)) do
+         :ok <- book_depth(category, Keyword.get(opts, :depth)),
+         :ok <- validate_symbol(symbol) do
       params =
         %{
           "symbol" => symbol,
@@ -2283,7 +2358,8 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, path} <- footprint_path(category),
          {:ok, span} <- footprint_span(timeframe),
          {:ok, session} <- footprint_session(Keyword.get(opts, :session)),
-         :ok <- count_within_max(Keyword.get(opts, :count), 1_200) do
+         :ok <- count_within_max(Keyword.get(opts, :count), 1_200),
+         :ok <- validate_symbol(symbol) do
       params =
         %{
           "symbols" => symbol,
@@ -2453,7 +2529,8 @@ defmodule DpExchange.Webull.Rest do
   def get_auction_imbalance(symbol, credentials, opts) do
     observed_at = DateTime.utc_now()
 
-    with {:ok, auction, action_type} <- auction_type(Keyword.get(opts, :auction)) do
+    with {:ok, auction, action_type} <- auction_type(Keyword.get(opts, :auction)),
+         :ok <- validate_symbol(symbol) do
       path =
         if Keyword.get(opts, :history, false),
           do: "/market-data/stocks/noii-bars/list",
@@ -2596,7 +2673,8 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- tick_path(category),
-         :ok <- count_within_max(Keyword.get(opts, :limit), tick_max(category)) do
+         :ok <- count_within_max(Keyword.get(opts, :limit), tick_max(category)),
+         :ok <- validate_symbol(symbol) do
       params =
         %{
           "symbol" => symbol,
@@ -2736,7 +2814,9 @@ defmodule DpExchange.Webull.Rest do
     with :ok <- book_category(category),
          {:ok, timespan} <- stock_timespan(timeframe),
          # `historical-bars.md`: "maximum limit 1200 (M1 supports up to 1650)".
-         :ok <- count_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)) do
+         :ok <- count_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)),
+         :ok <- validate_range(range),
+         :ok <- validate_symbol(symbol) do
       body =
         %{
           "symbols" => [symbol],
@@ -3580,7 +3660,8 @@ defmodule DpExchange.Webull.Rest do
         # The statement endpoints state "maximum value is 20" for `count`
         # (`financial-balancesheet.md` and kin, `fund-net-value.md`). `capital-flows` states
         # none and is left to the venue.
-        with :ok <- statement_count(kind, opts) do
+        with :ok <- statement_count(kind, opts),
+             :ok <- validate_symbol(symbol) do
           fundamental_rows(kind, path, base_params, credentials, opts)
         end
 
@@ -4550,6 +4631,7 @@ defmodule DpExchange.Webull.Rest do
 
     # `event-tick.md`: "maximum limit 1200".
     with :ok <- count_within_max(Keyword.get(opts, :limit), 1_200),
+         :ok <- validate_symbol(symbol),
          {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol) do
@@ -4593,6 +4675,7 @@ defmodule DpExchange.Webull.Rest do
     # A `:depth` that is not a whole number of levels is refused before the request, as the
     # stock and futures books refuse theirs: the page states none beyond "default 10 levels".
     with :ok <- book_depth("US_EVENT", Keyword.get(opts, :depth)),
+         :ok <- validate_symbol(symbol),
          {:ok, body} <-
            get("/market-data/event-contracts/depths/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol),
@@ -4716,7 +4799,8 @@ defmodule DpExchange.Webull.Rest do
       end
     end
 
-    with {:ok, contract_rows} <- paginate(fetch_page) do
+    with :ok <- validate_symbol(underlying),
+         {:ok, contract_rows} <- paginate(fetch_page) do
       decode_option_contracts(contract_rows, underlying)
     end
   end

@@ -308,11 +308,24 @@ defmodule DpExchange.Webull.Socket do
   @spec connection_opts(keyword()) :: keyword()
   def connection_opts(opts) do
     opts
-    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout, :ssl_options])
+    |> Keyword.take([:socket_connect_timeout, :socket_recv_timeout])
     |> Keyword.put_new(:socket_connect_timeout, @socket_connect_timeout_ms)
     |> Keyword.put_new(:socket_recv_timeout, @socket_recv_timeout_ms)
-    |> Keyword.put_new_lazy(:ssl_options, &verified_tls/0)
+    |> Keyword.put(:ssl_options, tls_options(Keyword.get(opts, :ssl_options)))
   end
+
+  # **`ssl_options: nil` is "none given", not "no verification".** `websockex` reads a `nil`
+  # (and an options list that says nothing about `verify`) as "use `insecure: true`", which is
+  # `verify: :verify_none` - so a caller passing `nil` or `[]` silently turned certificate
+  # verification off on a socket that carries credentials. Found in the family by Coinbase.
+  # A list is merged OVER the verified defaults: a caller overriding `:cacerts` keeps
+  # `verify_peer` and the hostname check, and only an explicit `verify:` of their own changes
+  # it. Anything else is treated as absent.
+  defp tls_options(given) when is_list(given) do
+    if Keyword.keyword?(given), do: Keyword.merge(verified_tls(), given), else: verified_tls()
+  end
+
+  defp tls_options(_absent_or_malformed), do: verified_tls()
 
   # **Certificate verification, which `websockex` does not do unless told to.** Its
   # `WebSockex.Conn` starts with `insecure: true`, which is `verify: :verify_none`
@@ -325,7 +338,7 @@ defmodule DpExchange.Webull.Socket do
   #
   # The operating system's trust store (`:public_key.cacerts_get/0`, which OTP caches after
   # the first read) and the HTTPS hostname rules, so a venue's wildcard certificate matches.
-  # A caller can still pass its own `:ssl_options`, which replace these entirely.
+  # A caller can still pass its own `:ssl_options`, merged over these (see `tls_options/1`).
   defp verified_tls do
     [
       verify: :verify_peer,

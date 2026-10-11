@@ -536,6 +536,10 @@ defmodule DpExchange.Webull.Feed do
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
+    # Wrapped (idempotently) before the options reach OTP: a crash report or a child spec
+    # prints the start arguments, and raw credentials in them print `app_secret`. The
+    # supervisor wraps too; this covers a `Feed` started directly.
+    opts = Credentials.wrap_opt(opts)
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
@@ -606,6 +610,9 @@ defmodule DpExchange.Webull.Feed do
   instead, and `DpExchange.Webull.Fake` calls the same function so the two cannot drift.
   """
   @spec check_subscriber(term()) :: :ok | {:error, {:invalid_subscriber, term()}}
+  def check_subscriber(subscriber) when is_boolean(subscriber),
+    do: {:error, {:invalid_subscriber, subscriber}}
+
   def check_subscriber(subscriber) when is_pid(subscriber) or is_atom(subscriber), do: :ok
   def check_subscriber(other), do: {:error, {:invalid_subscriber, other}}
 
@@ -834,20 +841,29 @@ defmodule DpExchange.Webull.Feed do
   # The same shape `{:error, {:invalid_symbols, ...}}` that `Subscription` uses for a symbol the
   # VENUE refused, because to a caller both mean "these symbols were not accepted"; the facade
   # has always returned it from `subscribe/2` either way. At most five offenders are named.
-  defp check_symbols(symbols) when is_list(symbols) do
+  #
+  # Public so the facade can refuse in the CALLER, before `{:error, :feed_not_started}`: a
+  # malformed list answers the same whether or not the feed runs. `Fake` calls it too.
+  @doc """
+  Whether `symbols` is a proper list of non-blank strings (blank means empty or only
+  whitespace after trimming). Anything else is `{:error, {:invalid_symbols, offenders}}` -
+  at most five offenders, or the whole value when it is not a list.
+  """
+  @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
+  def check_symbols(symbols) when is_list(symbols) do
     case invalid_symbols(symbols, []) do
       [] -> :ok
       invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
     end
   end
 
-  defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+  def check_symbols(other), do: {:error, {:invalid_symbols, other}}
 
   # Walks by hand so an improper list (`[1 | 2]`) is an offender and not a raise inside this
   # one named process, which `Enum.reject/2` on it would be. The improper tail is itself
   # reported, as the single offender that it is.
   defp invalid_symbols([symbol | rest], acc) do
-    if is_binary(symbol) and symbol != "",
+    if is_binary(symbol) and String.trim(symbol) != "",
       do: invalid_symbols(rest, acc),
       else: invalid_symbols(rest, [symbol | acc])
   end
