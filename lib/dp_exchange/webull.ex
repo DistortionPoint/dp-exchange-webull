@@ -921,7 +921,8 @@ defmodule DpExchange.Webull do
   # `{:via, module, term}` and `{name, node}`. Only the first two used to be accepted, so
   # `coverage(feed: {:global, name})` raised `FunctionClauseError` from a function whose spec is
   # a map. A name that resolves to no local pid, or to a remote one, reads as "not alive" and
-  # takes the empty answer; `feed_read/2` still catches the exit of a call that fails anyway.
+  # takes the empty answer. A remote PID is the exception: `Process.alive?/1` raises on it, so
+  # it is attempted as given, and `feed_read/2` answers the empty map if that call exits.
   defp alive?(pid) when is_pid(pid), do: node(pid) != node() or Process.alive?(pid)
   defp alive?(server), do: is_pid(GenServer.whereis(server))
 

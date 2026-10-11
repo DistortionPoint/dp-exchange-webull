@@ -63,6 +63,37 @@ defmodule DpExchange.Webull.ShardReopenBackoffTest do
     refute Map.has_key?(second.shards, 0), "the slot stays empty while the delay runs"
   end
 
+  test "a socket crash and an INVALID_SESSION share one run counter" do
+    feed = start_feed(shards: %{}, open_retry_base_ms: 600_000, open_retry_max_ms: 600_000)
+
+    # A crash first: the slot's socket exits, which `isolate_crashed_shard/3` reopens at once.
+    put_shard(feed, "s1")
+    send(feed, {:EXIT, :sys.get_state(feed).shards[0].socket, :boom})
+    _settled = Feed.coverage(feed)
+    after_crash = :sys.get_state(feed)
+
+    assert after_crash.crashes[0].count == 1
+    assert after_crash.reopen_timers == %{}
+
+    # An INVALID_SESSION right after is the SECOND teardown of the index within the window,
+    # so it is delayed rather than reopened at once.
+    second = invalidate(feed, "s2")
+    assert second.crashes[0].count == 2
+    assert {_token, old_timer} = second.reopen_timers[0]
+    assert is_integer(Process.read_timer(old_timer))
+
+    # And a crash after that climbs the same counter and replaces the pending timer.
+    put_shard(feed, "s3")
+    send(feed, {:EXIT, :sys.get_state(feed).shards[0].socket, :boom})
+    _settled = Feed.coverage(feed)
+    third = :sys.get_state(feed)
+
+    assert third.crashes[0].count == 3
+    assert Process.read_timer(old_timer) == false
+    assert {_new_token, new_timer} = third.reopen_timers[0]
+    assert is_integer(Process.read_timer(new_timer))
+  end
+
   test "a newer teardown replaces and cancels the pending timer" do
     feed = start_feed(shards: %{}, open_retry_base_ms: 600_000, open_retry_max_ms: 600_000)
 

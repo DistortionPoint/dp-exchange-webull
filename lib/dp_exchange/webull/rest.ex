@@ -314,7 +314,10 @@ defmodule DpExchange.Webull.Rest do
   retried down to single symbols, so only the rejected symbol keeps the rejection. A chunk
   whose request fails any other way gives
   each of its symbols that failure, so one chunk's trouble never costs another's quotes.
-  `US_CRYPTO` only. Other categories answer `{:error, {:unsupported_category, category}}`,
+  A member that is not a usable symbol (`nil`, a number, blank text) is answered
+  `{:error, {:invalid_symbol, member}}` under its own key, with no request, and does not cost
+  the other members anything (so such a key is not always text); a `symbols` that is not a
+  proper list is `{:error, {:invalid_symbols, symbols}}`. `US_CRYPTO` only. Other categories answer `{:error, {:unsupported_category, category}}`,
   because their snapshot limits are not read here.
   """
   @spec get_prices([String.t()], map(), keyword()) ::
