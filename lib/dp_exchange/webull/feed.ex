@@ -753,6 +753,9 @@ defmodule DpExchange.Webull.Feed do
        unsettled: MapSet.new(),
        # index => %{count:, at:} of consecutive socket crashes — see `@crash_window_ms`.
        crashes: %{},
+       # index => {token, timer_ref} of the one delayed reopen pending for that slot. See
+       # `reopen_with_backoff/4`.
+       reopen_timers: %{},
        # Overridable for the same reason every other cadence here is: a test proving the
        # retry actually recurs should not have to wait out a real second to see it.
        open_retry_base_ms: Config.opt(opts, :open_retry_base_ms, @open_retry_base_ms),
@@ -1200,6 +1203,21 @@ defmodule DpExchange.Webull.Feed do
       _already_open ->
         # A reshard already handled this index by the time the stagger elapsed (a fast-
         # follow call, or a rebalance) — nothing left to do.
+        {:noreply, state}
+    end
+  end
+
+  # A delayed reopen from `reopen_with_backoff/4`. Ignored unless its token is the one the
+  # slot currently holds: a later teardown of the same index replaced it.
+  def handle_info({:open_shard, index, symbols, opts, token}, state) do
+    case Map.get(state.reopen_timers, index) do
+      {^token, _timer} ->
+        handle_info({:open_shard, index, symbols, opts}, %{
+          state
+          | reopen_timers: Map.delete(state.reopen_timers, index)
+        })
+
+      _stale_or_cancelled ->
         {:noreply, state}
     end
   end
@@ -2335,7 +2353,21 @@ defmodule DpExchange.Webull.Feed do
   # Reopens a crashed shard — at once the first time, then on the `@crash_window_ms` ladder.
   # The shard's slot stays empty meanwhile, which is the honest state: a `reshard/3` arriving
   # in the gap opens it by its own route, and the delayed message then finds it taken.
-  defp reopen_after_crash(state, index, symbols) do
+  defp reopen_after_crash(state, index, symbols),
+    do: reopen_with_backoff(state, index, symbols, "crashed")
+
+  # The one reopen policy for a shard torn down because its connection is no good — a socket
+  # crash (`isolate_crashed_shard/3`) or an INVALID_SESSION (`rebuild_stale_shard/3`). The two
+  # share ONE run counter (`state.crashes`) on purpose: to the venue both are "this index
+  # claimed a session and lost it", and a venue answering INVALID_SESSION on every fresh
+  # session would otherwise reconnect (a new websocket plus HTTP round trips) with no pause
+  # at all. The first teardown reopens at once; ones within `@crash_window_ms` of each other
+  # climb the `open_retry_base_ms` ladder, capped at `open_retry_max_ms`.
+  #
+  # A delayed reopen carries a token held in `state.reopen_timers`. A newer teardown of the
+  # same index replaces (and cancels) the earlier timer, and a timer whose token is no longer
+  # the index's current one is ignored when it fires — see the tokened `:open_shard` clause.
+  defp reopen_with_backoff(state, index, symbols, what) do
     now = System.monotonic_time(:millisecond)
 
     count =
@@ -2345,28 +2377,45 @@ defmodule DpExchange.Webull.Feed do
       end
 
     state = %{
-      state
+      cancel_reopen_timer(state, index)
       | crashes: Map.put(state.crashes, index, %{count: count, at: now}),
         unsettled: MapSet.delete(state.unsettled, index)
     }
 
-    message = {:open_shard, index, symbols, state.resubscribe_opts}
-
     if count <= 1 do
-      send(self(), message)
+      send(self(), {:open_shard, index, symbols, state.resubscribe_opts})
+      state
     else
       delay = min(state.open_retry_base_ms * 2 ** min(count - 2, 30), state.open_retry_max_ms)
 
       Logger.warning(
-        "[Webull Feed] shard #{index} has crashed #{count} times within " <>
+        "[Webull Feed] shard #{index} has been torn down (#{what}) #{count} times within " <>
           "#{div(@crash_window_ms, 1_000)}s of each other — reopening it in #{delay}ms " <>
           "rather than at once"
       )
 
-      Process.send_after(self(), message, delay)
-    end
+      token = make_ref()
 
-    state
+      timer =
+        Process.send_after(
+          self(),
+          {:open_shard, index, symbols, state.resubscribe_opts, token},
+          delay
+        )
+
+      %{state | reopen_timers: Map.put(state.reopen_timers, index, {token, timer})}
+    end
+  end
+
+  defp cancel_reopen_timer(state, index) do
+    case Map.pop(state.reopen_timers, index) do
+      {nil, _same} ->
+        state
+
+      {{_token, timer}, timers} ->
+        Process.cancel_timer(timer)
+        %{state | reopen_timers: timers}
+    end
   end
 
   defp open_socket(state, opts) do
@@ -2584,6 +2633,12 @@ defmodule DpExchange.Webull.Feed do
   # id is minted in `open_socket/2` when the socket opens — a fresh session REQUIRES a fresh
   # socket, so there is no subscribe-level fix available here at all.
   #
+  # **The reopen is paced, not immediate.** It goes through `reopen_with_backoff/4`, the policy
+  # a crashed socket uses: the first teardown of an index reopens at once, repeats within
+  # `@crash_window_ms` wait on the `open_retry_base_ms` ladder. A venue that answered
+  # INVALID_SESSION to every fresh session otherwise had this package opening a websocket
+  # and making its HTTP round trips on every cycle with no pause at all.
+  #
   # ORDER MATTERS. The shard leaves `state.shards` BEFORE its socket is stopped, so the
   # `{:EXIT, ...}` that stopping it produces finds no shard for that pid and is ignored by
   # `handle_info({:EXIT, ...})`, rather than driving a second concurrent rebuild of the same
@@ -2645,8 +2700,7 @@ defmodule DpExchange.Webull.Feed do
         }
 
         stop_socket(shard.socket)
-        send(self(), {:open_shard, index, shard.symbols, state.resubscribe_opts})
-        state
+        reopen_with_backoff(state, index, shard.symbols, "INVALID_SESSION")
     end
   end
 

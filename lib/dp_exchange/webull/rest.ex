@@ -2229,7 +2229,11 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp book_levels(_absent, _direction), do: {:ok, []}
+  # Absent or `null` is an empty side; a side that is present and is not a list (a string, a
+  # number, an object) is a book this package could not read, which must not be delivered as
+  # a side with no liquidity.
+  defp book_levels(nil, _direction), do: {:ok, []}
+  defp book_levels(_unreadable, _direction), do: {:error, :unexpected_response_shape}
 
   # The venue's footprint granularities. **Deliberately narrower than `timeframes/0`** —
   # the footprint endpoint serves five widths and the bars endpoint serves more, and a
@@ -2959,6 +2963,10 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # A token that is not text is refused here rather than raising `FunctionClauseError` in the
+  # caller. The value is a credential, so the error names the field and never echoes it.
+  def check_token(_token, _credentials, _opts), do: {:error, {:invalid_field, :token}}
+
   @doc """
   The OAuth token exchange and refresh — `POST /oauth2/tokens/create` on the Connect host.
 
@@ -3023,6 +3031,14 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # Refused rather than a `FunctionClauseError` in the caller; the client secret is never
+  # echoed, so the error names the field.
+  def oauth_token(client_id, _client_secret, _opts) when not is_binary(client_id),
+    do: {:error, {:invalid_field, :client_id}}
+
+  def oauth_token(_client_id, _client_secret, _opts),
+    do: {:error, {:invalid_field, :client_secret}}
+
   # `code` and `refresh_token` are the venue's two grants and it takes exactly one. Sending
   # both would leave the venue to choose, and which it chose is not something the caller
   # could read back from the response.
@@ -3084,7 +3100,11 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec get_watchlist(String.t(), map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
-  def get_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+  def get_watchlist(watchlist_id, _credentials, _opts)
+      when not (is_binary(watchlist_id) and watchlist_id != ""),
+      do: {:error, {:invalid_watchlist_id, watchlist_id}}
+
+  def get_watchlist(watchlist_id, credentials, opts) do
     params = %{"watchlist_id" => watchlist_id}
 
     with {:ok, body} <-
@@ -3137,7 +3157,10 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec create_watchlist(String.t(), [String.t()], map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
-  def create_watchlist(name, symbols, credentials, opts) when is_binary(name) do
+  def create_watchlist(name, _symbols, _credentials, _opts) when not is_binary(name),
+    do: {:error, {:invalid_watchlist_name, name}}
+
+  def create_watchlist(name, symbols, credentials, opts) do
     body = put_present(%{"name" => name}, "sort", Keyword.get(opts, :sort))
 
     # Sent ONCE (`put_new`, so a caller can still ask for retries). `Core.HttpClient` retries
@@ -3193,6 +3216,19 @@ defmodule DpExchange.Webull.Rest do
   end
 
   @doc """
+  Whether `id` and `name` are something a watchlist call can address: an id is non-empty
+  text, a name is text. Anything else is `{:error, {:invalid_watchlist_id, id}}` /
+  `{:error, {:invalid_watchlist_name, name}}`; these were `FunctionClauseError`s in the
+  caller's process. The check `get_watchlist/3`, `update_watchlist/3`, `delete_watchlist/3`
+  and `create_watchlist/4` make before anything else, for `DpExchange.Webull.Fake`.
+  """
+  @spec validate_watchlist_target(:id | :name, term()) :: :ok | {:error, term()}
+  def validate_watchlist_target(:id, id) when is_binary(id) and id != "", do: :ok
+  def validate_watchlist_target(:id, id), do: {:error, {:invalid_watchlist_id, id}}
+  def validate_watchlist_target(:name, name) when is_binary(name), do: :ok
+  def validate_watchlist_target(:name, name), do: {:error, {:invalid_watchlist_name, name}}
+
+  @doc """
   Whether `sort` is something a watchlist create or update can send: absent, or a whole
   number. `sort` is a JSON integer on the watchlist pages (`create-watchlist.md:149-154`);
   text or a float there was sent as text, and a value the venue would read some other way.
@@ -3246,7 +3282,11 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec update_watchlist(String.t(), map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
-  def update_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+  def update_watchlist(watchlist_id, _credentials, _opts)
+      when not (is_binary(watchlist_id) and watchlist_id != ""),
+      do: {:error, {:invalid_watchlist_id, watchlist_id}}
+
+  def update_watchlist(watchlist_id, credentials, opts) do
     if Keyword.has_key?(opts, :symbols) do
       {:error, :membership_not_updatable_here}
     else
@@ -3288,7 +3328,11 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec delete_watchlist(String.t(), map(), keyword()) ::
           {:ok, :ok} | {:error, term()} | {:refused, term()}
-  def delete_watchlist(watchlist_id, credentials, opts) when is_binary(watchlist_id) do
+  def delete_watchlist(watchlist_id, _credentials, _opts)
+      when not (is_binary(watchlist_id) and watchlist_id != ""),
+      do: {:error, {:invalid_watchlist_id, watchlist_id}}
+
+  def delete_watchlist(watchlist_id, credentials, opts) do
     body = %{"watchlist_id" => watchlist_id}
 
     with {:ok, response} <-
@@ -3377,7 +3421,8 @@ defmodule DpExchange.Webull.Rest do
     body = %{"watchlist_id" => watchlist_id, "instruments" => instruments}
     path = "/market-data/watchlists/instruments/#{action}"
 
-    with {:ok, response} <- post(path, body, credentials, send_once(opts)),
+    with :ok <- validate_watchlist_target(:id, watchlist_id),
+         {:ok, response} <- post(path, body, credentials, send_once(opts)),
          :ok <- watchlist_success(response) do
       {:ok, %{"success" => true}}
     end
@@ -6007,9 +6052,14 @@ defmodule DpExchange.Webull.Rest do
       # the order may well be live. The id this package sent goes back with the failure, as
       # it does for a timeout, so the caller can find out with `get_order/3`.
       {:ok, row} when is_map(row) ->
+        # Text only: `Order.id` is a string, and a number or object the venue sent there is
+        # not an id the cancel and read-back calls could take.
         case value(row, ["client_order_id", "clientOrderId"]) do
-          nil -> {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
-          id -> {:ok, placed_order(id, request, order_type, tif)}
+          id when is_binary(id) ->
+            {:ok, placed_order(id, request, order_type, tif)}
+
+          _absent_or_unreadable ->
+            {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
         end
 
       _no_row ->
@@ -6157,7 +6207,10 @@ defmodule DpExchange.Webull.Rest do
         # An order the venue names differently is another order, not this one.
         if id == client_order_id, do: {:ok, order}, else: {:error, :not_in_response}
       else
-        {:ok, %Order{id: nil}} -> {:error, {:missing_required_field, :id}}
+        # Any order whose id is not text: absent, or a number or object the venue sent where
+        # `Order.id` (a string) belongs. Returning it would hand back a struct `Order.new/1`
+        # refuses.
+        {:ok, %Order{}} -> {:error, {:missing_required_field, :id}}
         {:error, _reason} = error -> error
         other -> other
       end

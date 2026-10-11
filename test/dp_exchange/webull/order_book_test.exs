@@ -1040,7 +1040,8 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert_receive {:path, path, query}
       assert path == "/trading/instruments/stocks/profiles/list"
       assert query =~ "category=US_STOCK"
-      assert is_list(symbols)
+      # A stock ticker is the venue's own identifier and is NOT split into BASE-QUOTE.
+      assert symbols == ["AAPL"]
     end
 
     test "US_ETF is translated to category=US_STOCK&sub_category=ETF" do

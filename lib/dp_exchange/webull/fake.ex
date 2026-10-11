@@ -1195,7 +1195,9 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
+      # The id first, as `Rest.get_watchlist/3` refuses a non-text one before anything else.
+      with :ok <- Rest.validate_watchlist_target(:id, id),
+           :ok <- authenticated(opts) do
         # And `name: nil` here, because the membership endpoint does not return it.
         case Map.fetch(watchlists(), id) do
           {:ok, %{symbols: symbols}} ->
@@ -1226,7 +1228,8 @@ defmodule DpExchange.Webull.Fake do
       # The members and the sort first, from `Rest`'s own validators and before credentials, as
       # `Rest.create_watchlist/4` checks them before it creates anything: a member that is
       # not text, or a `sort` that is not a whole number, was accepted here.
-      with {:ok, members} <- Rest.validate_watchlist_symbols(symbols),
+      with :ok <- Rest.validate_watchlist_target(:name, name),
+           {:ok, members} <- Rest.validate_watchlist_symbols(symbols),
            :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
            :ok <- authenticated(opts) do
         # A new id per create, and the members it was created with, which `get_watchlist/2`
@@ -1251,19 +1254,23 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def update_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      if Keyword.has_key?(opts, :symbols) do
-        # Refused rather than silently skipped, as in the package: this venue's update
-        # endpoint does not touch membership. Checked BEFORE credentials, as
-        # `Rest.update_watchlist/3` checks it before it builds a request.
-        {:error, :membership_not_updatable_here}
-      else
-        with :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
-             :ok <- authenticated(opts) do
-          rename_watchlist(id, Keyword.get(opts, :name))
-          {:ok, watchlist_struct(id, Keyword.get(opts, :name), nil)}
-        end
+      # Same order as `Rest.update_watchlist/3`: the id, then `:symbols` (refused rather than
+      # silently skipped: this venue's update endpoint does not touch membership), then the
+      # sort, all BEFORE credentials.
+      with :ok <- Rest.validate_watchlist_target(:id, id),
+           :ok <- membership_not_in_update(opts),
+           :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
+           :ok <- authenticated(opts) do
+        rename_watchlist(id, Keyword.get(opts, :name))
+        {:ok, watchlist_struct(id, Keyword.get(opts, :name), nil)}
       end
     end)
+  end
+
+  defp membership_not_in_update(opts) do
+    if Keyword.has_key?(opts, :symbols),
+      do: {:error, :membership_not_updatable_here},
+      else: :ok
   end
 
   # A rename of a watchlist this process created shows in the next listing.
@@ -1277,7 +1284,8 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def delete_watchlist(id, opts \\ []) do
     with_injection(fn ->
-      with :ok <- authenticated(opts) do
+      with :ok <- Rest.validate_watchlist_target(:id, id),
+           :ok <- authenticated(opts) do
         put_watchlist(id, :deleted)
         {:ok, :ok}
       end

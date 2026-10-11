@@ -117,6 +117,21 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
     end
   end
 
+  describe "token calls given a value that is not text" do
+    test "are refused naming the field, never raising and never echoing the value" do
+      plug = fn _conn -> flunk("no request may be sent") end
+
+      assert {:error, {:invalid_field, :token}} =
+               Rest.check_token(nil, @credentials, plug: plug, retry_attempts: 0)
+
+      assert {:error, {:invalid_field, :client_id}} =
+               Rest.oauth_token(nil, "s3cret", plug: plug, retry_attempts: 0)
+
+      assert {:error, {:invalid_field, :client_secret}} =
+               Rest.oauth_token("id", :s3cret, plug: plug, retry_attempts: 0)
+    end
+  end
+
   describe "oauth_token/3 — one endpoint, two operations" do
     test "a code exchanges" do
       me = self()

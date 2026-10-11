@@ -24,6 +24,35 @@ acceptable changelog line.
 
 ### Fixed
 
+- **`check_token/2` and `oauth_token/3` raised `FunctionClauseError` in the caller for a
+  value that was not text.** They are refused as `{:error, {:invalid_field, :token |
+  :client_id | :client_secret}}`, naming the field and never echoing a credential. The
+  Fake's `update_watchlist/2` now checks the id before `:symbols`, in `Rest`'s order.
+
+- **A venue answering `INVALID_SESSION` to every fresh session made a reconnect storm.**
+  `rebuild_stale_shard/3` reopened the shard with an immediate message each time, so a venue
+  that kept refusing the new session cost a websocket and its HTTP round trips per cycle with
+  no pause. It now goes through the policy a crashed socket already used
+  (`reopen_with_backoff/4`, one shared run counter per index): the first teardown reopens at
+  once, repeats within 60 s climb `open_retry_base_ms * 2^(n-2)` capped at
+  `open_retry_max_ms`. A delayed reopen carries a token held in `state.reopen_timers`; a newer
+  teardown of the same index cancels the older timer, and a timer whose token is no longer
+  current is ignored when it fires. The crash path got the same token, which it lacked.
+  Stability guard only; nothing is assumed about the venue's behaviour.
+- **A number or object where an order's id belongs was returned as the order's id.**
+  `get_order/3` answered `{:ok, %Order{id: 12345}}` for a numeric `client_order_id` (`Order.id`
+  is text) and `place_order/3` built the order from one; the first is now
+  `{:error, {:missing_required_field, :id}}` and the second
+  `{:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}`, the shape any
+  acknowledgement that names no usable order already has.
+- **A book side sent as text, a number or an object was delivered as an empty side.**
+  `get_order_book/3` read `"bids" => "none"` as "no bids"; it is now
+  `{:error, :unexpected_response_shape}`. An absent or `null` side is still empty.
+- **A watchlist id or name that was not text raised `FunctionClauseError` in the caller.**
+  `get_watchlist/3`, `update_watchlist/3`, `delete_watchlist/3` and the membership writes now
+  answer `{:error, {:invalid_watchlist_id, id}}` for a non-text or empty id, and
+  `create_watchlist/4` `{:error, {:invalid_watchlist_name, name}}`, before any request. The
+  Fake refuses the same values in the same position (`Rest.validate_watchlist_target/2`).
 - **A `to:` that was not a pid or a registered name crashed the shared `Feed` on the first
   delivery.** `subscribe/2` and `subscribe_notices/1` stored any term as the subscriber, and
   `Core.Fanout.resolve/1` has clauses for a pid and an atom only, so a string, a
