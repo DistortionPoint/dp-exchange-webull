@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.133] - 2026-10-11
+
 ### Changed
 
 - **BREAKING (error shape): a single-symbol read of a symbol that is `nil`, not a string, or
