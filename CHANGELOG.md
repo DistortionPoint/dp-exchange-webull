@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.123] - 2026-10-11
+
 ### Fixed
 
 - **A watchlist the fake created read back the canned `AAPL`/`GOOG` members.**
