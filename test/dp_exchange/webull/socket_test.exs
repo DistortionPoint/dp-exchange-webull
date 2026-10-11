@@ -156,6 +156,17 @@ defmodule DpExchange.Webull.SocketTest do
       assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
     end
 
+    test "a microsecond-sized timestamp is no venue time, not a year-50,000 one" do
+      # The stream states no unit. Ten digits read as seconds and thirteen as milliseconds;
+      # sixteen is neither, and read as milliseconds is a valid DateTime far in the future.
+      frame = publish("snapshot", snapshot_payload("BTCUSD", "1", "1787936147000000"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{} = quoted}
+      assert quoted.venue_time == nil
+    end
+
     test "a non-numeric price in a real frame does not crash the socket" do
       # Decimal.new/1 used to raise on this exact shape, taking the whole connection down
       # over one malformed field on one symbol.

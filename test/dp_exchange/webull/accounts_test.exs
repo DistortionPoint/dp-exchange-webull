@@ -258,6 +258,25 @@ defmodule DpExchange.Webull.AccountsTest do
       assert position.instrument_type == :crypto
     end
 
+    test "only a crypto position's symbol is split into BASE-QUOTE" do
+      # `GBTC` is an equity ticker that ends in a quote code; split as a pair it was `G-BTC`
+      # and never matched the holding the consumer knew it by.
+      rows = [
+        position_row(%{"symbol" => "GBTC", "instrument_type" => "EQUITY"}),
+        position_row(%{"symbol" => "ETHBTC", "instrument_type" => "CRYPTO"})
+      ]
+
+      assert {:ok, [equity, crypto]} =
+               Rest.get_positions(@credentials,
+                 plug: responding(rows),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert equity.symbol == "GBTC"
+      assert crypto.symbol == "ETH-BTC"
+    end
+
     test "a negative quantity is a SHORT, and the quantity comes back positive" do
       # This is the assertion that matters. Direction is in the sign and nowhere else, and a
       # package that assumed :long would report a short that is exactly backwards while
@@ -336,7 +355,7 @@ defmodule DpExchange.Webull.AccountsTest do
       for outcome <- ["yes", "no", nil] do
         row = position_row(%{"instrument_type" => "EVENT", "event_outcome" => outcome})
 
-        assert {:error, {:unsupported_position, "BTC-USD", :event_outcome}} =
+        assert {:error, {:unsupported_position, "BTCUSD", :event_outcome}} =
                  Rest.get_positions(@credentials,
                    plug: responding([row]),
                    account_id: @account,
@@ -356,7 +375,7 @@ defmodule DpExchange.Webull.AccountsTest do
                  retry_attempts: 0
                )
 
-      assert {:error, {:unsupported_position, "BTC-USD", {:option_strategy, "IRON_CONDOR"}}} =
+      assert {:error, {:unsupported_position, "BTCUSD", {:option_strategy, "IRON_CONDOR"}}} =
                Rest.get_positions(@credentials,
                  plug: responding([single, iron_condor]),
                  account_id: @account,

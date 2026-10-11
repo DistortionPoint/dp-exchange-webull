@@ -98,6 +98,38 @@ defmodule DpExchange.Webull.MicrostructureTest do
       assert Types.VolumeProfile.point_of_control(profile) == "24.21"
     end
 
+    test "a price level whose size is unreadable refuses the profile, not a nil in the map" do
+      # `VolumeProfile.point_of_control/1` adds the two sides' sizes at each price, so a `nil`
+      # size under a price type-checks as present and raises in the consumer.
+      for bad <- ["null", "NaN", "not a number"] do
+        body = footprint_body(%{"buy_detail" => %{"24.20" => "100", "24.21" => bad}})
+
+        assert {:error, {:invalid_decimal, :buy_detail, ^bad}} =
+                 Rest.get_volume_profile("AAPL", "5m", @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+
+      body = footprint_body(%{"sell_detail" => %{"24.20" => "x"}})
+
+      assert {:error, {:invalid_decimal, :sell_detail, "x"}} =
+               Rest.get_volume_profile("AAPL", "5m", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a price map that is not an object is not the documented shape" do
+      body = footprint_body(%{"buy_detail" => ["24.20", "100"]})
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_volume_profile("AAPL", "5m", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
     test "delta is the venue's figure and is NOT recomputed from the totals" do
       # 600 - 400 is 200, and the venue says 150. A classifier that leaves prints
       # unattributed produces exactly that gap, and it is information rather than a fault.

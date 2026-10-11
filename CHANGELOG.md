@@ -22,6 +22,45 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An equity, option, future or event symbol was split like a crypto pair.** `SymbolFormat`
+  cuts a symbol at a trailing `USDT`/`USDC`/`USD`/`BTC`/`ETH`, so `get_symbols/2` for
+  `US_STOCK`, a position, and an order whose row says it is an equity read `GBTC` as `G-BTC` and
+  `FBTC` as `F-BTC` - names no stock endpoint takes and no holding is known by. The split now
+  applies only to the crypto catalogue and to a position or order row whose `instrument_type`
+  is `CRYPTO` (or states none, the undocumented shape, which keeps its old reading).
+- **A volume profile could hold a `nil` where `Core.Types.VolumeProfile` types a `Decimal`.**
+  `buy_detail`/`sell_detail` stored `decimal(size)` under each price, so `"null"`, `"NaN"` or
+  text became a `nil` that `VolumeProfile.point_of_control/1` then raised on in the consumer.
+  A level with an unreadable size now refuses the profile
+  (`{:error, {:invalid_decimal, :buy_detail | :sell_detail, value}}`); a price map that is not
+  an object is `{:error, :unexpected_response_shape}`.
+- **`get_top_of_book/3` published a size beside a price it did not have.** A `"null"` bid with a
+  real `bid_size` came back as `bid: nil, bid_size: 5`, depth on an empty side. `Socket` already
+  kept each size only with its price; REST now does the same.
+- **An epoch past thirteen digits was read as milliseconds.** A microsecond or nanosecond value
+  became a valid `DateTime` in the year 50,000 or later, with no failure anywhere. `Rest` now
+  answers `{:error, :invalid_unix_time}` (a bar) or `nil` (a quote's time), and `Socket` treats
+  the frame as undated. The streaming schema states no unit for `timestamp`, so the seconds/
+  milliseconds reading there is recorded as unmeasured.
+- **An option contract on another underlying was filed under the one asked for.**
+  `get_option_chain/3` and `get_option_expirations/3` now refuse a row whose
+  `underlying_symbol` names a different underlying (`{:error, :not_in_response}`).
+- **A screener row whose `symbol` was a number or an object was published as a
+  `ScreenerResult` with that value as its symbol.** Only text names a row; the first text among
+  `symbol`, `sector_name` and `name` is used, and a row with none is dropped as before.
+- **`Fake.quantization/2` invented increments for a crypto pair it does not list.** It now
+  answers `{:refused, :not_listed}`, as the fake's other reads do.
+
+### Added
+
+- **An order's `created_at` and `updated_at`.** `created_at` is `place_time_at` and `updated_at`
+  is `filled_time_at` (both ISO8601 UTC with a stated example, `order-detail.md`), the latter
+  only for a `:filled` or `:partially_filled` order - after a cancel the last fill is not the
+  last change, and the venue states no time for the cancel. `nil` where absent or not ISO8601.
+  Unmeasured against a live order.
+
 ## [0.4.129] - 2026-10-11
 
 ### Fixed

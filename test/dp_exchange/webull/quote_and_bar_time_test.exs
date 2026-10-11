@@ -91,6 +91,28 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
       assert top.venue_time == nil
     end
 
+    test "a size is kept only with the price it belongs to" do
+      # A bid of "null" (the venue's no-price spelling) beside a real bid size is no level at
+      # all; the size must not read as depth on an empty side. The ask side is untouched.
+      row =
+        snapshot_row(%{
+          "bid" => "null",
+          "bid_size" => "5",
+          "ask_size" => "7"
+        })
+
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.new("40010"))
+      assert Decimal.equal?(top.ask_size, Decimal.new("7"))
+    end
+
     test "the traded price is still dated by the trade" do
       row = snapshot_row(%{"last_trade_time" => @last_trade_ms, "quote_time" => @quote_ms})
 
@@ -145,6 +167,29 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
 
         assert forming.opened_at == DateTime.from_unix!(forming_ms, :millisecond)
       end
+    end
+
+    test "a microsecond epoch is no bar time, not a year 58,000 one" do
+      micros = 1_787_936_147_000_000
+
+      assert {:error, :invalid_unix_time} =
+               Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                 category: "US_STOCK",
+                 plug: responding(bars_body([micros])),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a top of book with a microsecond quote_time has no venue time" do
+      row = snapshot_row(%{"quote_time" => 1_787_936_147_000_000})
+
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert top.venue_time == nil
     end
 
     test "a completed weekly bar from last month is kept" do

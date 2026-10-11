@@ -1791,6 +1791,61 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(order.price, Decimal.new(row["limit_price"]))
       assert Decimal.equal?(order.stop_price, Decimal.new(row["stop_price"]))
       assert order.provider == :webull
+
+      # `place_time_at` / `filled_time_at` (order-detail.md:342,353): ISO8601 UTC, the page's
+      # own example `2025-11-11T05:44:35.385Z`.
+      expected = ~U[2025-11-11 05:44:35.385Z]
+      assert DateTime.compare(order.created_at, expected) == :eq
+      assert DateTime.compare(order.updated_at, expected) == :eq
+    end
+
+    test "a fill time on an order that is not filled is not its last update" do
+      fixture = fixture!("order_detail.json")
+      response = fixture["response_filled"]
+      [leg] = response["orders"]
+
+      body =
+        Map.put(response, "orders", [
+          Map.merge(leg, %{"status" => "CANCELLED", "place_time_at" => "not a time"})
+        ])
+
+      assert {:ok, order} =
+               Rest.get_order(@credentials, response["client_order_id"],
+                 plug: responding(body),
+                 account_id: fixture["request_query"]["account_id"],
+                 retry_attempts: 0
+               )
+
+      assert order.status == :cancelled
+      # A fill earlier than the cancel is not when the order last changed, and an unreadable
+      # placement time is the venue's word unread, never a guess.
+      assert order.updated_at == nil
+      assert order.created_at == nil
+    end
+
+    test "only a crypto order's symbol is split into BASE-QUOTE" do
+      fixture = fixture!("order_detail.json")
+      response = fixture["response_filled"]
+      [leg] = response["orders"]
+
+      for {symbol, instrument_type, expected} <- [
+            {"GBTC", "EQUITY", "GBTC"},
+            {"BTCUSD", "CRYPTO", "BTC-USD"}
+          ] do
+        body =
+          Map.put(response, "orders", [
+            Map.merge(leg, %{"symbol" => symbol, "instrument_type" => instrument_type})
+          ])
+
+        assert {:ok, order} =
+                 Rest.get_order(@credentials, response["client_order_id"],
+                   plug: responding(body),
+                   account_id: fixture["request_query"]["account_id"],
+                   retry_attempts: 0
+                 )
+
+        assert order.symbol == expected
+      end
     end
 
     test "the vendor's own documented SUBMITTED example decodes to :pending" do

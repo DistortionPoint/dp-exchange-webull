@@ -485,6 +485,19 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       refute Enum.any?(results, &(&1.symbol == ""))
     end
 
+    test "a screener row whose symbol is not text is dropped, not published as one" do
+      rows = [%{"symbol" => 123}, %{"symbol" => %{"x" => 1}}, %{"symbol" => "MSFT"}]
+
+      assert {:ok, [only]} =
+               Rest.get_screener("gainers_losers", @credentials,
+                 plug: responding(rows),
+                 retry_attempts: 0
+               )
+
+      assert only.symbol == "MSFT"
+      assert only.rank == 3
+    end
+
     test "dropping a screener row does not re-rank the ones that survive" do
       # `rank` is the venue's own returned order — "inventing one from a metric would
       # re-rank the list", and so would closing the gap left by a dropped row.

@@ -1131,6 +1131,14 @@ defmodule DpExchange.Webull.Socket do
       # one. `0` is a common venue sentinel for "unknown", and a frame dated 1970 is a real
       # timestamp to everything downstream. Same rule as `Rest.from_epoch/1`.
       {epoch, ""} when epoch <= 0 -> {:error, :missing_venue_timestamp}
+      # **The streaming schema gives `timestamp` and `time` no unit and no format** (a bare
+      # `string`, `docs/reference/webull/streaming-api.md`). Seconds versus milliseconds is
+      # the same ten-or-thirteen-digit reading `Rest.from_epoch/1` makes of REST pages that DO
+      # state theirs: UNMEASURED on this stream. A frame in any other form (an ISO string, say)
+      # is `:missing_venue_timestamp`, not a guess. More than thirteen digits is neither unit -
+      # read as milliseconds, a microsecond or nanosecond value became a valid `DateTime` tens
+      # of thousands of years out.
+      {epoch, ""} when epoch > 9_999_999_999_999 -> {:error, :missing_venue_timestamp}
       {epoch, ""} when epoch > 100_000_000_000 -> DateTime.from_unix(epoch, :millisecond)
       {epoch, ""} -> DateTime.from_unix(epoch)
       _not_an_epoch -> {:error, :missing_venue_timestamp}

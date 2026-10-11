@@ -571,6 +571,27 @@ What an undated value does depends on the TYPE, because the contract differs:
   and refusing threw away a real guarded price, or a whole set of book levels, over an
   optional field. This changed in 0.4.36 and 0.4.37; before then both were refused.
 
+**Units.** An epoch is read as seconds up to ten digits and milliseconds up to thirteen; one
+longer (microseconds, nanoseconds) is not a time this package can read and is refused
+(`{:error, :invalid_unix_time}` on REST, an undated frame on the stream) rather than becoming a
+`DateTime` tens of thousands of years out. The streaming schema states no unit or format for
+`timestamp`/`time` at all, so the same reading there is **unmeasured**.
+
+**An order's `created_at` is the venue's `place_time_at`** (ISO8601 UTC, per
+`order-detail.md`), and `updated_at` is `filled_time_at` ("time of the last executed trade")
+**only** for a `:filled` or `:partially_filled` order; for any other status it is `nil`, since
+the order changed after its last fill and the venue states no time for that. Both are `nil`
+where the venue sent none or sent something that is not ISO8601. Unmeasured against a live
+order.
+
+**`get_symbols/1`, and the symbols on positions and orders, are split into `BASE-QUOTE` only
+for crypto.** An equity, option, future or event row keeps the ticker or code the venue named
+(`GBTC` is not `G-BTC`).
+
+**A volume profile's price maps hold `Decimal`s only.** A level whose size is not a number
+refuses the profile (`{:error, {:invalid_decimal, :buy_detail | :sell_detail, value}}`)
+instead of storing `nil` where `VolumeProfile.point_of_control/1` adds sizes.
+
 ## An order book is sorted, so `hd(bids)` is the best bid
 
 `get_order_book/2` guarantees it as of 0.4.39 — **bids descending, asks ascending** — and it

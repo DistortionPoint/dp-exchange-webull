@@ -769,28 +769,38 @@ defmodule DpExchange.Webull.Fake do
       # every other market-data call does, so it needs the same `authenticated(opts)`
       # gate they already carry.
       with :ok <- authenticated(opts) do
-        if String.contains?(symbol, "-") do
-          {:ok,
-           %{
-             price_increment: Decimal.new("0.01"),
-             quantity_increment: Decimal.new("0.00000001"),
-             min_quantity: Decimal.new("0.0001"),
-             max_quantity: Decimal.new("1000"),
-             min_quote_size: Decimal.new("1.00"),
-             max_quote_size: Decimal.new("100000"),
-             status: "OC"
-           }}
-        else
-          {:ok,
-           %{
-             price_increment: nil,
-             quantity_increment: Decimal.new("1"),
-             min_quantity: nil,
-             max_quantity: nil,
-             min_quote_size: nil,
-             max_quote_size: nil,
-             status: "OC"
-           }}
+        cond do
+          # A crypto pair the fake does not list is one the venue's catalogue would answer
+          # with no row (`Rest.quantization/3`: no row to read). Increments for it would be a
+          # price step and lot size this fake invented for an instrument it has never heard of.
+          # An equity ticker is modelled by one fixed row, as `get_price/2`'s docs say, so it is
+          # not held to the crypto list.
+          String.contains?(symbol, "-") and symbol not in @symbols ->
+            {:refused, :not_listed}
+
+          String.contains?(symbol, "-") ->
+            {:ok,
+             %{
+               price_increment: Decimal.new("0.01"),
+               quantity_increment: Decimal.new("0.00000001"),
+               min_quantity: Decimal.new("0.0001"),
+               max_quantity: Decimal.new("1000"),
+               min_quote_size: Decimal.new("1.00"),
+               max_quote_size: Decimal.new("100000"),
+               status: "OC"
+             }}
+
+          true ->
+            {:ok,
+             %{
+               price_increment: nil,
+               quantity_increment: Decimal.new("1"),
+               min_quantity: nil,
+               max_quantity: nil,
+               min_quote_size: nil,
+               max_quote_size: nil,
+               status: "OC"
+             }}
         end
       end
     end)

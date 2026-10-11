@@ -653,6 +653,19 @@ defmodule DpExchange.Webull.RestTest do
       assert {:ok, ["BTC-USD"]} =
                Rest.get_symbols(@credentials, plug: responding(body), retry_attempts: 0)
     end
+
+    test "a stock ticker is listed as the venue names it, not split at a trailing BTC" do
+      # `GBTC` and `FBTC` are equity tickers; split as a crypto pair they became `G-BTC` and
+      # `F-BTC`, names no stock endpoint accepts.
+      body = [%{"symbol" => "GBTC"}, %{"symbol" => "AAPL"}, %{"symbol" => "FBTC"}]
+
+      assert {:ok, ["AAPL", "FBTC", "GBTC"]} =
+               Rest.get_symbols(@credentials,
+                 category: "US_STOCK",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "list_instruments/2" do

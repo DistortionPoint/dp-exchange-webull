@@ -127,6 +127,23 @@ defmodule DpExchange.Webull.OptionsTest do
       assert Decimal.equal?(strike, 100)
     end
 
+    test "a contract on another underlying is refused, not filed under the one asked for" do
+      body = [contract(), contract(%{"underlying_symbol" => "MSFT"})]
+
+      assert {:error, :not_in_response} =
+               Rest.get_option_chain("AAPL", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      # The underlying the row names, in either case, is the one asked for.
+      assert {:ok, _chain} =
+               Rest.get_option_chain("AAPL", @credentials,
+                 plug: responding([contract(%{"underlying_symbol" => "aapl"})]),
+                 retry_attempts: 0
+               )
+    end
+
     test "the same contract listed twice is one contract" do
       assert {:ok, chain} =
                Rest.get_option_chain("AAPL", @credentials,

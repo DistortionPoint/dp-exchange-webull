@@ -119,6 +119,14 @@ defmodule DpExchange.Webull.FakeTest do
       assert {:refused, :not_listed} = Fake.get_top_of_book("DOGE-USD", @opts)
       assert {:refused, :not_listed} = Fake.get_historical_prices("DOGE-USD", "1m", [], @opts)
     end
+
+    test "increments are never invented for a crypto pair this venue does not list" do
+      assert {:refused, :not_listed} = Fake.quantization("DOGE-USD", @opts)
+      assert {:ok, quantum} = Fake.quantization("BTC-USD", @opts)
+      assert Decimal.equal?(quantum.price_increment, Decimal.new("0.01"))
+      # An equity ticker is the fake's one modelled stock row: a lot size and nothing else.
+      assert {:ok, %{price_increment: nil}} = Fake.quantization("AAPL", @opts)
+    end
   end
 
   describe "candles" do

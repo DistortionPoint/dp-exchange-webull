@@ -213,9 +213,10 @@ defmodule DpExchange.Webull.QuoteProto do
   # `first_repeated/2` — filters for `is_binary/1`, so a lost `nil` is a lost nothing; the
   # difference is visible only through `decode_message/1` itself, which is public. It is
   # fixed as a latent trap, not as a live defect: the conflation holds only while every
-  # stepped-over wire type decodes to `nil`, and the first `decode_value/2` clause to return
-  # a meaningful value for a field number the schema also uses would turn it into a silent
-  # drop with nothing in the tests pointing at it.
+  # stepped-over wire type decodes to a non-binary, and the first `decode_value/2` clause to
+  # return a meaningful BINARY for a field number the schema also uses would turn it into a
+  # silent drop with nothing in the tests pointing at it. (A 64-bit or 32-bit field decodes to
+  # `nil`; a varint decodes to its integer. Neither is a binary, so every reader skips both.)
   defp accumulate(acc, field_number, value) do
     case Map.fetch(acc, field_number) do
       :error -> Map.put(acc, field_number, value)

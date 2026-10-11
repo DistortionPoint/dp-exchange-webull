@@ -743,13 +743,20 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, native) do
+        bid = decimal(value(row, ["bidPrice", "bid_price", "bid"]))
+        ask = decimal(value(row, ["askPrice", "ask_price", "ask"]))
+
         {:ok,
          %TopOfBook{
            symbol: snapshot_canonical(native, category),
-           bid: decimal(value(row, ["bidPrice", "bid_price", "bid"])),
-           ask: decimal(value(row, ["askPrice", "ask_price", "ask"])),
-           bid_size: decimal(value(row, ["bidSize", "bid_size"])),
-           ask_size: decimal(value(row, ["askSize", "ask_size"])),
+           bid: bid,
+           ask: ask,
+           # **A size is the size of a level, and a side with no readable price has no level.**
+           # `bid: nil` beside a `bid_size` read as a one-sided book with depth on the empty
+           # side. `Socket` already keeps each size only with the price it belongs to; this is
+           # the same rule for the same type on the other transport.
+           bid_size: bid && decimal(value(row, ["bidSize", "bid_size"])),
+           ask_size: ask && decimal(value(row, ["askSize", "ask_size"])),
            venue_time: quote_time(row),
            observed_at: DateTime.utc_now(),
            provider: :webull
@@ -861,6 +868,8 @@ defmodule DpExchange.Webull.Rest do
   @spec get_symbols(map(), keyword()) ::
           {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
   def get_symbols(credentials, opts) do
+    category = Config.opt(opts, :category, "US_CRYPTO")
+
     with {:ok, rows} <- all_instrument_rows(nil, credentials, opts, [], 0) do
       {:ok,
        rows
@@ -868,11 +877,19 @@ defmodule DpExchange.Webull.Rest do
        # Only a string names an instrument. `is_nil/1` let a map or a list through to
        # `to_canonical_symbol/1`, which raised (REST mutation fuzz, 2026-09-27).
        |> Enum.filter(&is_binary/1)
-       |> Enum.map(&SymbolFormat.to_canonical_symbol/1)
+       |> Enum.map(&listed_symbol(&1, category))
        |> Enum.sort()
        |> Enum.uniq()}
     end
   end
+
+  # **Only a crypto pair is split into `BASE-QUOTE`.** `SymbolFormat` cuts a symbol at a
+  # trailing `USDT`/`USDC`/`USD`/`BTC`/`ETH`, which is right for `BTCUSD` and wrong for an
+  # equity ticker that happens to end in one: `GBTC` and `FBTC` came back from
+  # `get_symbols(category: "US_STOCK")` as `G-BTC` and `F-BTC`, names no stock endpoint takes
+  # (`snapshot_symbol/2` sends a stock ticker as it is). A ticker is the venue's own identifier.
+  defp listed_symbol(native, "US_CRYPTO"), do: SymbolFormat.to_canonical_symbol(native)
+  defp listed_symbol(native, _category), do: native
 
   @doc """
   Every `US_CRYPTO` listing as a `Core.Instrument` — base, quote, instrument type and
@@ -1493,7 +1510,11 @@ defmodule DpExchange.Webull.Rest do
   # one and `{:error, {:invalid_decimal, :quantity, value}}` for text that is not a number.
   defp to_position(row) do
     with {:ok, symbol} <-
-           required_position_symbol(row |> value(["symbol"]) |> canonical_or_nil()),
+           required_position_symbol(
+             row
+             |> value(["symbol"])
+             |> canonical_or_nil(row_instrument_type(row))
+           ),
          :ok <- representable_position(row, symbol),
          {:ok, quantity} <- required_decimal(value(row, ["quantity"]), :quantity) do
       {:ok, position_struct(row, symbol, quantity)}
@@ -2330,7 +2351,9 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp to_profile(entry, symbol, timeframe) do
-    with {:ok, opened_at} <- venue_time(entry) do
+    with {:ok, opened_at} <- venue_time(entry),
+         {:ok, buys} <- price_map(value(entry, ["buy_detail", "buyDetail"]), :buy_detail),
+         {:ok, sells} <- price_map(value(entry, ["sell_detail", "sellDetail"]), :sell_detail) do
       {:ok,
        %VolumeProfile{
          symbol: symbol,
@@ -2342,18 +2365,33 @@ defmodule DpExchange.Webull.Rest do
          delta: decimal(value(entry, ["delta"])),
          buy_volume: decimal(value(entry, ["buy_total", "buyTotal"])),
          sell_volume: decimal(value(entry, ["sell_total", "sellTotal"])),
-         buy_at_price: price_map(value(entry, ["buy_detail", "buyDetail"])),
-         sell_at_price: price_map(value(entry, ["sell_detail", "sellDetail"])),
+         buy_at_price: buys,
+         sell_at_price: sells,
          session: session_atom(value(entry, ["trading_session", "tradingSession"])),
          provider: :webull
        }}
     end
   end
 
-  defp price_map(%{} = detail),
-    do: Map.new(detail, fn {price, size} -> {price, decimal(size)} end)
+  # **A price level whose size cannot be read refuses the profile.** `VolumeProfile`'s maps
+  # are `%{String.t() => Decimal.t()}` and `point_of_control/1` adds the two sides' sizes, so
+  # a `nil` size stored under a price (`"null"`, `"NaN"`, text) was a map that type-checks as
+  # present and raises `Decimal.add/2` on `nil` in the consumer. Dropping the level instead
+  # would publish a footprint with a hole in it that reads as "nothing traded at that price".
+  # An absent map is `nil` ("not published"); a present one that is not an object is not
+  # the documented shape.
+  defp price_map(nil, _field), do: {:ok, nil}
 
-  defp price_map(_absent), do: nil
+  defp price_map(%{} = detail, field) do
+    Enum.reduce_while(detail, {:ok, %{}}, fn {price, size}, {:ok, acc} ->
+      case decimal(size) do
+        nil -> {:halt, {:error, {:invalid_decimal, field, size}}}
+        parsed -> {:cont, {:ok, Map.put(acc, price, parsed)}}
+      end
+    end)
+  end
+
+  defp price_map(_unreadable, _field), do: {:error, :unexpected_response_shape}
 
   defp session_atom("PRE"), do: :pre_market
   defp session_atom("RTH"), do: :regular
@@ -4217,9 +4255,17 @@ defmodule DpExchange.Webull.Rest do
   # in. Closing the gap would re-rank the list, which is the same thing the `rank` comment
   # below rules out for a different reason.
   defp to_screener_result({row, rank}, name) do
-    case value(row, ["symbol", "sector_name", "name"]) do
-      nil -> nil
-      symbol -> build_screener_result(symbol, row, rank, name)
+    # Only text names a row. `ScreenerResult.symbol` is `String.t()`, and a number or an object
+    # under `symbol` was published as one; it is the same unnamed row as a missing key.
+    named =
+      Enum.find_value(["symbol", "sector_name", "name"], fn key ->
+        text = value(row, [key])
+        is_binary(text) && text
+      end)
+
+    case named do
+      symbol when is_binary(symbol) -> build_screener_result(symbol, row, rank, name)
+      _unnamed -> nil
     end
   end
 
@@ -4665,7 +4711,8 @@ defmodule DpExchange.Webull.Rest do
   defp to_option_contract(row, underlying) when is_map(row) do
     with {:ok, expiry} <- option_expiry(value(row, ["expiration_date", "expirationDate"])),
          {:ok, strike} <- option_strike(value(row, ["strike_price", "strikePrice", "strike"])),
-         {:ok, right} <- option_right(value(row, ["direction", "option_type", "optionType"])) do
+         {:ok, right} <- option_right(value(row, ["direction", "option_type", "optionType"])),
+         :ok <- contract_underlying(row, underlying) do
       {:ok,
        %OptionContract{
          underlying: underlying,
@@ -4691,10 +4738,23 @@ defmodule DpExchange.Webull.Rest do
        }}
     else
       :error -> {:error, {:unreadable_option_contract, Map.keys(row)}}
+      {:error, _reason} = refused -> refused
     end
   end
 
   defp to_option_contract(row, _underlying), do: {:error, {:unreadable_option_contract, row}}
+
+  # **A contract is the requested underlying's, or the read is refused.** The page documents
+  # `underlying_symbol` on every row (`option-contract-list.md`), and a row naming another
+  # underlying was filed under the one asked for with its expiry, strike and right all
+  # plausible - the substitution `symbol_row/2` refuses for the snapshot rows. A row that names
+  # no underlying is read as the requested one, as ever.
+  defp contract_underlying(row, underlying) do
+    case value(row, ["underlying_symbol", "underlyingSymbol"]) do
+      nil -> :ok
+      named -> if same_symbol?(named, underlying), do: :ok, else: {:error, :not_in_response}
+    end
+  end
 
   defp option_expiry(nil), do: :error
 
@@ -4883,6 +4943,13 @@ defmodule DpExchange.Webull.Rest do
   # `{:error, :invalid_unix_time}` is the shape an out-of-range value already produces here,
   # so every caller handles it unchanged.
   defp from_epoch(value) when value <= 0, do: {:error, :invalid_unix_time}
+
+  # **Past thirteen digits is neither seconds nor milliseconds.** Microseconds (16 digits) or
+  # nanoseconds (19) read as milliseconds is a `DateTime` in the year 50,000 or later - valid,
+  # so it would go out as a bar's open time or a quote's time with no failure anywhere. The
+  # venue documents only seconds and milliseconds, so a longer value is refused as the unit
+  # it cannot be read as.
+  defp from_epoch(value) when value > 9_999_999_999_999, do: {:error, :invalid_unix_time}
 
   defp from_epoch(value) when value > 100_000_000_000, do: DateTime.from_unix(value, :millisecond)
   defp from_epoch(value), do: DateTime.from_unix(value)
@@ -6172,10 +6239,12 @@ defmodule DpExchange.Webull.Rest do
   # (`dp-exchange-schwab`'s `Orders.leg_fields/1`), where the venue's `orderLegCollection`
   # genuinely is one strategy filled together, nothing here is misdescribed by refusing.
   defp to_order(%{"orders" => [leg]} = group) when is_map(leg) do
+    status = leg |> value(["status"]) |> status_atom()
+
     {:ok,
      %Order{
        id: value(group, ["client_order_id", "clientOrderId"]) || leg_id(leg),
-       symbol: leg |> value(["symbol"]) |> canonical_or_nil(),
+       symbol: leg |> value(["symbol"]) |> canonical_or_nil(row_instrument_type(leg)),
        side: leg |> value(["side"]) |> side_atom(),
        order_type: leg |> value(["order_type", "orderType"]) |> order_type_atom(),
        time_in_force: leg |> value(["time_in_force", "timeInForce"]) |> tif_atom(),
@@ -6188,7 +6257,9 @@ defmodule DpExchange.Webull.Rest do
        # not a separate field. The venue names no `avg_filled_price` anywhere this
        # package's own reference pages cover; that key was never proven, only assumed.
        average_price: decimal(value(leg, ["filled_price", "filledPrice"])),
-       status: leg |> value(["status"]) |> status_atom(),
+       status: status,
+       created_at: iso_order_time(value(leg, ["place_time_at"])),
+       updated_at: updated_at(leg, status),
        provider: :webull
      }}
   end
@@ -6198,6 +6269,35 @@ defmodule DpExchange.Webull.Rest do
 
   defp to_order(%{"orders" => []}), do: {:error, {:missing_required_field, :orders}}
   defp to_order(_other), do: {:error, :unexpected_response_shape}
+
+  # `place_time_at` is "Order placement time in ISO8601 format (UTC). Format:
+  # yyyy-MM-dd'T'HH:mm:ss.SSSZ", example `2025-11-11T05:44:35.385Z` (`order-detail.md:342`,
+  # and the same field on the open and history pages). That is the venue's own placement
+  # time, so it is `created_at`. The deprecated millisecond `place_time` beside it is not
+  # read: one stated format is enough, and a second reading of the same instant could only
+  # disagree. Anything not ISO8601 with an offset is `nil` - the venue's word or nothing,
+  # never an epoch guessed at or the local clock.
+  defp iso_order_time(raw) when is_binary(raw) do
+    case DateTime.from_iso8601(raw) do
+      {:ok, at, _offset} -> at
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp iso_order_time(_not_text), do: nil
+
+  # `filled_time_at` is "Time of the last executed trade" (`order-detail.md:353`), which is
+  # the order's last change only while a fill IS the last thing that happened to it. For a
+  # `:filled` order it is, and for a `:partially_filled` one it is the latest change this
+  # read knows of. For any other status (cancelled after a partial fill, say) the order
+  # changed later than its last fill and the venue states no time for that, so `updated_at`
+  # stays `nil` rather than carry a time that is earlier than the truth. **Unmeasured against
+  # a live order**: the page's example gives `filled_time_at` the same instant as
+  # `place_time_at`.
+  defp updated_at(leg, status) when status in [:filled, :partially_filled],
+    do: iso_order_time(value(leg, ["filled_time_at"]))
+
+  defp updated_at(_leg, _status), do: nil
 
   # **An order list is all of the orders or a refusal — never the ones this package could
   # read.** A group it cannot decode into one `Order` (a multi-leg combo `to_order/1`
@@ -6228,15 +6328,27 @@ defmodule DpExchange.Webull.Rest do
 
   defp leg_id(leg), do: value(leg, ["client_order_id", "clientOrderId"])
 
-  defp canonical_or_nil(nil), do: nil
+  defp row_instrument_type(row), do: value(row, ["instrument_type", "instrumentType"])
+
+  defp canonical_or_nil(nil, _instrument_type), do: nil
+
   # Only a string is a symbol. A map or a list used to reach
   # `SymbolFormat.to_canonical_symbol/1` and raise out of `get_order/3`, `get_orders/2` and
   # `get_positions/2` (REST mutation fuzz, 2026-09-27). It is now the same absent symbol as
   # `nil`: an order carries it as `nil` and a position refuses it.
-  defp canonical_or_nil(native) when is_binary(native),
-    do: SymbolFormat.to_canonical_symbol(native)
+  #
+  # **Only a crypto pair is split into `BASE-QUOTE`**, as `listed_symbol/2` does for the
+  # catalogue. A row that states it is an equity, option, future or event holds a ticker or
+  # contract code the venue named, and `GBTC` is not `G-BTC`. A row that states no type is
+  # read as before (`account-position.md` lists `instrument_type` as required, so that is the
+  # undocumented shape, and the split it always had is kept for it).
+  defp canonical_or_nil(native, instrument_type)
+       when is_binary(native) and instrument_type in [nil, "CRYPTO"],
+       do: SymbolFormat.to_canonical_symbol(native)
 
-  defp canonical_or_nil(_absent), do: nil
+  defp canonical_or_nil(native, _other_instrument) when is_binary(native), do: native
+
+  defp canonical_or_nil(_absent, _instrument_type), do: nil
 
   # `order-detail.md:182`'s own `side` enum names `SHORT` beside `BUY`/`SELL`, and
   # `Core.Types.Order.side/0` is `:buy | :sell` — Core has no third slot for it. `nil` is
