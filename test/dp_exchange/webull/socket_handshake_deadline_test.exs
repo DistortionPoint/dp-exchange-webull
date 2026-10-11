@@ -95,6 +95,38 @@ defmodule DpExchange.Webull.SocketHandshakeDeadlineTest do
     assert_receive {:server_handshake, :error}, 5_000
   end
 
+  test "the app key held in the socket's state is redacted from inspect, as a crash report " <>
+         "would print it" do
+    {listen_socket, port} = listen()
+
+    server =
+      serve(listen_socket, [
+        fn socket ->
+          {:ok, request} = recv_until_headers_end(socket, "")
+
+          :ok =
+            :gen_tcp.send(
+              socket,
+              "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n" <>
+                "Connection: Upgrade\r\nSec-WebSocket-Accept: #{accept_header(request)}\r\n\r\n"
+            )
+
+          Process.sleep(10_000)
+        end
+      ])
+
+    on_exit(fn -> Process.exit(server, :kill) end)
+
+    opts = Keyword.put(socket_opts(port), :app_key, "LEAK_PROOF_SOCKET_APP_KEY")
+    {:ok, socket_pid} = Socket.start_link(opts)
+    on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
+
+    state = :sys.get_state(socket_pid)
+
+    refute inspect(state, limit: :infinity) =~ "LEAK_PROOF_SOCKET_APP_KEY"
+    assert %DpExchange.Webull.Credentials{app_key: "LEAK_PROOF_SOCKET_APP_KEY"} = state.app_key
+  end
+
   defp socket_opts(port) do
     [
       url: "ws://127.0.0.1:#{port}/mqtt",

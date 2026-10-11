@@ -30,6 +30,12 @@ defmodule DpExchange.Webull.Supervisor do
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
+    # Wrapped here as well as in `DpExchange.Webull.child_spec/1`: a caller that reaches
+    # `start_link/1` directly (the documented route for a delivery target other than the
+    # supervisor) used to leave the raw map in the init argument and in the Feed child
+    # spec's start arguments, both of which OTP prints in a crash or supervisor report.
+    # Idempotent - `Credentials.wrap/1` passes a wrapped struct through.
+    opts = DpExchange.Webull.Credentials.wrap_opt(opts)
     Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
   end
 

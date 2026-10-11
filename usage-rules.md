@@ -222,10 +222,12 @@ prints unredacted `Logger` metadata otherwise. The credential map is wrapped in 
 before it ever reaches state, so the crash line reads `credentials:
 #DpExchange.Webull.Credentials<...>` rather than the key pair itself. That now holds for the
 credentials you pass to `subscribe/2`, `unsubscribe/2` and `update_symbols/2` as well, which
-used to sit unwrapped in in-flight reconcile state and in the messages that reopen a shard. This does not
-extend to `app_key` on a live shard's socket — `app_key` is sent as a plaintext header
-(`x-app-key`) on every signed request this venue accepts by design, so it carries none of
-the confidentiality `app_secret` does, and a shard's own crash report still shows it.
+used to sit unwrapped in in-flight reconcile state and in the messages that reopen a shard.
+A shard's socket holds its `app_key` wrapped the same way, so its crash report reads
+`#DpExchange.Webull.Credentials<...>` too (the key is sent as a plaintext header, `x-app-key`,
+on every signed request by design, so this is hygiene rather than secrecy). Starting the tree
+through `DpExchange.Webull.start_link/1` directly wraps the credentials as `child_spec/1`
+does; a child spec you build yourself still hands your supervisor the raw map.
 
 **A specific cause of that per-shard crash is now a clean reconnect instead — see
 dp-exchange-core issue #27.** Webull sometimes closes a shard's socket with a WebSocket
@@ -496,7 +498,8 @@ DpExchange.Webull.adjusted?("1m")  #=> false
 document `pagination_key` — the venue's own reference pages, not just its endpoint
 inventory — and this package walks it the same way `get_symbols/2` walks the instrument
 catalogue's: to the end, or `{:error, {:too_many_pages, n}}` on a bound, or
-`{:error, :pagination_key_did_not_advance}` on a repeated key. `get_orders/2` returns the
+`{:error, :pagination_key_did_not_advance}` on a repeated key, or
+`{:error, :unexpected_pagination_key}` on a key that is not text. `get_orders/2` returns the
 whole set the venue holds for the request, not a prefix.
 
 **`opts[:limit]` is no longer read.** Neither endpoint documents a `page_size` parameter —

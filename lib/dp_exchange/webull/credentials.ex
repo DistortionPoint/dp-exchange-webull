@@ -73,10 +73,16 @@ defmodule DpExchange.Webull.Credentials do
   which ignores keys the struct does not declare rather than raising — matching how
   `Auth.headers/2` already reads this map, by pattern-matching only the keys it needs.
   """
-  @spec wrap(map() | nil) :: t() | nil
+  @spec wrap(term()) :: t() | nil | term()
   def wrap(nil), do: nil
   def wrap(%__MODULE__{} = credentials), do: credentials
   def wrap(credentials) when is_map(credentials), do: struct(__MODULE__, credentials)
+
+  # Not a map: passed through untouched. `Auth.headers/2` refuses it as
+  # `{:missing_credentials, :webull}` at signing time. Raising here instead would put the
+  # value - which may be a bare secret string - into a `FunctionClauseError`'s printed
+  # argument list, in the caller's process or a supervisor's report.
+  def wrap(other), do: other
 
   @doc """
   Wraps the `:credentials` entry of a keyword list of options, IN PLACE, only when that

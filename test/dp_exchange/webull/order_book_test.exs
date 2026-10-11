@@ -1142,6 +1142,26 @@ defmodule DpExchange.Webull.OrderBookTest do
                )
     end
 
+    test "a cursor that is not text is refused, not sent back or raised on" do
+      for bad <- [%{"a" => 1}, ["x"], 7, true] do
+        plug = fn conn ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(
+            200,
+            Jason.encode!(%{"data" => [%{"symbol" => "AAPL"}], "pagination_key" => bad})
+          )
+        end
+
+        assert {:error, :unexpected_pagination_key} =
+                 Rest.get_symbols(@credentials,
+                   category: "US_STOCK",
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "an always-advancing key is stopped by the page bound, on either endpoint" do
       # A truncated instrument list is the worst shape this family has — every symbol in it
       # is real and the missing ones are simply never traded — so the walk is bounded

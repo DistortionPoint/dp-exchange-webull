@@ -149,7 +149,7 @@ defmodule DpExchange.Webull.Socket do
 
   alias DpExchange.Core.{Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Webull.{MqttPacket, QuoteProto, SymbolFormat}
+  alias DpExchange.Webull.{Credentials, MqttPacket, QuoteProto, SymbolFormat}
 
   # `DpExchange.Webull.Vendor.WebSockex`, not the real `websockex` hex package's
   # `WebSockex` — see that module's own moduledoc for why. This alias, and its position
@@ -278,7 +278,11 @@ defmodule DpExchange.Webull.Socket do
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
       session_id: Keyword.fetch!(opts, :session_id),
-      app_key: Keyword.fetch!(opts, :app_key),
+      # Wrapped: `Credentials` redacts `app_key` from `inspect/1`, and this map is printed in
+      # full by OTP's crash report when the socket terminates abnormally, which happens
+      # on every malformed close the venue sends (see the moduledoc). `connect_key/1` reads
+      # it back for the one place that signs a CONNECT.
+      app_key: Credentials.wrap(%{app_key: Keyword.fetch!(opts, :app_key)}),
       buffer: <<>>,
       # QoS 2 packet ids delivered and PUBREC'd but not yet released by a PUBREL. See the
       # moduledoc's "QoS 2 is delivered once".
@@ -470,7 +474,7 @@ defmodule DpExchange.Webull.Socket do
   def handle_info(:send_connect, state) do
     # The password is documented as "any value" — authorisation happens on the signed HTTP
     # subscribe, so this is sent to satisfy the protocol flag rather than to authenticate.
-    packet = MqttPacket.connect(state.session_id, state.app_key, "x", @keep_alive_s)
+    packet = MqttPacket.connect(state.session_id, connect_key(state), "x", @keep_alive_s)
     ping = make_ref()
     schedule_ping(ping)
     {:reply, {:binary, packet}, %{state | ping: ping, last_heard_at: now_ms()}}
@@ -506,6 +510,11 @@ defmodule DpExchange.Webull.Socket do
   def handle_info({:ping, _stale}, state), do: {:ok, state}
 
   def handle_info(_other, state), do: {:ok, state}
+
+  # A state built by `start_link/1` holds the wrapped key; one a test built by hand may hold
+  # the bare string.
+  defp connect_key(%{app_key: %Credentials{app_key: app_key}}), do: app_key
+  defp connect_key(%{app_key: app_key}), do: app_key
 
   defp schedule_ping(ping),
     do: Process.send_after(self(), {:ping, ping}, div(@keep_alive_s, 2) * 1_000)

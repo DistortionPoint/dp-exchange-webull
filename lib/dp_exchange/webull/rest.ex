@@ -1030,6 +1030,7 @@ defmodule DpExchange.Webull.Rest do
 
       case next_pagination_key(body) do
         nil -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        {:invalid_key, _other} -> {:error, :unexpected_pagination_key}
         ^key -> {:error, :pagination_key_did_not_advance}
         next -> all_instrument_rows(next, credentials, opts, collected, page + 1)
       end
@@ -1075,6 +1076,7 @@ defmodule DpExchange.Webull.Rest do
 
       case next_key do
         nil -> {:ok, collected |> Enum.reverse() |> Enum.concat()}
+        {:invalid_key, _other} -> {:error, :unexpected_pagination_key}
         ^key -> {:error, :pagination_key_did_not_advance}
         next -> paginate(fetch_page, next, collected, page + 1)
       end
@@ -1153,10 +1155,17 @@ defmodule DpExchange.Webull.Rest do
   defp instruments_path(category), do: {:error, {:unsupported_instrument_category, category}}
 
   # A key echoed back unchanged would page forever without this; see the clause above.
+  #
+  # A cursor is text. A number, list or object in its place used to be sent back as the next
+  # request's `pagination_key`, and `stringify/1` raises on a map or a list - in the caller.
+  # It is `{:invalid_key, term}` and the walk refuses it: ending the walk there would hand back
+  # the pages collected so far as though they were the whole list.
   defp next_pagination_key(body) when is_map(body) do
     case value(body, ["pagination_key", "paginationKey", "next_page_key"]) do
       "" -> nil
-      found -> found
+      nil -> nil
+      found when is_binary(found) -> found
+      other -> {:invalid_key, other}
     end
   end
 
@@ -5151,12 +5160,41 @@ defmodule DpExchange.Webull.Rest do
   # is which kind" and "something went wrong".
   defp refusal(status, body) do
     case refusal_body(body) do
-      %{"msg" => message} when is_binary(message) -> {:venue_error, status, message}
-      %{"message" => message} when is_binary(message) -> {:venue_error, status, message}
-      %{"error_description" => detail} when is_binary(detail) -> {:venue_error, status, detail}
-      %{"code" => code} -> {:venue_error, status, code}
-      _other -> {:venue_error, status}
+      %{"msg" => message} when is_binary(message) ->
+        {:venue_error, status, bound_reason(message)}
+
+      %{"message" => message} when is_binary(message) ->
+        {:venue_error, status, bound_reason(message)}
+
+      %{"error_description" => detail} when is_binary(detail) ->
+        {:venue_error, status, bound_reason(detail)}
+
+      %{"code" => code} when is_binary(code) ->
+        {:venue_error, status, bound_reason(code)}
+
+      %{"code" => code} when is_integer(code) ->
+        {:venue_error, status, code}
+
+      _other ->
+        {:venue_error, status}
     end
+  end
+
+  # A refusal's words come from the venue, or from a gateway in front of it, and ride in an
+  # error tuple a caller logs and keeps. Text over 2 KiB is cut and copied (a view would pin
+  # the whole response, up to Core's body limit); the cut is marked, never silent. A `code`
+  # that is an object or a list used to ride along whole and is now the bare status.
+  @max_reason_bytes 2_048
+
+  defp bound_reason(text) when byte_size(text) <= @max_reason_bytes, do: :binary.copy(text)
+
+  defp bound_reason(text) do
+    cut =
+      if String.valid?(text),
+        do: String.slice(text, 0, div(@max_reason_bytes, 4)),
+        else: binary_part(text, 0, @max_reason_bytes)
+
+    :binary.copy(cut) <> "... [truncated, #{byte_size(text)} bytes in all]"
   end
 
   # A 2xx body this package cannot decode is NOT an empty object.

@@ -51,6 +51,19 @@ defmodule DpExchange.Webull.SocketTest do
 
   defp connack(code), do: <<2::4, 0::4, 2, 0, code>>
 
+  describe "the CONNECT reads its app key from either state shape" do
+    test "a wrapped key and a bare one produce the same CONNECT packet" do
+      assert {:reply, {:binary, bare}, _bare_state} = Socket.handle_info(:send_connect, state())
+
+      wrapped = %{state() | app_key: DpExchange.Webull.Credentials.wrap(%{app_key: "k"})}
+
+      assert {:reply, {:binary, from_wrapped}, _wrapped_state} =
+               Socket.handle_info(:send_connect, wrapped)
+
+      assert from_wrapped == bare
+    end
+  end
+
   describe "CONNACK is where the link actually comes up" do
     test "code 0 raises link_up" do
       # The WebSocket being open is not the venue being reachable. Reporting a live link

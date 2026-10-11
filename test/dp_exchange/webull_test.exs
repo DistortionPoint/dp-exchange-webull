@@ -211,6 +211,24 @@ defmodule DpExchange.WebullTest do
       assert Webull.coverage_by_kind(feed: opts[:feed]) == %{}
     end
 
+    test "start_link/1 called directly does not leave a raw secret in the supervisor's state" do
+      unique = System.unique_integer([:positive])
+      secret = "DIRECT_START_SECRET_#{unique}"
+
+      opts = [
+        name: :"sup_raw_#{unique}",
+        feed: :"feed_raw_#{unique}",
+        limiter: :"lim_raw_#{unique}",
+        credentials: %{app_key: "direct-key", app_secret: secret}
+      ]
+
+      assert {:ok, pid} = Webull.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      refute inspect(:sys.get_state(pid), limit: :infinity) =~ secret
+      refute inspect(:sys.get_state(opts[:feed]), limit: :infinity) =~ secret
+    end
+
     test "a consumer who names no :limiter still gets Feed wired to the limiter this tree started" do
       # The documented usage is `children = [{DpExchange.Webull, []}]` — no `:limiter`
       # anywhere. Before this test existed, `init/1` started `Feed` with the bare `opts`

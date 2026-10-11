@@ -355,6 +355,31 @@ defmodule DpExchange.Webull.RestTest do
                )
     end
 
+    test "a refusal's words are bounded, and a code that is an object is not carried" do
+      long = String.duplicate("x", 10_000)
+
+      assert {:refused, {:venue_error, 400, reason}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(%{"msg" => long}, 400),
+                 retry_attempts: 0
+               )
+
+      assert byte_size(reason) < 2_200
+      assert reason =~ "[truncated, 10000 bytes in all]"
+
+      assert {:refused, {:venue_error, 400}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(%{"code" => %{"nested" => [1, 2, 3]}}, 400),
+                 retry_attempts: 0
+               )
+
+      assert {:refused, {:venue_error, 400, 17}} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(%{"code" => 17}, 400),
+                 retry_attempts: 0
+               )
+    end
+
     test "400, 401 and 403 are told apart, because their remedies differ" do
       # The property the status exists for. All three are refusals — permanent for the
       # request as sent — and a caller does something different with each:

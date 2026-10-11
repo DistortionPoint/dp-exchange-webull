@@ -22,6 +22,38 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A `pagination_key` that was not text was sent back as the next cursor.** The key was taken
+  from the body whatever its type, and `stringify/1` raises on an object or a list, so a venue
+  answering `"pagination_key": {...}` raised in the caller. Every cursor walk (`get_symbols/2`,
+  orders, activities, screeners, option contracts, fundamentals) now refuses it:
+  `{:error, :unexpected_pagination_key}`. Ending the walk there instead would have returned a
+  prefix as the whole list.
+- **A refusal carried the venue's words and `code` unbounded.** `{:refused, {:venue_error,
+  status, text}}` held a gateway's whole JSON string (up to Core's body limit) and a `code` that
+  was an object rode along as a nested term. Text over 2 KiB is cut, copied and marked
+  `... [truncated, N bytes in all]`; a `code` is kept when it is text or a whole number and is
+  otherwise dropped (`{:venue_error, status}`).
+- **A shard's socket held its `app_key` as a bare string in the state OTP prints on a crash.**
+  `Credentials` redacts `app_key`, and `Socket` now holds it wrapped (`connect_key/1` reads it
+  for the CONNECT). `usage-rules.md` no longer says the key shows in a shard's crash report.
+- **`DpExchange.Webull.start_link/1` called directly left the raw credential map in the
+  supervisor's init argument and in `Feed`'s child spec.** Only `child_spec/1` wrapped it.
+  `Supervisor.start_link/1` now wraps too (idempotent). `Credentials.wrap/1` passes a value
+  that is not a map through instead of raising `FunctionClauseError` with it in the printed
+  arguments.
+
+### Reviewed, not changed
+
+- Notices from the venue's `notice` topic are not rate-limited: `Feed` fans them out unbounded
+  by design (the notice that a consumer is being dropped must not be the first thing dropped),
+  so a venue sending thousands per second would reach a consumer's mailbox at that rate.
+  Nothing measured shows it; recorded, not guessed at.
+- `Feed` keeps every wanted symbol, including those past the five-shard ceiling (reported as
+  `capacity_exceeded`), so a caller handing it millions of symbols makes every reshard sort
+  them. A caller error rather than a venue behaviour; no cap is invented here.
+
 ## [0.4.131] - 2026-10-11
 
 ### Fixed

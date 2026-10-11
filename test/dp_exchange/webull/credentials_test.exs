@@ -29,6 +29,12 @@ defmodule DpExchange.Webull.CredentialsTest do
              } = wrapped
     end
 
+    test "a value that is not a map passes through rather than raising with it in the " <>
+           "printed arguments" do
+      assert Credentials.wrap(@app_secret) == @app_secret
+      assert Credentials.wrap(app_key: @app_key) == [app_key: @app_key]
+    end
+
     test "already-wrapped credentials pass through unchanged" do
       wrapped = Credentials.wrap(%{app_key: @app_key, app_secret: @app_secret})
 
