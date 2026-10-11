@@ -16,13 +16,20 @@ defmodule DpExchange.Webull.MqttPacket do
 
   ## Packets implemented
 
-  Outbound: `CONNECT` (1), `PINGREQ` (12), `DISCONNECT` (14).
-  Inbound: `CONNACK` (2), `PUBLISH` (3), `PINGRESP` (13).
+  Outbound: `CONNECT` (1), `PINGREQ` (12), `DISCONNECT` (14), and the acknowledgements
+  `PUBACK` (4), `PUBREC` (5) and `PUBCOMP` (7) described below.
+  Inbound: `CONNACK` (2), `PUBLISH` (3), `PUBREL` (6), `PINGRESP` (13).
 
-  **QoS 0 throughout**, which is why `PUBACK`/`PUBREC`/`PUBREL`/`PUBCOMP` are absent: a
-  dropped price tick is replaced by the next one. Higher QoS would buy redelivery of stale
-  prices at the cost of broker-side queueing — the wrong trade for a feed where only the
-  newest value matters.
+  **QoS 0 is what this package expects, but it does not choose it.** The client never
+  sends a `SUBSCRIBE` (see below), so the QoS a session is delivered at is set by the
+  venue's HTTP subscribe, not here, and the documentation states none. This module used to
+  say "QoS 0 throughout" and leave `PUBACK`/`PUBREC`/`PUBREL`/`PUBCOMP` unimplemented on
+  that footing. A broker that publishes at QoS 1 or 2 keeps an in-flight window per session
+  and stops delivering when it fills with messages nobody acknowledged (MQTT 3.1.1 §4.3):
+  a connection that stays up, passes keep-alive, and delivers less and then nothing. So a
+  QoS 1 `PUBLISH` is acknowledged with `PUBACK`, a QoS 2 one with `PUBREC`, and the `PUBREL`
+  that follows with `PUBCOMP` (`ack/2`). Delivery is at-least-once: a retransmitted `PUBLISH`
+  is delivered again, which for a feed where the newest value wins costs nothing.
 
   ## No `SUBSCRIBE`, and this was checked rather than assumed
 
@@ -62,9 +69,25 @@ defmodule DpExchange.Webull.MqttPacket do
   @connect 1
   @connack 2
   @publish 3
+  @puback 4
+  @pubrec 5
+  @pubrel 6
+  @pubcomp 7
   @pingreq 12
   @pingresp 13
   @disconnect 14
+
+  @typedoc """
+  A decoded inbound packet. A QoS 1 or 2 `PUBLISH` carries the acknowledgement it is owed as
+  a fourth element, to be turned into bytes with `ack/2`.
+  """
+  @type packet ::
+          {:connack, non_neg_integer()}
+          | {:publish, binary(), binary()}
+          | {:publish, binary(), binary(), {:puback | :pubrec, 0..65_535}}
+          | {:pubrel, 0..65_535}
+          | :pingresp
+          | {:unhandled, non_neg_integer(), binary()}
 
   @protocol_name "MQTT"
   @protocol_level 4
@@ -109,8 +132,22 @@ defmodule DpExchange.Webull.MqttPacket do
       variable_header <> payload
   end
 
+  @doc "`PINGREQ` — the keep-alive probe; the broker answers with `PINGRESP`."
   @spec pingreq() :: binary()
   def pingreq, do: fixed_header(@pingreq, 0) <> <<0>>
+
+  @doc """
+  The acknowledgement for an inbound QoS 1 or 2 packet: `:puback` (QoS 1 `PUBLISH`),
+  `:pubrec` (QoS 2 `PUBLISH`) or `:pubcomp` (the `PUBREL` that follows a `PUBREC`).
+
+  MQTT 3.1.1 §3.4, §3.5, §3.7: four bytes, the fixed header with zero flags, a remaining
+  length of 2, and the packet identifier being acknowledged. See the moduledoc for why a
+  package that never chose a QoS must still be able to answer one.
+  """
+  @spec ack(:puback | :pubrec | :pubcomp, 0..65_535) :: binary()
+  def ack(:puback, packet_id), do: <<@puback::4, 0::4, 2, packet_id::16>>
+  def ack(:pubrec, packet_id), do: <<@pubrec::4, 0::4, 2, packet_id::16>>
+  def ack(:pubcomp, packet_id), do: <<@pubcomp::4, 0::4, 2, packet_id::16>>
 
   @doc """
   `DISCONNECT` — a clean, client-initiated end to the session.
@@ -145,7 +182,7 @@ defmodule DpExchange.Webull.MqttPacket do
   silently wedged that way. See `valid_header?/3`.
   """
   @spec decode(binary()) ::
-          {:ok, term(), binary()}
+          {:ok, packet(), binary()}
           | {:error, :incomplete}
           | {:error, :malformed_length}
           | {:error, :malformed_header}
@@ -210,12 +247,14 @@ defmodule DpExchange.Webull.MqttPacket do
   # PUBLISH carries a packet identifier after the topic **only at QoS 1 or 2**, and the QoS
   # lives in bits 2-1 of the fixed-header flags.
   #
-  # This package subscribes at QoS 0 and so should never see a higher one — but "should
-  # never" is not a decoder's business. Reading the flags costs nothing, and ignoring them
-  # means that if the broker ever publishes at QoS 1, two bytes of packet identifier are
-  # read as the head of the protobuf payload. That does not fail: it decodes into a
-  # slightly wrong message, which is this family's named failure mode arriving through the
-  # wire format.
+  # This package never sends a SUBSCRIBE, so it does not choose the QoS and cannot rule out
+  # a higher one. Ignoring the flags would mean that if the broker publishes at QoS 1, two
+  # bytes of packet identifier are read as the head of the protobuf payload. That does not
+  # fail: it decodes into a slightly wrong message, which is this family's named failure
+  # mode arriving through the wire format. A QoS 1 or 2 PUBLISH is returned with the
+  # acknowledgement it is owed (`ack/2`); one too short to hold its identifier is not a
+  # PUBLISH this decoder can read, and is `:unhandled` rather than delivered with its first
+  # bytes taken for a payload.
   defp decode_body(@publish, flags, body) do
     qos = flags |> bsr(1) |> band(0x03)
 
@@ -228,15 +267,24 @@ defmodule DpExchange.Webull.MqttPacket do
     end
   end
 
+  # The second half of a QoS 2 delivery. `valid_header?/3` has already fixed its length at 2.
+  defp decode_body(@pubrel, _flags, <<packet_id::16>>), do: {:pubrel, packet_id}
+
   defp decode_body(@pingresp, _flags, _body), do: :pingresp
   defp decode_body(type, _flags, body), do: {:unhandled, type, body}
 
   defp publish(topic, 0, payload), do: {:publish, topic, payload}
 
-  defp publish(topic, _qos, <<_packet_id::16, payload::binary>>),
-    do: {:publish, topic, payload}
+  defp publish(topic, 1, <<packet_id::16, payload::binary>>),
+    do: {:publish, topic, payload, {:puback, packet_id}}
 
-  defp publish(topic, _qos, payload), do: {:publish, topic, payload}
+  defp publish(topic, 2, <<packet_id::16, payload::binary>>),
+    do: {:publish, topic, payload, {:pubrec, packet_id}}
+
+  # QoS 3 is refused by `valid_header?/3`, so what reaches here is a QoS 1 or 2 body with no
+  # room for its packet identifier.
+  defp publish(topic, _qos, short_payload),
+    do: {:unhandled, @publish, <<byte_size(topic)::16, topic::binary, short_payload::binary>>}
 
   # --- primitives ---------------------------------------------------------
 

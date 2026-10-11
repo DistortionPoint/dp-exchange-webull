@@ -230,13 +230,17 @@ defmodule DpExchange.Webull.Auth do
 
   Second precision with no fractional part. A fractional second changes the string, and
   the string is signed.
+
+  The instant is always written in UTC. A `DateTime` in another zone used to be formatted
+  as it came (`...+02:00`), a string the venue's `Z` form does not accept and that was
+  signed all the same.
   """
   @spec timestamp(DateTime.t()) :: String.t()
   def timestamp(now \\ DateTime.utc_now()) do
     now
-    |> DateTime.truncate(:second)
+    |> DateTime.to_unix()
+    |> DateTime.from_unix!()
     |> DateTime.to_iso8601(:extended)
-    |> String.replace(~r/\+00:00$/, "Z")
   end
 
   defp with_access_token(headers, token) when is_binary(token) and token != "",

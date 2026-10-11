@@ -55,6 +55,22 @@ defmodule DpExchange.Webull.Socket do
   (`details.reason: :silent_connection`, with the `session_id`) and closes. That takes the
   ordinary `handle_disconnect/2` path: `:link_down`, reconnect, CONNECT, resubscribe.
 
+  ## Acknowledgements are owed whatever QoS the venue picks
+
+  The socket never sends a `SUBSCRIBE`, so the QoS a session is delivered at is the venue's
+  choice. A `PUBLISH` at QoS 1 or 2 is acknowledged (`PUBACK`, `PUBREC`, and `PUBCOMP` for
+  the `PUBREL` that follows), all of a frame's acknowledgements in one reply frame. A
+  broker's in-flight window fills with unacknowledged messages and delivery stops while the
+  connection, the keep-alive and the subscription all look healthy. See `MqttPacket`.
+
+  ## Data this socket cannot read is reported
+
+  A `snapshot`, `quote` or `tick` that cannot be turned into a `Quote`, `TopOfBook` or
+  `Trade`, a topic it does not decode, and a packet type it does not handle each raise a
+  `:data_quality` notice, once per reason per connection and for at most 64 distinct
+  reasons. The reason never carries the venue's offending value (that is in `details`), so
+  the set of reasons already reported cannot grow with what the venue sends.
+
   ## What it does not do
 
   It does not subscribe. Subscriptions on this venue are **HTTP calls**, made by `Feed`
@@ -119,9 +135,15 @@ defmodule DpExchange.Webull.Socket do
   # connection at all" entry.
   @keep_alive_s 60
 
-  # The topics `emit/3` decodes, or deliberately ignores (`echo` is the empty heartbeat).
-  # `tick` has its own clause. Anything else is reported, not dropped: see `handle_packet/2`.
-  @known_topics ["snapshot", "quote", "notice", "echo"]
+  # The topics `emit/3` handles: `notice`, and `echo` (the empty heartbeat, deliberately
+  # ignored). `tick`, `snapshot` and `quote` have clauses of their own. Anything else is
+  # reported, not dropped: see `handle_packet/2`.
+  @known_topics ["notice", "echo"]
+
+  # How many distinct dropped-data reasons one connection reports before going quiet. Ours,
+  # not the venue's: far more than the handful of real reasons, small enough that a venue
+  # inventing a new one per message cannot grow the socket's state without bound.
+  @max_reported_drops 64
 
   # Three missed PINGRESPs at the half-keep-alive cadence. See the moduledoc's "A PINGREQ
   # nobody answers ends the connection".
@@ -378,6 +400,8 @@ defmodule DpExchange.Webull.Socket do
     {:reconnect,
      Map.merge(state, %{
        buffer: <<>>,
+       # Acknowledgements owed to a connection that no longer exists are owed to nobody.
+       acks: [],
        connected?: false,
        connected_at: nil,
        ping: nil,
@@ -463,14 +487,33 @@ defmodule DpExchange.Webull.Socket do
         state |> handle_packet(packet) |> Map.put(:buffer, rest) |> drain()
 
       {:error, :incomplete} ->
-        {:ok, state}
+        finish(state)
 
       {:error, reason} when reason in [:malformed_length, :malformed_header] ->
         # Unrecoverable: no future byte repairs an invalid length. Dropping the buffer and
         # saying so beats a live socket that silently delivers nothing.
         notify(state, Notice.new(:data_quality, :webull, details: %{dropped: :malformed_frame}))
-        {:ok, %{state | buffer: <<>>}}
+        finish(%{state | buffer: <<>>})
     end
+  end
+
+  # Ends a frame's drain. Acknowledgements owed for the packets it carried go out as ONE
+  # binary frame: MQTT over WebSocket allows several packets in a frame, and `WebSockex`
+  # takes one reply per callback. See `MqttPacket`'s moduledoc for why anything is owed.
+  defp finish(state) do
+    case Map.get(state, :acks, []) do
+      [] ->
+        {:ok, state}
+
+      owed ->
+        {:reply, {:binary, owed |> Enum.reverse() |> IO.iodata_to_binary()},
+         Map.put(state, :acks, [])}
+    end
+  end
+
+  defp owe_ack(state, kind, packet_id) do
+    ack = MqttPacket.ack(kind, packet_id)
+    Map.update(state, :acks, [ack], &[ack | &1])
   end
 
   defp handle_packet(state, {:connack, 0}) do
@@ -503,7 +546,11 @@ defmodule DpExchange.Webull.Socket do
   # parked on that shard's `reply_to` with nothing able to answer it — see `Feed`'s own
   # refusal clause. The two notices that carry a session id and the three that did not were
   # the same event class all along; only the successful one had been wired up.
-  defp handle_packet(state, {:connack, code}) when code in [3, 103, 104] do
+  # 4 (bad user name or password) and 5 (not authorised) are MQTT 3.1.1 §3.2.2.3's own
+  # credential refusals. The venue's table (`streaming-api.md`) lists neither, only its 3,
+  # 103 and 104, but a broker answering a standard code means the standard thing, and it
+  # was being reported as a transport `:link_down` that tells an operator nothing about the key.
+  defp handle_packet(state, {:connack, code}) when code in [3, 4, 5, 103, 104] do
     notify(
       state,
       Notice.new(:credentials_rejected, :webull,
@@ -535,10 +582,26 @@ defmodule DpExchange.Webull.Socket do
     state
   end
 
-  # `tick` and anything unrecognised thread the state through, for `report_drop/3`; the
-  # other topics never drop silently and keep their `:ok`-returning `emit/3`.
+  # `tick`, `snapshot`, `quote` and anything unrecognised thread the state through, for
+  # `report_drop/3`; `notice` and `echo` never drop silently and keep their `:ok`-returning
+  # `emit/3`.
   defp handle_packet(state, {:publish, "tick", payload}),
     do: emit_trade(state, QuoteProto.decode_tick(payload))
+
+  # Three topics are protobuf, one is JSON, one is empty. A handler assuming a single
+  # encoding drops four fifths of the traffic — which is what the prior adapter did by
+  # calling `Jason.decode/1` on every payload.
+  #
+  # **A snapshot or book this package cannot read is reported, as an unreadable tick
+  # always was.** Both returned `:ok` in silence, so a venue that changed a field number
+  # left a consumer with a connected, subscribed, mute feed and nothing saying it was this
+  # decoder rather than the venue. These are the main data path; the tape was the only one
+  # that could explain itself (dp-exchange-core issue #40).
+  defp handle_packet(state, {:publish, "snapshot", payload}),
+    do: emit_snapshot(state, QuoteProto.decode_snapshot(payload))
+
+  defp handle_packet(state, {:publish, "quote", payload}),
+    do: emit_book(state, QuoteProto.decode_quote(payload))
 
   defp handle_packet(state, {:publish, topic, payload}) when topic in @known_topics do
     emit(state, topic, payload)
@@ -553,13 +616,23 @@ defmodule DpExchange.Webull.Socket do
     report_drop(state, {:unrecognised_topic, topic}, %{topic: topic, bytes: byte_size(payload)})
   end
 
-  defp handle_packet(state, _other), do: state
+  # A QoS 1 or 2 PUBLISH: acknowledged, then handled exactly as a QoS 0 one is.
+  defp handle_packet(state, {:publish, topic, payload, {kind, packet_id}}) do
+    state |> owe_ack(kind, packet_id) |> handle_packet({:publish, topic, payload})
+  end
 
-  # Three topics are protobuf, one is JSON, one is empty. A handler assuming a single
-  # encoding drops four fifths of the traffic — which is what the prior adapter did by
-  # calling `Jason.decode/1` on every payload.
-  defp emit(state, "snapshot", payload),
-    do: emit_decoded(state, QuoteProto.decode_snapshot(payload))
+  # The PUBREL that completes a QoS 2 delivery. Nothing was held back for it.
+  defp handle_packet(state, {:pubrel, packet_id}), do: owe_ack(state, :pubcomp, packet_id)
+
+  # A packet type this package neither sends a request for nor decodes (SUBACK, PUBACK,
+  # a PUBLISH too short for its own identifier). It used to be dropped here without a trace,
+  # though `MqttPacket` decodes it precisely so that someone is told. Reported once per type
+  # per connection, with the size and not the bytes.
+  defp handle_packet(state, {:unhandled, type, body}) do
+    report_drop(state, {:unhandled_packet, type}, %{packet_type: type, bytes: byte_size(body)})
+  end
+
+  defp handle_packet(state, _other), do: state
 
   # A `quote` message is the book: bid and ask, and no last price — the venue does not send
   # one on this topic.
@@ -578,14 +651,22 @@ defmodule DpExchange.Webull.Socket do
   # to `nil`, and went out as `%TopOfBook{bid: nil, ask: nil}`: delivered, and counted by
   # `Feed` as coverage for a symbol with no book at all. Found 2026-10-10. A quote that states
   # no readable level is no quote.
-  defp emit(state, "quote", payload) do
-    with {:ok, decoded} <- QuoteProto.decode_quote(payload),
-         {:ok, bid, ask} <- readable_levels(decoded) do
-      emit_top_of_book(state, decoded, bid, ask)
-    else
-      _no_levels -> :ok
+  defp emit_book(state, {:ok, decoded}) do
+    case readable_levels(decoded) do
+      {:ok, bid, ask} ->
+        emit_top_of_book(state, decoded, bid, ask)
+        state
+
+      :error ->
+        report_drop(state, {:quote, :no_readable_level}, %{
+          symbol: decoded.symbol,
+          bid: decoded.bid,
+          ask: decoded.ask
+        })
     end
   end
+
+  defp emit_book(state, :error), do: report_drop(state, {:quote, :undecodable}, %{})
 
   # A `tick` message is one print — the tape. Unlike `snapshot` and `quote`, this topic is
   # not requested by default everywhere in the family; on this venue it is, though (see
@@ -747,8 +828,14 @@ defmodule DpExchange.Webull.Socket do
          #
          # `nil` still reaches a caller for a level that states no size, which is what
          # `Core.Types.TopOfBook` requires: "not published", never "none available".
-         bid_size: decimal(decoded[:bid_size]),
-         ask_size: decimal(decoded[:ask_size]),
+         #
+         # **A size is the size of a level, and a side with no readable price has no level.**
+         # `bid: nil` with a `bid_size` beside it says "no resting bid, and 5 of it": a level
+         # that is absent and sized at once. The price was `"null"` or unparseable and the
+         # size was a real number, so the pair read as a one-sided book with depth on the
+         # empty side. Each size is kept only with the price it belongs to.
+         bid_size: bid && decimal(decoded[:bid_size]),
+         ask_size: ask && decimal(decoded[:ask_size]),
          venue_time: venue_time_or_nil(decoded),
          observed_at: DateTime.utc_now(),
          provider: :webull
@@ -766,29 +853,36 @@ defmodule DpExchange.Webull.Socket do
   # one print: `:running_total` (dp-exchange-core issue #42), to be differenced, never
   # summed. A snapshot that states no volume (`QuoteProto` reads `""` as absent) or an
   # unreadable one stays `nil`, with no window, so nothing is invented either way.
-  defp emit_decoded(state, {:ok, decoded}) do
-    with {:ok, price} <- required_decimal(decoded[:price], :price) do
-      volume = decimal(decoded[:volume])
+  defp emit_snapshot(state, {:ok, decoded}) do
+    case required_decimal(decoded[:price], :price) do
+      {:ok, price} ->
+        volume = decimal(decoded[:volume])
 
-      send(
-        state.subscriber,
-        {:dp_exchange, :webull,
-         %Quote{
-           symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
-           price: price,
-           volume: volume,
-           volume_window: volume && :running_total,
-           venue_time: venue_time_or_nil(decoded),
-           observed_at: DateTime.utc_now(),
-           provider: :webull
-         }}
-      )
+        send(
+          state.subscriber,
+          {:dp_exchange, :webull,
+           %Quote{
+             symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
+             price: price,
+             volume: volume,
+             volume_window: volume && :running_total,
+             venue_time: venue_time_or_nil(decoded),
+             observed_at: DateTime.utc_now(),
+             provider: :webull
+           }}
+        )
+
+        state
+
+      {:error, reason} ->
+        report_drop(state, {:snapshot, drop_reason(reason)}, %{
+          symbol: decoded.symbol,
+          price: decoded.price
+        })
     end
-
-    :ok
   end
 
-  defp emit_decoded(_state, :error), do: :ok
+  defp emit_snapshot(state, :error), do: report_drop(state, {:snapshot, :undecodable}, %{})
 
   # `id: nil` — see the moduledoc's "`tick` carries no trade id". `Trade.new/1` is
   # deliberately not used here: it would raise on the very absence this comment and the
@@ -815,7 +909,7 @@ defmodule DpExchange.Webull.Socket do
       state
     else
       {:error, reason} ->
-        report_drop(state, {:tick, reason}, %{
+        report_drop(state, {:tick, drop_reason(reason)}, %{
           symbol: decoded[:symbol],
           time: decoded[:timestamp],
           basic_timestamp: decoded[:basic_timestamp],
@@ -846,10 +940,17 @@ defmodule DpExchange.Webull.Socket do
   # fields (strings from the frame, never credentials), which is what a consumer needs to
   # tell "the venue publishes no crypto ticks" from "this decoder cannot read them". Once per
   # reason per connection, so a steady stream of unreadable prints is one line, not thousands.
+  #
+  # **The set of keys already reported is bounded.** A key can carry something the venue
+  # chose (a topic name), and one that carried the offending value itself
+  # (`{:invalid_decimal, :price, "<whatever arrived>"}`): a stream of distinct values made a
+  # distinct key each, so a notice per message and a set growing for as long as the
+  # connection lived. `drop_reason/1` takes the value out of the key (it stays in `details`),
+  # and past `@max_reported_drops` distinct reasons nothing more is added or sent.
   defp report_drop(state, key, details) do
     reported = Map.get(state, :drops_reported, MapSet.new())
 
-    if MapSet.member?(reported, key) do
+    if MapSet.member?(reported, key) or MapSet.size(reported) >= @max_reported_drops do
       state
     else
       notify(
@@ -863,6 +964,10 @@ defmodule DpExchange.Webull.Socket do
       Map.put(state, :drops_reported, MapSet.put(reported, key))
     end
   end
+
+  # The reason a frame was dropped, without the venue's value in it. See `report_drop/3`.
+  defp drop_reason({:invalid_decimal, field, _value}), do: {:invalid_decimal, field}
+  defp drop_reason(reason), do: reason
 
   # Undocumented on the streaming schema (`docs/reference/webull/streaming-api.md` gives
   # the field no value list) — matched against the same `"B"`/`"S"` the venue's REST tape

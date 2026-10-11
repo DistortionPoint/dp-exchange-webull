@@ -109,8 +109,11 @@ defmodule DpExchange.Webull.QuoteProto do
   @doc """
   Decodes a `Quote` — book levels — into the venue's own best bid and ask.
 
-  The repeated fields arrive in book order, so the first entry of each side is the best
-  level. **No mid is computed here.** A mid is a decision about what a price means, and it
+  The first entry of each side is taken as the best level. **That is an assumption, not a
+  documented guarantee**: the venue's schema (`docs/reference/webull/streaming-api.md`) says
+  nothing about the order of `asks` and `bids`, and no frame has been captured that would
+  settle it. Choosing the best price instead would mean decoding every level of every book
+  on the hot path, so the assumption stands and is stated. **No mid is computed here.** A mid is a decision about what a price means, and it
   belongs with the caller that also knows whether both sides are present.
   """
   @spec decode_quote(binary()) :: {:ok, map()} | :error

@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A QoS 1 or 2 `PUBLISH` was never acknowledged.** The MQTT module stated "QoS 0
+  throughout", but the client never sends a `SUBSCRIBE`, so the venue's HTTP subscribe sets
+  the QoS and the documentation states none. A broker that publishes above QoS 0 stops
+  delivering when its in-flight window fills with unacknowledged messages, leaving a
+  connection that passes keep-alive and delivers nothing. The socket now answers `PUBACK`
+  (QoS 1), `PUBREC` (QoS 2) and `PUBCOMP` (for the `PUBREL`), all of a frame's in one reply.
+  `MqttPacket.decode/1` returns an acknowledgement-bearing four-element `{:publish, ...}` for
+  those; a QoS 1 or 2 body too short for its packet id is `{:unhandled, 3, body}` rather than a
+  PUBLISH whose payload is that byte. Delivery is at-least-once.
+- **An unreadable `snapshot` or `quote` was dropped in silence**, though an unreadable `tick`
+  has raised a `:data_quality` notice since dp-exchange-core issue #40. Snapshots with no
+  readable price, books with no readable level, either one undecodable, and any MQTT packet
+  type the socket does not handle now raise one notice per reason per connection.
+- **The set of reasons already reported grew without bound.** A reason carried the venue's
+  offending value (`{:tick, {:invalid_decimal, :price, "<value>"}}`) or its topic name, so a
+  venue sending something different each message made a notice per message and a set that grew
+  for the life of the connection. The value is out of the reason (it stays in `details`) and
+  at most 64 distinct reasons are reported per connection.
+- **A streamed `TopOfBook` carried a size for a side with no readable price.** A `"null"` bid
+  with a real size arrived as `bid: nil, bid_size: 5`. Each size is kept only with its price.
+- **CONNACK 4 and 5 were reported as a bare `:link_down`.** They are MQTT's bad-credentials and
+  not-authorised refusals and now raise `:credentials_rejected`, as 3, 103 and 104 do.
+- **`Auth.timestamp/1` wrote a non-UTC `DateTime` with its own offset** (`...+02:00`), a form
+  the venue's `Z` timestamp does not accept, and signed it. It is always UTC.
+- `QuoteProto.decode_quote/1`'s documentation stated that the first level of each side is the
+  best as a fact. The schema does not say so; it is now stated as the assumption it is.
+
 ## [0.4.121] - 2026-10-11
 
 ### Fixed

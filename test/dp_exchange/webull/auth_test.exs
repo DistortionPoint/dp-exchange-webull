@@ -207,6 +207,27 @@ defmodule DpExchange.Webull.AuthTest do
       # A fractional second changes the string, and the string is signed.
       assert Auth.timestamp(~U[2022-01-04 03:55:31.123456Z]) == "2022-01-04T03:55:31Z"
     end
+
+    test "an instant in another zone is written in UTC, not with its own offset" do
+      # The same instant as the test above, as a clock two hours ahead reads it. It used to
+      # come out `2022-01-04T05:55:31+02:00`, which the venue's `Z` form does not accept and
+      # which was signed as it stood.
+      two_hours_ahead = %DateTime{
+        year: 2022,
+        month: 1,
+        day: 4,
+        hour: 5,
+        minute: 55,
+        second: 31,
+        microsecond: {123_456, 6},
+        time_zone: "Europe/Test",
+        zone_abbr: "TST",
+        utc_offset: 7200,
+        std_offset: 0
+      }
+
+      assert Auth.timestamp(two_hours_ahead) == "2022-01-04T03:55:31Z"
+    end
   end
 
   describe "a blank credential is a missing one, not one to sign with" do

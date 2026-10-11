@@ -76,11 +76,50 @@ defmodule DpExchange.Webull.MqttPacketTest do
       body = <<5::16, "quote", 7::16, 1, 2, 3>>
       packet = <<3::4, bsl(1, 1)::4>> <> <<byte_size(body)>> <> body
 
-      assert {:ok, {:publish, "quote", <<1, 2, 3>>}, ""} = MqttPacket.decode(packet)
+      assert {:ok, {:publish, "quote", <<1, 2, 3>>, {:puback, 7}}, ""} =
+               MqttPacket.decode(packet)
+    end
+
+    test "a QoS 2 publish is owed a PUBREC, and its payload is not the packet id either" do
+      body = <<5::16, "quote", 9::16, 1, 2, 3>>
+      packet = <<3::4, bsl(2, 1)::4>> <> <<byte_size(body)>> <> body
+
+      assert {:ok, {:publish, "quote", <<1, 2, 3>>, {:pubrec, 9}}, ""} =
+               MqttPacket.decode(packet)
+    end
+
+    test "a QoS 1 publish too short to hold its packet id is not delivered with a payload" do
+      # One byte where two are owed. It used to be returned as a QoS 0 PUBLISH whose payload
+      # was that byte: a message that parses as nothing, or as something slightly wrong.
+      body = <<5::16, "quote", 7>>
+      packet = <<3::4, bsl(1, 1)::4>> <> <<byte_size(body)>> <> body
+
+      assert {:ok, {:unhandled, 3, ^body}, ""} = MqttPacket.decode(packet)
+    end
+
+    test "a QoS 0 publish is owed nothing" do
+      assert {:ok, {:publish, "quote", <<1>>}, ""} =
+               MqttPacket.decode(publish_packet("quote", <<1>>))
     end
 
     test "an empty payload is still a publish" do
       assert {:ok, {:publish, "echo", ""}, ""} = MqttPacket.decode(publish_packet("echo", ""))
+    end
+  end
+
+  describe "acknowledgements, because the venue picks the QoS and this package does not" do
+    test "PUBACK, PUBREC and PUBCOMP are four bytes naming the packet id" do
+      assert MqttPacket.ack(:puback, 7) == <<4::4, 0::4, 2, 7::16>>
+      assert MqttPacket.ack(:pubrec, 258) == <<5::4, 0::4, 2, 1, 2>>
+      assert MqttPacket.ack(:pubcomp, 65_535) == <<7::4, 0::4, 2, 255, 255>>
+    end
+
+    test "a PUBREL decodes to the packet id its PUBCOMP must carry" do
+      assert {:ok, {:pubrel, 9}, ""} = MqttPacket.decode(<<6::4, 2::4, 2, 9::16>>)
+    end
+
+    test "a PUBREL without its mandatory flags is malformed, not waited on" do
+      assert MqttPacket.decode(<<6::4, 0::4, 2, 9::16>>) == {:error, :malformed_header}
     end
   end
 

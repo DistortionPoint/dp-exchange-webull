@@ -1152,3 +1152,27 @@ decode (`details.dropped == {:unrecognised_topic, topic}`). No `Trade` and no su
 means the venue sent no ticks for those symbols. A notice means it did, and says why each
 kind was dropped (dp-exchange-core issue #40). A tick whose own `time` is unreadable falls
 back to the frame's `timestamp` before being refused.
+
+**The same holds for the other two topics.** A `snapshot` with no readable price
+(`details.dropped == {:snapshot, {:invalid_decimal, :price}}`, or `{:snapshot, :undecodable}`),
+a `quote` book that states no readable level (`{:quote, :no_readable_level}` or
+`{:quote, :undecodable}`) and an MQTT packet type this package does not handle
+(`{:unhandled_packet, type}`) each raise one `:data_quality` `Notice` per reason per
+connection, with the venue's strings in `details`. The reason never contains the venue's
+offending value, and a connection reports at most 64 distinct reasons, so a venue sending
+something different every message cannot make the notices, or this package's memory, grow
+with it. Before this, an unreadable snapshot or book was dropped in silence.
+
+A streamed `TopOfBook` carries a `bid_size` only with a readable `bid`, and an `ask_size`
+only with a readable `ask`. A level whose price is `"null"` but whose size is a number used
+to arrive as `bid: nil, bid_size: 5`.
+
+**Credential refusals.** A CONNACK of 3, 4, 5, 103 or 104 is a `:credentials_rejected`
+`Notice`. 4 (bad user name or password) and 5 (not authorised) are MQTT's own codes, which
+the venue's table does not list; they used to be a bare `:link_down`.
+
+**MQTT acknowledgements.** The QoS a session is delivered at is the venue's choice, not this
+package's, and the documentation states none. A QoS 1 or 2 message is acknowledged
+(`PUBACK`, `PUBREC`, `PUBCOMP`) and delivered as any other; delivery is at-least-once, so a
+retransmitted message reaches you twice. Unacknowledged, a broker's in-flight window fills
+and delivery stops on a connection that still looks healthy.

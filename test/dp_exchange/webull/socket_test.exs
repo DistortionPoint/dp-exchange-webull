@@ -61,7 +61,9 @@ defmodule DpExchange.Webull.SocketTest do
     end
 
     test "credential codes are reported as credentials, not as a link failure" do
-      for code <- [3, 103, 104] do
+      # 4 and 5 are MQTT 3.1.1's own bad-credentials and not-authorised refusals; the venue's
+      # table lists neither, and both used to be reported as a bare `:link_down`.
+      for code <- [3, 4, 5, 103, 104] do
         assert {:ok, _state} = Socket.handle_frame({:binary, connack(code)}, state())
 
         assert_receive {:dp_exchange, :webull, %Notice{kind: :credentials_rejected} = notice}
@@ -1000,6 +1002,197 @@ defmodule DpExchange.Webull.SocketTest do
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 3}, state())
 
       assert System.monotonic_time(:millisecond) - started >= 2_000
+    end
+  end
+
+  describe "acknowledgements are owed whatever QoS the venue picks" do
+    defp publish_qos(topic, payload, qos, packet_id) do
+      body = <<byte_size(topic)::16>> <> topic <> <<packet_id::16>> <> payload
+      <<3::4, bsl(qos, 1)::4>> <> varint(byte_size(body)) <> body
+    end
+
+    test "a QoS 1 publish is delivered AND answered with a PUBACK" do
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "77845.79"), 1, 7)
+
+      assert {:reply, {:binary, <<4::4, 0::4, 2, 7::16>>}, state} =
+               Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"} = quote_struct}
+      assert Decimal.equal?(quote_struct.price, Decimal.new("77845.79"))
+      assert state.acks == []
+    end
+
+    test "a QoS 2 publish is answered with a PUBREC, and its PUBREL with a PUBCOMP" do
+      frame = publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 2, 9)
+
+      assert {:reply, {:binary, <<5::4, 0::4, 2, 9::16>>}, state} =
+               Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{}}
+
+      pubrel = <<6::4, 2::4, 2, 9::16>>
+
+      assert {:reply, {:binary, <<7::4, 0::4, 2, 9::16>>}, _state} =
+               Socket.handle_frame({:binary, pubrel}, state)
+    end
+
+    test "every acknowledgement a frame owes goes out in ONE reply, in arrival order" do
+      frame =
+        publish_qos("snapshot", snapshot_payload("BTCUSD", "1"), 1, 1) <>
+          publish("snapshot", snapshot_payload("ETHUSD", "2")) <>
+          publish_qos("snapshot", snapshot_payload("LTCUSD", "3"), 1, 2)
+
+      assert {:reply, {:binary, acks}, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert acks == <<4::4, 0::4, 2, 1::16, 4::4, 0::4, 2, 2::16>>
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "ETH-USD"}}
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "LTC-USD"}}
+    end
+
+    test "a QoS 0 frame owes nothing and replies with nothing" do
+      frame = publish("snapshot", snapshot_payload("BTCUSD", "1"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+    end
+
+    test "a publish on a topic nobody decodes is still acknowledged" do
+      # The broker's window is filled by messages, not by messages this package understood.
+      frame = publish_qos("crypto-tick", <<1, 2, 3>>, 1, 3)
+
+      assert {:reply, {:binary, <<4::4, 0::4, 2, 3::16>>}, _state} =
+               Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{details: %{dropped: dropped}}}
+      assert dropped == {:unrecognised_topic, "crypto-tick"}
+    end
+
+    test "acknowledgements owed to a dropped connection are not carried to the next one" do
+      owing = state() |> stable_since() |> Map.put(:acks, [<<4::4, 0::4, 2, 1::16>>])
+
+      assert {:reconnect, reconnected} = Socket.handle_disconnect(%{reason: :closed}, owing)
+
+      assert reconnected.acks == []
+    end
+  end
+
+  describe "data this socket cannot read says so" do
+    test "a packet type this package does not handle is reported once per type" do
+      suback = <<9::4, 0::4, 3, 0, 1, 0>>
+
+      assert {:ok, state} = Socket.handle_frame({:binary, suback}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:unhandled_packet, 9}
+      assert details.bytes == 3
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, suback}, state)
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+    end
+
+    test "a snapshot with no readable price is reported, not dropped in silence" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+      frame = publish("snapshot", proto_field(1, basic) <> proto_field(3, "null"))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:snapshot, {:invalid_decimal, :price}}
+      assert details.price == "null"
+      assert details.symbol == "BTCUSD"
+    end
+
+    test "a snapshot that does not decode at all is reported" do
+      assert {:ok, _state} =
+               Socket.handle_frame({:binary, publish("snapshot", <<0xFF, 0xFF, 0xFF>>)}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:snapshot, :undecodable}
+    end
+
+    test "a book that does not decode at all is reported" do
+      assert {:ok, _state} =
+               Socket.handle_frame({:binary, publish("quote", <<0xFF, 0xFF, 0xFF>>)}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:quote, :undecodable}
+    end
+
+    test "a book whose levels are both unreadable is reported, with what it said" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      frame =
+        publish(
+          "quote",
+          proto_field(1, basic) <>
+            proto_field(2, proto_field(1, "null")) <> proto_field(3, proto_field(1, "null"))
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:quote, :no_readable_level}
+      assert details.bid == "null"
+      assert details.ask == "null"
+    end
+
+    test "the reason excludes the venue's value, so distinct values are one reason" do
+      first = publish("snapshot", snapshot_payload("BTCUSD", "null"))
+      second = publish("snapshot", snapshot_payload("BTCUSD", "n/a"))
+
+      assert {:ok, state} = Socket.handle_frame({:binary, first}, state())
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
+
+      assert {:ok, state} = Socket.handle_frame({:binary, second}, state)
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      assert MapSet.size(state.drops_reported) == 1
+    end
+
+    test "the set of reasons already reported is bounded" do
+      # A topic name is the venue's to choose. One new name per message made a notice per
+      # message and a set that grew with the connection.
+      final =
+        Enum.reduce(1..100, state(), fn index, acc ->
+          frame = publish("topic-#{index}", <<1>>)
+          assert {:ok, next} = Socket.handle_frame({:binary, frame}, acc)
+          next
+        end)
+
+      assert MapSet.size(final.drops_reported) == 64
+
+      notices =
+        for _index <- 1..100, reduce: 0 do
+          count ->
+            receive do
+              {:dp_exchange, :webull, %Notice{kind: :data_quality}} -> count + 1
+            after
+              0 -> count
+            end
+        end
+
+      assert notices == 64
+    end
+  end
+
+  describe "a size belongs to a level that has a price" do
+    test "a side whose price is unreadable carries no size, however real the size is" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+      bid_level = proto_field(1, "null") <> proto_field(2, "5")
+      ask_level = proto_field(1, "77846.48") <> proto_field(2, "0.014")
+
+      frame =
+        publish(
+          "quote",
+          proto_field(1, basic) <> proto_field(2, ask_level) <> proto_field(3, bid_level)
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
+      assert top.bid == nil
+      assert top.bid_size == nil, "5 of a bid that is not there"
+      assert Decimal.equal?(top.ask_size, Decimal.new("0.014"))
     end
   end
 end
