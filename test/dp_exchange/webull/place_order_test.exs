@@ -86,6 +86,36 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
   end
 
+  describe "side and symbol are checked before anything is sent" do
+    test "a side the venue has no word for is refused, not upper-cased and sent" do
+      exploding = fn _conn -> raise "must not send a side the venue does not list" end
+
+      for bad <- [:bid, :long, "hold", 1, {:buy}] do
+        assert {:error, {:invalid_side, ^bad}} =
+                 place(limit_request(%{side: bad}), plug: exploding, account_id: @account)
+      end
+    end
+
+    test "a symbol that is empty or not text is refused" do
+      exploding = fn _conn -> raise "must not send an unusable symbol" end
+
+      for bad <- ["", :btc, 42] do
+        assert {:error, {:invalid_symbol, ^bad}} =
+                 place(limit_request(%{symbol: bad}), plug: exploding, account_id: @account)
+      end
+    end
+
+    test "buy and sell are accepted in either case, as atoms or strings" do
+      for side <- [:buy, :sell, "buy", "SELL"] do
+        assert {:ok, _order} =
+                 place(limit_request(%{side: side}),
+                   plug: responding(accepted()),
+                   account_id: @account
+                 )
+      end
+    end
+  end
+
   describe "a caller's own client_order_id" do
     test "longer than the venue's 32 characters is refused, and nothing is sent" do
       exploding = fn _conn -> raise "must not send an id the venue will refuse" end

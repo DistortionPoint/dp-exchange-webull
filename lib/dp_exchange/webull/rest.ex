@@ -4776,7 +4776,9 @@ defmodule DpExchange.Webull.Rest do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
+          do: nil,
+          else: parsed
 
       _unparsable ->
         nil
@@ -4784,6 +4786,13 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp decimal(_other), do: nil
+
+  # `"1E999999999"` parses, and is a finite `Decimal` whose exponent is a nine-digit number.
+  # The first `Decimal.add/2`, `compare/2` or `to_string(:normal)` over it aligns coefficients
+  # by `10^exponent`: a gigabyte of integer, in the caller's process, from one field. No
+  # price, size or rate on this venue is near 1E+-1000, so an exponent past that is refused
+  # as unreadable. **Chosen, not measured**: the venue documents no numeric range.
+  defp absurd_exponent?(%Decimal{exp: exp}), do: abs(exp) > 1_000
 
   # A garbage or missing value in a field this contract requires must not become a `nil`
   # carried into `@enforce_keys` — a struct's field list does not check that a value is
@@ -5329,10 +5338,36 @@ defmodule DpExchange.Webull.Rest do
   # `Map.fetch!/2` on `:side` raised `KeyError` in the caller's process, on an order write.
   defp required_order_identity(request) do
     case Enum.find([:symbol, :side], &is_nil(Map.get(request, &1))) do
-      nil -> valid_client_order_id(Map.get(request, :client_order_id))
-      field -> {:error, {:missing_required_field, field}}
+      nil ->
+        with :ok <- valid_order_symbol(Map.get(request, :symbol)),
+             :ok <- valid_order_side(Map.get(request, :side)),
+             do: valid_client_order_id(Map.get(request, :client_order_id))
+
+      field ->
+        {:error, {:missing_required_field, field}}
     end
   end
+
+  # A symbol that is not text raised `FunctionClauseError` in `SymbolFormat` (crypto) or went
+  # to the wire as `to_string/1` of whatever it was; an empty one is no product.
+  defp valid_order_symbol(symbol) when is_binary(symbol) and symbol != "", do: :ok
+  defp valid_order_symbol(symbol), do: {:error, {:invalid_symbol, symbol}}
+
+  # `common-order-place.md`'s `side` is BUY, SELL, or SHORT (options only, by its note). Any
+  # other value was upper-cased and SENT, so `:bid` or `:long` reached the venue as `"BID"`
+  # on a money write and failed there, after the request, naming nothing the caller wrote.
+  # Atoms and strings are both accepted, in any case, as `to_string/1 |> upcase` always did.
+  # Whether SHORT suits the instrument is the venue's to say: the page states it for options
+  # only and this package does not guess a narrower rule for the others.
+  @order_sides ~w(BUY SELL SHORT)
+
+  defp valid_order_side(side) when is_atom(side) or is_binary(side) do
+    if String.upcase(to_string(side)) in @order_sides,
+      do: :ok,
+      else: {:error, {:invalid_side, side}}
+  end
+
+  defp valid_order_side(side), do: {:error, {:invalid_side, side}}
 
   # `common-order-place.md:175`: the caller's own id is "Maximum length is 32 characters".
   # One longer (or empty, or not text) was sent as it stood and failed at the venue after the

@@ -127,18 +127,36 @@ defmodule DpExchange.Webull.Subscription do
 
   An empty symbol list is `:ok` without a request: asking the venue to subscribe to
   nothing spends a call from a budget this venue is already the tightest on.
+
+  `symbols` that is not a list of non-empty strings is `{:error, {:invalid_symbols, symbols}}`
+  with no request made, rather than a raise in the caller's process.
   """
-  @spec subscribe(String.t(), [String.t()], keyword()) :: :ok | {:error, term()}
+  @spec subscribe(String.t(), term(), keyword()) :: :ok | {:error, term()}
   def subscribe(session_id, symbols, opts), do: post(@subscribe_path, session_id, symbols, opts)
 
-  @doc "Stops publication for `symbols`."
-  @spec unsubscribe(String.t(), [String.t()], keyword()) :: :ok | {:error, term()}
+  @doc """
+  Stops publication for `symbols`. Refuses the same malformed `symbols` as `subscribe/3`.
+  """
+  @spec unsubscribe(String.t(), term(), keyword()) :: :ok | {:error, term()}
   def unsubscribe(session_id, symbols, opts),
     do: post(@unsubscribe_path, session_id, symbols, opts)
 
   defp post(_path, _session_id, [], _opts), do: :ok
 
   defp post(path, session_id, symbols, opts) do
+    if symbol_list?(symbols),
+      do: post_checked(path, session_id, symbols, opts),
+      else: {:error, {:invalid_symbols, symbols}}
+  end
+
+  # Tolerates an improper list, which `Enum.all?/2` would raise on.
+  defp symbol_list?([symbol | rest]),
+    do: is_binary(symbol) and symbol != "" and symbol_list?(rest)
+
+  defp symbol_list?([]), do: true
+  defp symbol_list?(_not_a_list), do: false
+
+  defp post_checked(path, session_id, symbols, opts) do
     # Checked before anything is built: a `:sub_types` that is not a list of strings would
     # either raise out of `Jason.encode!/1` (a tuple) or go to the venue as a body it
     # rejects with a 417 naming nothing the caller wrote. Refused locally and by name.

@@ -13,7 +13,10 @@ defmodule DpExchange.Webull.Fake do
 
   **It never rewrites a value the caller supplied**, and never stamps the current clock —
   `@at` is fixed, because a fake that stamps `utc_now/0` cannot be used to test anything
-  about freshness and is itself the substitution this family refuses.
+  about freshness and is itself the substitution this family refuses. **The one exception is
+  `get_balances/2`'s `timestamp`**, which is `DateTime.utc_now/0` because the real package
+  stamps it with when it asked (`Rest.get_balances/2`'s `asked_at`: a balance has no venue
+  event time), so a fixed past instant there would be the fake being differently capable.
 
   ## It models the three things that make this venue different
 
@@ -1609,21 +1612,26 @@ defmodule DpExchange.Webull.Fake do
         placed = placed |> Map.values() |> Enum.sort_by(& &1.id)
         {open, closed} = Enum.split_with(placed, &(&1.status in @open_statuses))
 
-        cond do
-          Keyword.get(opts, :history, false) and fixed ->
-            {:ok, [fixed | closed]}
+        # The fixed order goes on the side ITS status puts it. It was assumed closed whenever
+        # a stored copy existed, so one this process had replaced (still pending) vanished
+        # from the open list and was listed as history.
+        {fixed_open, fixed_closed} = fixed_order_sides(fixed)
 
-          Keyword.get(opts, :history, false) ->
-            {:ok, [%{fake_order() | status: :filled} | closed]}
-
-          fixed ->
-            {:ok, open}
-
-          true ->
-            {:ok, [fake_order() | open]}
-        end
+        if Keyword.get(opts, :history, false),
+          do: {:ok, fixed_closed ++ closed},
+          else: {:ok, fixed_open ++ open}
       end
     end)
+  end
+
+  # `{in the open listing, in the history listing}` for the fixed order. Never touched: the
+  # canned pending order is open and, as history, a filled one. Stored (cancelled, replaced):
+  # wherever its own status puts it, and only there.
+  defp fixed_order_sides(nil),
+    do: {[fake_order()], [%{fake_order() | status: :filled}]}
+
+  defp fixed_order_sides(%Types.Order{status: status} = order) do
+    if status in @open_statuses, do: {[order], []}, else: {[], [order]}
   end
 
   # **`:pending`, not `:open`.** `order-detail.md:215`'s documented `status` enum is
@@ -1660,11 +1668,21 @@ defmodule DpExchange.Webull.Fake do
   # This fake answers the same way: it may be less capable than the venue, never differently
   # capable, and a consumer's test that passes `nil` here must see what production returns.
   defp check_symbols(symbols) when is_list(symbols) do
-    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+    case invalid_symbols(symbols, []) do
       [] -> :ok
-      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
     end
   end
 
   defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  # By hand, as `Feed` does, so an improper list is refused and not a raise.
+  defp invalid_symbols([symbol | rest], acc) do
+    if is_binary(symbol) and symbol != "",
+      do: invalid_symbols(rest, acc),
+      else: invalid_symbols(rest, [symbol | acc])
+  end
+
+  defp invalid_symbols([], acc), do: acc
+  defp invalid_symbols(improper_tail, acc), do: [improper_tail | acc]
 end

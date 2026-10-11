@@ -179,6 +179,16 @@ defmodule DpExchange.Webull.SocketTest do
       end
     end
 
+    for absurd <- ["1E999999999", "1E-999999999"] do
+      test "a #{absurd} price is dropped rather than admitted as real" do
+        frame = publish("snapshot", snapshot_payload("BTCUSD", unquote(absurd)))
+
+        assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      end
+    end
+
     test "a book message delivers top-of-book, and never a price" do
       # This asserted the opposite until 2026-08-31: that `price` became the bid, with a
       # comment calling the bid "a real quoted number, labelled as the bid too". It is
@@ -522,6 +532,31 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
       assert notice.message == "Permission grabbed by other session"
       assert notice.details.venue_notice_unparsed == "Permission grabbed by other session"
+    end
+
+    test "a long notice is cut on a character boundary, with a marker, still one per frame" do
+      # "a" then two-byte characters: byte 1024 falls inside one, so a byte-wise cut would
+      # leave invalid UTF-8.
+      text = "a" <> String.duplicate("é", 2_000)
+      json = Jason.encode!(%{"content" => text})
+
+      for {payload, field} <- [{text, :unparsed}, {json, :content}] do
+        assert {:ok, _state} =
+                 Socket.handle_frame({:binary, publish("notice", payload)}, state())
+
+        assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}, 5_000
+        assert String.valid?(notice.message)
+        assert byte_size(notice.message) < 1_100
+        assert notice.message =~ "[truncated, #{byte_size(text)} bytes in all]"
+        assert String.starts_with?(notice.message, "a" <> String.duplicate("é", 511))
+
+        if field == :unparsed do
+          assert String.valid?(notice.details.venue_notice_unparsed)
+          assert byte_size(notice.details.venue_notice_unparsed) < 1_100
+        end
+
+        refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      end
     end
 
     test "a notice payload that is not text at all is dropped rather than mangled" do

@@ -294,6 +294,38 @@ defmodule DpExchange.Webull.FakeTest do
       assert done.status == :filled
     end
 
+    test "the fixed order replaced here is still open, and listed as open only" do
+      # Replacing it stores a copy that is still `:pending`. The listing treated any stored
+      # copy of the fixed order as closed, so it left the open list and appeared in history.
+      assert {:ok, replaced} =
+               Fake.replace_order(
+                 @credentials,
+                 @known_order_id,
+                 %{price: Decimal.new("41000")},
+                 @order_opts
+               )
+
+      assert replaced.status == :pending
+
+      assert {:ok, [open]} = Fake.get_orders(@credentials, @order_opts)
+      assert open.id == @known_order_id
+      assert Decimal.equal?(open.price, Decimal.new("41000"))
+
+      assert {:ok, []} = Fake.get_orders(@credentials, [history: true] ++ @order_opts)
+
+      assert {:ok, :cancelled} = Fake.cancel_order(@credentials, @known_order_id, @order_opts)
+      assert {:ok, []} = Fake.get_orders(@credentials, @order_opts)
+
+      assert {:ok, [%{id: @known_order_id, status: :cancelled}]} =
+               Fake.get_orders(@credentials, [history: true] ++ @order_opts)
+    end
+
+    test "an improper symbol list is refused by name, not raised on" do
+      assert {:error, {:invalid_symbols, [:tail]}} = Fake.subscribe(["BTC-USD" | :tail], [])
+      assert {:error, {:invalid_symbols, [:tail]}} = Fake.unsubscribe(["BTC-USD" | :tail])
+      assert {:error, {:invalid_symbols, [:tail]}} = Fake.update_symbols(["BTC-USD" | :tail])
+    end
+
     test "every order call needs an account" do
       only_credentials = [credentials: @credentials]
 

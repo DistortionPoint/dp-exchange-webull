@@ -308,6 +308,18 @@ defmodule DpExchange.Webull.RestTest do
       end
     end
 
+    for absurd <- ["1E999999999", "1E-999999999", "1e1001"] do
+      test "a price of #{absurd} is refused, not admitted as a gigabyte integer" do
+        body = [%{"price" => unquote(absurd), "time" => 1_787_936_147_000}]
+
+        assert {:error, {:invalid_decimal, :price, unquote(absurd)}} =
+                 Rest.get_price("BTC-USD", @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
     test "a response with no venue timestamp is nil, and never the local clock" do
       # "Rather than substituting now" is the guarantee, and it is now asserted directly
       # instead of inferred from an error — which could not tell a `nil` from a substitution

@@ -801,13 +801,25 @@ defmodule DpExchange.Webull.Feed do
   # VENUE refused, because to a caller both mean "these symbols were not accepted"; the facade
   # has always returned it from `subscribe/2` either way. At most five offenders are named.
   defp check_symbols(symbols) when is_list(symbols) do
-    case Enum.reject(symbols, &(is_binary(&1) and &1 != "")) do
+    case invalid_symbols(symbols, []) do
       [] -> :ok
-      invalid -> {:error, {:invalid_symbols, Enum.take(invalid, 5)}}
+      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
     end
   end
 
   defp check_symbols(other), do: {:error, {:invalid_symbols, other}}
+
+  # Walks by hand so an improper list (`[1 | 2]`) is an offender and not a raise inside this
+  # one named process, which `Enum.reject/2` on it would be. The improper tail is itself
+  # reported, as the single offender that it is.
+  defp invalid_symbols([symbol | rest], acc) do
+    if is_binary(symbol) and symbol != "",
+      do: invalid_symbols(rest, acc),
+      else: invalid_symbols(rest, [symbol | acc])
+  end
+
+  defp invalid_symbols([], acc), do: acc
+  defp invalid_symbols(improper_tail, acc), do: [improper_tail | acc]
 
   defp apply_subscribe(symbols, subscriber, opts, from, state) do
     # Wrapped before `opts` goes anywhere: it is captured by in-flight reconcile tags, by
@@ -2682,7 +2694,10 @@ defmodule DpExchange.Webull.Feed do
   # `latch_resubscribe_failure/4` below already makes and for the same reason: a notice per
   # attempt on a venue that is down is a storm, just a slower one.
   defp retry_shard_open(state, index, symbols, opts, attempt, reason) do
-    delay = min(state.open_retry_base_ms * 2 ** (attempt - 1), state.open_retry_max_ms)
+    # The exponent is clamped before the power, as `reopen_after_crash/3` does: `attempt`
+    # counts every failed open of an outage and has no ceiling of its own, and the cap is
+    # reached long before 2^30 for any sane `open_retry_base_ms`.
+    delay = min(state.open_retry_base_ms * 2 ** min(attempt - 1, 30), state.open_retry_max_ms)
 
     Logger.warning(
       "[Webull Feed] shard #{index} did not open (#{inspect(reason)}) on attempt " <>

@@ -3833,6 +3833,21 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       end
     end
 
+    test "symbols that are not a list of non-empty strings are refused without a call" do
+      exploding = fn _conn -> raise "must not call the venue for bad symbols" end
+
+      for bad <- [nil, "BTC-USD", ["BTC-USD", :eth], [""], [1 | 2], %{}] do
+        for call <- [&Subscription.subscribe/3, &Subscription.unsubscribe/3] do
+          assert {:error, {:invalid_symbols, ^bad}} =
+                   call.("session-1", bad,
+                     credentials: @credentials,
+                     plug: exploding,
+                     retry_attempts: 0
+                   )
+        end
+      end
+    end
+
     test "an empty symbol list is :ok without spending a call" do
       exploding = fn _conn -> raise "must not call the venue for zero symbols" end
 

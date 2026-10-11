@@ -802,14 +802,37 @@ defmodule DpExchange.Webull.Socket do
       notify(
         state,
         Notice.new(:degraded, :webull,
-          message: String.trim(payload),
-          details: %{venue_notice_unparsed: payload}
+          message: payload |> String.trim() |> bound_text(),
+          details: %{venue_notice_unparsed: bound_text(payload)}
         )
       )
     end
 
     :ok
   end
+
+  # How much of the venue's own words one notice carries. Ours, not the venue's: the venue
+  # documents no notice size, a frame may be up to the 1 MiB `MqttPacket` allows, and one
+  # notice is raised per frame, so an unbounded text was a megabyte per notice.
+  @max_notice_text_bytes 1_024
+
+  # Cut on a UTF-8 boundary (the input is valid UTF-8), with a marker saying it was cut.
+  defp bound_text(text) when byte_size(text) <= @max_notice_text_bytes, do: text
+
+  defp bound_text(text) do
+    cut = utf8_boundary(text, @max_notice_text_bytes)
+
+    binary_part(text, 0, cut) <> "... [truncated, #{byte_size(text)} bytes in all]"
+  end
+
+  # The largest `n <= limit` at which a character starts, so `text[0, n)` ends whole.
+  defp utf8_boundary(text, n) when n > 0 do
+    if Bitwise.band(:binary.at(text, n), 0xC0) == 0x80,
+      do: utf8_boundary(text, n - 1),
+      else: n
+  end
+
+  defp utf8_boundary(_text, 0), do: 0
 
   # **Severity is read from the frame; it used to be a constant.** Every frame on the
   # `notice` topic was `Notice.new(:degraded, :webull, ...)`, and `:degraded` defaults to
@@ -874,7 +897,7 @@ defmodule DpExchange.Webull.Socket do
   defp venue_notice_text(%{"content" => content}) when is_binary(content) do
     case String.trim(content) do
       "" -> nil
-      trimmed -> trimmed
+      trimmed -> bound_text(trimmed)
     end
   end
 
@@ -1114,7 +1137,11 @@ defmodule DpExchange.Webull.Socket do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed), do: nil, else: parsed
+        # An exponent past +-1000 is no price on this venue; arithmetic over `1E999999999`
+        # allocates a gigabyte integer. Chosen, not measured. See `Rest`'s `decimal/1`.
+        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or abs(parsed.exp) > 1_000,
+          do: nil,
+          else: parsed
 
       _unparsable ->
         nil

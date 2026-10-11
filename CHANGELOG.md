@@ -22,6 +22,43 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order's `side` and `symbol` were not checked.** `place_order/3`, `preview_order/3`,
+  `place_orders/3` and the fake upper-cased whatever `side` they were given and sent it, so
+  `:bid` or `"hold"` reached the venue as `"BID"` or `"HOLD"` on a money write; a `symbol`
+  that was not text raised `FunctionClauseError` for crypto. They are now
+  `{:error, {:invalid_side, side}}` and `{:error, {:invalid_symbol, symbol}}` with no request
+  made. `side` accepts `buy`, `sell` and `short` in any case, atom or string
+  (`common-order-place.md` lists BUY, SELL and SHORT, the last "options only"); whether SHORT
+  suits a given instrument is left to the venue, since the page states no rule for the rest.
+- **A `notice` frame's text was carried whole.** Up to the 1 MiB packet cap, once per frame,
+  in both `message` and `details.venue_notice_unparsed`. Text is now cut at 1,024 bytes on a
+  UTF-8 boundary and ends `... [truncated, N bytes in all]`. Still one notice per frame. The
+  bound is ours, not the venue's.
+- **`Subscription.subscribe/3` and `unsubscribe/3` raised on `symbols` that was not a list of
+  strings.** `nil`, a string, an improper list or a non-string entry raised in the caller's
+  process; an empty string would have been sent as a product. They are now
+  `{:error, {:invalid_symbols, symbols}}` with no request made; the `@spec` takes `term()`.
+- **An improper symbol list (`["BTC-USD" | :tail]`) crashed `Feed` and the fake.** The
+  `check_symbols` guard added for `nil` and non-string entries walked the list with `Enum`,
+  which raises on an improper one, inside the single named `Feed` process every caller
+  shares. It is now `{:error, {:invalid_symbols, [tail]}}` in `Feed` and in `Fake`.
+- **`Feed`'s failed-open backoff had no exponent ceiling.** `retry_shard_open/6` computed
+  `2 ** (attempt - 1)` with an attempt count that grows for the whole outage; it is clamped
+  at 2^30 as `reopen_after_crash/3` already was. The delay was already capped, so nothing
+  observable changes except the arithmetic.
+- **`Fake.get_orders/2` lost a replaced fixed order.** Any stored copy of the fixed order was
+  treated as closed, so after `replace_order/4` (still `:pending`) it vanished from the open
+  listing and appeared in history. It now goes on the side its own status says.
+- **A venue number with an absurd exponent was admitted as a real figure.** `"1E999999999"`
+  parses as a finite `Decimal`, and the first `add`, `compare` or `to_string(:normal)` over it
+  builds a `10^999999999` integer in the caller's (or the socket's) process. `Rest`'s and
+  `Socket`'s `decimal/1` already refused `NaN` and `Inf`; they now also refuse an exponent
+  beyond +-1000, as an unreadable value (`{:invalid_decimal, field, value}` on REST, a
+  `:data_quality` drop on the stream). **The bound is chosen, not measured**: the venue
+  documents no numeric range, and no price, size or rate here is near 1E+-1000.
+
 ## [0.4.124] - 2026-10-11
 
 ### Fixed

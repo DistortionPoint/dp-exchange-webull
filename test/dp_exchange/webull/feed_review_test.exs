@@ -52,6 +52,22 @@ defmodule DpExchange.Webull.FeedReviewTest do
       assert state.subscribers == MapSet.new(), "a refused call registers no subscriber"
     end
 
+    test "an improper list is refused, not a raise inside the named feed", %{limiter: limiter} do
+      feed = start_feed()
+      opts = subscribe_opts(limiter)
+
+      assert {:error, {:invalid_symbols, [:tail]}} =
+               Feed.subscribe(feed, ["BTC-USD" | :tail], opts)
+
+      assert {:error, {:invalid_symbols, [:tail]}} =
+               Feed.update_symbols(feed, ["BTC-USD" | :tail], opts)
+
+      assert {:error, {:invalid_symbols, [:tail]}} =
+               Feed.unsubscribe(feed, ["BTC-USD" | :tail], opts)
+
+      assert Process.alive?(feed)
+    end
+
     test "unsubscribe/3 refuses a non-list and a non-binary element", %{limiter: limiter} do
       feed = start_feed()
       opts = subscribe_opts(limiter)
