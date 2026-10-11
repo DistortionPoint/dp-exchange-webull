@@ -237,7 +237,7 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert query =~ "category=US_STOCK"
 
       assert {:ok, _etf} =
-               Rest.get_order_book("SPY", @credentials,
+               Rest.get_order_book("F", @credentials,
                  category: "US_ETF",
                  plug: plug,
                  retry_attempts: 0
@@ -245,6 +245,22 @@ defmodule DpExchange.Webull.OrderBookTest do
 
       assert_receive {:query, etf_query}
       assert etf_query =~ "category=US_ETF"
+    end
+
+    test "a book naming another symbol is not delivered under the requested one" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!([depth_row()]))
+      end
+
+      # The row names "F"; asking for "SPY" used to return F's book labelled SPY.
+      assert {:error, :not_in_response} =
+               Rest.get_order_book("SPY", @credentials, plug: plug, retry_attempts: 0)
+
+      # Same symbol, any case, is the row asked for.
+      assert {:ok, %{symbol: "f"}} =
+               Rest.get_order_book("f", @credentials, plug: plug, retry_attempts: 0)
     end
 
     test "US_OPTION is refused before the request, as the vendor states" do

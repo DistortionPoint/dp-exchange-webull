@@ -1061,7 +1061,7 @@ defmodule DpExchange.Webull.RestTest do
     defp nested_opts(body), do: [plug: responding(body), retry_attempts: 0]
 
     test "get_trades/3" do
-      for body <- [[%{"symbol" => "BTCUSD", "result" => "x"}], ["not a row"]] do
+      for body <- [[%{"symbol" => "BTC-USD", "result" => "x"}], ["not a row"]] do
         assert {:error, :unexpected_response_shape} =
                  Rest.get_trades("BTC-USD", @credentials, nested_opts(body))
       end

@@ -1112,26 +1112,48 @@ defmodule DpExchange.Webull.Fake do
       # answered a statement of whatever `kind` it was given.
       with :ok <- Rest.validate_statement_kind(kind),
            :ok <- authenticated(opts) do
-        {:ok,
-         [
-           %Types.FinancialStatement{
-             symbol: symbol,
-             kind: kind,
-             line_items: %{
-               "total_assets" => "379297000000",
-               "fiscal_year" => 2026,
-               "fiscal_period" => 0
-             },
-             period_end: ~D[2025-12-27],
-             # The venue's integer code, not a string. `0` is the full year.
-             fiscal_period: "FY",
-             currency: "USD",
-             venue_time: nil,
-             provider: :webull
-           }
-         ]}
+        {:ok, [statement(symbol, kind)]}
       end
     end)
+  end
+
+  # `:indicators` is shaped like the real path's: one statement per fiscal period with the
+  # metrics under the venue's names and NO `period_end`, because `financial-indicators.md`
+  # publishes none. The other kinds carry a report end date and are unchanged.
+  defp statement(symbol, :indicators) do
+    %Types.FinancialStatement{
+      symbol: symbol,
+      kind: :indicators,
+      line_items: %{
+        "roa" => "0.2133",
+        "fiscal_year" => 2025,
+        "fiscal_period" => 4,
+        "currency" => "USD"
+      },
+      period_end: nil,
+      fiscal_period: "Q4",
+      currency: "USD",
+      venue_time: nil,
+      provider: :webull
+    }
+  end
+
+  defp statement(symbol, kind) do
+    %Types.FinancialStatement{
+      symbol: symbol,
+      kind: kind,
+      line_items: %{
+        "total_assets" => "379297000000",
+        "fiscal_year" => 2026,
+        "fiscal_period" => 0
+      },
+      period_end: ~D[2025-12-27],
+      # The venue's integer code, not a string. `0` is the full year.
+      fiscal_period: "FY",
+      currency: "USD",
+      venue_time: nil,
+      provider: :webull
+    }
   end
 
   @impl true

@@ -166,7 +166,6 @@ defmodule DpExchange.Webull.Rest do
   defp snapshot_path(category), do: {:error, {:unsupported_snapshot_category, category}}
 
   # The stock snapshot publishes extended-hours and overnight blocks only when asked. Both
-  # The stock snapshot publishes extended-hours and overnight blocks only when asked. Both
   # are marked optional by the venue and default to false, and this sends them explicitly so
   # a caller reading `nil` knows it did not ask rather than that the venue had nothing.
   #
@@ -186,9 +185,20 @@ defmodule DpExchange.Webull.Rest do
   @doc """
   Last price for one symbol.
 
-  **Crypto and stocks are different endpoints**, chosen by `opts[:category]` — `US_CRYPTO`
-  (the default), `US_STOCK` or `US_ETF`. `US_OPTION` is refused: the vendor states the stock
-  snapshot does not serve it.
+  **Each asset class is its own endpoint**, chosen by `opts[:category]` — `US_CRYPTO` (the
+  default), `US_STOCK`, `US_ETF`, `US_OPTION`, `US_FUTURES` or `US_EVENT`. Any other category
+  is `{:error, {:unsupported_snapshot_category, category}}` before a request is made.
+
+  **The row must be the symbol asked for.** The response is a list, and the first row used to
+  be taken whatever it named. A row that names a different symbol than the one requested is
+  `{:error, :not_in_response}`: a price for another instrument is the substitute this package
+  refuses to hand back, and it would look entirely plausible. A response whose rows name no
+  symbol at all is read as before.
+
+  **An event contract's `price` is the venue's own unlabelled number** (`event-snapshot.md`
+  says only "the current market price for buying or selling an event contract", beside
+  separate `yes_*` and `no_*` quotes). It is returned as sent; which outcome it prices is not
+  stated by the venue, and nothing here claims one.
 
   ## Volume is read wherever the response carries it
 
@@ -210,7 +220,7 @@ defmodule DpExchange.Webull.Rest do
       params = snapshot_params(native, category, opts)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body) do
+           {:ok, row} <- symbol_row(body, native) do
         snapshot_quote(row, native, category)
       end
     end
@@ -609,6 +619,11 @@ defmodule DpExchange.Webull.Rest do
   `get_event_order_book/3`'s own moduledoc, the numbers would still look right — a YES ask
   of 0.13 is real and is not "the" ask the way a stock's is. Use
   `get_event_order_book/3` instead, which returns both sides under their own names.
+
+  As in `get_price/3`, a row naming a different symbol than the one asked for is
+  `{:error, :not_in_response}`. `bid`, `ask` and the sizes are `nil` where the row does not
+  carry a readable number for them, and `venue_time` is the quote's own time
+  (`quote_time`), falling back to the last trade's only where there is no quote time.
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
@@ -621,7 +636,7 @@ defmodule DpExchange.Webull.Rest do
       params = snapshot_params(native, category, opts)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body) do
+           {:ok, row} <- symbol_row(body, native) do
         {:ok,
          %TopOfBook{
            symbol: snapshot_canonical(native, category),
@@ -965,6 +980,9 @@ defmodule DpExchange.Webull.Rest do
 
   Category is read from the symbol's own shape (a canonical pair has a dash; a ticker does
   not) rather than asked for, because `quantization/1`'s contract takes only a symbol.
+
+  The row must be the symbol's own: a response whose rows all name other symbols is
+  `{:error, :not_in_response}`, never another instrument's increments.
   """
   @spec quantization(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -975,7 +993,7 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, path} <- instruments_path(category),
          params = %{"category" => category, "symbols" => native},
          {:ok, body} <- get(path, params, credentials, opts),
-         {:ok, row} <- first_row(body) do
+         {:ok, row} <- symbol_row(body, native) do
       {:ok, quantum_from_row(row, category)}
     end
   end
@@ -1310,6 +1328,17 @@ defmodule DpExchange.Webull.Rest do
   `instrument_type` comes from the venue's own `EQUITY | OPTION | FUTURES | CRYPTO | EVENT`.
   An unknown one is `nil`, not the nearest.
 
+  **Two documented row shapes cannot be a `Position` and are refused, with the whole list:**
+  an options strategy other than `SINGLE` (one row for several contracts, which sit under
+  `legs`) and any `EVENT` row (its `event_outcome`, `yes` or `no`, is the opposite exposure
+  to the same symbol and `Position` has nowhere to say which). Both answer
+  `{:error, {:unsupported_position, symbol, reason}}`; the alternative was a position that
+  read as a plain holding in the underlying, or a `no` holding reported as a `yes` one.
+  A `SINGLE` option row's `symbol` is passed on as the venue sent it. The page's own example
+  shows the underlying (`AAPL`) there while describing the field as the "option symbol code
+  for derivatives", and this was not probed live, so it is not asserted to be the contract
+  symbol.
+
   `liquidation_price` and `leverage` stay `nil`: **the venue publishes neither on this
   endpoint.** `nil` there means "not stated", never "no liquidation risk" — see
   `Core.Types.Position`.
@@ -1341,8 +1370,37 @@ defmodule DpExchange.Webull.Rest do
   # a caller knowing the position exists.
   defp to_position(row) do
     with {:ok, symbol} <-
-           required_position_symbol(row |> value(["symbol"]) |> canonical_or_nil()) do
+           required_position_symbol(row |> value(["symbol"]) |> canonical_or_nil()),
+         :ok <- representable_position(row, symbol) do
       {:ok, position_struct(row, symbol)}
+    end
+  end
+
+  # **A position `Core.Types.Position` cannot say is refused, not flattened into one it can.**
+  # `account-position.md` documents two row shapes this struct has no field for:
+  #
+  #   * an `option_strategy` other than `SINGLE` (a vertical, straddle, condor, ...) is ONE
+  #     row for a whole strategy, with the contracts under `legs` and a `quantity`, `cost_price`
+  #     and `last_price` that describe the strategy and not any one contract. Returned as a
+  #     `Position`, it read as a plain holding in the underlying's symbol.
+  #   * an `EVENT` row carries an `event_outcome` (`yes` or `no`). The two outcomes are
+  #     opposite exposures to the same symbol, and a `Position` that drops the field reports
+  #     a `no` holding as a `yes` one.
+  #
+  # The refusal covers the whole list, as an unreadable order does in `collect_orders/1`: a
+  # position list quietly missing a spread reads as "nothing is held there".
+  defp representable_position(row, symbol) do
+    strategy = value(row, ["option_strategy", "optionStrategy"])
+
+    cond do
+      is_binary(strategy) and strategy != "SINGLE" ->
+        {:error, {:unsupported_position, symbol, {:option_strategy, strategy}}}
+
+      value(row, ["instrument_type", "instrumentType"]) == "EVENT" ->
+        {:error, {:unsupported_position, symbol, :event_outcome}}
+
+      true ->
+        :ok
     end
   end
 
@@ -1395,7 +1453,7 @@ defmodule DpExchange.Webull.Rest do
   defp instrument_atom("OPTION"), do: :option
   defp instrument_atom("FUTURES"), do: :futures
   defp instrument_atom("CRYPTO"), do: :crypto
-  defp instrument_atom("EVENT"), do: :event
+  # No `"EVENT"` clause: an event row never reaches here (`representable_position/2`).
   defp instrument_atom(_other), do: nil
 
   # The venue's own activity types. `get_transfers/2` is documented in the contract as
@@ -1575,6 +1633,11 @@ defmodule DpExchange.Webull.Rest do
   the total consideration including premium and charges; for futures it is the initial
   margin required to open the position. Those are different quantities, and the key carries
   the instrument so a caller cannot read one as the other.
+
+  A figure the venue sent that cannot be read as a number is
+  `{:error, {:invalid_decimal, :estimated_cost | :estimated_fee, value}}`, not a `nil`; an
+  absent `estimated_cost` is `{:error, :unexpected_response_shape}`, and an absent fee is
+  `nil`.
   """
   @spec preview_order(map(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -1606,21 +1669,35 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **A figure the venue sent and this package cannot read is an error, not a `nil`.**
+  # `estimated_cost` and `estimated_transaction_fee` are both REQUIRED by
+  # `common-order-preview.md`'s response schema (and the response is one object, not a list).
+  # A present-but-unparseable value used to come back as `estimated_cost: nil` inside
+  # `{:ok, preview}`, which a caller reads as "the venue priced this order at nothing
+  # known" rather than "the venue's answer could not be read". An ABSENT fee stays `nil`:
+  # it was never sent, and `nil` says so.
   defp to_preview_result(row, instrument) do
-    case value(row, ["estimated_cost", "estimatedCost"]) do
-      nil ->
+    with {:ok, cost} <-
+           required_decimal(value(row, ["estimated_cost", "estimatedCost"]), :estimated_cost),
+         {:ok, fee} <-
+           optional_decimal(
+             value(row, ["estimated_transaction_fee", "estimatedTransactionFee"]),
+             :estimated_fee
+           ) do
+      {:ok,
+       %{
+         instrument_type: instrument,
+         # Total consideration on stocks and options; initial margin on futures. The
+         # instrument above says which, because they are not the same quantity.
+         estimated_cost: cost,
+         estimated_fee: fee
+       }}
+    else
+      {:error, {:missing_required_field, :estimated_cost}} ->
         {:error, :unexpected_response_shape}
 
-      cost ->
-        {:ok,
-         %{
-           instrument_type: instrument,
-           # Total consideration on stocks and options; initial margin on futures. The
-           # instrument above says which, because they are not the same quantity.
-           estimated_cost: decimal(cost),
-           estimated_fee:
-             decimal(value(row, ["estimated_transaction_fee", "estimatedTransactionFee"]))
-         }}
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -1764,6 +1841,10 @@ defmodule DpExchange.Webull.Rest do
   place for it. The sizes that survive are the venue's own level sizes, not a sum this
   package computed from the participants.
 
+  **The row is the requested symbol's.** A row naming another symbol is
+  `{:error, :not_in_response}`, never that instrument's book under this one's name; a
+  response whose rows name no symbol is read as its first row.
+
   `venue_time` is the venue's `quote_time`. **A book the venue did not stamp is delivered
   with `venue_time: nil`**, never the local clock: `observed_at` states when this package
   read it, and refusing would discard real levels over an optional field.
@@ -1784,7 +1865,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("overnight_required", book_overnight(category, opts))
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body) do
+           {:ok, row} <- symbol_row(body, symbol) do
         to_order_book(row, symbol)
       end
     end
@@ -1916,7 +1997,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("trading_sessions", session)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body) do
+           {:ok, row} <- symbol_row(body, symbol) do
         decode_profiles(row, symbol, timeframe)
       end
     end
@@ -2043,6 +2124,12 @@ defmodule DpExchange.Webull.Rest do
   a caller can tell a live imbalance from this morning's.
 
   `side` is the venue's own value, unmapped — see `Core.Types.AuctionImbalance` for why.
+
+  `auction` on each result is the one the **row** names in its own `imbalance_action_type`
+  (`PRE_OPEN` is `:opening`, `PRE_CLOSE` is `:closing`), not the one requested: outside the
+  publication windows the venue returns history, and a row for the other auction must not be
+  labelled with the requested one. A row that names none takes the requested auction; one
+  that names any other value is `{:error, {:unsupported_auction, value}}`.
   """
   @spec get_auction_imbalance(String.t(), map(), keyword()) ::
           {:ok, [AuctionImbalance.t()]} | {:error, term()} | {:refused, term()}
@@ -2063,8 +2150,22 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <- get(path, params, credentials, opts),
            {:ok, imbalance_rows} <- rows(body) do
-        {:ok, Enum.map(imbalance_rows, &to_imbalance(&1, symbol, auction, observed_at))}
+        to_imbalances(imbalance_rows, symbol, auction, observed_at)
       end
+    end
+  end
+
+  defp to_imbalances(imbalance_rows, symbol, auction, observed_at) do
+    imbalance_rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_imbalance(row, symbol, auction, observed_at) do
+        {:ok, imbalance} -> {:cont, {:ok, [imbalance | acc]}}
+        error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, imbalances} -> {:ok, Enum.reverse(imbalances)}
+      error -> error
     end
   end
 
@@ -2073,23 +2174,42 @@ defmodule DpExchange.Webull.Rest do
   defp auction_type(nil), do: {:error, :auction_required}
   defp auction_type(other), do: {:error, {:unsupported_auction, other}}
 
-  defp to_imbalance(row, symbol, auction, observed_at) do
-    %AuctionImbalance{
-      symbol: symbol,
-      auction: auction,
-      paired_quantity: decimal(value(row, ["paired_shares", "pairedShares"])),
-      imbalance_quantity: decimal(value(row, ["imbalance_shares", "imbalanceShares"])),
-      # The venue's code, carried as sent. Its meaning is not documented.
-      side: to_string_or_nil(value(row, ["imbalance_side", "imbalanceSide"])),
-      reference_price: decimal(value(row, ["imbalance_ref_price", "imbalanceRefPrice"])),
-      near_price: decimal(value(row, ["imbalance_near_price", "imbalanceNearPrice"])),
-      far_price: decimal(value(row, ["imbalance_far_price", "imbalanceFarPrice"])),
-      # The venue's own time, or nil. Together with `observed_at` this is the only way to
-      # tell a live imbalance from one returned outside the auction window.
-      venue_time: imbalance_time(row),
-      observed_at: observed_at,
-      provider: :webull
-    }
+  defp to_imbalance(row, symbol, requested, observed_at) do
+    with {:ok, auction} <- row_auction(row, requested) do
+      {:ok,
+       %AuctionImbalance{
+         symbol: symbol,
+         auction: auction,
+         paired_quantity: decimal(value(row, ["paired_shares", "pairedShares"])),
+         imbalance_quantity: decimal(value(row, ["imbalance_shares", "imbalanceShares"])),
+         # The venue's code, carried as sent. Its meaning is not documented.
+         side: to_string_or_nil(value(row, ["imbalance_side", "imbalanceSide"])),
+         reference_price: decimal(value(row, ["imbalance_ref_price", "imbalanceRefPrice"])),
+         near_price: decimal(value(row, ["imbalance_near_price", "imbalanceNearPrice"])),
+         far_price: decimal(value(row, ["imbalance_far_price", "imbalanceFarPrice"])),
+         # The venue's own time, or nil. Together with `observed_at` this is the only way to
+         # tell a live imbalance from one returned outside the auction window.
+         venue_time: imbalance_time(row),
+         observed_at: observed_at,
+         provider: :webull
+       }}
+    end
+  end
+
+  # **The auction is the one the ROW says it belongs to.** Every row carries its own
+  # `imbalance_action_type` (`PRE_OPEN` or `PRE_CLOSE`, `get-noii-snapshot.md`,
+  # `get-noii-bars.md`), and the label used to be the auction the caller ASKED for. Outside
+  # the venue's publication windows it "returns historical data", so a row for the other
+  # auction answered under the requested one's name was a closing imbalance filed as an
+  # opening one, with every number in it still plausible. A row that names no auction takes
+  # the requested one; one that names a value outside the two is refused.
+  defp row_auction(row, requested) do
+    case value(row, ["imbalance_action_type", "imbalanceActionType"]) do
+      nil -> {:ok, requested}
+      "PRE_OPEN" -> {:ok, :opening}
+      "PRE_CLOSE" -> {:ok, :closing}
+      other -> {:error, {:unsupported_auction, other}}
+    end
   end
 
   defp imbalance_time(row) do
@@ -2156,7 +2276,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("trading_sessions", tick_sessions(category, opts))
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- first_row(body) do
+           {:ok, row} <- symbol_row(body, symbol) do
         decode_ticks(row, symbol)
       end
     end
@@ -2444,7 +2564,10 @@ defmodule DpExchange.Webull.Rest do
   response as an authenticated session will find every subsequent call refused.
 
   `status` travels unmapped for that reason: `PENDING`, `NORMAL`, `INVALID` and `EXPIRED`
-  are the venue's four, and only the second is a token that works.
+  are the venue's four, and only the second is a token that works. A response with no
+  `token`, or a `status` outside the four, is refused
+  (`{:error, {:missing_required_field, field}}` / `{:error, {:unknown_token_status, status}}`)
+  rather than handed back as a token.
 
   Tokens default to **15 days** and must be recreated, not renewed — there is no refresh on
   this endpoint. `expires_at` is milliseconds.
@@ -2452,8 +2575,37 @@ defmodule DpExchange.Webull.Rest do
   @spec create_token(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_token(credentials, opts) do
     with {:ok, response} <- post("/auth/tokens/create", %{}, credentials, send_once(opts)),
-         {:ok, row} <- first_row(response) do
+         {:ok, row} <- first_row(response),
+         :ok <- token_row(row, :token) do
       {:ok, row}
+    end
+  end
+
+  @token_statuses ~w(PENDING NORMAL INVALID EXPIRED)
+
+  # **A token response that names no token, or a status outside the venue's four, is not a
+  # token.** `first_row/1` accepts any object, so `%{}` - or an error envelope that arrived
+  # with a 2xx - came back as `{:ok, %{}}`: a created token that does not exist, or a checked
+  # one with no verdict, which a caller reads as "usable". `create-token.md` and
+  # `check-token.md` both document `status` as `PENDING | NORMAL | INVALID | EXPIRED`; a fifth
+  # word is the venue saying something this package has no remedy for, and `NORMAL` must
+  # never be inferred. `create_token/2` additionally needs the `token` itself.
+  defp token_row(row, :token) do
+    with {:ok, _token} <- required_string(row, "token", :token), do: token_row(row, :status)
+  end
+
+  defp token_row(row, :status) do
+    case required_string(row, "status", :status) do
+      {:ok, status} when status in @token_statuses -> :ok
+      {:ok, status} -> {:error, {:unknown_token_status, status}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp required_string(row, key, field) do
+    case value(row, [key]) do
+      found when is_binary(found) -> {:ok, found}
+      _absent -> {:error, {:missing_required_field, field}}
     end
   end
 
@@ -2466,13 +2618,17 @@ defmodule DpExchange.Webull.Rest do
   and only this endpoint says which.
 
   The status comes back as the venue's own string. Nothing is mapped to a boolean, because
-  "not usable" covers three different problems with three different remedies.
+  "not usable" covers three different problems with three different remedies. A response
+  with no `status`, or one outside the venue's four, is refused rather than returned as a
+  verdict (`{:error, {:missing_required_field, :status}}` /
+  `{:error, {:unknown_token_status, status}}`).
   """
   @spec check_token(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def check_token(token, credentials, opts) when is_binary(token) do
     with {:ok, response} <- post("/auth/tokens/check", %{"token" => token}, credentials, opts),
-         {:ok, row} <- first_row(response) do
+         {:ok, row} <- first_row(response),
+         :ok <- token_row(row, :status) do
       {:ok, row}
     end
   end
@@ -2493,6 +2649,10 @@ defmodule DpExchange.Webull.Rest do
   **Two expiries come back, and they are not the same clock.** `expires_in` is the access
   token's, in seconds; `rt_expires_in` is the refresh token's, and it is the one that ends
   the session when it runs out. A caller tracking only the first will be surprised.
+
+  A 2xx answer with no `access_token` is `{:error, {:missing_required_field, :access_token}}`,
+  not a token response: this package has no vendor schema for this body (the page is not
+  retrievable), but a grant that returned no token has not succeeded whatever else it said.
   """
   @spec oauth_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -2519,7 +2679,9 @@ defmodule DpExchange.Webull.Rest do
              send_once(request_opts(opts))
            ) do
         {:ok, %{status: status, body: body}} when status in 200..299 ->
-          decoded_token(body)
+          with {:ok, tokens} <- decoded_token(body),
+               {:ok, _access_token} <- required_string(tokens, "access_token", :access_token),
+               do: {:ok, tokens}
 
         {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
           {:refused, refusal(status, body)}
@@ -2588,6 +2750,9 @@ defmodule DpExchange.Webull.Rest do
   `name` is `nil` here where `list_watchlists/2` has it. Reading the listing to fill it in
   would be a second request this function did not make, and a name from a moment ago beside
   a membership from now.
+
+  The `id` is the one the venue's reply names. A reply that names none is
+  `{:error, {:missing_required_field, :id}}`; it is not filled in from the id asked for.
   """
   @spec get_watchlist(String.t(), map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
@@ -2597,6 +2762,10 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, body} <-
            get("/market-data/watchlists/instruments/list", params, credentials, opts),
          {:ok, row} <- first_row(body),
+         # **The id is the venue's, or the read is refused.** This fell back to the id the
+         # caller asked for, publishing the caller's own argument as though the venue had
+         # confirmed it (`get_order/3` refuses the same shape for the same reason).
+         {:ok, id} <- venue_watchlist_id(row),
          {:ok, instruments} <- list_value(row, ["instruments"]) do
       symbols =
         instruments
@@ -2605,7 +2774,7 @@ defmodule DpExchange.Webull.Rest do
 
       {:ok,
        %Watchlist{
-         id: value(row, ["watchlist_id"]) || watchlist_id,
+         id: id,
          name: nil,
          symbols: symbols,
          venue_time: nil,
@@ -2660,6 +2829,13 @@ defmodule DpExchange.Webull.Rest do
          # row this cycle". This is the same rule on the create path.
          {:ok, id} <- created_watchlist_id(row) do
       add_created_members(id, name, symbols, credentials, opts)
+    end
+  end
+
+  defp venue_watchlist_id(row) do
+    case value(row, ["watchlist_id"]) do
+      id when is_binary(id) -> {:ok, id}
+      _absent -> {:error, {:missing_required_field, :id}}
     end
   end
 
@@ -3022,6 +3198,13 @@ defmodule DpExchange.Webull.Rest do
 
   Line items are the venue's own names, unchanged — see `Core.Types.FinancialStatement`.
 
+  **`:indicators` answers one statement per fiscal period, not one per call.** The venue
+  returns a single object whose metrics each list their own `{fiscal_year, fiscal_period,
+  value}` readings; those are regrouped by period, oldest first, with `line_items` holding
+  that period's metrics beside `fiscal_year`, the raw `fiscal_period` code and `currency`.
+  `period_end` is `nil` for them (the page publishes no end date). A response not in that
+  shape is `{:error, :unexpected_response_shape}`.
+
   **`fiscal_period` is the venue's integer code translated through the venue's own legend**,
   which its page states as `0=FY, 1=Q1, 2=Q2, 3=Q3, 4=Q4`. The contract wants a label and
   the venue publishes a code, so the code is mapped with the venue's own key and the raw
@@ -3033,7 +3216,7 @@ defmodule DpExchange.Webull.Rest do
   def get_financials(symbol, kind, credentials, opts)
       when kind in @statement_kinds do
     with {:ok, rows} <- get_fundamental(statement_endpoint(kind), symbol, credentials, opts) do
-      {:ok, Enum.map(rows, &to_statement(&1, symbol, kind))}
+      to_statements(rows, symbol, kind)
     end
   end
 
@@ -3042,6 +3225,101 @@ defmodule DpExchange.Webull.Rest do
 
   defp statement_endpoint(:income), do: :income_statement
   defp statement_endpoint(kind), do: kind
+
+  defp to_statements(rows, symbol, :indicators), do: indicator_statements(rows, symbol)
+
+  defp to_statements(rows, symbol, kind),
+    do: {:ok, Enum.map(rows, &to_statement(&1, symbol, kind))}
+
+  # **`indicators` is not shaped like the other statements, and reading it as one lost every
+  # period.** `financial-indicators.md:186-228` documents ONE object per call,
+  # `{currency, values: {<metric>: [{fiscal_year, fiscal_period, value}, ...]}}` - the periods
+  # sit INSIDE each metric's list, so there is no top-level `end_date` or `fiscal_period` for
+  # `to_statement/3` to read. It returned one statement whose `period_end` and
+  # `fiscal_period` were both `nil` and whose period-by-period values were buried in
+  # `line_items`, and a caller could not tell which year a ratio belonged to.
+  #
+  # Regrouped here: one `FinancialStatement` per `{fiscal_year, fiscal_period}` the venue
+  # listed, oldest first, `line_items` holding that period's metrics by the venue's own names
+  # (values as the strings it sent) beside the `fiscal_year`, raw `fiscal_period` code and
+  # `currency`. `period_end` is `nil`: the page publishes no end date for an indicator, and
+  # none is derived from a fiscal year, which is not a calendar year. A row without a `values`
+  # object, or a period entry that is not an object carrying an integer `fiscal_year`, is not
+  # the documented shape and refuses the whole read.
+  defp indicator_statements(rows, symbol) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case indicator_periods(row) do
+        {:ok, periods} ->
+          {:cont, {:ok, [indicator_statement_list(periods, row, symbol) | acc]}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, groups} -> {:ok, groups |> Enum.reverse() |> Enum.concat()}
+      error -> error
+    end
+  end
+
+  defp indicator_statement_list(periods, row, symbol) do
+    currency = value(row, ["currency"])
+
+    periods
+    |> Enum.sort_by(fn {{year, period}, _metrics} -> {year, period} end)
+    |> Enum.map(fn {{year, period}, metrics} ->
+      %FinancialStatement{
+        symbol: symbol,
+        kind: :indicators,
+        line_items:
+          Map.merge(metrics, %{
+            "fiscal_year" => year,
+            "fiscal_period" => period,
+            "currency" => currency
+          }),
+        period_end: nil,
+        fiscal_period: fiscal_period_label(period),
+        currency: currency,
+        venue_time: nil,
+        provider: :webull
+      }
+    end)
+  end
+
+  defp indicator_periods(%{"values" => %{} = values}) do
+    Enum.reduce_while(values, {:ok, %{}}, fn {metric, entries}, {:ok, acc} ->
+      case add_indicator_entries(acc, metric, entries) do
+        {:ok, grouped} -> {:cont, {:ok, grouped}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp indicator_periods(_not_the_documented_shape), do: {:error, :unexpected_response_shape}
+
+  defp add_indicator_entries(acc, metric, entries) when is_list(entries) do
+    Enum.reduce_while(entries, {:ok, acc}, fn entry, {:ok, grouped} ->
+      case indicator_entry(entry) do
+        {:ok, key, reading} ->
+          {:cont, {:ok, put_reading(grouped, key, metric, reading)}}
+
+        :error ->
+          {:halt, {:error, :unexpected_response_shape}}
+      end
+    end)
+  end
+
+  defp add_indicator_entries(_acc, _metric, _entries), do: {:error, :unexpected_response_shape}
+
+  defp put_reading(grouped, key, metric, reading),
+    do: Map.update(grouped, key, %{metric => reading}, &Map.put(&1, metric, reading))
+
+  defp indicator_entry(%{"fiscal_year" => year, "fiscal_period" => period} = entry)
+       when is_integer(year),
+       do: {:ok, {year, period}, Map.get(entry, "value")}
+
+  defp indicator_entry(_other), do: :error
 
   defp to_statement(row, symbol, kind) do
     %FinancialStatement{
@@ -3064,7 +3342,16 @@ defmodule DpExchange.Webull.Rest do
   # would be indistinguishable from one the venue published.
   defp fiscal_period_label(0), do: "FY"
   defp fiscal_period_label(period) when period in 1..4, do: "Q#{period}"
-  defp fiscal_period_label(period) when is_binary(period), do: period
+  # A venue that has already worded the period ("FY2026") sent a label, and a label is what
+  # this field wants. A numeric string is the legend's code in another type and goes through
+  # the legend: passed on as it was, "0" would have been published as a period label.
+  defp fiscal_period_label(period) when is_binary(period) do
+    case Integer.parse(period) do
+      {code, ""} -> fiscal_period_label(code)
+      _worded -> period
+    end
+  end
+
   defp fiscal_period_label(_other), do: nil
 
   defp statement_date(nil), do: nil
@@ -3092,6 +3379,11 @@ defmodule DpExchange.Webull.Rest do
   **Splits are not here.** Webull publishes `fund-splits` for funds and nothing for equities,
   so a `:split` kind would be answerable for some symbols and silently empty for the rest.
   `get_fundamental(:fund_splits, …)` reaches the one that exists.
+
+  **A dividend's `amount` is set only for a `CASH_DIVIDEND`** (or a row that names no
+  `div_type`). The venue's other types - stock, scrip, return of capital, and so on - leave it
+  `nil`, because a cash amount in `currency` is a claim the page does not make for them; the
+  venue's whole row, `div_type` included, is in `details`.
   """
   @spec get_corporate_events(map(), keyword()) ::
           {:ok, [CorporateEvent.t()]} | {:error, term()} | {:refused, term()}
@@ -3148,7 +3440,7 @@ defmodule DpExchange.Webull.Rest do
       record_date: statement_date(value(row, ["record_date"])),
       pay_date: statement_date(value(row, ["pay_date", "payment_date"])),
       announced_date: statement_date(value(row, ["declare_date"])),
-      amount: decimal(value(row, ["amount", "dividend"])),
+      amount: dividend_amount(row),
       currency: value(row, ["currency"]),
       ratio: nil,
       # The venue publishes no confirmed/estimated flag on either calendar. `nil` says so;
@@ -3174,6 +3466,21 @@ defmodule DpExchange.Webull.Rest do
       details: row,
       provider: :webull
     }
+  end
+
+  # **`amount` is a cash amount only for a cash dividend.** `dividend-calendar.md` types each
+  # row with a `div_type` - `CASH_DIVIDEND`, `STOCK_DIVIDEND`, `SCRIP_DIVIDEND`,
+  # `RETURN_OF_CAPITAL`, `INTEREST_PRINCIPAL_PAYMENT`, `DIVIDEND_REINVESTMENT`,
+  # `TRUST_INCOME_DISTRIBUTION` - and describes `amount` as "per share" without saying of what
+  # for the others. A stock dividend's figure copied into `Core.Types.CorporateEvent.amount`
+  # (a cash amount in `currency`) is a number that looks like money and is not. Any other
+  # type leaves `amount` `nil`; `details` still holds the venue's row, `div_type` included. A
+  # row naming no type is read as before.
+  defp dividend_amount(row) do
+    case value(row, ["div_type"]) do
+      type when type in [nil, "CASH_DIVIDEND"] -> decimal(value(row, ["amount", "dividend"]))
+      _other_type -> nil
+    end
   end
 
   @doc """
@@ -3752,7 +4059,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
-         {:ok, row} <- first_row(body) do
+         {:ok, row} <- symbol_row(body, symbol) do
       list_value(row, ["result"])
     end
   end
@@ -3772,7 +4079,9 @@ defmodule DpExchange.Webull.Rest do
   derived level cannot be told from a quoted one.
 
   Returned as `%{yes_bids:, yes_asks:, no_bids:, no_asks:, quote_time:}` with the venue's own
-  level maps and its `quote_time` in milliseconds.
+  level maps and its `quote_time` in milliseconds. A side that is present and not a list is
+  `{:error, :unexpected_response_shape}` (an absent one is `[]`), and a row naming another
+  market than the one asked for is `{:error, :not_in_response}`.
   """
   @spec get_event_order_book(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -3781,16 +4090,24 @@ defmodule DpExchange.Webull.Rest do
       %{"symbol" => symbol, "category" => "US_EVENT"}
       |> put_present("depth", Keyword.get(opts, :depth))
 
+    # **Each side is a list or it is refused.** `List.wrap/1` turned a string into a
+    # one-level "book" and an object into a one-row list of the wrong thing, and an unreadable
+    # side read as an empty one - the shape `list_value/2` exists to refuse. An absent side is
+    # still none, and a row that names another market is `:not_in_response` (`symbol_row/2`).
     with {:ok, body} <-
            get("/market-data/event-contracts/depths/list", params, credentials, opts),
-         {:ok, row} <- first_row(body) do
+         {:ok, row} <- symbol_row(body, symbol),
+         {:ok, yes_bids} <- list_value(row, ["yes_bids"]),
+         {:ok, yes_asks} <- list_value(row, ["yes_asks"]),
+         {:ok, no_bids} <- list_value(row, ["no_bids"]),
+         {:ok, no_asks} <- list_value(row, ["no_asks"]) do
       {:ok,
        %{
          symbol: value(row, ["symbol"]) || symbol,
-         yes_bids: List.wrap(value(row, ["yes_bids"])),
-         yes_asks: List.wrap(value(row, ["yes_asks"])),
-         no_bids: List.wrap(value(row, ["no_bids"])),
-         no_asks: List.wrap(value(row, ["no_asks"])),
+         yes_bids: yes_bids,
+         yes_asks: yes_asks,
+         no_bids: no_bids,
+         no_asks: no_asks,
          quote_time: value(row, ["quote_time"])
        }}
     end
@@ -3825,6 +4142,10 @@ defmodule DpExchange.Webull.Rest do
   is now `{:error, {:ambiguous_option_contract, expiry, strike, right, [venue_symbol]}}`;
   narrow the request with `opts[:expiry]` / `opts[:strike]` or read the flat contract list.
   The same contract listed twice is one contract, and is kept once.
+
+  **The grid is keyed on the strike's value, not the venue's spelling of it**: a call listed
+  at `"150.0"` and a put at `"150"` share the cell at `Decimal.new("150")`. The contract's own
+  `:strike` keeps the spelling it was sent with.
   """
   @spec get_option_chain(String.t(), map(), keyword()) ::
           {:ok, OptionChain.t()} | {:error, term()} | {:refused, term()}
@@ -4012,6 +4333,17 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **The grid is keyed on the strike's VALUE, not on how the venue spelled it.** A `Decimal`
+  # is a coefficient and an exponent, and `Decimal.new("150.0")` and `Decimal.new("150")`
+  # are different map keys for the same strike: a call listed at `"150.0"` and a put at
+  # `"150"` landed in two cells, each with a `nil` on the side the other held, and a caller
+  # looking up the strike found half a row. The key is the plain, trailing-zero-free form
+  # (`Decimal.new("150")`, the form `Core.Types.OptionChain` shows), and the contract's own
+  # `:strike` keeps the venue's spelling.
+  defp strike_key(%Decimal{} = strike) do
+    strike |> Decimal.normalize() |> Decimal.to_string(:normal) |> Decimal.new()
+  end
+
   # A strike listed with only one side keeps a `nil` on the other, rather than being absent:
   # a caller iterating strikes has to see that the put is missing.
   #
@@ -4020,12 +4352,13 @@ defmodule DpExchange.Webull.Rest do
   defp chain_grid(contracts) do
     Enum.reduce_while(contracts, {:ok, %{}}, fn contract, {:ok, grid} ->
       strikes = Map.get(grid, contract.expiry, %{})
-      row = Map.get(strikes, contract.strike, %{call: nil, put: nil})
+      key = strike_key(contract.strike)
+      row = Map.get(strikes, key, %{call: nil, put: nil})
 
       case Map.get(row, contract.right) do
         held when is_nil(held) or held == contract ->
           row = Map.put(row, contract.right, contract)
-          {:cont, {:ok, Map.put(grid, contract.expiry, Map.put(strikes, contract.strike, row))}}
+          {:cont, {:ok, Map.put(grid, contract.expiry, Map.put(strikes, key, row))}}
 
         held ->
           {:halt,
@@ -4212,6 +4545,35 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # The row for the symbol that was asked for. A list endpoint answers every symbol in the
+  # request, and the first row used to be taken whichever instrument it named, so a response
+  # leading with another symbol delivered that symbol's price, book or increments under the
+  # requested symbol's name. A row naming a different symbol is `:not_in_response`; a
+  # response none of whose rows names a symbol is read as the first row, as it always was.
+  defp symbol_row(body, native) do
+    with {:ok, body_rows} <- rows(body) do
+      case Enum.filter(body_rows, &is_map/1) do
+        [] -> {:error, :unexpected_response_shape}
+        maps -> pick_symbol_row(maps, native)
+      end
+    end
+  end
+
+  defp pick_symbol_row([first | _rest] = maps, native) do
+    named? = Enum.any?(maps, &is_binary(value(&1, ["symbol"])))
+
+    case Enum.find(maps, &same_symbol?(value(&1, ["symbol"]), native)) do
+      nil when named? -> {:error, :not_in_response}
+      nil -> {:ok, first}
+      row -> {:ok, row}
+    end
+  end
+
+  defp same_symbol?(named, native) when is_binary(named),
+    do: String.upcase(named) == String.upcase(native)
+
+  defp same_symbol?(_named, _native), do: false
+
   defp required(row, keys) do
     case value(row, keys) do
       nil -> {:error, :unexpected_response_shape}
@@ -4397,6 +4759,12 @@ defmodule DpExchange.Webull.Rest do
       parsed -> {:ok, parsed}
     end
   end
+
+  # Absent is `nil`; present and unreadable is an error. `decimal/1` alone answers `nil` for
+  # both, which is how a figure the venue DID send, in a shape this package could not read,
+  # became indistinguishable from one it never sent.
+  defp optional_decimal(nil, _field), do: {:ok, nil}
+  defp optional_decimal(value, field), do: required_decimal(value, field)
 
   @doc """
   Places a crypto order.

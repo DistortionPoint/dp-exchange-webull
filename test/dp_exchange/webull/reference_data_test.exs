@@ -821,7 +821,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       body = [%{"fiscal_period" => "FY2026", "end_date" => "2025-12-27"}]
 
       assert {:ok, [statement]} =
-               Rest.get_financials("AAPL", :indicators, @credentials,
+               Rest.get_financials("AAPL", :balance_sheet, @credentials,
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -829,11 +829,23 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert statement.fiscal_period == "FY2026"
     end
 
+    test "a numeric-string fiscal period goes through the legend, not through as a label" do
+      body = [%{"fiscal_period" => "0", "end_date" => "2025-12-27"}]
+
+      assert {:ok, [statement]} =
+               Rest.get_financials("AAPL", :balance_sheet, @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert statement.fiscal_period == "FY"
+    end
+
     test "a fiscal period outside the legend is nil, and the integer is still readable" do
       body = [%{"fiscal_period" => 9, "end_date" => "2025-12-27"}]
 
       assert {:ok, [statement]} =
-               Rest.get_financials("AAPL", :indicators, @credentials,
+               Rest.get_financials("AAPL", :balance_sheet, @credentials,
                  plug: responding(body),
                  retry_attempts: 0
                )

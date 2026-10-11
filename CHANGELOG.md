@@ -22,6 +22,73 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- `get_order_book/3`, `get_trades/3`, `get_volume_profile/4` and `get_event_trades/3`
+  read the row naming the requested symbol, as `get_price`/`get_top_of_book` now do. They
+  took the first row whatever it named, so another instrument's book or ticks came back
+  under the requested symbol. A response naming only other symbols is
+  `{:error, :not_in_response}`.
+
+Found by tracing every spec-example fixture through the decoder that reads it. None of these
+was visible to a test written to agree with the code; each is a nearby substitute where
+there should have been an error.
+
+- **A snapshot, book or increment for the wrong symbol is no longer delivered under the
+  requested one.** `get_price/3`, `get_top_of_book/3` and `quantization/3` took the first row
+  of the response whatever symbol it named. A row set that names other symbols than the one
+  asked for is now `{:error, :not_in_response}`; the matching row is chosen when several are
+  returned; a response whose rows name no symbol is read as before. `get_event_order_book/3`
+  gets the same check.
+- **`get_positions/2` refuses what a `Position` cannot say.** A multi-leg option strategy (one
+  row for several contracts, `legs` dropped) and any `EVENT` row (its `yes`/`no`
+  `event_outcome` is the opposite exposure to the same symbol, and was dropped) used to come
+  back as a plain holding. They now answer `{:error, {:unsupported_position, symbol, reason}}`
+  for the whole list, as an unreadable order does. `instrument_type: "EVENT"` no longer reaches
+  the `:event` atom through this path.
+- **`get_auction_imbalance/3` labelled every row with the auction that was requested.** Outside
+  the publication windows the venue returns history, and each row names its own
+  `imbalance_action_type`. The row's auction is now the one reported (`PRE_OPEN` is
+  `:opening`, `PRE_CLOSE` is `:closing`); a row naming neither is
+  `{:error, {:unsupported_auction, value}}`; one naming none takes the requested auction.
+- **`get_financials(:indicators)` published one statement with no period.** The venue sends
+  `{currency, values: {metric: [{fiscal_year, fiscal_period, value}]}}`, which was read as if it
+  were a per-period row. It is now regrouped into one `FinancialStatement` per fiscal period,
+  oldest first, with `fiscal_period` labelled by the venue's legend and `period_end` `nil` (the
+  page publishes none). A body not in that shape is `{:error, :unexpected_response_shape}`.
+- **A stock or scrip dividend's figure was published as a cash `amount`.** `get_corporate_events/2`
+  now sets `amount` only for `CASH_DIVIDEND` (or a row naming no `div_type`); the other six
+  `div_type` members leave it `nil`, and `details` still holds the row.
+- **`get_option_chain/3` split one strike across two cells by its spelling.** A call listed at
+  `"150.0"` and a put at `"150"` were different `Decimal` map keys. The grid is keyed on the
+  strike's value (`Decimal.new("150")`), and the contract keeps the venue's spelling. Anyone
+  indexing the grid with a trailing-zero `Decimal` must use the plain form.
+- **`preview_order/3` returned `nil` for a cost it could not read.** A present, unparseable
+  `estimated_cost` or `estimated_transaction_fee` is now
+  `{:error, {:invalid_decimal, field, value}}`; an absent fee is still `nil`.
+- **`get_watchlist/3` filled the watchlist id in from its own argument** when the reply named
+  none. It is now `{:error, {:missing_required_field, :id}}`.
+- **A token response that is not a token was accepted.** `create_token/2` and `check_token/3`
+  returned any object, `%{}` included; they now require `token` (create) and a `status` among
+  `PENDING`, `NORMAL`, `INVALID`, `EXPIRED`, and `oauth_token/3` requires `access_token` on a
+  2xx. Refusals are `{:missing_required_field, field}` / `{:unknown_token_status, status}`.
+- **`get_event_order_book/3` read an unreadable side as empty or as a one-entry book**
+  (`List.wrap/1` on a string or an object). A side that is present and not a list is now
+  `{:error, :unexpected_response_shape}`.
+- **`fiscal_period` given as a numeric string** (`"0"`) was published as the label `"0"`; it now
+  goes through the venue's legend like the integer does.
+- `Fake.get_financials/3` answers `:indicators` in the shape the real path now does.
+
+### Changed
+
+- Spec-example fixtures: `fund_report_brief.json` no longer carries `managers[].is_incumbent`
+  (the page gives it no example, so `1` was invented); `quote_event_snapshot.json` added, built
+  only from `event-snapshot.md`'s own per-property examples. `README.md` there records both.
+- Spec-example tests now assert the venue times the decoders pick (`quote_time` against
+  `last_trade_time`), the tick `side` codes, per-period `:indicators` regrouping, the batched
+  `get_prices/3` path, the event snapshot, and every refusal above. The preview test feeds the
+  documented object response instead of wrapping it in a list the venue never sends.
+
 ## [0.4.120] - 2026-10-10
 
 ### Fixed

@@ -47,6 +47,17 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   `place_orders/3` was decoding the documented batch envelope as one row instead of one row
   per order; and `support_trading_session` — present in `common-order-place.md`'s own
   worked example — never reached the wire from `preview_order/3`/`place_order/3` at all.
+
+  ## A second pass: tracing each fixture through the decoder that reads it
+
+  Verifying every fixture against its page (the values and the key paths) found them faithful
+  apart from one invented value (`managers[].is_incumbent`, since removed). Tracing them
+  through the decoders found the other kind of bug, where the fixture was right and the
+  decode substituted: the first row taken whatever symbol it named; a position, auction or
+  dividend flattened into a type that could not say what it was; `:indicators` read as a
+  per-period row; a strike spelled two ways keying two cells; a token response accepted with
+  no token in it. The tests that pin those are marked "refused", "not_in_response" or
+  "regroup" below, and each says what the old behavior was.
   """
 
   use ExUnit.Case, async: true
@@ -279,6 +290,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert quote.symbol == "AAPL260522C00300000"
       assert Decimal.equal?(quote.price, Decimal.new("47.35"))
       assert Decimal.equal?(quote.volume, Decimal.new("48906"))
+      assert quote.volume_window == :running_total
+      assert quote.venue_time == DateTime.from_unix!(1_761_131_406_558, :millisecond)
 
       assert_receive {:request, "GET", "/market-data/options/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -303,12 +316,95 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert quote.symbol == "SILZ5"
       assert Decimal.equal?(quote.price, Decimal.new("47.35"))
       assert Decimal.equal?(quote.volume, Decimal.new("48906"))
+      assert quote.volume_window == :running_total
+      assert quote.venue_time == DateTime.from_unix!(1_761_131_406_558, :millisecond)
 
       assert_receive {:request, "GET", "/market-data/futures/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
       assert decoded["symbols"] == "SILZ5"
       assert decoded["category"] == "US_FUTURES"
       refute Map.has_key?(decoded, "extend_hour_required")
+    end
+  end
+
+  # `event-snapshot.md:27` — GET /market-data/event-contracts/snapshots/list
+  describe "get_price/3 against the event snapshot" do
+    test "reads the venue's own unlabelled price and volume" do
+      me = self()
+
+      assert {:ok, %Types.Quote{} = quote} =
+               Rest.get_price("KXCPI-26JAN-T0.3", @credentials,
+                 category: "US_EVENT",
+                 plug: capturing(fixture!("quote_event_snapshot.json"), me),
+                 retry_attempts: 0
+               )
+
+      assert quote.symbol == "KXCPI-26JAN-T0.3"
+      assert Decimal.equal?(quote.price, Decimal.new("0.13"))
+      assert Decimal.equal?(quote.volume, Decimal.new("32"))
+      assert quote.venue_time == DateTime.from_unix!(1_768_861_137_000, :millisecond)
+
+      assert_receive {:request, "GET", "/market-data/event-contracts/snapshots/list", query, _raw}
+      decoded = URI.decode_query(query)
+      assert decoded["symbols"] == "KXCPI-26JAN-T0.3"
+      assert decoded["category"] == "US_EVENT"
+      refute Map.has_key?(decoded, "extend_hour_required")
+    end
+  end
+
+  describe "get_price/3 and get_top_of_book/3 answer for the symbol asked, not the first row" do
+    test "a row that names another symbol is not_in_response, never that symbol's price" do
+      # A row for AAPL answered a request for MSFT would be a plausible price for the wrong
+      # instrument.
+      opts = [category: "US_STOCK", plug: responding(fixture!("quote_stock_snapshot.json"))]
+
+      assert {:error, :not_in_response} =
+               Rest.get_price("MSFT", @credentials, opts ++ [retry_attempts: 0])
+
+      assert {:error, :not_in_response} =
+               Rest.get_top_of_book("MSFT", @credentials, opts ++ [retry_attempts: 0])
+    end
+
+    test "the matching row is chosen when the venue answers several" do
+      [aapl] = fixture!("quote_stock_snapshot.json")
+      other = Map.merge(aapl, %{"symbol" => "MSFT", "price" => "999"})
+
+      assert {:ok, %Types.Quote{} = quote} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding([other, aapl]),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quote.price, Decimal.new("100"))
+    end
+  end
+
+  describe "get_prices/3 against the crypto snapshot" do
+    test "one request answers every symbol asked for, each in get_price/3's shape" do
+      me = self()
+      [btc] = fixture!("quote_crypto_snapshot.json")
+      eth = Map.merge(btc, %{"symbol" => "ETHUSD", "price" => "2000.25"})
+
+      assert {:ok, results} =
+               Rest.get_prices(["BTC-USD", "ETH-USD", "XRP-USD"], @credentials,
+                 plug: capturing([btc, eth], me),
+                 retry_attempts: 0
+               )
+
+      assert {:ok, %Types.Quote{} = btc_quote} = results["BTC-USD"]
+      assert Decimal.equal?(btc_quote.price, Decimal.new("100.5"))
+      assert btc_quote.volume == nil
+      assert btc_quote.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+
+      assert {:ok, %Types.Quote{} = eth_quote} = results["ETH-USD"]
+      assert Decimal.equal?(eth_quote.price, Decimal.new("2000.25"))
+
+      # A symbol the response has no row for is an error, never silently absent.
+      assert results["XRP-USD"] == {:error, :not_in_response}
+
+      assert_receive {:request, "GET", "/market-data/crypto/snapshots/list", query, _raw}
+      assert URI.decode_query(query)["symbols"] == "BTCUSD,ETHUSD,XRPUSD"
     end
   end
 
@@ -325,6 +421,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(book.ask, Decimal.new("0.6343"))
       assert Decimal.equal?(book.bid_size, Decimal.new("3817.29798008"))
       assert Decimal.equal?(book.ask_size, Decimal.new("1387.5"))
+      # Dated by the QUOTE (`quote_time`, a string of milliseconds here), not by the last
+      # trade (`last_trade_time`, 1640688000000 in the same row).
+      assert book.venue_time == DateTime.from_unix!(1_761_131_401_742, :millisecond)
     end
 
     test "the stock snapshot's bid/ask carry through the same way" do
@@ -340,6 +439,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(book.ask, Decimal.new("13.9"))
       assert Decimal.equal?(book.bid_size, Decimal.new("5"))
       assert Decimal.equal?(book.ask_size, Decimal.new("5"))
+      # The stock snapshot has no `quote_time`; its only time is the last trade's.
+      assert book.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
     end
 
     # `event-snapshot.md:27` publishes yes_bid/yes_ask/no_bid/no_ask, not one bid/ask — see
@@ -490,6 +591,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       decoded = URI.decode_query(query)
       assert decoded["category"] == "US_STOCK"
       assert decoded["symbols"] == "AAPL"
+    end
+
+    # The increments of another instrument would round this symbol's orders to a step it
+    # does not trade in, and read as perfectly plausible numbers.
+    test "a row for another symbol is not_in_response, never that symbol's increments" do
+      assert {:error, :not_in_response} =
+               Rest.quantization("ETH-USD", @credentials,
+                 plug: responding(fixture!("quote_quantization_crypto.json")),
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -935,6 +1046,32 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert imbalance.venue_time == DateTime.from_unix!(1_774_272_599_000, :millisecond)
       assert imbalance.provider == :webull
     end
+
+    # The vendor "returns historical data" outside the publication windows, so a row can
+    # belong to the other auction than the one asked for. It is labelled by what the ROW
+    # says (`imbalance_action_type`), not by the request.
+    test "RESPONSE: the auction is the one the row names, not the one requested" do
+      row = fixture!("depth_auction_imbalance.json")
+      closing_row = Map.put(row, "imbalance_action_type", "PRE_CLOSE")
+
+      assert {:ok, [%Types.AuctionImbalance{auction: :closing}]} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :opening,
+                 plug: responding(closing_row),
+                 retry_attempts: 0
+               )
+    end
+
+    test "RESPONSE: an action type outside PRE_OPEN/PRE_CLOSE is refused, not defaulted" do
+      odd_row = Map.put(fixture!("depth_auction_imbalance.json"), "imbalance_action_type", "HALT")
+
+      assert {:error, {:unsupported_auction, "HALT"}} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :opening,
+                 plug: responding(odd_row),
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "auction imbalance bars — /market-data/stocks/noii-bars/list (get-noii-bars.md)" do
@@ -1006,6 +1143,20 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert trade.provider == :webull
       assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
+
+    # `tick.md` describes `side` as "Such as: B S G L N" and defines none of them. Only B and
+    # S are unambiguous; the rest are an unknown aggressor, never the nearest side.
+    test "RESPONSE: B is a buy, and G, L, N or anything unlisted is nil rather than a side" do
+      group = fixture!("depth_trades_stock.json")
+      [tick] = group["result"]
+
+      for {code, expected} <- [{"B", :buy}, {"S", :sell}, {"G", nil}, {"L", nil}, {"N", nil}] do
+        opts = [plug: responding(%{group | "result" => [Map.put(tick, "side", code)]})]
+
+        assert {:ok, [trade]} = Rest.get_trades("AAPL", @credentials, opts ++ [retry_attempts: 0])
+        assert trade.side == expected
+      end
+    end
   end
 
   describe "trades (option) — /market-data/options/ticks/list (option-tick.md)" do
@@ -1034,9 +1185,11 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
+      assert trade.symbol == "AAPL260522C00300000"
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
       assert trade.side == :sell
+      assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
   end
 
@@ -1066,9 +1219,11 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
+      assert trade.symbol == "SILZ5"
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
       assert trade.side == :sell
+      assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
   end
 
@@ -1176,6 +1331,36 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert_receive {:request, "GET", path, query, _raw}
       assert path == "/trading/assets/positions/list"
       assert query =~ "account_id=LOJOQITOD49R6G9BPQM489CISA"
+    end
+
+    # `account-position.md`'s `option_strategy` enum lists a dozen multi-leg strategies, and a
+    # strategy is ONE row whose quantity and cost describe the whole of it, the contracts
+    # sitting under `legs`. A `Position` has one symbol and nowhere for the legs.
+    test "a multi-leg option strategy is refused, not flattened into a plain holding" do
+      [row] = fixture!("account_position.json")
+      body = [Map.put(row, "option_strategy", "VERTICAL")]
+
+      assert {:error, {:unsupported_position, "AAPL", {:option_strategy, "VERTICAL"}}} =
+               Rest.get_positions(@credentials,
+                 plug: responding(body),
+                 account_id: "LOJOQITOD49R6G9BPQM489CISA",
+                 retry_attempts: 0
+               )
+    end
+
+    # `event_outcome` ("yes"/"no") is the opposite exposure to the same symbol, and
+    # `Position` cannot carry it. Test-only variant of the OPTION fixture row: the field is
+    # the vendor's own, the instrument type swapped to the one it applies to.
+    test "an event-contract position is refused, because its outcome has nowhere to go" do
+      [row] = fixture!("account_position.json")
+      body = [Map.merge(row, %{"instrument_type" => "EVENT", "event_outcome" => "no"})]
+
+      assert {:error, {:unsupported_position, "AAPL", :event_outcome}} =
+               Rest.get_positions(@credentials,
+                 plug: responding(body),
+                 account_id: "LOJOQITOD49R6G9BPQM489CISA",
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -1293,7 +1478,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       assert {:ok, preview} =
                Rest.preview_order(@credentials, request,
-                 plug: capturing([fixture["response"]], me),
+                 plug: capturing(fixture["response"], me),
                  account_id: fixture["request"]["account_id"],
                  retry_attempts: 0
                )
@@ -1353,7 +1538,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       assert {:ok, _preview} =
                Rest.preview_order(@credentials, request,
-                 plug: capturing([fixture["response"]], me),
+                 plug: capturing(fixture["response"], me),
                  account_id: fixture["request"]["account_id"],
                  retry_attempts: 0
                )
@@ -1361,6 +1546,33 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert_receive {:request, "POST", _path, _query, raw}
       leaf = raw |> Jason.decode!() |> Map.get("new_orders") |> List.first()
       assert leaf["support_trading_session"] == "NIGHT"
+    end
+
+    # `estimated_cost` and `estimated_transaction_fee` are both required by the page's
+    # response schema. A figure that is present and unreadable is not an absent one.
+    test "a cost or fee the venue sent and this package cannot read is an error, not nil" do
+      fixture = fixture!("order_preview.json")
+      req_order = fixture["request"]["new_orders"] |> List.first()
+
+      request = %{
+        instrument_type: :equity,
+        symbol: req_order["symbol"],
+        side: :buy,
+        quantity: Decimal.new(req_order["quantity"]),
+        price: Decimal.new(req_order["limit_price"]),
+        order_type: :limit,
+        time_in_force: :day
+      }
+
+      opts = [account_id: fixture["request"]["account_id"], retry_attempts: 0]
+      bad_cost = Map.put(fixture["response"], "estimated_cost", "n/a")
+      bad_fee = Map.put(fixture["response"], "estimated_transaction_fee", "n/a")
+
+      assert {:error, {:invalid_decimal, :estimated_cost, "n/a"}} =
+               Rest.preview_order(@credentials, request, [plug: responding(bad_cost)] ++ opts)
+
+      assert {:error, {:invalid_decimal, :estimated_fee, "n/a"}} =
+               Rest.preview_order(@credentials, request, [plug: responding(bad_fee)] ++ opts)
     end
   end
 
@@ -1692,6 +1904,40 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       # create-token.md:27-28 — no requestBody is documented for this endpoint.
       assert_receive {:request, "POST", "/auth/tokens/create", _query, "{}"}
+    end
+  end
+
+  describe "token responses that are not tokens" do
+    test "create_token/2 refuses a body with no token or a status outside the venue's four" do
+      for body <- [%{}, %{"status" => "PENDING"}, %{"token" => "t"}] do
+        assert {:error, {:missing_required_field, _field}} =
+                 Rest.create_token(@credentials, plug: responding(body), retry_attempts: 0)
+      end
+
+      body = %{"token" => "ccb071f764864b65a1fb48484e940a56", "status" => "ACTIVE"}
+
+      assert {:error, {:unknown_token_status, "ACTIVE"}} =
+               Rest.create_token(@credentials, plug: responding(body), retry_attempts: 0)
+    end
+
+    test "check_token/3 refuses a body with no verdict, and never infers NORMAL" do
+      assert {:error, {:missing_required_field, :status}} =
+               Rest.check_token("t", @credentials, plug: responding(%{}), retry_attempts: 0)
+
+      assert {:error, {:unknown_token_status, "OK"}} =
+               Rest.check_token("t", @credentials,
+                 plug: responding(%{"status" => "OK"}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "oauth_token/3 refuses a 2xx answer that carries no access_token" do
+      assert {:error, {:missing_required_field, :access_token}} =
+               Rest.oauth_token("CLIENT", "secret",
+                 code: "auth-code",
+                 plug: responding(%{"token_type" => "Bearer"}),
+                 retry_attempts: 0
+               )
     end
   end
 
@@ -2387,12 +2633,10 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     # `financial-indicators.md:186-228` documents this endpoint's row as ONE object per
     # call: `{currency, values: {<metric>: [{fiscal_year, fiscal_period, value}, ...]}}` —
     # not an array of per-period rows with a top-level `fiscal_period`/`end_date` the way
-    # balance_sheet/cash_flow/income_statement are shaped. `to_statement/3` reads
-    # `value(row, ["end_date"])`/`value(row, ["fiscal_period"])` off the row's own top
-    # level, which this shape never has. This documents the actual, silently-lossy
-    # behavior rather than a fix — the right shape for `:indicators` here (one statement
-    # per metric×period? per period only?) is a design decision left open.
-    test "indicators: period_end and fiscal_period are nil — venue row has no top-level dates" do
+    # balance_sheet/cash_flow/income_statement are shaped. This used to be read as if it
+    # were, which published one statement with no period at all and the readings buried in
+    # `line_items["values"]`; it is now regrouped into one statement per fiscal period.
+    test "indicators: one statement per fiscal period, carrying that period's readings" do
       body = fixture!("fund_stmt_indicators.json")
 
       assert {:ok, [statement]} =
@@ -2402,10 +2646,58 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                )
 
       assert statement.kind == :indicators
+      assert statement.symbol == "AAPL"
       assert statement.currency == "USD"
+      # The page publishes no end date for an indicator, and none is derived.
       assert statement.period_end == nil
-      assert statement.fiscal_period == nil
-      assert statement.line_items["values"]["roa"] != nil
+      # fiscal_period 4 -> "Q4", by the venue's own legend.
+      assert statement.fiscal_period == "Q4"
+      assert statement.line_items["roa"] == "0.2133"
+      assert statement.line_items["fiscal_year"] == 2025
+      assert statement.line_items["fiscal_period"] == 4
+      refute Map.has_key?(statement.line_items, "values")
+    end
+
+    # Test-only variant of the fixture: a second metric and a second period built from the
+    # fixture's own entry (same value string), to prove the regrouping by `{year, period}`
+    # and the oldest-first order, which one documented reading cannot.
+    test "indicators: readings regroup by period across metrics, oldest first" do
+      [%{"value" => reading}] = fixture!("fund_stmt_indicators.json")["values"]["roa"]
+      later = %{"fiscal_year" => 2025, "fiscal_period" => 4, "value" => reading}
+      earlier = %{"fiscal_year" => 2025, "fiscal_period" => 3, "value" => reading}
+
+      body = %{
+        "currency" => "USD",
+        "values" => %{"roa" => [later, earlier], "roe" => [later]}
+      }
+
+      assert {:ok, [q3, q4]} =
+               Rest.get_financials("AAPL", :indicators, @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert q3.fiscal_period == "Q3"
+      q3_keys = q3.line_items |> Map.keys() |> Enum.sort()
+      assert q3_keys == ["currency", "fiscal_period", "fiscal_year", "roa"]
+
+      assert q4.fiscal_period == "Q4"
+      assert q4.line_items["roa"] == reading
+      assert q4.line_items["roe"] == reading
+    end
+
+    test "indicators: a row that is not the documented values object is refused, not guessed" do
+      for body <- [
+            %{"currency" => "USD"},
+            %{"currency" => "USD", "values" => %{"roa" => "0.2133"}},
+            %{"currency" => "USD", "values" => %{"roa" => [%{"fiscal_period" => 4}]}}
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_financials("AAPL", :indicators, @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
     end
   end
 
@@ -2668,6 +2960,28 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert event.announced_date == ~D[2026-05-01]
       assert Decimal.equal?(event.amount, Decimal.new("0.25"))
       assert event.currency == "USD"
+    end
+
+    # `div_type` is a seven-member enum; `amount` is "per share" and only a cash dividend's is
+    # cash. Test-only variants of the fixture row with the venue's own other enum members.
+    test "only a CASH_DIVIDEND's amount is a cash amount; the other types leave it nil" do
+      [row] = fixture!("fund_report_dividend_calendar.json")
+
+      for type <- ["STOCK_DIVIDEND", "SCRIP_DIVIDEND", "RETURN_OF_CAPITAL"] do
+        body = [Map.put(row, "div_type", type)]
+
+        assert {:ok, [event]} =
+                 Rest.get_corporate_events(@credentials,
+                   symbol: "AAPL",
+                   kind: :dividend,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+
+        assert event.amount == nil
+        assert event.details["div_type"] == type
+        assert event.ex_date == ~D[2026-05-08]
+      end
     end
 
     test "an earnings row maps expected_publish_date under announced_date" do
@@ -3363,6 +3677,26 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert query =~ "category=US_EVENT"
       assert query =~ "depth=10"
     end
+
+    # `List.wrap/1` used to turn a string into a one-entry side and an object into a one-row
+    # one, and an unreadable side read as an empty one.
+    test "a side that is not a list is refused, and a row for another market is not this one" do
+      [row] = fixture!("event_order_book.json")
+
+      for bad <- ["0.13", %{"price" => "0.13", "size" => "543"}] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_event_order_book("KXCPI-26JAN-T0.3", @credentials,
+                   plug: responding([Map.put(row, "yes_bids", bad)]),
+                   retry_attempts: 0
+                 )
+      end
+
+      assert {:error, :not_in_response} =
+               Rest.get_event_order_book("KXOTHER-26JAN-T0.3", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "get_option_chain/3 and get_option_expirations/3 — option-contract-list.md" do
@@ -3379,7 +3713,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                )
 
       assert %Types.OptionChain{} = chain
-      call = chain.expiries[~D[2025-06-20]][Decimal.new("150.0")].call
+      # Keyed on the strike's value (`Decimal.new("150")`, the form `Core.Types.OptionChain`
+      # shows), not on the venue's spelling of it ("150.0"); the contract keeps the spelling.
+      call = chain.expiries[~D[2025-06-20]][Decimal.new("150")].call
 
       # option-contract-list.md:293-382
       assert call.venue_symbol == "AAPL250620C00150000"
@@ -3389,7 +3725,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(call.multiplier, Decimal.new("100"))
       assert call.settlement_type == "PHYSICAL"
       assert call.expiration_type == "MONTHLY"
-      assert chain.expiries[~D[2025-06-20]][Decimal.new("150.0")].put == nil
+      assert chain.expiries[~D[2025-06-20]][Decimal.new("150")].put == nil
       assert chain.underlying_price == nil
 
       assert_receive {:request, "GET", "/trading/instruments/options/contracts/list", query, _raw}
@@ -3400,6 +3736,31 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert query =~ "start_date=2025-06-20"
       assert query =~ "strike_price_gte=150"
       assert query =~ "strike_price_lte=150"
+    end
+
+    # Test-only variant of the fixture's contract: the same strike as a put, spelled "150"
+    # where the call says "150.0". They are one strike, and one cell.
+    test "a call at 150.0 and a put at 150 share a cell, whatever the venue's spelling" do
+      %{"data" => [call_row]} = fixture!("option_contract_list.json")
+
+      put_row =
+        Map.merge(call_row, %{
+          "symbol" => "AAPL250620P00150000",
+          "option_type" => "PUT",
+          "strike_price" => "150"
+        })
+
+      assert {:ok, chain} =
+               Rest.get_option_chain("AAPL", @credentials,
+                 plug: responding(%{"data" => [call_row, put_row]}),
+                 retry_attempts: 0
+               )
+
+      assert [strike] = Map.keys(chain.expiries[~D[2025-06-20]])
+      assert Decimal.equal?(strike, Decimal.new("150"))
+      cell = chain.expiries[~D[2025-06-20]][strike]
+      assert cell.call.venue_symbol == "AAPL250620C00150000"
+      assert cell.put.venue_symbol == "AAPL250620P00150000"
     end
 
     test "expirations are the distinct expiries on the venue's own contracts" do

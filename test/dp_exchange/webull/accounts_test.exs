@@ -319,8 +319,7 @@ defmodule DpExchange.Webull.AccountsTest do
           {"EQUITY", :equity},
           {"OPTION", :option},
           {"FUTURES", :futures},
-          {"CRYPTO", :crypto},
-          {"EVENT", :event}
+          {"CRYPTO", :crypto}
         ] do
       test "instrument type #{venue} maps to #{expected}" do
         assert {:ok, [position]} =
@@ -332,6 +331,38 @@ defmodule DpExchange.Webull.AccountsTest do
 
         assert position.instrument_type == unquote(expected)
       end
+    end
+
+    test "an EVENT row is refused: its yes/no outcome is an exposure a Position cannot carry" do
+      for outcome <- ["yes", "no", nil] do
+        row = position_row(%{"instrument_type" => "EVENT", "event_outcome" => outcome})
+
+        assert {:error, {:unsupported_position, "BTC-USD", :event_outcome}} =
+                 Rest.get_positions(@credentials,
+                   plug: responding([row]),
+                   account_id: @account,
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a SINGLE option strategy is a position, any other strategy is refused" do
+      single = position_row(%{"instrument_type" => "OPTION", "option_strategy" => "SINGLE"})
+      iron_condor = Map.put(single, "option_strategy", "IRON_CONDOR")
+
+      assert {:ok, [%Types.Position{instrument_type: :option}]} =
+               Rest.get_positions(@credentials,
+                 plug: responding([single]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:unsupported_position, "BTC-USD", {:option_strategy, "IRON_CONDOR"}}} =
+               Rest.get_positions(@credentials,
+                 plug: responding([single, iron_condor]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
     end
 
     test "an instrument type this package does not know is nil" do

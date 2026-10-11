@@ -1004,7 +1004,9 @@ defmodule DpExchange.Webull do
   Open positions on one account. Requires `opts[:account_id]`.
 
   See `DpExchange.Webull.Rest.get_positions/2`, including why the side comes from the sign
-  of the quantity rather than an assumption.
+  of the quantity rather than an assumption, and why a multi-leg option strategy or an event
+  contract on the account answers `{:error, {:unsupported_position, symbol, reason}}` rather
+  than a `Position` that drops the legs or the yes/no outcome.
   """
   def get_positions(opts), do: Rest.get_positions(credentials(opts), with_limiter(opts))
 

@@ -1,0 +1,19 @@
+[
+  {
+    "instrument_id": "504279491",
+    "symbol": "KXCPI-26JAN-T0.3",
+    "name": "Will CPI rise more than 0.3% in January 2026?",
+    "price": "0.13",
+    "volume": "32",
+    "last_trade_time": 1768861137000,
+    "open_interest": "14240",
+    "yes_bid": "0.08",
+    "yes_bid_size": "2115",
+    "yes_ask": "0.13",
+    "yes_ask_size": "543",
+    "no_bid": "0.87",
+    "no_bid_size": "543",
+    "no_ask": "0.92",
+    "no_ask_size": "2115"
+  }
+]

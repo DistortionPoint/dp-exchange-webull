@@ -22,6 +22,7 @@ each backs.
 | `quote_stock_snapshot.json` | `snapshot.md:27,194-391` | same |
 | `quote_option_snapshot.json` | `option-snapshot.md:27,171-302` | same |
 | `quote_futures_snapshot.json` | `futures-snapshot.md:27,171-267` | same |
+| `quote_event_snapshot.json` | `event-snapshot.md:27` (path), the response schema's per-property examples | same; every value is the page's own example, written out by reading `.responses["200"]…items.properties[*].example` — the page documents `price` without saying which outcome it prices |
 | `quote_symbols_page1.json`, `quote_symbols_page2.json` | `crypto-instrument-list.md:27` (path), `:198-270` (row fields), `:276-280` (pagination_key) | page 1 is the documented row + `pagination_key` example; page 2 omits the key per the schema's own "if absent, last page" |
 | `list_instruments_page1.json`, `list_instruments_page2.json` | `crypto-instrument-list.md:27` (path), `:198-270` (row fields), `:56` (`symbols` param example `"BTCUSD,ALTUSD"` — `ALTUSD` sourced from there, not invented), `:61-72` (status enum `OC`/`CO`/`NT`), `:276-280` (pagination_key) | backs `Rest.list_instruments/2`; only `status: "OC"` has a full worked-example row on this page, so the `CO` and `NT` rows are the same documented row with the schema's own other two enum members substituted in — never a status this page does not enumerate |
 | `quote_quantization_crypto.json` | `crypto-instrument-list.md:27,236-265` | the six quantization fields |
@@ -56,7 +57,7 @@ each backs.
 |---|---|---|
 | `account_list.json` | `account-list.md:145-202` | assembled from per-field examples |
 | `account_balance.json` | `account-balance.md:162-386` | assembled |
-| `account_position.json` | `account-position.md:166-298` | the OPTION row the schema's own examples cohere into |
+| `account_position.json` | `account-position.md:166-298` | the OPTION row the schema's own examples cohere into. `event_outcome` (applies to event rows only) and `legs` are left out: the page's own examples would put them on an OPTION row, which is not a row the venue sends. The multi-leg and event refusals are tested on variants built in the test, labelled there |
 | `account_transfers.json` | `docs/reference/webull/openapi/trade-cash-activity-by-type.md:222-366` | `activity_type`/`activity_sub_type` use the page's own documented DEPOSIT/ACH pairing (from the field's description table, not its standalone example, which is TRADE/BUY) |
 | `account_transactions.json` | same page/lines | uses the field's own literal `TRADE`/`BUY` example |
 
@@ -69,7 +70,7 @@ each backs.
 | `order_place_batch.json` | `docs/reference/webull/openapi/order-batch-place.md:421-439` (request, verbatim `jsonRequestBodyExample`), `:329-348` (response, verbatim documented example) | |
 | `order_replace.json` | `docs/reference/webull/openapi/common-order-replace.md:375-399` (request, narrowed to the 4 fields a LIMIT amendment uses), `:281-299` (ack response fields) | `replace_order/4` never parses the ack body — it reads the order back via `get_order/3` |
 | `order_cancel.json` | `docs/reference/webull/openapi/common-order-cancel.md:264-267` (request, verbatim), `:170-189` (response fields, unused by `cancel_order/3`) | |
-| `order_detail.json` | `docs/reference/webull/openapi/order-detail.md:203-356` (field examples), `:228-236` (status enum — both `SUBMITTED` and `FILLED` variants kept, so both the `:pending` and `:filled` mappings are exercised), `:36-53` (request query) | two response variants: `response_filled`, `response_submitted` |
+| `order_detail.json` | `docs/reference/webull/openapi/order-detail.md:203-356` (field examples; the query's `client_order_id` example and the response's are two unrelated values on that page, so a read-back check that the id returned equals the id asked for would reject the vendor's own example — none is made), `:228-236` (status enum — both `SUBMITTED` and `FILLED` variants kept, so both the `:pending` and `:filled` mappings are exercised), `:36-53` (request query) | two response variants: `response_filled`, `response_submitted` |
 | `order_open_list.json` | `docs/reference/webull/openapi/order-open.md:163,234,554-561` | `status: "SUBMITTED"` (the field's own literal example) decodes to `:pending` |
 | `order_history_list.json` | `docs/reference/webull/openapi/order-history.md:183,255-264,574-581`, `:53,63` (start/end format) | `status: "FILLED"` for the closed-order path |
 
@@ -102,7 +103,7 @@ each backs.
 | `fund_stmt_financial_alerts.json` | `financial-alert.md:166-212` | |
 | `fund_stmt_forecast_eps.json` | `forecast-eps.md:164-199` | bare array response |
 | `fund_stmt_income_statement.json` | `financial-income.md:186-370` | |
-| `fund_stmt_indicators.json` | `financial-indicators.md:186-228` | nested `{currency, values: {<metric>: [{fiscal_year, fiscal_period, value}]}}` shape |
+| `fund_stmt_indicators.json` | `financial-indicators.md:186-228` | nested `{currency, values: {<metric>: [{fiscal_year, fiscal_period, value}]}}` shape; `get_financials/4` regroups it into one statement per fiscal period |
 | `fund_stmt_industry_comparisons.json` | `industry-comparison.md:174-234` | `data` array of comparison items |
 
 All eleven above are assembled from each page's own per-property `example` values — none of
@@ -113,7 +114,7 @@ these pages carries a single full worked response.
 | fixture | page:lines | note |
 |---|---|---|
 | `fund_report_allocations.json` | `fund-allocation.md:168-215` | assembled |
-| `fund_report_brief.json` | `fund-brief.md:168-215` | assembled; bare object |
+| `fund_report_brief.json` | `fund-brief.md:168-215` | assembled; bare object. `managers[].is_incumbent` is omitted: the page types it `integer` ("1=yes") and gives it no `example`, so any value would be invented (an earlier revision of this fixture carried `1`) |
 | `fund_report_dividends.json` | `docs/reference/webull/openapi/fund-dividends.md:182-216` | assembled; `page_1`/`page_2` pair drives the `pagination_key` walk, page 1's key is the page's own documented example |
 | `fund_report_files.json` | `docs/reference/webull/openapi/fund-files.md:167-193` | assembled |
 | `fund_report_holdings.json` | `docs/reference/webull/openapi/fund-holdings.md:167-202` | assembled |

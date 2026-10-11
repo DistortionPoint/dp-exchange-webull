@@ -108,6 +108,14 @@ defmodule DpExchange.Webull.WatchlistsTest do
       assert query =~ "watchlist_id=wl-1"
     end
 
+    test "a membership read that names no watchlist id is refused, not filled in from the call" do
+      # The caller's own argument is not the venue's confirmation of it.
+      body = [%{"instruments" => [%{"symbol" => "AAPL"}]}]
+
+      assert {:error, {:missing_required_field, :id}} =
+               Rest.get_watchlist("wl-1", @credentials, plug: responding(body), retry_attempts: 0)
+    end
+
     test "an instrument row with no symbol is dropped rather than becoming nil" do
       body = [%{"watchlist_id" => "wl-1", "instruments" => [%{"instrument_id" => "1"}]}]
 
@@ -389,7 +397,10 @@ defmodule DpExchange.Webull.WatchlistsTest do
                )
 
       assert {:ok, _read} =
-               DpExchange.Webull.get_watchlist("wl-1", base ++ [plug: responding([%{}])])
+               DpExchange.Webull.get_watchlist(
+                 "wl-1",
+                 base ++ [plug: responding([%{"watchlist_id" => "wl-1"}])]
+               )
 
       assert {:ok, _created} =
                DpExchange.Webull.create_watchlist(

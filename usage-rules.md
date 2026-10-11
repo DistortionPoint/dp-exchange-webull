@@ -821,6 +821,16 @@ statement's shape.
 (`0=FY, 1=Q1 …`). The raw integer stays in `line_items`, and a code outside the legend leaves
 the label `nil` rather than inventing one.
 
+**`:indicators` answers one statement per fiscal period, oldest first.** The venue sends one
+object whose metrics each list their own `{fiscal_year, fiscal_period, value}` readings;
+those are regrouped by period, with that period's metrics (the venue's names, string values)
+in `line_items` beside `fiscal_year`, the raw `fiscal_period` and `currency`. `period_end`
+is `nil` for them — the venue publishes no end date for an indicator.
+
+**A dividend's `amount` is a cash amount only for a `CASH_DIVIDEND`** (or a row naming no
+`div_type`). Stock, scrip and the other types leave it `nil`; `details` holds the venue's row,
+`div_type` included.
+
 **`get_corporate_events/1` needs `:symbol`** — these calendars are per issuer, not
 market-wide — and without `:kind` reads *both* calendars, which is two requests.
 
@@ -916,12 +926,35 @@ order may be live: settle it with `get_order/3` and the id in the tuple.
 `create_token/1` returns one that is `PENDING`, and verification happens through an SMS code
 in the Webull app — which needs a person. `check_token/2` is the only call that tells
 `PENDING` from `EXPIRED` from `INVALID`; all three fail identically at the next request and
-each has a different remedy.
+each has a different remedy. A response with no `token`, or a `status` outside the venue's
+four (`PENDING`, `NORMAL`, `INVALID`, `EXPIRED`), is refused —
+`{:error, {:missing_required_field, field}}` / `{:error, {:unknown_token_status, status}}` —
+and `oauth_token/3` refuses a 2xx with no `access_token`. `NORMAL` is never inferred.
 
 `oauth_token/3` is one endpoint doing two jobs on a **different host**, with a form body.
 `opts[:code]` exchanges, `opts[:refresh_token]` refreshes, and exactly one is required.
 **Two expiries come back and they are not the same clock** — `rt_expires_in` is the one that
 ends the session.
+
+## Rows this package will not flatten, and rows that are not yours
+
+**An answer is for the symbol you asked, not the first row.** `get_price/3`,
+`get_top_of_book/3`, `quantization/2` and `get_event_order_book/3` answer
+`{:error, :not_in_response}` when the venue's rows name other symbols than the one asked for.
+
+**`get_positions/1` refuses what a `Position` cannot say**: a multi-leg option strategy and any
+event-contract row answer `{:error, {:unsupported_position, symbol, reason}}` for the whole
+list, rather than a position that drops the legs or the yes/no outcome. A `SINGLE` option
+row's `symbol` is the venue's, unverified as the contract symbol.
+
+**`get_auction_imbalance/2` labels each row with the auction the row names**
+(`PRE_OPEN` is `:opening`, `PRE_CLOSE` is `:closing`), which outside the publication windows can
+differ from the one you asked for.
+
+**`get_option_chain/2` keys strikes by value**: `"150.0"` and `"150"` are one cell at
+`Decimal.new("150")`.
+
+**`get_watchlist/2` takes its `id` from the venue's reply** and refuses a reply that names none.
 
 ## A write is sent once; a read is retried
 
