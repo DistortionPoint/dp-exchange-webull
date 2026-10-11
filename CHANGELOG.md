@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.121] - 2026-10-11
+
 ### Fixed
 
 - `get_order_book/3`, `get_trades/3`, `get_volume_profile/4` and `get_event_trades/3`
