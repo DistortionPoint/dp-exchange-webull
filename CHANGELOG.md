@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.131] - 2026-10-11
+
 ### Fixed
 
 - **`check_token/2` and `oauth_token/3` raised `FunctionClauseError` in the caller for a
