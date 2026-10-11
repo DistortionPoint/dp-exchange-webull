@@ -22,6 +22,46 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An order's numbers went to the wire as typed.** `quantity`, `amount` and the price the
+  order type sends were not checked, so `0`, a negative, `NaN`, `Infinity`, `true` or text
+  reached the venue (a map or a list raised out of `to_string/1` in the caller's process),
+  and `limit_price`, `stop_price` and `trailing_stop_step` went out as a JSON number for an
+  integer and as `"1.0e-8"` for a float, where the order and replace pages type all of them
+  as strings. They are now `{:error, {:invalid_number, field, value}}` with no request made
+  (by index in a batch) and are sent as strings in full notation. The fake runs the same
+  check.
+- **`replace_order/4` reported a change it did not send.** An `:order_type` or
+  `:time_in_force` with no wire name was dropped from the body while the call returned the
+  read-back order; a `nil` change counted as a non-empty amendment; `quantity` and the
+  prices of an integer went out as JSON numbers though `common-order-replace.md` types them
+  as strings. Now `{:unsupported_order_type, v}`, `{:unsupported_time_in_force, v}`,
+  `:no_order_changes` and strings respectively, in `Fake` too.
+- **`cancel_order/3`, `get_order/3` and `replace_order/4` accepted a `nil` or empty
+  `client_order_id`** and sent `"client_order_id": null`. Now
+  `{:error, {:invalid_client_order_id, id}}` after the account check and before signing
+  (new `Rest.validate_order_id/1`, used by `Fake` as well).
+- **`get_news/2` raised on a stream frame it could not read.** A `meta` frame whose `convId`
+  or `sessionId` was an object or a list, or a `text` frame whose `message` was one, raised
+  `Protocol.UndefinedError`; such a value now contributes nothing. `symbols` must all be
+  non-empty text (a tuple or a map in the list reached `Jason.encode!/1` and raised).
+- **`get_auction_imbalance/3` filed another symbol's row under the requested one.** Both NOII
+  pages carry `symbol` on each row; a row naming a different symbol is now
+  `{:error, :not_in_response}`. A row naming none is read as before.
+- **`get_order/3` and `get_watchlist/3` returned a record other than the one asked for.** A
+  reply naming a different `client_order_id` or `watchlist_id` is now
+  `{:error, :not_in_response}`. A watchlist reply naming none is still
+  `{:missing_required_field, :id}`.
+- **`get_order_book/3` sent any `depth`.** The futures page states "Valid range: 1 - 10";
+  `US_FUTURES` now refuses anything else as `{:depth_out_of_range, n, max: 10}`, and a stock
+  book needs a positive whole number (`min: 1`). Absent still sends the documented `10`.
+- **`list_futures_contracts/2` took `symbols: []` or `code: ""` as given** and sent an empty
+  parameter; it is now `:symbols_or_code_required`.
+- **`get_financials/4`, `get_corporate_events/1` and `get_filings/2` turned a row that was
+  not an object into a result.** A string or number in the list became a statement, event or
+  filing of all-`nil` fields; the read is now `{:error, :unexpected_response_shape}`.
+
 ## [0.4.125] - 2026-10-11
 
 ### Fixed

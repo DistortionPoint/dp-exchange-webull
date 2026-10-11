@@ -974,6 +974,21 @@ repeated order. So `place_order`, `place_orders`, `replace_order`, `cancel_order
 "unknown": read the order or watchlist back before sending it again. Pass `:retry_attempts`
 yourself only if you have your own reason to believe a repeat is harmless.
 
+## An order's numbers and ids are checked before anything is signed
+
+`quantity`, `amount`, and the price fields the order type sends (`price`, `stop_price`,
+`trailing_stop_step`) must be a finite number above zero, in any of `Decimal`, integer, float
+or numeric text: otherwise `{:error, {:invalid_number, field, value}}`, by index inside a
+batch. They go out as the venue's strings in full notation (`"0.00000001"`, never `"1.0e-8"`
+and never a JSON number). `replace_order/4` holds its `changes` to the same rule, treats a
+`nil` value as no change (`{:error, :no_order_changes}` when nothing is left), and refuses an
+`:order_type` or `:time_in_force` it has no wire name for
+(`{:unsupported_order_type, v}` / `{:unsupported_time_in_force, v}`) instead of dropping it.
+`cancel_order/3`, `get_order/3` and `replace_order/4` refuse a missing or empty
+`client_order_id` as `{:error, {:invalid_client_order_id, id}}`. `get_order_book/3` on
+`US_FUTURES` takes `depth` 1 to 10 (`{:depth_out_of_range, n, max: 10}`), as the venue's page
+states. The fake refuses all of these identically.
+
 ## Error shapes that mean "do not act on this answer"
 
 Returned by calls that previously answered `{:ok, _}` carrying a value you could not act on.

@@ -1691,18 +1691,26 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       modify = fixture["request"]["modify_orders"] |> List.first()
       me = self()
 
+      # The two vendor pages' examples name different orders. A read-back naming another
+      # order is refused (`:not_in_response`), so the detail is re-keyed to the order this
+      # test replaces.
+      read_back =
+        detail["response_filled"]
+        |> Jason.encode!()
+        |> String.replace(detail["response_filled"]["client_order_id"], modify["client_order_id"])
+
       plug = fn conn ->
         {:ok, raw, conn} = Plug.Conn.read_body(conn)
         send(me, {:request, conn.request_path, raw})
 
         body =
           if conn.request_path =~ "replace",
-            do: fixture["ack_response"],
-            else: detail["response_filled"]
+            do: Jason.encode!(fixture["ack_response"]),
+            else: read_back
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(body))
+        |> Plug.Conn.resp(200, body)
       end
 
       assert {:ok, order} =
@@ -1734,7 +1742,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert_receive {:request, "/trading/orders/get", _raw2}
 
       detail_row = detail["response_filled"]["orders"] |> List.first()
-      assert order.id == detail_row["client_order_id"]
+      # The read-back was re-keyed to the replaced order above.
+      assert order.id == modify["client_order_id"]
       assert order.status == :filled
       assert Decimal.equal?(order.price, Decimal.new(detail_row["limit_price"]))
     end
@@ -1763,7 +1772,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       fixture = fixture!("order_detail.json")
 
       assert {:ok, order} =
-               Rest.get_order(@credentials, fixture["request_query"]["client_order_id"],
+               Rest.get_order(@credentials, fixture["response_filled"]["client_order_id"],
                  plug: responding(fixture["response_filled"]),
                  account_id: fixture["request_query"]["account_id"],
                  retry_attempts: 0
@@ -1788,7 +1797,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       fixture = fixture!("order_detail.json")
 
       assert {:ok, order} =
-               Rest.get_order(@credentials, fixture["request_query"]["client_order_id"],
+               Rest.get_order(@credentials, fixture["response_submitted"]["client_order_id"],
                  plug: responding(fixture["response_submitted"]),
                  account_id: fixture["request_query"]["account_id"],
                  retry_attempts: 0
@@ -2023,7 +2032,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       body = fixture!("watchlist_get.json")
 
       assert {:ok, watchlist} =
-               Rest.get_watchlist("627b139c79619a70b3f91dba", @credentials,
+               Rest.get_watchlist("12345678", @credentials,
                  plug: responding(body),
                  retry_attempts: 0
                )
@@ -2037,9 +2046,12 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     test "the documented query parameter example reaches the wire" do
       me = self()
 
+      # The page's two examples name different ids; the reply must name the one asked for.
+      body = Map.put(fixture!("watchlist_get.json"), "watchlist_id", "627b139c79619a70b3f91dba")
+
       assert {:ok, _watchlist} =
                Rest.get_watchlist("627b139c79619a70b3f91dba", @credentials,
-                 plug: capturing(fixture!("watchlist_get.json"), me),
+                 plug: capturing(body, me),
                  retry_attempts: 0
                )
 

@@ -679,6 +679,7 @@ defmodule DpExchange.Webull.Fake do
     with :ok <- fake_replaceable(instrument),
          :ok <- Rest.validate_amendment(order_type, changes),
          :ok <- fake_account(opts),
+         :ok <- Rest.validate_order_id(client_order_id),
          :ok <- credentialed(credentials),
          {:ok, base} <- replaceable_order(client_order_id) do
       # Remembered (per process) under the same id, as the venue amends in place and
@@ -1545,6 +1546,7 @@ defmodule DpExchange.Webull.Fake do
     with_injection(fn ->
       # Account first, credentials second — matching `Rest.cancel_order/3`'s own order.
       with :ok <- fake_account(opts),
+           :ok <- Rest.validate_order_id(client_order_id),
            :ok <- credentialed(credentials) do
         case lookup_order(client_order_id) do
           {:ok, order} ->
@@ -1563,6 +1565,7 @@ defmodule DpExchange.Webull.Fake do
     with_injection(fn ->
       # Account first, credentials second — matching `Rest.get_order/3`'s own order.
       with :ok <- fake_account(opts),
+           :ok <- Rest.validate_order_id(client_order_id),
            :ok <- credentialed(credentials) do
         case lookup_order(client_order_id) do
           {:ok, order} -> {:ok, order}

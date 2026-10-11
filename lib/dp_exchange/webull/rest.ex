@@ -1759,14 +1759,17 @@ defmodule DpExchange.Webull.Rest do
 
     with :ok <- previewable(instrument),
          :ok <- amendable(order_type, changes),
-         {:ok, account_id} <- account_id(opts) do
+         {:ok, account_id} <- account_id(opts),
+         :ok <- validate_order_id(client_order_id) do
+      # Money fields as the venue's strings (`common-order-replace.md` types all four as
+      # `"type": "string"`); an integer `quantity` went out as a JSON number.
       modification =
         %{"client_order_id" => client_order_id}
         |> put_present("order_type", changes |> Map.get(:order_type) |> order_type_name())
-        |> put_present("quantity", Map.get(changes, :quantity))
-        |> put_present("limit_price", Map.get(changes, :price))
-        |> put_present("stop_price", Map.get(changes, :stop_price))
-        |> put_present("trailing_stop_step", Map.get(changes, :trailing_stop_step))
+        |> put_number("quantity", Map.get(changes, :quantity))
+        |> put_number("limit_price", Map.get(changes, :price))
+        |> put_number("stop_price", Map.get(changes, :stop_price))
+        |> put_number("trailing_stop_step", Map.get(changes, :trailing_stop_step))
         |> put_present("time_in_force", changes |> Map.get(:time_in_force) |> tif_name())
 
       body = %{"account_id" => account_id, "modify_orders" => [modification]}
@@ -1810,9 +1813,32 @@ defmodule DpExchange.Webull.Rest do
 
       {:ok, allowed} ->
         case Map.keys(changes) -- allowed do
-          [] -> present?(changes)
+          [] -> amendment_values(changes)
           rejected -> {:error, {:unsupported_order_edit, order_type, rejected}}
         end
+    end
+  end
+
+  # **What an amendment carries must be sendable, or the call is refused.** A change whose
+  # value is `nil` is no change (it was never sent, so `%{quantity: nil}` passed the
+  # not-empty check and the venue re-accepted the order unchanged); an `:order_type` or
+  # `:time_in_force` this package has no wire name for was dropped from the body, so the
+  # caller was told an amendment happened that never reached the venue; and a quantity or
+  # price that is not a number above zero was sent as typed.
+  defp amendment_values(changes) do
+    set = for {field, value} <- changes, not is_nil(value), into: %{}, do: {field, value}
+
+    with :ok <- present?(set),
+         :ok <- positive_numbers(set, [:quantity, :price, :stop_price, :trailing_stop_step]),
+         :ok <- known_name(set, :order_type, &order_type_name/1, :unsupported_order_type) do
+      known_name(set, :time_in_force, &tif_name/1, :unsupported_time_in_force)
+    end
+  end
+
+  defp known_name(set, field, wire_name, error) do
+    case Map.fetch(set, field) do
+      {:ok, value} -> if wire_name.(value), do: :ok, else: {:error, {error, value}}
+      :error -> :ok
     end
   end
 
@@ -1820,6 +1846,20 @@ defmodule DpExchange.Webull.Rest do
   # re-accept the order unchanged, which looks like success and achieves nothing.
   defp present?(changes) when map_size(changes) == 0, do: {:error, :no_order_changes}
   defp present?(_changes), do: :ok
+
+  @doc """
+  Whether `client_order_id` names an order a call can address: text, and not empty.
+
+  The check `cancel_order/3`, `get_order/3` and `replace_order/4` make after the account and
+  before anything is signed, for `DpExchange.Webull.Fake` to refuse what the real path
+  refuses. A `nil` or an empty id went out as `"client_order_id": null` (or `=`) for the venue
+  to answer, in whatever way it chose, about no order at all. Length is not checked here: the
+  32-character cap is the venue's for an id the CALLER chose (`place_order/3` enforces it),
+  and an id the venue issued is not this package's to refuse.
+  """
+  @spec validate_order_id(term()) :: :ok | {:error, {:invalid_client_order_id, term()}}
+  def validate_order_id(id) when is_binary(id) and id != "", do: :ok
+  def validate_order_id(id), do: {:error, {:invalid_client_order_id, id}}
 
   @doc """
   The order book for an equity, ETF or future — `/market-data/stocks/depths/list`, or
@@ -1866,7 +1906,8 @@ defmodule DpExchange.Webull.Rest do
   def get_order_book(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
-    with {:ok, path} <- book_path(category) do
+    with {:ok, path} <- book_path(category),
+         :ok <- book_depth(category, Keyword.get(opts, :depth)) do
       params =
         %{
           "symbol" => symbol,
@@ -1882,6 +1923,17 @@ defmodule DpExchange.Webull.Rest do
       end
     end
   end
+
+  # **A depth the venue states a range for is checked before the request.** The futures page
+  # (`futures-depth-of-book.md`) says "Valid range: 1 – 10"; the stock page states none beyond
+  # "L1-1 level, L2-default 10 levels", so there only a positive whole number is required. A
+  # string, `0` or a negative went out as `depth=...` for the venue to refuse, or to read as it
+  # liked. Absent is the documented `10` sent by `get_order_book/3`.
+  defp book_depth(_category, nil), do: :ok
+  defp book_depth("US_FUTURES", depth) when is_integer(depth) and depth in 1..10, do: :ok
+  defp book_depth("US_FUTURES", depth), do: {:error, {:depth_out_of_range, depth, max: 10}}
+  defp book_depth(_category, depth) when is_integer(depth) and depth >= 1, do: :ok
+  defp book_depth(_category, depth), do: {:error, {:depth_out_of_range, depth, min: 1}}
 
   # Futures have their own depth endpoint, at the same two-sided shape. `US_EVENT` does not
   # belong here at all — see `get_event_order_book/3`.
@@ -2189,7 +2241,8 @@ defmodule DpExchange.Webull.Rest do
   defp auction_type(other), do: {:error, {:unsupported_auction, other}}
 
   defp to_imbalance(row, symbol, requested, observed_at) do
-    with {:ok, auction} <- row_auction(row, requested) do
+    with :ok <- imbalance_symbol(row, symbol),
+         {:ok, auction} <- row_auction(row, requested) do
       {:ok,
        %AuctionImbalance{
          symbol: symbol,
@@ -2207,6 +2260,17 @@ defmodule DpExchange.Webull.Rest do
          observed_at: observed_at,
          provider: :webull
        }}
+    end
+  end
+
+  # **A row is the requested symbol's, or the read is refused.** Both NOII pages document
+  # `symbol` on each row, and the rows were stamped with the symbol ASKED for whatever they
+  # named, so another instrument's imbalance came back filed under this one with every number
+  # in it plausible. A row that names no symbol is read as the requested one, as ever.
+  defp imbalance_symbol(row, symbol) do
+    case value(row, ["symbol"]) do
+      nil -> :ok
+      named -> if same_symbol?(named, symbol), do: :ok, else: {:error, :not_in_response}
     end
   end
 
@@ -2790,6 +2854,8 @@ defmodule DpExchange.Webull.Rest do
          # caller asked for, publishing the caller's own argument as though the venue had
          # confirmed it (`get_order/3` refuses the same shape for the same reason).
          {:ok, id} <- venue_watchlist_id(row),
+         # A different watchlist than the one asked for is not this one's membership.
+         :ok <- if(id == watchlist_id, do: :ok, else: {:error, :not_in_response}),
          {:ok, instruments} <- list_value(row, ["instruments"]) do
       symbols =
         instruments
@@ -3251,13 +3317,21 @@ defmodule DpExchange.Webull.Rest do
           {:ok, [FinancialStatement.t()]} | {:error, term()} | {:refused, term()}
   def get_financials(symbol, kind, credentials, opts)
       when kind in @statement_kinds do
-    with {:ok, rows} <- get_fundamental(statement_endpoint(kind), symbol, credentials, opts) do
+    with {:ok, rows} <- get_fundamental(statement_endpoint(kind), symbol, credentials, opts),
+         {:ok, rows} <- object_rows(rows) do
       to_statements(rows, symbol, kind)
     end
   end
 
   def get_financials(_symbol, kind, _credentials, _opts),
     do: {:error, {:unsupported_statement_kind, kind}}
+
+  # A row that is not an object (a string or a number in the list) is not a statement, a
+  # calendar entry or a filing. It used to become one with every field `nil` and the stray
+  # value as its `line_items` or `details`; the whole read is refused instead.
+  defp object_rows(rows) do
+    if Enum.all?(rows, &is_map/1), do: {:ok, rows}, else: {:error, :unexpected_response_shape}
+  end
 
   defp statement_endpoint(:income), do: :income_statement
   defp statement_endpoint(kind), do: kind
@@ -3427,12 +3501,11 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, symbol} <- required_symbol(opts),
          {:ok, kinds} <- corporate_event_kinds(Keyword.get(opts, :kind)) do
       Enum.reduce_while(kinds, {:ok, []}, fn kind, {:ok, acc} ->
-        case get_fundamental(calendar_endpoint(kind), symbol, credentials, opts) do
-          {:ok, rows} ->
-            {:cont, {:ok, acc ++ Enum.map(rows, &to_corporate_event(&1, symbol, kind))}}
-
-          error ->
-            {:halt, error}
+        with {:ok, rows} <- get_fundamental(calendar_endpoint(kind), symbol, credentials, opts),
+             {:ok, rows} <- object_rows(rows) do
+          {:cont, {:ok, acc ++ Enum.map(rows, &to_corporate_event(&1, symbol, kind))}}
+        else
+          error -> {:halt, error}
         end
       end)
     end
@@ -3540,7 +3613,8 @@ defmodule DpExchange.Webull.Rest do
           {:ok, [Filing.t()]} | {:error, term()} | {:refused, term()}
   def get_filings(symbol, credentials, opts) do
     with {:ok, envelope_rows} <- get_fundamental(:filings, symbol, credentials, opts),
-         {:ok, filing_rows} <- filings_from_envelope(envelope_rows) do
+         {:ok, filing_rows} <- filings_from_envelope(envelope_rows),
+         {:ok, filing_rows} <- object_rows(filing_rows) do
       {:ok, Enum.map(filing_rows, &to_filing(&1, symbol))}
     end
   end
@@ -3636,10 +3710,18 @@ defmodule DpExchange.Webull.Rest do
 
   defp required_symbols(opts) do
     case Keyword.get(opts, :symbols) do
-      [_first | _rest] = symbols -> {:ok, symbols}
-      symbol when is_binary(symbol) -> {:ok, [symbol]}
+      [_first | _rest] = symbols -> all_symbols(symbols)
+      symbol when is_binary(symbol) and symbol != "" -> {:ok, [symbol]}
       _missing -> {:error, :symbols_required}
     end
+  end
+
+  # Every entry is text. A tuple, a map or a pid in the list reached `Jason.encode!/1` in
+  # `post_sse/4` and raised in the caller's process; an empty string names nothing.
+  defp all_symbols(symbols) do
+    if Enum.all?(symbols, &(is_binary(&1) and &1 != "")),
+      do: {:ok, symbols},
+      else: {:error, :symbols_required}
   end
 
   defp required_symbol(opts) do
@@ -3705,18 +3787,32 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # An id is text or a number. `to_string/1` over a map or a list raised
+  # `Protocol.UndefinedError` out of `get_news/2` on a `meta` frame the venue sent with an
+  # object where the id belongs; such a frame names no id, and the next one may.
   defp sse_conversation_id(events) do
     Enum.find_value(events, fn
-      %{"type" => "meta", "args" => %{"convId" => conv_id}} -> to_string(conv_id)
-      %{"type" => "meta", "args" => %{"sessionId" => session_id}} -> to_string(session_id)
-      _other -> nil
+      %{"type" => "meta", "args" => %{} = args} ->
+        sse_id(Map.get(args, "convId")) || sse_id(Map.get(args, "sessionId"))
+
+      _other ->
+        nil
     end)
   end
 
+  defp sse_id(id) when is_binary(id) and id != "", do: id
+  defp sse_id(id) when is_integer(id), do: Integer.to_string(id)
+  defp sse_id(_not_an_id), do: nil
+
+  # Only a text chunk's text is the summary. `Enum.map_join/3` over a `message` that was a map
+  # or a list raised out of `get_news/2`; one that is not text contributes nothing.
   defp sse_summary_text(events) do
     events
-    |> Enum.filter(&match?(%{"type" => "text"}, &1))
-    |> Enum.map_join("", &Map.get(&1, "message", ""))
+    |> Enum.flat_map(fn
+      %{"type" => "text", "message" => message} when is_binary(message) -> [message]
+      _other -> []
+    end)
+    |> Enum.join()
   end
 
   # The five screeners, each with its own required parameters. `gainers_losers` needs a
@@ -3921,12 +4017,16 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp symbols_or_code(opts) do
-    if Keyword.get(opts, :symbols) || Keyword.get(opts, :code) do
+    # `[]` and `""` name nothing: they used to count as given, and went out as an empty
+    # `symbols=` the venue answers in a way a caller cannot tell from "no contracts listed".
+    if Enum.any?([:symbols, :code], &(opts |> Keyword.get(&1) |> symbols_param() |> named?())) do
       :ok
     else
       {:error, :symbols_or_code_required}
     end
   end
+
+  defp named?(param), do: is_binary(param) and String.trim(param) != ""
 
   defp symbols_param(nil), do: nil
   defp symbols_param(list) when is_list(list), do: Enum.join(list, ",")
@@ -4742,6 +4842,9 @@ defmodule DpExchange.Webull.Rest do
   # own `stringify/1` pass still turns it into a query string value where one is built.
   defp put_present(map, key, value) when is_integer(value), do: Map.put(map, key, value)
 
+  defp put_present(map, key, value) when is_float(value),
+    do: Map.put(map, key, wire_number(value))
+
   defp put_present(map, key, value), do: Map.put(map, key, to_string(value))
 
   # **`Decimal.to_string/1` defaults to SCIENTIFIC notation**, and `to_string/1` on a
@@ -4756,8 +4859,62 @@ defmodule DpExchange.Webull.Rest do
   # `option_decimal_param/1` in this same module already said `:normal` and the ORDER path
   # did not. Guarding `put_present/3` as well as the two size fields means a money field
   # added to a map later cannot reintroduce it.
+  #
+  # A float and a numeric string get the same treatment. `to_string(1.0e-8)` is `"1.0e-8"` and a
+  # caller's `"1e-8"` went out as typed: neither is a number the venue reads as one.
   defp wire_number(%Decimal{} = value), do: Decimal.to_string(value, :normal)
+
+  defp wire_number(value) when is_float(value),
+    do: value |> Decimal.from_float() |> wire_number()
+
+  defp wire_number(value) when is_binary(value) do
+    case decimal(value) do
+      nil -> value
+      parsed -> wire_number(parsed)
+    end
+  end
+
   defp wire_number(value), do: to_string(value)
+
+  # A money field of a JSON body: always the venue's string form (`order-*.md` and
+  # `common-order-replace.md` type `quantity`, `limit_price`, `stop_price` and
+  # `trailing_stop_step` as `"type": "string"`). `put_present/3` keeps an integer an integer,
+  # which is right for `sort` and `count` and sent `"limit_price": 10` for a price of `10`.
+  defp put_number(map, _key, nil), do: map
+  defp put_number(map, key, value), do: Map.put(map, key, wire_number(value))
+
+  # **A number the order will carry must be a finite number above zero.** `0`, a negative, a
+  # `NaN`, an `Infinity`, a boolean or text that is not a number all used to be sent as typed
+  # (or, for a map or a list, raised out of `to_string/1` in the caller's process) on a
+  # money-moving write; the venue's refusal then arrived after the request and named a field
+  # the caller never wrote. `:error` is `{:invalid_number, field, value}` for the first
+  # offending field, in the order given.
+  defp positive_numbers(request, fields) do
+    Enum.find_value(fields, :ok, fn field ->
+      value = Map.get(request, field)
+
+      if is_nil(value) or positive_number?(value),
+        do: nil,
+        else: {:error, {:invalid_number, field, value}}
+    end)
+  end
+
+  defp positive_number?(%Decimal{} = value) do
+    not (Decimal.nan?(value) or Decimal.inf?(value) or absurd_exponent?(value)) and
+      Decimal.gt?(value, 0)
+  end
+
+  defp positive_number?(value) when is_integer(value), do: value > 0
+  defp positive_number?(value) when is_float(value), do: value > 0.0
+
+  defp positive_number?(value) when is_binary(value) do
+    case decimal(value) do
+      nil -> false
+      parsed -> Decimal.gt?(parsed, 0)
+    end
+  end
+
+  defp positive_number?(_not_a_number), do: false
 
   defp decimal(nil), do: nil
   defp decimal(%Decimal{} = value), do: value
@@ -5003,6 +5160,8 @@ defmodule DpExchange.Webull.Rest do
     with :ok <- required_order_identity(request),
          {:ok, order_type} <- batch_order_type(request),
          :ok <- required_order_prices(request, order_type),
+         :ok <- positive_numbers(request, [:quantity, :amount]),
+         :ok <- positive_numbers(request, sent_price_fields(order_type)),
          :ok <- batch_time_in_force(request),
          {:ok, sizing} <- batch_entrust(request),
          {:ok, support_trading_session} <- batch_support_trading_session(request) do
@@ -5018,7 +5177,7 @@ defmodule DpExchange.Webull.Rest do
           "support_trading_session" => support_trading_session
         }
         |> Map.merge(sizing)
-        |> put_present("limit_price", price_for(request, order_type))
+        |> put_number("limit_price", price_for(request, order_type))
 
       {:ok, leaf}
     end
@@ -5212,8 +5371,10 @@ defmodule DpExchange.Webull.Rest do
     instrument = instrument_type(request)
 
     with :ok <- required_order_identity(request),
+         :ok <- positive_numbers(request, [:quantity, :amount]),
          {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
          :ok <- required_order_prices(request, order_type),
+         :ok <- positive_numbers(request, sent_price_fields(order_type)),
          {:ok, session} <- support_trading_session(request) do
       leaf =
         %{
@@ -5227,9 +5388,9 @@ defmodule DpExchange.Webull.Rest do
           "entrust_type" => entrust
         }
         |> Map.merge(sizing)
-        |> put_present("limit_price", price_for(request, order_type))
-        |> put_present("stop_price", stop_for(request, order_type))
-        |> put_present("trailing_stop_step", trailing_stop_step_for(request, order_type))
+        |> put_number("limit_price", price_for(request, order_type))
+        |> put_number("stop_price", stop_for(request, order_type))
+        |> put_number("trailing_stop_step", trailing_stop_step_for(request, order_type))
         |> put_present("expire_date", expire_date(request, tif))
         |> put_present("event_outcome", Map.get(request, :event_outcome))
         |> put_present("support_trading_session", session)
@@ -5396,20 +5557,19 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp required_order_prices(request, order_type) do
-    required =
-      case order_type do
-        "LIMIT" -> [:price]
-        "STOP_LOSS" -> [:stop_price]
-        "STOP_LOSS_LIMIT" -> [:price, :stop_price]
-        "TRAILING_STOP_LOSS" -> [:trailing_stop_step]
-        _other -> []
-      end
-
-    case Enum.find(required, &is_nil(Map.get(request, &1))) do
+    case Enum.find(sent_price_fields(order_type), &is_nil(Map.get(request, &1))) do
       nil -> :ok
       field -> {:error, {:missing_required_field, field}}
     end
   end
+
+  # The request fields an order type puts on the wire as a price, which are the ones it
+  # requires and the only ones checked (a `:price` left on a market order is never sent).
+  defp sent_price_fields("LIMIT"), do: [:price]
+  defp sent_price_fields("STOP_LOSS"), do: [:stop_price]
+  defp sent_price_fields("STOP_LOSS_LIMIT"), do: [:price, :stop_price]
+  defp sent_price_fields("TRAILING_STOP_LOSS"), do: [:trailing_stop_step]
+  defp sent_price_fields(_other), do: []
 
   defp price_for(request, "LIMIT"), do: Map.get(request, :price)
   defp price_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :price)
@@ -5535,7 +5695,8 @@ defmodule DpExchange.Webull.Rest do
   @spec cancel_order(map(), String.t(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, client_order_id, opts) do
-    with {:ok, account_id} <- account_id(opts) do
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- validate_order_id(client_order_id) do
       body = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, send_once(opts)) do
@@ -5561,7 +5722,8 @@ defmodule DpExchange.Webull.Rest do
   @spec get_order(map(), String.t(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, client_order_id, opts) do
-    with {:ok, account_id} <- account_id(opts) do
+    with {:ok, account_id} <- account_id(opts),
+         :ok <- validate_order_id(client_order_id) do
       params = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, body} <- get("/trading/orders/get", params, credentials, opts),
@@ -5569,7 +5731,8 @@ defmodule DpExchange.Webull.Rest do
            # Refused rather than filled in from `client_order_id`: that would be publishing
            # the caller's own argument as though the venue had confirmed it.
            {:ok, %Order{id: id} = order} when is_binary(id) <- to_order(group) do
-        {:ok, order}
+        # An order the venue names differently is another order, not this one.
+        if id == client_order_id, do: {:ok, order}, else: {:error, :not_in_response}
       else
         {:ok, %Order{id: nil}} -> {:error, {:missing_required_field, :id}}
         {:error, _reason} = error -> error
