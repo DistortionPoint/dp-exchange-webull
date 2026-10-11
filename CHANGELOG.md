@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.129] - 2026-10-11
+
 ### Fixed
 
 - **`get_order_book/3` built a level `Core.Types.OrderBook` refuses.** `OrderBook.level/0` is
