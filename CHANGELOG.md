@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.138] - 2026-10-12
+
 Family market-data and order conventions (tick R). Nothing here was measured against the live
 venue; what is unmeasured is said on each line.
 
