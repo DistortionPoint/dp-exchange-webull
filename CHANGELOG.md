@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The Fake's order book ignored `:depth`.** It validated the option and then returned its whole
+  canned ladder; it now returns at most `depth` levels per side, as the real request asks for.
+
+- **The bar grid check no longer refuses legitimate session bars.** tick R applied the strict
+  UTC grid to every category, which would refuse US stock `1h`/`2h`/`4h` bars opening at
+  09:30 New York (13:30Z/14:30Z) and `1d` bars stamped at New York midnight. Crypto keeps
+  the strict grid; stock, option, futures and event bars now accept: 30 minutes and under on
+  the UTC grid, wider intraday widths at minute 0 or 30 (13:45Z is still refused), and a
+  `1d`/`1w`/`1M`/`1y` bar at 00:00Z or New York midnight (04:00Z/05:00Z) mapped to 00:00 UTC
+  of that date, as Schwab does. Anything else is `{:unaligned_candle, time}`. Unmeasured
+  against a live venue. The `Fake` models crypto only and keeps the strict grid.
+- **Crypto bars with a `:start` and no `:limit` send `count=1200`** (as stock does), so the
+  range-reached check works past the venue's default of 200.
+- **Option bars send `real_time_required=true` for `include_partial: true`.** The parameter is
+  optional there (venue default `false`), and it was never sent, so a caller who asked for
+  the forming bar was answered by a venue that never included it. Without the option the
+  request is unchanged.
+- **The stream reads the venue's `"null"` (or an empty) bid/ask price as no resting order on
+  that side, as `Rest.get_top_of_book/3` does.** The tick-R change refused the whole frame for
+  it, so the same spelling gave a one-sided book over REST and a dropped frame (with a
+  `:data_quality` notice) on the stream. A side that is `NaN`, text or negative still refuses
+  the frame, and a frame with neither side priced is still no quote. REST also reads `""` as
+  no price on a side.
+
 ## [0.4.138] - 2026-10-12
 
 Family market-data and order conventions (tick R). Nothing here was measured against the live

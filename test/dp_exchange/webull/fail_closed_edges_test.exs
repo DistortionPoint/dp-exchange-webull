@@ -55,7 +55,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
       now = Timeframe.boundary(DateTime.utc_now(), "1m")
 
       rows =
-        for n <- 1..200 do
+        for n <- 1..1_200 do
           at = now |> DateTime.add(-n * 60) |> DateTime.to_unix(:millisecond)
 
           %{
@@ -71,11 +71,13 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
       body = [%{"symbol" => "BTCUSD", "result" => rows}]
       plug = fn conn -> Req.Test.json(conn, body) end
 
-      assert {:error, {:range_too_wide, 200}} =
+      # A `:start` with no `:limit` asks for the page maximum (1200), so a full 1200-bar page
+      # whose oldest bar is still after `:start` is the one refused.
+      assert {:error, {:range_too_wide, 1_200}} =
                Rest.get_historical_prices(
                  "BTC-USD",
                  "1m",
-                 [start: DateTime.add(now, -86_400)],
+                 [start: DateTime.add(now, -172_800)],
                  @credentials,
                  plug: plug,
                  retry_attempts: 0

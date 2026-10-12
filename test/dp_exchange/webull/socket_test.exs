@@ -307,7 +307,7 @@ defmodule DpExchange.Webull.SocketTest do
       # which reads as an empty side rather than one the package could not read.
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
 
-      for bad <- ["null", "NaN", "abc", "-1"] do
+      for bad <- ["NaN", "abc", "-1"] do
         frame =
           publish(
             "quote",
@@ -318,8 +318,27 @@ defmodule DpExchange.Webull.SocketTest do
         assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
         refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
-        assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
+        assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 5_000
       end
+    end
+
+    test "the venue's \"null\" no-price spelling is no resting order on that side, as in REST" do
+      # `Rest.get_top_of_book/3` reads "null" as no price on that side; the stream must not
+      # refuse the spelling the REST call of the same venue accepts.
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+      # Field 2 is the ask side and field 3 the bid side (`QuoteProto.decode_quote/1`).
+      null_ask = proto_field(1, "null") <> proto_field(2, "7")
+      bid = proto_field(1, "77845.79") <> proto_field(2, "0.045")
+
+      frame =
+        publish("quote", proto_field(1, basic) <> proto_field(2, null_ask) <> proto_field(3, bid))
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}, 5_000
+      assert top.ask == nil
+      assert top.ask_size == nil
+      assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
     end
 
     test "a side priced at zero is no resting order: nil, and no size" do

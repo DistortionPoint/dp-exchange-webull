@@ -478,10 +478,14 @@ defmodule DpExchange.Webull.Rest do
       `{:error, {:range_too_wide, count}}` (was `{:range_exceeds_count, count}`), never a
       short answer. Stock bars send `count` (the `:limit`, else the maximum when a `:start`
       is given) so the venue's default of 200 does not cut a range short.
-    * **A bar must sit on its width's grid** (`DpExchange.Core.Timeframe.aligned?/2`), else
-      the reply is `{:error, {:unaligned_candle, time}}`. **Unmeasured**: the pages call
-      `time` "Bar UTC time" without saying it is the open; this includes whether daily and
-      longer stock bars are stamped at 00:00 UTC of the session date.
+    * **A bar must sit on its width's grid**, else the reply is
+      `{:error, {:unaligned_candle, time}}`. Crypto uses the strict UTC grid
+      (`DpExchange.Core.Timeframe.aligned?/2`). Stock, option, futures and event bars are
+      session-anchored: widths of 30 minutes and under keep the UTC grid, `1h` and wider
+      intraday widths need only a 30-minute alignment (a 09:30 New York open is 13:30Z or
+      14:30Z), and a daily, weekly, monthly or yearly bar stamped at 00:00Z or at New York
+      midnight (04:00Z EDT, 05:00Z EST) is mapped to 00:00 UTC of that date. **Unmeasured**:
+      the pages call `time` "Bar UTC time" without saying it is the open.
     * An open, high, low or close of zero or less is `{:error, {:non_positive_price, field,
       raw}}`.
   """
@@ -603,6 +607,13 @@ defmodule DpExchange.Webull.Rest do
           "timespan" => timespan
         }
         |> put_present("count", Keyword.get(opts, :limit))
+        # `real_time_required` is optional here (default false, "Include the latest data"),
+        # so only a caller who asked for the forming bar sends it; otherwise
+        # `include_partial: true` would be answered by a venue that never sent that bar.
+        |> put_present(
+          "real_time_required",
+          if(Keyword.get(opts, :include_partial) == true, do: "true")
+        )
 
       with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
@@ -629,6 +640,15 @@ defmodule DpExchange.Webull.Rest do
     native = SymbolFormat.to_exchange_symbol(symbol)
 
     with {:ok, timespan} <- timespan(timeframe) do
+      # The caller's `:limit`; else, when a `:start` is given, the page maximum (1200) so the
+      # range can be reached past the venue's default of 200 (as the stock path does); else
+      # nothing (the venue's default, the latest bars).
+      count =
+        case {Keyword.get(opts, :limit), Keyword.get(range, :start)} do
+          {nil, %DateTime{}} -> @crypto_bar_max
+          {limit, _start} -> limit
+        end
+
       # `symbols`, not `symbol`. The replacement endpoint took a rename with the path, and
       # `real_time_required` is **required** where the old path had no such parameter.
       # `false` asks for completed bars only: an in-progress bar has a boundary that has
@@ -657,12 +677,12 @@ defmodule DpExchange.Webull.Rest do
           "timespan" => timespan,
           "real_time_required" => "false"
         }
-        |> put_present("count", Keyword.get(opts, :limit))
+        |> put_present("count", count)
 
       with :ok <- crypto_count_within_limit(Keyword.get(opts, :limit)),
            {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_bars(body, symbol, timeframe),
-           :ok <- range_reached(bars, range, Keyword.get(opts, :limit) || @crypto_bar_default) do
+           :ok <- range_reached(bars, range, count || @crypto_bar_default) do
         {:ok, bars |> Enum.filter(&within?(&1, range)) |> finish_bars(timeframe, opts)}
       end
     end
@@ -896,7 +916,8 @@ defmodule DpExchange.Webull.Rest do
   # pair answers it) and is read as no price on that side, as is an absent field.
   defp quote_side_price(row, keys, field) do
     case value(row, keys) do
-      absent when absent in [nil, "null"] -> {:ok, nil}
+      # `""` is an empty field, the same "nothing there" `QuoteProto` reads it as.
+      absent when absent in [nil, "null", ""] -> {:ok, nil}
       raw -> raw |> required_decimal(field) |> side_price(field, raw)
     end
   end
@@ -3002,13 +3023,15 @@ defmodule DpExchange.Webull.Rest do
   ## A bar's `time` must sit on its width
 
   The page says only "Bar UTC time" (`historical-bars.md`), not that it is the open. A bar
-  whose time is not aligned to its width (`DpExchange.Core.Timeframe.aligned?/2`) refuses the
-  whole reply `{:error, {:unaligned_candle, time}}`. **Unmeasured:** whether daily, weekly,
-  monthly and yearly stock bars are stamped at 00:00 UTC of the session date or at the
-  exchange-local midnight (which is not a UTC day boundary and would be refused here). When a
-  live read shows the local stamp, the mapping to the session date belongs in `decode_bar/3`;
-  until then no instant is guessed. Weeks, months and years have no boundary rule in Core
-  and are not checked.
+  whose time is off its grid refuses the whole reply `{:error, {:unaligned_candle, time}}`.
+  The grid is the session's, not the UTC epoch's: widths of 30 minutes and under keep the
+  strict UTC grid (they divide the 09:30 New York open); `1h` and wider intraday widths need
+  only minute 0 or 30 with no seconds (13:30Z is accepted, 13:45Z refused); a `1d`, `1w`,
+  `1M` or `1y` bar stamped at 00:00Z or at New York midnight (04:00Z in EDT, 05:00Z in EST)
+  is mapped to 00:00 UTC of that date, as `DpExchange.Schwab` does, and a `1d` bar at any
+  other time of day is refused (weeks, months and years have no rule in Core, so another
+  time is left as sent). **Unmeasured** against a live venue: this is where a session bar
+  can open, not an observed stamp.
 
   Widths: the eight the crypto endpoint serves plus `1w`, `1M` and `1y`.
   """
@@ -3162,7 +3185,7 @@ defmodule DpExchange.Webull.Rest do
          {:ok, raw_bars} <- nested_results(groups) do
       raw_bars
       |> Enum.reduce_while({:ok, []}, fn bar, {:ok, acc} ->
-        case decode_bar(bar, symbol, timeframe) do
+        case decode_bar(bar, symbol, timeframe, :session) do
           {:ok, candle} -> {:cont, {:ok, [candle | acc]}}
           error -> {:halt, error}
         end
@@ -5316,7 +5339,7 @@ defmodule DpExchange.Webull.Rest do
         _other -> []
       end)
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-        case decode_bar(row, symbol, timeframe) do
+        case decode_bar(row, symbol, timeframe, :crypto) do
           {:ok, bar} -> {:cont, {:ok, [bar | acc]}}
           error -> {:halt, error}
         end
@@ -5344,9 +5367,12 @@ defmodule DpExchange.Webull.Rest do
   # it would be a plausible candle in the wrong bucket. The whole reply is refused
   # `{:unaligned_candle, time}`. **Unmeasured** against a live venue; widths Core has no rule
   # for (`1w`, `1M`, `1y`) pass. OHLC are prices: zero or negative refuses (`required_price/2`).
-  defp decode_bar(row, symbol, timeframe) do
-    with {:ok, timestamp} <- venue_time(row),
-         :ok <- aligned_bar(timestamp, timeframe),
+  #
+  # `kind` is `:crypto` (a 24h market: the strict UTC grid) or `:session` (stock, option,
+  # futures, event: see `session_bar_time/2`).
+  defp decode_bar(row, symbol, timeframe, kind) do
+    with {:ok, raw_timestamp} <- venue_time(row),
+         {:ok, timestamp} <- bar_time(raw_timestamp, timeframe, kind),
          {:ok, open} <- required_price(value(row, ["open"]), :open),
          {:ok, high} <- required_price(value(row, ["high"]), :high),
          {:ok, low} <- required_price(value(row, ["low"]), :low),
@@ -5451,11 +5477,56 @@ defmodule DpExchange.Webull.Rest do
   # `:end` is exclusive: a bar opening exactly at `:end` belongs to the next window.
   defp before_end?(bar, finish), do: DateTime.compare(bar.opened_at, finish) == :lt
 
-  defp aligned_bar(timestamp, timeframe) do
+  defp bar_time(timestamp, timeframe, :crypto), do: strict_bar_time(timestamp, timeframe)
+  defp bar_time(timestamp, timeframe, :session), do: session_bar_time(timestamp, timeframe)
+
+  defp strict_bar_time(timestamp, timeframe) do
     if Timeframe.aligned?(timestamp, timeframe),
-      do: :ok,
+      do: {:ok, timestamp},
       else: {:error, {:unaligned_candle, timestamp}}
   end
+
+  # **Session-traded bars are anchored to the session, not to the UTC epoch.** US cash
+  # sessions open at 09:30 America/New_York, so:
+  #
+  #   * widths of 30 minutes and under divide 09:30 and keep the strict UTC grid;
+  #   * wider intraday widths (1h, 2h, 4h, ...) open at 09:30, 10:30 ...: only a
+  #     30-minute alignment (minute 0 or 30, no seconds) is required;
+  #   * a daily, weekly, monthly or yearly bar stamped at exchange-local midnight (04:00Z in
+  #     EDT, 05:00Z in EST) or at 00:00Z states the session DATE; it is mapped to 00:00 UTC of
+  #     that date, as `DpExchange.Schwab` does. A `1d` bar at any other time of day is
+  #     refused; `1w`/`1M`/`1y` have no rule in Core and any other time is left as sent.
+  #
+  # Anything off those grids is `{:unaligned_candle, time}`. **Unmeasured** against a live
+  # venue: this is the architect's reading of where a session bar can open.
+  defp session_bar_time(timestamp, timeframe) do
+    cond do
+      timeframe in ["1h", "2h", "4h", "6h", "12h"] ->
+        half_hour_bar_time(timestamp)
+
+      timeframe in ["1d", "1w", "1M", "1y"] ->
+        session_date_time(timestamp, timeframe)
+
+      true ->
+        strict_bar_time(timestamp, timeframe)
+    end
+  end
+
+  defp half_hour_bar_time(%DateTime{minute: minute, second: 0, microsecond: {0, _p}} = at)
+       when minute in [0, 30],
+       do: {:ok, at}
+
+  defp half_hour_bar_time(at), do: {:error, {:unaligned_candle, at}}
+
+  defp session_date_time(
+         %DateTime{hour: hour, minute: 0, second: 0, microsecond: {0, _p}} = at,
+         _timeframe
+       )
+       when hour in [0, 4, 5],
+       do: {:ok, DateTime.new!(DateTime.to_date(at), ~T[00:00:00], "Etc/UTC")}
+
+  defp session_date_time(at, "1d"), do: {:error, {:unaligned_candle, at}}
+  defp session_date_time(at, _calendar_width), do: {:ok, at}
 
   # **An envelope is never a row.** The third clause exists for endpoints that answer with a
   # bare object, and it used to catch envelopes too: `%{"code" => "200", "msg" => "ok",

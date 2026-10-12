@@ -165,6 +165,20 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
       assert Decimal.equal?(top.ask_size, Decimal.new("7"))
     end
 
+    test "an empty bid is no resting order, not a refused reply" do
+      row = snapshot_row(%{"bid" => "", "bid_size" => "5"})
+
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert Decimal.equal?(top.ask, Decimal.new("40010"))
+    end
+
     test "the traded price is still dated by the trade" do
       row = snapshot_row(%{"last_trade_time" => @last_trade_ms, "quote_time" => @quote_ms})
 

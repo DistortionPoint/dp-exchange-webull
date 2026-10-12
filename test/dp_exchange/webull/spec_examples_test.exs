@@ -830,6 +830,21 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       refute query =~ "real_time_required"
     end
 
+    test "include_partial: true asks the venue for the latest data", %{fixture: fixture} do
+      me = self()
+
+      assert {:ok, [_bar]} =
+               Rest.get_historical_prices("AAPL260522C00300000", "1m", [], @credentials,
+                 category: "US_OPTION",
+                 include_partial: true,
+                 plug: capturing(fixture, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", _path, query, _raw}, 5_000
+      assert query =~ "real_time_required=true"
+    end
+
     test "a start/end range is refused before a request is sent" do
       start = DateTime.utc_now()
 

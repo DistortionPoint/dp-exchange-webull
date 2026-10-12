@@ -988,6 +988,11 @@ defmodule DpExchange.Webull.Socket do
 
   defp level_price(nil), do: {:ok, nil}
 
+  # The venue's own documented spelling of "no price" (see `decimal/1`), read as no resting
+  # order on that side exactly as `Rest.get_top_of_book/3` reads it - the two transports must
+  # not disagree about the same frame.
+  defp level_price(absent) when absent in ["null", ""], do: {:ok, nil}
+
   defp level_price(raw) do
     case decimal(raw) do
       nil ->

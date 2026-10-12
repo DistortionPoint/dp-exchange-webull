@@ -513,12 +513,17 @@ DpExchange.Webull.adjusted?("1m")  #=> false
   venue's default of 200). A full page whose oldest bar is still after `:start` is
   `{:error, {:range_too_wide, count}}` (it was `{:range_exceeds_count, count}`, crypto only).
   Whether the venue returns the latest or the oldest `count` bars of a range is unmeasured.
-* **A bar's `time` must sit on its width's grid** (`DpExchange.Core.Timeframe.aligned?/2`) or
-  the whole reply is `{:error, {:unaligned_candle, time}}`: the pages say "Bar UTC time", not
-  "open time", and their own example (`09:00:09.945`) is on no grid. **Unmeasured:** whether
-  daily and longer stock bars are stamped at 00:00 UTC of the session date or at the
-  exchange-local midnight; a local stamp is refused until a live read says which, rather than
-  guessing an instant. `1w`, `1M` and `1y` have no grid rule in Core and are not checked.
+* **A bar's `time` must sit on its width's grid** or the whole reply is `{:error,
+  {:unaligned_candle, time}}`: the pages say "Bar UTC time", not "open time", and their own
+  example (`09:00:09.945`) is on no grid. **Crypto** uses the strict UTC grid
+  (`DpExchange.Core.Timeframe.aligned?/2`). **Stock, option, futures and event** bars are
+  session-anchored: 30 minutes and under keep the UTC grid; `1h` and wider intraday widths
+  need only minute 0 or 30 and no seconds (13:30Z accepted, 13:45Z refused); a `1d`, `1w`,
+  `1M` or `1y` bar stamped at 00:00Z or New York midnight (04:00Z EDT, 05:00Z EST) is mapped
+  to 00:00 UTC of that date (as Schwab does), and a `1d` bar at any other time is refused.
+  `1w`, `1M` and `1y` have no grid rule in Core, so another time is left as sent.
+  **Unmeasured** against a live venue. Crypto with a `:start` and no `:limit` sends
+  `count=1200`.
 * **An open, high, low or close of zero or less** is `{:error, {:non_positive_price, field,
   raw}}`; so is a trade or quote price. A book level with no readable price or a price of zero
   or less refuses the whole book (it was dropped), a level of size zero is dropped, and a
@@ -526,8 +531,9 @@ DpExchange.Webull.adjusted?("1m")  #=> false
 * **A candle or trade `:limit` over the page's maximum** (1200; 1650 for stock `1m`; 1000 for
   the stock tape) **is `{:error, {:invalid_option, :limit, value}}`**, as is one that is not a
   positive whole number; it was `{:limit_out_of_range, n, max: max}`.
-* **A streamed `TopOfBook` side priced `0` is `nil` with no size**; a side that is present
-  but unreadable refuses that frame's top of book (a `:data_quality` notice, once per
+* **A streamed `TopOfBook` side priced `0`, `"null"` (the venue's no-price spelling) or empty
+  is `nil` with no size**; a side that is present but unreadable (`NaN`, text, negative)
+  refuses that frame's top of book (a `:data_quality` notice, once per
   connection), as REST does for a non-numeric or negative bid/ask. A streamed trade with no
   time of its own still takes the frame's `Basic.timestamp` (`Trade.timestamp` is required).
 * **`capabilities/0` declares `max_candles_per_request: 1_200`** - *documented*, from each bars

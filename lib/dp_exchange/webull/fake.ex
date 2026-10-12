@@ -292,17 +292,28 @@ defmodule DpExchange.Webull.Fake do
            :ok <- Rest.validate_symbol(symbol),
            :ok <- fake_book_symbol(symbol, category),
            :ok <- authenticated(opts) do
+        # `:depth` is levels per side, as the real request sends it.
+        depth = Keyword.get(opts, :depth)
+
         {:ok,
          %Types.OrderBook{
            symbol: symbol,
-           bids: [
-             {Decimal.new("13.90"), Decimal.new("5")},
-             {Decimal.new("13.89"), Decimal.new("12")}
-           ],
-           asks: [
-             {Decimal.new("13.91"), Decimal.new("3")},
-             {Decimal.new("13.92"), Decimal.new("20")}
-           ],
+           bids:
+             fake_levels(
+               [
+                 {Decimal.new("13.90"), Decimal.new("5")},
+                 {Decimal.new("13.89"), Decimal.new("12")}
+               ],
+               depth
+             ),
+           asks:
+             fake_levels(
+               [
+                 {Decimal.new("13.91"), Decimal.new("3")},
+                 {Decimal.new("13.92"), Decimal.new("20")}
+               ],
+               depth
+             ),
            venue_time: @at,
            observed_at: @at,
            sequence: nil,
@@ -311,6 +322,11 @@ defmodule DpExchange.Webull.Fake do
       end
     end)
   end
+
+  defp fake_levels(levels, depth) when is_integer(depth) and depth > 0,
+    do: Enum.take(levels, depth)
+
+  defp fake_levels(levels, _whole_ladder), do: levels
 
   # A crypto pair has no depth endpoint on this venue, and the fake refuses it the same way
   # the real package does rather than inventing a book.

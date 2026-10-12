@@ -308,33 +308,95 @@ defmodule DpExchange.Webull.BarConventionsTest do
 
   describe "a bar's time is a bucket start" do
     test "a bar off the width's grid refuses the whole reply, on every path" do
-      half = ~U[2021-12-28 00:30:00Z]
+      off = ~U[2021-12-28 00:07:00Z]
 
       for {category, symbol} <- @paths do
         assert {:error, {:unaligned_candle, got}} =
-                 Rest.get_historical_prices(symbol, "1h", [], @credentials,
+                 Rest.get_historical_prices(symbol, "5m", [], @credentials,
                    category: category,
-                   plug: responding(groups([bar(@past), bar(half)])),
+                   plug: responding(groups([bar(@past), bar(off)])),
                    retry_attempts: 0
                  )
 
-        assert DateTime.compare(got, half) == :eq
+        assert DateTime.compare(got, off) == :eq
       end
     end
 
-    test "a daily stock bar stamped at the exchange-local midnight is refused (unmeasured)" do
-      # 05:00 UTC is New York midnight in winter. Whether the venue stamps daily bars this
-      # way is UNMEASURED; until a live read shows it, the instant is not guessed at.
-      local_midnight = ~U[2021-12-28 05:00:00Z]
+    test "crypto keeps the strict UTC grid: a 1h bar at 13:30Z is refused" do
+      at = ~U[2021-12-28 13:30:00Z]
+
+      assert {:error, {:unaligned_candle, got}} =
+               Rest.get_historical_prices("BTC-USD", "1h", [], @credentials,
+                 plug: responding(groups([bar(at)])),
+                 retry_attempts: 0
+               )
+
+      assert DateTime.compare(got, at) == :eq
+    end
+
+    test "session-traded 1h bars are session-anchored: 13:30Z is accepted, 13:45Z refused" do
+      half = ~U[2021-12-28 14:30:00Z]
+      session_open = ~U[2021-12-28 13:30:00Z]
+      quarter = ~U[2021-12-28 13:45:00Z]
+
+      for {category, symbol} <- @paths, category != "US_CRYPTO" do
+        opts = [category: category, retry_attempts: 0]
+        wide = "1h"
+
+        assert {:ok, [first, second]} =
+                 Rest.get_historical_prices(
+                   symbol,
+                   wide,
+                   [],
+                   @credentials,
+                   [plug: responding(groups([bar(session_open), bar(half)]))] ++ opts
+                 )
+
+        assert DateTime.compare(first.opened_at, session_open) == :eq
+        assert DateTime.compare(second.opened_at, half) == :eq
+
+        assert {:error, {:unaligned_candle, got}} =
+                 Rest.get_historical_prices(
+                   symbol,
+                   wide,
+                   [],
+                   @credentials,
+                   [plug: responding(groups([bar(quarter)]))] ++ opts
+                 )
+
+        assert DateTime.compare(got, quarter) == :eq
+      end
+    end
+
+    test "a daily stock bar at exchange-local midnight maps to 00:00Z of that date" do
+      # 04:00Z is New York midnight in summer (EDT), 05:00Z in winter (EST).
+      for {stamp, date} <- [
+            {~U[2021-07-06 04:00:00Z], ~U[2021-07-06 00:00:00Z]},
+            {~U[2021-12-28 05:00:00Z], ~U[2021-12-28 00:00:00Z]},
+            {~U[2021-12-28 00:00:00Z], ~U[2021-12-28 00:00:00Z]}
+          ] do
+        assert {:ok, [candle]} =
+                 Rest.get_historical_prices("AAPL", "1d", [], @credentials,
+                   category: "US_STOCK",
+                   plug: responding(groups([bar(stamp)])),
+                   retry_attempts: 0
+                 )
+
+        assert DateTime.compare(candle.opened_at, date) == :eq
+      end
+    end
+
+    test "a daily stock bar at any other time of day is refused" do
+      at = ~U[2021-12-28 09:00:00Z]
 
       assert {:error, {:unaligned_candle, got}} =
                Rest.get_historical_prices("AAPL", "1d", [], @credentials,
                  category: "US_STOCK",
-                 plug: responding(groups([bar(local_midnight)])),
+                 plug: responding(groups([bar(at)])),
                  retry_attempts: 0
                )
 
-      assert DateTime.compare(got, local_midnight) == :eq
+      assert DateTime.compare(got, at) == :eq
     end
 
     test "a width Core has no grid for is not checked" do
