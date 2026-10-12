@@ -88,7 +88,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
           shards: %{
             0 => %{connected_shard("s0") | symbols: ["BTCUSD"], connected?: false}
           },
-          reconcile_timeout_ms: 2_000,
+          reconcile_timeout_ms: 600_000,
           credentials: credentials(),
           limiter: limiter,
           plug: plug
@@ -107,10 +107,11 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       first = reconcile_pid(feed)
       first_ref = Process.monitor(first)
 
-      # Long enough that the first attempt's deadline lands INSIDE the refute window below
-      # while the second attempt holds the tag, and far enough from the second's own
-      # deadline that the two cannot be confused for each other.
-      Process.sleep(1_200)
+      # The first attempt's own deadline message is delivered by hand, after the second
+      # attempt holds the tag, instead of waiting for a real timer to land inside a refute
+      # window. Every real deadline is 10 minutes out, so nothing but this message can reach
+      # the successor, and a descheduled test process cannot decide the outcome.
+      [{tag, %{attempt: first_attempt}}] = Map.to_list(:sys.get_state(feed).reconciling)
 
       send(feed, {:dp_exchange, :webull, link_up("s0")})
       second = reconcile_pid(feed, first)
@@ -118,10 +119,14 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
 
       assert_receive {:DOWN, ^first_ref, :process, ^first, _reason}, 5_000
 
-      refute_receive {:DOWN, ^second_ref, :process, ^second, _reason}, 1_200
+      send(feed, {:reconcile_timeout, tag, first_attempt})
 
-      assert map_size(:sys.get_state(feed).reconciling) == 1,
-             "one tag, one tracked attempt — the superseded one must not still be counted"
+      # `get_state` is answered after the stale deadline above has been handled.
+      assert [{^tag, %{pid: ^second}}] = Map.to_list(:sys.get_state(feed).reconciling),
+             "one tag, one tracked attempt — and it is the successor, still running"
+
+      refute_received {:DOWN, ^second_ref, :process, ^second, _reason}
+      assert Process.alive?(second)
 
       assert Process.alive?(feed)
     end

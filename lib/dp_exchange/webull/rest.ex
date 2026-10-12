@@ -884,9 +884,10 @@ defmodule DpExchange.Webull.Rest do
   As in `get_price/3`, a row naming a different symbol than the one asked for is
   `{:error, :not_in_response}`. `bid`, `ask` and the sizes are `nil` where the row does not
   carry a number for them: a price of `0` (or the literal `"null"`; an empty string is an
-  absent field) is no resting order on that side, so that side and its size are `nil`, while a negative price or text that is not
-  a number is `{:error, {:non_positive_price, side, raw}}` / `{:error, {:invalid_decimal,
-  side, raw}}`. `venue_time` is the quote's own time (`quote_time`) and **`nil` when the row
+  absent field) is no resting order on that side, so that side and its size are `nil`,
+  while a negative price or text that is not a number is
+  `{:error, {:non_positive_price, side, raw}}` / `{:error, {:invalid_decimal, side, raw}}`.
+  `venue_time` is the quote's own time (`quote_time`) and **`nil` when the row
   has none** - the stock snapshot states only `last_trade_time`, a different event, and it is
   not used (family convention MD7).
   """
@@ -2940,7 +2941,9 @@ defmodule DpExchange.Webull.Rest do
     end)
     |> case do
       # Oldest first, by the venue's own time — see `Core.Venue`'s callback doc.
-      {:ok, trades} -> {:ok, trades |> Enum.reverse() |> Enum.sort_by(& &1.timestamp, DateTime)}
+      # The accumulator already holds the venue's newest-first rows reversed, so the stable sort
+      # leaves ticks sharing one instant oldest first too.
+      {:ok, trades} -> {:ok, Enum.sort_by(trades, & &1.timestamp, DateTime)}
       error -> error
     end
   end

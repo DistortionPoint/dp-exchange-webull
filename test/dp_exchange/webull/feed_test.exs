@@ -1400,13 +1400,8 @@ defmodule DpExchange.Webull.FeedTest do
         # shift every symbol after it across shard boundaries — unsubscribing and
         # resubscribing BBB/CCC/DDD/EEE despite none of them changing. Stable assignment
         # must leave both existing shards alone.
-        if decoded["session_id"] in ["shard-0", "shard-1"] do
-          flunk(
-            "shard #{decoded["session_id"]} was touched by an unrelated insertion: " <>
-              inspect(decoded["symbols"])
-          )
-        end
-
+        # Reported, not `flunk/1`ed: the plug runs in a reconcile task, where a flunk only
+        # kills the task and tells the test nothing.
         send(test_pid, {:request, decoded["session_id"], decoded["symbols"]})
         Req.Test.json(conn, %{"code" => "200"})
       end
@@ -1434,6 +1429,10 @@ defmodule DpExchange.Webull.FeedTest do
 
       assert_receive {:request, session_id, ["AAAUSD"]}
       assert session_id not in ["shard-0", "shard-1"]
+
+      # The call returned, so every request it made has already been sent.
+      refute_received {:request, "shard-0", _symbols}
+      refute_received {:request, "shard-1", _symbols}
     end
   end
 
@@ -1673,7 +1672,7 @@ defmodule DpExchange.Webull.FeedTest do
           limiter: limiter,
           plug: plug,
           retry_attempts: 0,
-          rejected_symbol_ttl_ms: 20
+          rejected_symbol_ttl_ms: 600_000
         )
 
       :sys.replace_state(feed, &%{&1 | wanted: MapSet.new(["GOOD-USD", "BAD-USD"])})
@@ -1689,8 +1688,15 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, :resubscribe)
       assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD"]}
 
-      # Past the TTL: the same tick's own resync picks BAD-USD back up as eligible.
-      Process.sleep(30)
+      # Past the TTL: the expiry is moved into the past rather than slept for, so a slow
+      # round trip above cannot expire it early. The same tick's own resync picks BAD-USD
+      # back up as eligible.
+      expired = System.monotonic_time(:millisecond) - 1
+
+      :sys.replace_state(feed, fn state ->
+        %{state | rejected: Map.new(state.rejected, fn {symbol, _at} -> {symbol, expired} end)}
+      end)
+
       send(feed, :resubscribe)
 
       assert_receive {:request, "/market-data/streaming/subscribe", symbols_a}
@@ -1731,6 +1737,9 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change, severity: :warning}}
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, reason}})
+      # The call is answered after the message above is handled, so a notice it would send
+      # is already in the mailbox before the refute looks.
+      _settled = Feed.coverage(feed)
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
     end
 
@@ -1758,6 +1767,7 @@ defmodule DpExchange.Webull.FeedTest do
       :ok = Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
+      _settled = Feed.coverage(feed)
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
     end
 
@@ -1782,6 +1792,7 @@ defmodule DpExchange.Webull.FeedTest do
                       %Notice{kind: :coverage_change, severity: :warning, details: %{shard: 0}}}
 
       send(feed, {:reconcile_done, {:resubscribe, 1}, :ok})
+      _settled = Feed.coverage(feed)
 
       refute_receive {:dp_exchange, :webull,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
@@ -1794,6 +1805,7 @@ defmodule DpExchange.Webull.FeedTest do
                       %Notice{kind: :coverage_change, severity: :warning, details: %{shard: 1}}}
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :timeout}})
+      _settled = Feed.coverage(feed)
 
       refute_receive {:dp_exchange, :webull,
                       %Notice{kind: :coverage_change, details: %{shard: 0}}},
@@ -1825,9 +1837,11 @@ defmodule DpExchange.Webull.FeedTest do
       :ok = Feed.subscribe_notices(feed, to: self())
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :oversubscribed}})
+      _settled = Feed.coverage(feed)
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, {:invalid_symbols, ["AAA-USD"]}}})
+      _settled = Feed.coverage(feed)
       refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
     end
   end

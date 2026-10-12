@@ -88,8 +88,10 @@ defmodule DpExchange.Webull.FeedTerminateLogTest do
     test "skips a shard that never connected — it has no session to close" do
       shards = %{0 => %{connected_shard("s0") | socket: dead_pid(), connected?: false}}
 
+      # At `:debug`, the level the "attempts" tests above capture at: a refute at a quieter
+      # level would pass even if the line were logged.
       log =
-        ExUnit.CaptureLog.capture_log(fn ->
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
           assert Feed.terminate(:shutdown, %{shards: shards}) == :ok
         end)
 
@@ -113,7 +115,7 @@ defmodule DpExchange.Webull.FeedTerminateLogTest do
       shards = %{0 => %{connected_shard("s0") | socket: dead_pid()}}
 
       log =
-        ExUnit.CaptureLog.capture_log(fn ->
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
           assert Feed.terminate({:some_crash, :reason}, %{shards: shards}) == :ok
         end)
 
@@ -154,7 +156,7 @@ defmodule DpExchange.Webull.FeedTerminateLogTest do
       shards = %{0 => %{connected_shard("s0") | socket: unresponsive}}
 
       log =
-        ExUnit.CaptureLog.capture_log(fn ->
+        ExUnit.CaptureLog.capture_log([level: :debug], fn ->
           assert Feed.terminate(:normal, %{shards: shards}) == :ok
         end)
 

@@ -1041,9 +1041,11 @@ defmodule DpExchange.Webull.SocketTest do
           [:dp_exchange, :link, :event]
         ],
         fn event, measurements, metadata, _config ->
-          # Scoped by provider: `:telemetry` handlers are global to the VM, so an unscoped
-          # one also receives every other concurrently-running test's events.
-          if metadata.provider == :webull do
+          # Scoped to the emitting process: `:telemetry` handlers are global to the VM and
+          # run in whichever process emits, and `provider: :webull` alone also matches every
+          # other concurrently-running test's sockets. These tests drive the frame handlers
+          # directly from the test process, so only its own emissions are its own.
+          if metadata.provider == :webull and self() == test_pid do
             send(test_pid, {:telemetry, event, measurements, metadata})
           end
         end,

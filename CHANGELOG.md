@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Ticks sharing one timestamp came back newest first.** The tape decoder reversed the venue's
+  newest-first rows back into venue order before its stable sort, so ties kept the venue's order;
+  they are now oldest first like the rest of the tape (`Core.Venue`'s ordering rule).
+
+### Fixed
+
+- Test suite (tick U), no behaviour change. The link-telemetry tests in `socket_test.exs`
+  now accept only events emitted by the test process itself (the handler matched
+  `provider: :webull` alone, so a concurrent test's socket could satisfy or break them);
+  the "no DISCONNECT" refutes in `feed_terminate_log_test.exs` capture at `:debug`, the
+  level the positive cases use, so they can fail; the busy-feed test blocks the feed for 8s
+  instead of 6s so a descheduled test process cannot shorten the measured wait below its
+  5s bound; a new test pins that same-millisecond ticks come back reversed from the
+  venue's newest-first order; the rejected-symbol TTL test in `feed_test.exs` no longer
+  relies on a 20 ms TTL staying unexpired across two HTTP round trips (it moves the expiry
+  into the past instead of sleeping); "the superseded attempt is torn down" in
+  `resubscribe_identity_test.exs` no longer races real 2 s deadlines against a 1.2 s refute
+  (deadlines are 10 minutes and the stale deadline message is delivered by hand); plug-side
+  `flunk/1` in reconcile tasks (which could not fail a test) became messages plus a
+  `reconciling == %{}` check in `resubscribe_timer_test.exs` and a `refute_received` in the
+  shard-stability test; the notice refutes in `feed_test.exs` first settle the feed with a
+  synchronous call. A `get_top_of_book/3` `@doc` line over 98 columns was re-wrapped.
+
 ## [0.4.140] - 2026-10-12
 
 ### Fixed

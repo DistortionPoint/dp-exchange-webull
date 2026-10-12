@@ -124,8 +124,13 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # Issue #10: every completed re-subscribe grabs `us-crypto` from a sibling session, and
       # a consumer measured a streaming shard going 30 s or more silent after each one, every
       # minute. The tick is for a shard that stopped delivering; this one has not.
-      plug = fn _conn ->
-        flunk("a shard delivering within the interval must not be re-subscribed")
+      # Reported to the test process, not `flunk/1`ed in the plug: the plug runs in a reconcile
+      # task, where a flunk only kills the task and the test passed with or without the guard.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        conn
       end
 
       shard = %{connected_shard("shard-0") | symbols: ["BTC-USD"]}
@@ -138,6 +143,9 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       send(feed, :resubscribe)
       _settled = Feed.coverage(feed)
 
+      # No reconcile was spawned for the tick: it is spawned inside the same handler.
+      assert :sys.get_state(feed).reconciling == %{}
+      refute_received {:request, :unexpected}
       assert Process.alive?(feed)
     end
 
@@ -285,7 +293,12 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       end)
 
       send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
 
+      # The tick spawns its reconcile task inside the same message handler, so after the
+      # synchronous call above an empty `reconciling` proves no re-assert was started; the
+      # refute then only catches a request that was somehow sent without being tracked.
+      assert :sys.get_state(feed).reconciling == %{}
       refute_receive {:request, _session}, 300
     end
 

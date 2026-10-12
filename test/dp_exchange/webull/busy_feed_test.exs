@@ -3,10 +3,10 @@ defmodule DpExchange.Webull.BusyFeedTest do
   A public call answers on the feed's own timeout, not `GenServer.call/2`'s default.
 
   Split out of `feed_test.exs` for wall clock. This test must block a live feed for longer
-  than the five-second default it is proving is no longer in force, so six seconds of
+  than the five-second default it is proving is no longer in force, so eight seconds of
   waiting is the substance of it rather than slack that could be trimmed. ExUnit
   parallelises across FILES and serialises within one, so sitting beside ninety other tests
-  meant those six seconds ran end to end instead of alongside them.
+  meant those eight seconds ran end to end instead of alongside them.
   """
 
   use DpExchange.Webull.FeedCase, async: true
@@ -23,9 +23,11 @@ defmodule DpExchange.Webull.BusyFeedTest do
       #
       # The blocker runs INSIDE the feed process: `:sys.replace_state/2` applies its function
       # there, so the sleep occupies the feed exactly as a slow callback would, and the call
-      # under test queues behind it on the real mailbox. Six seconds is chosen to sit between
+      # under test queues behind it on the real mailbox. Eight seconds is chosen to sit between
       # the two timeouts: comfortably past the five-second default that used to fire, and
-      # nowhere near the fifteen the call is now allowed.
+      # nowhere near the fifteen the call is now allowed. (Eight, not six: the test process
+      # can be descheduled between the blocker's message and its own call on a loaded suite,
+      # and every second it loses comes off the wait measured below.)
       #
       # A `GenServer.call/3` timeout exits in the CALLER, so before the fix this test would
       # not have failed an assertion — it would have killed the test process with
@@ -37,7 +39,7 @@ defmodule DpExchange.Webull.BusyFeedTest do
       test_pid = self()
 
       # `spawn`, not `spawn_link`, and `:sys.replace_state/3` rather than `/2`: the two-arity
-      # form carries its own five-second timeout, which the six-second block deliberately
+      # form carries its own five-second timeout, which the eight-second block deliberately
       # outlasts, and a linked blocker would then have killed the test with that exit before
       # the assertion below could run.
       spawn(fn ->
@@ -45,7 +47,7 @@ defmodule DpExchange.Webull.BusyFeedTest do
           feed,
           fn state ->
             send(test_pid, blocked)
-            Process.sleep(6_000)
+            Process.sleep(8_000)
             state
           end,
           30_000

@@ -174,6 +174,24 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
       assert Enum.map(trades, &Decimal.to_string(&1.price)) == ["1", "2", "3"]
     end
 
+    test "ticks sharing one timestamp are reversed from the venue's newest-first order" do
+      # Within a single millisecond the LAST row the venue sent is the earliest. A sort on
+      # time alone would leave ties in the venue's order, newest of them first.
+      ticks =
+        for price <- ["3", "2", "1"] do
+          %{"price" => price, "volume" => "1", "side" => "BUY", "time" => 1_761_131_409_100}
+        end
+
+      assert {:ok, trades} =
+               Rest.get_trades("ESZ5", @credentials,
+                 category: "US_FUTURES",
+                 plug: capturing([%{"symbol" => "ESZ5", "result" => ticks}], self()),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(trades, &Decimal.to_string(&1.price)) == ["1", "2", "3"]
+    end
+
     test "the book reaches the futures depths endpoint without overnight_required" do
       me = self()
 
