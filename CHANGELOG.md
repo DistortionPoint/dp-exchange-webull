@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.139] - 2026-10-12
+
 ### Fixed
 
 - **The Fake's order book ignored `:depth`.** It validated the option and then returned its whole
