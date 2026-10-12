@@ -970,10 +970,35 @@ defmodule DpExchange.Webull.Socket do
   defp venue_notice_text(_no_content), do: nil
 
   # Both levels decoded once, here, so the caller can refuse a book that states neither.
+  #
+  # **Family convention MD6.** A side that is absent, or priced `0`, is no resting order: `nil`
+  # (and `emit_top_of_book/4` then keeps no size for it). A side that is PRESENT and unreadable
+  # (`"null"`, `"NaN"`, text, a negative price) refuses the frame's top of book - it used to
+  # become `nil` and deliver the other side as though this one were simply empty. A frame with
+  # neither side priced is no quote at all.
   defp readable_levels(decoded) do
-    case {decimal(decoded[:bid]), decimal(decoded[:ask])} do
-      {nil, nil} -> :error
-      {bid, ask} -> {:ok, bid, ask}
+    with {:ok, bid} <- level_price(decoded[:bid]),
+         {:ok, ask} <- level_price(decoded[:ask]),
+         true <- not (is_nil(bid) and is_nil(ask)) do
+      {:ok, bid, ask}
+    else
+      _unreadable_or_empty -> :error
+    end
+  end
+
+  defp level_price(nil), do: {:ok, nil}
+
+  defp level_price(raw) do
+    case decimal(raw) do
+      nil ->
+        :error
+
+      price ->
+        cond do
+          Decimal.eq?(price, 0) -> {:ok, nil}
+          Decimal.negative?(price) -> :error
+          true -> {:ok, price}
+        end
     end
   end
 
@@ -1018,7 +1043,7 @@ defmodule DpExchange.Webull.Socket do
   # summed. A snapshot that states no volume (`QuoteProto` reads `""` as absent) or an
   # unreadable one stays `nil`, with no window, so nothing is invented either way.
   defp emit_snapshot(state, {:ok, decoded}) do
-    case required_decimal(decoded[:price], :price) do
+    case required_price(decoded[:price], :price) do
       {:ok, price} ->
         volume = decimal(decoded[:volume])
 
@@ -1053,7 +1078,7 @@ defmodule DpExchange.Webull.Socket do
   # moduledoc both document as real rather than accidental.
   defp emit_trade(state, {:ok, decoded}) do
     with {:ok, timestamp} <- tick_time(decoded),
-         {:ok, price} <- required_decimal(decoded[:price], :price),
+         {:ok, price} <- required_price(decoded[:price], :price),
          {:ok, quantity} <- required_decimal(decoded[:volume], :quantity) do
       send(
         state.subscriber,
@@ -1061,7 +1086,11 @@ defmodule DpExchange.Webull.Socket do
          %Trade{
            id: nil,
            symbol: SymbolFormat.to_canonical_symbol(decoded.symbol),
-           side: tick_side(decoded[:side]),
+           # Always `nil`: the stream's `side` (field 5) has no value list anywhere the venue
+           # publishes, so what `B`/`S` mean (taker, buyer, resting order) is UNMEASURED and
+           # `Core.Types.Trade` says an undocumented code is `nil`, not a mapping nobody has
+           # checked. It was `B -> :buy`, `S -> :sell`. See `Rest`'s `to_trade/2`.
+           side: nil,
            price: price,
            quantity: quantity,
            timestamp: timestamp,
@@ -1090,6 +1119,11 @@ defmodule DpExchange.Webull.Socket do
   # It used to take whichever was PRESENT, so a `time` in a form this package cannot read
   # (the streaming page gives the field no format) dropped the print even when the frame
   # carried a readable `timestamp` beside it.
+  # A tick's own time (field 2), else - when that is absent or unreadable - the frame's
+  # `Basic.timestamp`. A DELIBERATE exception to family convention MD7 (no message-assembly
+  # time): MD7 names `Quote.venue_time` and `TopOfBook.venue_time`, which are nullable, while
+  # `Trade.timestamp` is required, so a print with no tick time is placed by the only stated
+  # time the frame has or dropped (and reported). Unmeasured how far the two differ.
   defp tick_time(decoded) do
     case venue_time(decoded) do
       {:ok, at} -> {:ok, at}
@@ -1132,15 +1166,6 @@ defmodule DpExchange.Webull.Socket do
   # The reason a frame was dropped, without the venue's value in it. See `report_drop/3`.
   defp drop_reason({:invalid_decimal, field, _value}), do: {:invalid_decimal, field}
   defp drop_reason(reason), do: reason
-
-  # Undocumented on the streaming schema (`docs/reference/webull/streaming-api.md` gives
-  # the field no value list) — matched against the same `"B"`/`"S"` the venue's REST tape
-  # documents and this package already relies on in `Rest`'s own `tick_side/1`. Anything
-  # else is `nil`, a real trade with an unknown aggressor, rather than a guess that would
-  # put volume on the wrong side of a delta.
-  defp tick_side("B"), do: :buy
-  defp tick_side("S"), do: :sell
-  defp tick_side(_undocumented), do: nil
 
   # `{:error, :missing_venue_timestamp}` for a frame the venue did not date, or dated with
   # something this package cannot read. What a caller does with that depends entirely on the
@@ -1232,6 +1257,14 @@ defmodule DpExchange.Webull.Socket do
     case decimal(value) do
       nil -> {:error, {:invalid_decimal, field, value}}
       parsed -> {:ok, parsed}
+    end
+  end
+
+  # A traded price is positive (family convention MD6): zero or less is the venue's "no
+  # value", not a price, and the frame is dropped (reported once per reason).
+  defp required_price(value, field) do
+    with {:ok, price} <- required_decimal(value, field) do
+      if Decimal.positive?(price), do: {:ok, price}, else: {:error, {:non_positive_price, field}}
     end
   end
 end

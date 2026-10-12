@@ -86,6 +86,33 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
 
       assert_receive {:request, _host, "/auth/tokens/create", _raw}
     end
+
+    test "a create that may have reached the venue is write_unconfirmed, never a bare error" do
+      # W1: a token may now exist (and an SMS verification may be waiting). The request has
+      # no idempotency key, so the key is nil.
+      unavailable = fn conn -> Plug.Conn.send_resp(conn, 503, "unavailable") end
+
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
+               Rest.create_token(@credentials, plug: unavailable, retry_attempts: 3)
+
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
+               Rest.create_token(@credentials, plug: responding("not an object"))
+    end
+
+    test "failures decided before sending stay plain, and a 4xx is a refusal" do
+      exploding = fn _conn -> raise "must not send without credentials" end
+
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.create_token(%{}, plug: exploding, retry_attempts: 0)
+
+      rejected = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(400, Jason.encode!(%{"code" => "BAD"}))
+      end
+
+      assert {:refused, _body} = Rest.create_token(@credentials, plug: rejected)
+    end
   end
 
   describe "check_token/3" do

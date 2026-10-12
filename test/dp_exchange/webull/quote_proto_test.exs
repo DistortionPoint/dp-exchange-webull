@@ -45,11 +45,13 @@ defmodule DpExchange.Webull.QuoteProtoTest do
       assert snapshot.timestamp == "2222222222222"
     end
 
-    test "falls back to the assembly timestamp when there is no trade time" do
+    test "with no trade time the timestamp is nil, never the assembly timestamp" do
+      # `Basic.timestamp` is when the venue built the message, a different event from the
+      # last trade; `Quote.venue_time` is the trade's (family convention MD7).
       payload = field(1, basic("BTCUSD", "1111111111111")) <> field(3, "77845.79")
 
       assert {:ok, snapshot} = QuoteProto.decode_snapshot(payload)
-      assert snapshot.timestamp == "1111111111111"
+      assert snapshot.timestamp == nil
     end
 
     test "a payload with no price is an error, not a snapshot with a nil price" do

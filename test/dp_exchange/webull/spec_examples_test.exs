@@ -95,6 +95,21 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     |> Jason.decode!()
   end
 
+  # The vendor's worked bar example is dated `2021-12-28T09:00:09.945+0000` - nine seconds
+  # and 945 ms off every minute grid, so it is not an OPEN time and `decode_bar/3` refuses it
+  # `{:unaligned_candle, time}` (each bars `describe` below asserts that on the raw example).
+  # Every other bar test here decodes the same fixture with only that one instant moved onto
+  # the grid, so the shapes, fields and request parameters stay the vendor's own.
+  defp aligned_bars(fixture) do
+    fixture
+    |> Jason.encode!()
+    |> String.replace("2021-12-28T09:00:09.945+0000", "2021-12-28T09:00:00.000+0000")
+    |> Jason.decode!()
+  end
+
+  @example_bar_time ~U[2021-12-28 09:00:09.945Z]
+  @aligned_bar_time ~U[2021-12-28 09:00:00.000Z]
+
   defp responding(body, status \\ 200) do
     fn conn ->
       conn
@@ -439,8 +454,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(book.ask, Decimal.new("13.9"))
       assert Decimal.equal?(book.bid_size, Decimal.new("5"))
       assert Decimal.equal?(book.ask_size, Decimal.new("5"))
-      # The stock snapshot has no `quote_time`; its only time is the last trade's.
-      assert book.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+      # The stock snapshot has no `quote_time`; its only time is the last trade's, a
+      # different event, so the quote's time is nil (family convention MD7).
+      assert book.venue_time == nil
     end
 
     # `event-snapshot.md:27` publishes yes_bid/yes_ask/no_bid/no_ask, not one bid/ask — see
@@ -609,7 +625,15 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   # =========================================================================================
 
   describe "crypto bars — GET /market-data/crypto/bars/list (crypto-bars.md)" do
-    setup do: %{fixture: fixture!("bars_crypto.json")}
+    setup do: %{fixture: aligned_bars(fixture!("bars_crypto.json"))}
+
+    test "the vendor's example bar time is not on the grid, so the reply is refused" do
+      assert {:error, {:unaligned_candle, @example_bar_time}} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
+                 plug: responding(fixture!("bars_crypto.json")),
+                 retry_attempts: 0
+               )
+    end
 
     test "decodes the vendor's documented example bar", %{fixture: fixture} do
       assert {:ok, [%Types.Candle{} = bar]} =
@@ -620,7 +644,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       assert bar.symbol == "BTC-USD"
       assert bar.timeframe == "1m"
-      assert bar.opened_at == ~U[2021-12-28 09:00:09.945Z]
+      assert bar.opened_at == @aligned_bar_time
       assert Decimal.equal?(bar.open, Decimal.new("150.25"))
       assert Decimal.equal?(bar.high, Decimal.new("153.15"))
       assert Decimal.equal?(bar.low, Decimal.new("149.8"))
@@ -657,7 +681,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   end
 
   describe "futures bars — GET /market-data/futures/bars/list (futures-historical-bars.md)" do
-    setup do: %{fixture: fixture!("bars_futures.json")}
+    setup do: %{fixture: aligned_bars(fixture!("bars_futures.json"))}
+
+    test "the vendor's example bar time is not on the grid, so the reply is refused" do
+      assert {:error, {:unaligned_candle, @example_bar_time}} =
+               Rest.get_historical_prices("SILZ5", "1m", [], @credentials,
+                 category: "US_FUTURES",
+                 plug: responding(fixture!("bars_futures.json")),
+                 retry_attempts: 0
+               )
+    end
 
     test "decodes the vendor's documented example bar", %{fixture: fixture} do
       assert {:ok, [%Types.Candle{} = bar]} =
@@ -667,7 +700,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == ~U[2021-12-28 09:00:09.945Z]
+      assert bar.opened_at == @aligned_bar_time
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.high, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.low, Decimal.new("1.3362"))
@@ -698,7 +731,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   end
 
   describe "event bars — GET /market-data/event-contracts/bars/list (event-bars.md)" do
-    setup do: %{fixture: fixture!("bars_event.json")}
+    setup do: %{fixture: aligned_bars(fixture!("bars_event.json"))}
+
+    test "the vendor's example bar time is not on the grid, so the reply is refused" do
+      assert {:error, {:unaligned_candle, @example_bar_time}} =
+               Rest.get_historical_prices("KXCPI-26JAN-T0.3", "1m", [], @credentials,
+                 category: "US_EVENT",
+                 plug: responding(fixture!("bars_event.json")),
+                 retry_attempts: 0
+               )
+    end
 
     test "decodes the vendor's documented example bar", %{fixture: fixture} do
       assert {:ok, [%Types.Candle{} = bar]} =
@@ -708,7 +750,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == ~U[2021-12-28 09:00:09.945Z]
+      assert bar.opened_at == @aligned_bar_time
       assert Decimal.equal?(bar.open, Decimal.new("0.05"))
       assert Decimal.equal?(bar.high, Decimal.new("0.05"))
       assert Decimal.equal?(bar.low, Decimal.new("0.05"))
@@ -740,7 +782,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   end
 
   describe "option bars — GET /market-data/options/bars/list (option-historical-bars.md)" do
-    setup do: %{fixture: fixture!("bars_option.json")}
+    setup do: %{fixture: aligned_bars(fixture!("bars_option.json"))}
+
+    test "the vendor's example bar time is not on the grid, so the reply is refused" do
+      assert {:error, {:unaligned_candle, @example_bar_time}} =
+               Rest.get_historical_prices("AAPL260522C00300000", "1m", [], @credentials,
+                 category: "US_OPTION",
+                 plug: responding(fixture!("bars_option.json")),
+                 retry_attempts: 0
+               )
+    end
 
     test "decodes the vendor's documented example bar, flattening the result-wrapped group",
          %{fixture: fixture} do
@@ -751,7 +802,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == ~U[2021-12-28 09:00:09.945Z]
+      assert bar.opened_at == @aligned_bar_time
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.close, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.volume, Decimal.new("10"))
@@ -795,7 +846,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   end
 
   describe "stock bars — POST /market-data/stocks/bars/list (historical-bars.md)" do
-    setup do: %{fixture: fixture!("bars_stock_grouped.json")}
+    setup do: %{fixture: aligned_bars(fixture!("bars_stock_grouped.json"))}
+
+    test "the vendor's example bar time is not on the grid, so the reply is refused" do
+      assert {:error, {:unaligned_candle, @example_bar_time}} =
+               Rest.get_historical_prices("AAPL", "1m", [], @credentials,
+                 category: "US_STOCK",
+                 plug: responding(fixture!("bars_stock_grouped.json")),
+                 retry_attempts: 0
+               )
+    end
 
     test "flattens the object-wrapped result envelope (the group-vs-row bug this decoder now handles)",
          %{fixture: fixture} do
@@ -814,7 +874,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # futures schema's own field examples here, and this fixture is quoted verbatim
       # rather than "corrected" to a more plausible stock symbol.
       assert bar.symbol == "AAPL"
-      assert bar.opened_at == ~U[2021-12-28 09:00:09.945Z]
+      assert bar.opened_at == @aligned_bar_time
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.high, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.low, Decimal.new("1.3362"))
@@ -878,6 +938,10 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # `end_time: 1711349398500`, which is what these two `DateTime`s convert to.
       assert body["start_time"] == 1_711_262_998_500
       assert body["end_time"] == 1_711_349_398_500
+      # A range with a `:start` and no `:limit` asks for the endpoint's maximum, not the
+      # venue's default of 200 (`historical-bars.md`: "default 200"), which cut a range short.
+      # The request is `1m` (M1), whose page maximum is 1650 (other widths: 1200).
+      assert body["count"] == 1_650
     end
   end
 
@@ -1138,23 +1202,37 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert trade.symbol == "AAPL"
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
-      assert trade.side == :sell
+      # The example row carries side "S", which the page does not define: nil, not :sell.
+      assert trade.side == nil
       assert trade.broken == false
       assert trade.provider == :webull
       assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
 
-    # `tick.md` describes `side` as "Such as: B S G L N" and defines none of them. Only B and
-    # S are unambiguous; the rest are an unknown aggressor, never the nearest side.
-    test "RESPONSE: B is a buy, and G, L, N or anything unlisted is nil rather than a side" do
+    # `tick.md` describes `side` as "Such as: B S G L N" and defines none of them - not whose
+    # side `B` is (taker, buyer or resting order). `Core.Types.Trade` says an undocumented
+    # code is nil, so EVERY code is nil (family convention MD10; unmeasured).
+    test "RESPONSE: no side code is read as a side - every one is nil" do
       group = fixture!("depth_trades_stock.json")
       [tick] = group["result"]
 
-      for {code, expected} <- [{"B", :buy}, {"S", :sell}, {"G", nil}, {"L", nil}, {"N", nil}] do
+      for code <- ["B", "S", "G", "L", "N", "buy", nil] do
         opts = [plug: responding(%{group | "result" => [Map.put(tick, "side", code)]})]
 
         assert {:ok, [trade]} = Rest.get_trades("AAPL", @credentials, opts ++ [retry_attempts: 0])
-        assert trade.side == expected
+        assert trade.side == nil
+      end
+    end
+
+    test "RESPONSE: a traded price of zero or less refuses the reply" do
+      group = fixture!("depth_trades_stock.json")
+      [tick] = group["result"]
+
+      for bad <- ["0", "0.00", "-1"] do
+        opts = [plug: responding(%{group | "result" => [Map.put(tick, "price", bad)]})]
+
+        assert {:error, {:non_positive_price, :price, ^bad}} =
+                 Rest.get_trades("AAPL", @credentials, opts ++ [retry_attempts: 0])
       end
     end
   end
@@ -1188,7 +1266,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert trade.symbol == "AAPL260522C00300000"
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
-      assert trade.side == :sell
+      assert trade.side == nil
       assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
   end
@@ -1222,7 +1300,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert trade.symbol == "SILZ5"
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
-      assert trade.side == :sell
+      assert trade.side == nil
       assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
     end
   end
@@ -1974,14 +2052,16 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
   describe "token responses that are not tokens" do
     test "create_token/2 refuses a body with no token or a status outside the venue's four" do
+      # A 2xx whose body does not establish the token is a write that may have happened:
+      # `{:write_unconfirmed, nil, reason}` (W1), with the old refusal as the reason.
       for body <- [%{}, %{"status" => "PENDING"}, %{"token" => "t"}] do
-        assert {:error, {:missing_required_field, _field}} =
+        assert {:error, {:write_unconfirmed, nil, {:missing_required_field, _field}}} =
                  Rest.create_token(@credentials, plug: responding(body), retry_attempts: 0)
       end
 
       body = %{"token" => "ccb071f764864b65a1fb48484e940a56", "status" => "ACTIVE"}
 
-      assert {:error, {:unknown_token_status, "ACTIVE"}} =
+      assert {:error, {:write_unconfirmed, nil, {:unknown_token_status, "ACTIVE"}}} =
                Rest.create_token(@credentials, plug: responding(body), retry_attempts: 0)
     end
 

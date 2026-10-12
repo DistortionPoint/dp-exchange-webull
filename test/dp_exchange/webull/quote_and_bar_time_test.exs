@@ -66,7 +66,9 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
       assert top.venue_time == DateTime.from_unix!(@quote_ms, :millisecond)
     end
 
-    test "a row with only last_trade_time, as the stock snapshot has, keeps that time" do
+    test "a row with only last_trade_time, as the stock snapshot has, is undated: nil" do
+      # The last trade is a different event from the quote; dating the quote with it made a
+      # staleness check judge the trade (family convention MD7).
       row = snapshot_row(%{"symbol" => "AAPL", "last_trade_time" => @last_trade_ms})
 
       assert {:ok, top} =
@@ -76,7 +78,57 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
                  retry_attempts: 0
                )
 
-      assert top.venue_time == DateTime.from_unix!(@last_trade_ms, :millisecond)
+      assert top.venue_time == nil
+    end
+
+    test "a quote_time with no last_trade_time does not date the traded price" do
+      row = snapshot_row(%{"quote_time" => @quote_ms})
+
+      assert {:ok, quote_struct} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert quote_struct.venue_time == nil
+    end
+
+    test "a bid or ask of zero is no resting order on that side: nil, and no size" do
+      row = snapshot_row(%{"bid" => "0", "bid_size" => "5", "ask" => "0.00", "ask_size" => "7"})
+
+      assert {:ok, top} =
+               Rest.get_top_of_book("BTC-USD", @credentials,
+                 plug: responding([row]),
+                 retry_attempts: 0
+               )
+
+      assert top.bid == nil
+      assert top.bid_size == nil
+      assert top.ask == nil
+      assert top.ask_size == nil
+    end
+
+    test "a negative bid, or a bid that is not a number, refuses the reply" do
+      for {bid, expected} <- [
+            {"-1", {:non_positive_price, :bid, "-1"}},
+            {"abc", {:invalid_decimal, :bid, "abc"}}
+          ] do
+        assert {:error, ^expected} =
+                 Rest.get_top_of_book("BTC-USD", @credentials,
+                   plug: responding([snapshot_row(%{"bid" => bid})]),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a traded price of zero or less refuses the reply" do
+      for bad <- ["0", "-3"] do
+        assert {:error, {:non_positive_price, :price, ^bad}} =
+                 Rest.get_price("BTC-USD", @credentials,
+                   plug: responding([snapshot_row(%{"price" => bad})]),
+                   retry_attempts: 0
+                 )
+      end
     end
 
     test "an unparseable quote_time is nil, not the trade's time" do
@@ -162,7 +214,7 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
                    unquote(timeframe),
                    [],
                    @credentials,
-                   [real_time: true] ++ opts
+                   [include_partial: true] ++ opts
                  )
 
         assert forming.opened_at == DateTime.from_unix!(forming_ms, :millisecond)

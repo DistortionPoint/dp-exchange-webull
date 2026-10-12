@@ -103,10 +103,14 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a side the venue has no word for is refused, not upper-cased and sent" do
       exploding = fn _conn -> raise "must not send a side the venue does not list" end
 
-      for bad <- [:bid, :long, :short, "short", "hold", 1, {:buy}, nil] do
+      for bad <- [:bid, :long, :short, "short", "hold", 1, {:buy}] do
         assert {:error, {:invalid_side, ^bad}} =
                  place(limit_request(%{side: bad}), plug: exploding, account_id: @account)
       end
+
+      # An absent side is a missing field, not an invalid one (DV2).
+      assert {:error, {:missing_field, :side}} =
+               place(limit_request(%{side: nil}), plug: exploding, account_id: @account)
     end
 
     test "a symbol that is empty or not text is refused" do
@@ -265,7 +269,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       request = limit_request(%{amount: Decimal.new("250")})
       exploding = fn _conn -> raise "must not call the venue with an ambiguous size" end
 
-      assert {:error, :ambiguous_order_size} =
+      assert {:error, {:unexpected_field, :amount}} =
                place(request, plug: exploding, account_id: @account)
     end
 
@@ -282,7 +286,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       exploding = fn _conn -> raise "must not call the venue" end
 
-      assert {:error, :cash_sizing_not_supported_for_stop} =
+      assert {:error, {:unexpected_field, :amount}} =
                place(request, plug: exploding, account_id: @account)
     end
   end

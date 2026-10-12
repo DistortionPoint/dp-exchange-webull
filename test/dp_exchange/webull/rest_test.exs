@@ -581,9 +581,11 @@ defmodule DpExchange.Webull.RestTest do
 
     test "maps canonical widths to the venue's own timespan codes" do
       for {canonical, code} <- [{"1m", "M1"}, {"1h", "M60"}, {"2h", "M120"}, {"1d", "D"}] do
+        # No rows: the fixture bars sit on the minute grid and a wider width would (rightly)
+        # refuse them as unaligned; this test is about the request's `timespan` alone.
         plug = fn conn ->
           assert conn.query_string =~ "timespan=#{code}"
-          Req.Test.json(conn, @groups)
+          Req.Test.json(conn, [])
         end
 
         assert {:ok, _bars} =

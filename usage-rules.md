@@ -169,7 +169,7 @@ rules, so the two cannot drift: `Fake.preview_order/3`, `Fake.get_financials/3`,
 `Fake.get_corporate_events/1` (which now also honours `:kind`), `Fake.get_news/1` (which
 also takes one symbol as a string), `Fake.get_screener/2` (`week52_high_low` requires
 `:rank_type`), `Fake.update_watchlist/2`, `Fake.get_volume_profile/3`,
-`Fake.get_historical_prices/4` (a `:limit` over 1200 is refused), and the cash-activity
+`Fake.get_historical_prices/4` (a `:limit` over 1200 is `{:invalid_option, :limit, n}`; it was `{:limit_out_of_range, n, max: 1200}`), and the cash-activity
 calls (a range across two calendar years is refused, and `get_transactions/2` honours
 `:activity_types`). A fake order placed under a caller-chosen `client_order_id` can now be
 read back and cancelled under it. An order placed with no `client_order_id` is issued a new
@@ -496,12 +496,50 @@ DpExchange.Webull.adjusted?("1d")  #=> true
 DpExchange.Webull.adjusted?("1m")  #=> false
 ```
 
+### Bars: the forming bar, the range, the grid (family conventions, BREAKING)
+
+* **The bar still forming is not returned** (its `opened_at` plus the width is after now, on
+  this machine's clock - the venue sends none) unless you pass **`include_partial: true`**,
+  on every category. `Candle` has no partial flag, so with it the last bar may still change.
+  **`real_time:` is gone**: it is `{:error, {:unsupported_option, :real_time}}` (stock and
+  event bars used to read it), and a non-boolean `:include_partial`
+  is `{:error, {:invalid_option, :include_partial, v}}`. Whether the crypto endpoint's
+  `real_time_required` includes the forming bar for `"false"` or `"true"` is the vendor
+  page's own contradiction (see `Rest.crypto_bars/5`), so `include_partial: true` there
+  returns the bar only if the page's bullets are right - **unmeasured**.
+* **`:start` is inclusive and `:end` is exclusive**, on `opened_at` (it was inclusive).
+* **A range is never answered short.** Stock bars send `count` (your `:limit`, else the
+  maximum - 1200, 1650 for `1m` - when a `:start` is given; no range and no limit leaves the
+  venue's default of 200). A full page whose oldest bar is still after `:start` is
+  `{:error, {:range_too_wide, count}}` (it was `{:range_exceeds_count, count}`, crypto only).
+  Whether the venue returns the latest or the oldest `count` bars of a range is unmeasured.
+* **A bar's `time` must sit on its width's grid** (`DpExchange.Core.Timeframe.aligned?/2`) or
+  the whole reply is `{:error, {:unaligned_candle, time}}`: the pages say "Bar UTC time", not
+  "open time", and their own example (`09:00:09.945`) is on no grid. **Unmeasured:** whether
+  daily and longer stock bars are stamped at 00:00 UTC of the session date or at the
+  exchange-local midnight; a local stamp is refused until a live read says which, rather than
+  guessing an instant. `1w`, `1M` and `1y` have no grid rule in Core and are not checked.
+* **An open, high, low or close of zero or less** is `{:error, {:non_positive_price, field,
+  raw}}`; so is a trade or quote price. A book level with no readable price or a price of zero
+  or less refuses the whole book (it was dropped), a level of size zero is dropped, and a
+  negative size is `{:error, {:non_positive_size, :size, raw}}`.
+* **A candle or trade `:limit` over the page's maximum** (1200; 1650 for stock `1m`; 1000 for
+  the stock tape) **is `{:error, {:invalid_option, :limit, value}}`**, as is one that is not a
+  positive whole number; it was `{:limit_out_of_range, n, max: max}`.
+* **A streamed `TopOfBook` side priced `0` is `nil` with no size**; a side that is present
+  but unreadable refuses that frame's top of book (a `:data_quality` notice, once per
+  connection), as REST does for a non-numeric or negative bid/ask. A streamed trade with no
+  time of its own still takes the frame's `Basic.timestamp` (`Trade.timestamp` is required).
+* **`capabilities/0` declares `max_candles_per_request: 1_200`** - *documented*, from each bars
+  page's `count` maximum (stock `1m`: 1650), never measured against a live response.
+
 ## `get_orders/2` follows `pagination_key` to the end, bounded
 
 `/trading/orders/open-orders/list` and `/trading/orders/historical-orders/list` both
 document `pagination_key` — the venue's own reference pages, not just its endpoint
 inventory — and this package walks it the same way `get_symbols/2` walks the instrument
-catalogue's: to the end, or `{:error, {:too_many_pages, n}}` on a bound, or
+catalogue's: to the end, or `{:error, :history_truncated}` on the page bound (was
+`{:too_many_pages, n}` / `:too_many_instrument_pages`), or
 `{:error, :pagination_key_did_not_advance}` on a repeated key, or
 `{:error, :unexpected_pagination_key}` on a key that is not text. `get_orders/2` returns the
 whole set the venue holds for the request, not a prefix.
@@ -581,6 +619,14 @@ What an undated value does depends on the TYPE, because the contract differs:
 * **A quote or an order book is delivered with `venue_time: nil`.** Neither type enforces it,
   and refusing threw away a real guarded price, or a whole set of book levels, over an
   optional field. This changed in 0.4.36 and 0.4.37; before then both were refused.
+* **`venue_time` is the time of the event the struct describes, and nothing nearby.** A
+  `Quote`'s is the last trade's (`last_trade_time`; on the stream the snapshot's `trade_time`,
+  **never** `Basic.timestamp`, which is when the message was assembled); a `TopOfBook`'s is the
+  quote's (`quote_time`), and the REST stock snapshot, which states only `last_trade_time`,
+  answers `nil` for it. A `Quote` from a row that states only a `quote_time` is `nil` too.
+* **A trade's `side` is `nil`.** The tape's `B`/`S`/`G`/`L`/`N` are defined nowhere the venue
+  publishes (taker, buyer or resting order is unmeasured), and `Core.Types.Trade` says an
+  undocumented code is `nil`. It was `B -> :buy`, `S -> :sell`.
 
 **Units.** An epoch is read as seconds up to ten digits and milliseconds up to thirteen; one
 longer (microseconds, nanoseconds) is not a time this package can read and is refused
@@ -983,11 +1029,15 @@ again). Settle each with `get_order/3`. Missing credentials and our own limiter 
 write stay the plain `{:error, reason}` (`place_order/3`, `replace_order/4` and the watchlist
 writes likewise).
 
-An entry with no `:symbol` or `:side` (`{:invalid_symbol, nil}` / `{:invalid_side, nil}`), or
-a `LIMIT` entry with no `:price` (`{:missing_field, :price}`), is refused by index before
+An entry with no `:symbol` or `:side` (`{:invalid_symbol, nil}` / `{:missing_field, :side}`),
+or a `LIMIT` entry with no `:price` (`{:missing_field, :price}`), is refused by index before
 anything is sent: `{:error, {:batch_order_rejected, index, reason}}`. So is a key the batch
-builder does not read (`{:unsupported_order_field, key}`, e.g. `:stop_price`) and a `:price`
-on a market entry (`{:unexpected_field, :price}`).
+builder does not read (`{:unsupported_order_field, key}`, e.g. `:stop_price`), a `:price`
+on a market entry (`{:unexpected_field, :price}`), neither `:quantity` nor `:amount`
+(`{:missing_field, :quantity}`), any `:amount` (`{:unexpected_field, :amount}`) and no
+`:support_trading_session` (`{:missing_field, :support_trading_session}`). These three were
+the bare atoms `:missing_order_size`, `:cash_sizing_not_supported_for_batch` and
+`:support_trading_session_required`.
 
 `place_order/3` answers `{:error, {:order_unconfirmed, client_order_id,
 :unexpected_response_shape}}` when the venue accepts (2xx) but its row names no order **or
@@ -1003,22 +1053,27 @@ follows the same rule for its own send (`{:order_unconfirmed, order_id, reason}`
 
 A map (`{:invalid_order_request, r}`), then **no key the builder does not read**
 (`{:unsupported_order_field, key}`: `post_only`, `reduce_only`, `end_time` were ignored), the
-symbol (`{:invalid_symbol, v}`, blank counts), the side (`{:invalid_side, v}`: `:buy`/`:sell`,
+symbol (`{:invalid_symbol, v}`, blank counts), the side (`{:missing_field, :side}` when
+absent - it was `{:invalid_side, nil}` - otherwise `{:invalid_side, v}`: `:buy`/`:sell`,
 or text in any case; **`:short` is refused**, `capabilities/0` says
 `supports_short_selling: false`, where it used to be sent and come back as `side: nil`),
 **`:order_type` and `:time_in_force`, both required, never defaulted**
 (`{:missing_field, key}`: an absent type used to become a limit order and an absent duration
 a GTC one), a type the instrument does not use (`{:unsupported_order_type, type}`), a
 duration it does not serve for that type (`{:unsupported_order_combination, type, tif}`, the
-instrument no longer in the tuple), the size (`{:missing_field, :quantity}`), the price
+instrument no longer in the tuple), **a GTD order's expiry with the duration**
+(`{:missing_field, :expire_date}`; an `:expire_date` on any other duration is
+`{:unexpected_field, :expire_date}` - it used to be checked after the prices), the size
+(`{:missing_field, :quantity}` for neither `:quantity` nor `:amount`;
+`{:unexpected_field, :amount}` for both, and for `:amount` on a stop-limit order - these
+were the bare atoms `:ambiguous_order_size` and `:cash_sizing_not_supported_for_stop`), the price
 fields (`{:unexpected_field, key}` for a `:price` on a market or stop order, a `:stop_price`
 on a limit or market one, a `:trailing_stop_step` on anything else; `{:missing_field, key}`
 for one the type needs), the numbers (`{:invalid_quantity, v}`, `{:invalid_amount, v}`,
 `{:invalid_price, v}`, `{:invalid_stop_price, v}`, `{:invalid_trailing_stop_step, v}`; **a
 float is refused**, it has lost digits - use a `Decimal`, an integer or numeric text), the
 caller's `client_order_id` (`{:invalid_client_order_id, v}`, 32 characters at most, blank
-refused), a GTD order's expiry (`{:missing_field, :expire_date}`; an `:expire_date` on any
-other duration is `{:unexpected_field, :expire_date}`), then the account option
+refused), then the account option
 (`{:error, {:missing_option, :account_id}}`) and the credentials. `Fake` answers the same, in
 the same order, from the same function. A preview that is not a map is
 `{:invalid_order_request, r}` (it raised), and a preview of crypto is still
@@ -1053,6 +1108,14 @@ each has a different remedy. A response with no `token`, or a `status` outside t
 four (`PENDING`, `NORMAL`, `INVALID`, `EXPIRED`), is refused —
 `{:error, {:missing_required_field, field}}` / `{:error, {:unknown_token_status, status}}` —
 and `oauth_token/3` refuses a 2xx with no `access_token`. `NORMAL` is never inferred.
+
+**`create_token/1` is a write.** A create that may have reached the venue and is not proven
+(a transport error or timeout, a 5xx, a 2xx whose body is unreadable, names no token or states
+a status outside the four) is `{:error, {:write_unconfirmed, nil, reason}}` - `reason` is the
+refusal above for a 2xx - since a token may now exist and the SMS verification may be
+waiting; the `nil` is the idempotency key the request does not carry. Missing credentials and
+our own limiter refusing stay the plain `{:error, reason}`; a 4xx is `{:refused, reason}`.
+`check_token/2` is a read and keeps the unwrapped refusals.
 
 `oauth_token/3` is one endpoint doing two jobs on a **different host**, with a form body.
 `opts[:code]` exchanges, `opts[:refresh_token]` refreshes, and exactly one is required.

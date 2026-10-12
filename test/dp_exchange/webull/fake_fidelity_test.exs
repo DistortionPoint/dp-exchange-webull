@@ -256,7 +256,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
     end
 
     test "a bar count over the crypto maximum is refused" do
-      assert {:error, {:limit_out_of_range, 5000, max: 1200}} =
+      assert {:error, {:invalid_option, :limit, 5000}} =
                Fake.get_historical_prices("BTC-USD", "1m", [], [limit: 5000] ++ @opts)
     end
 

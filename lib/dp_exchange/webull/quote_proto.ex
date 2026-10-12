@@ -68,10 +68,12 @@ defmodule DpExchange.Webull.QuoteProto do
          symbol: symbol,
          price: price,
          volume: present(fields, 8),
-         # `trade_time` (2) is the venue's own time for the print. Preferred over
-         # `Basic.timestamp` (3), which is when the message was assembled — they differ,
-         # and only the first one describes the trade.
-         timestamp: present(fields, 2) || present(basic, 3)
+         # `trade_time` (2) is the venue's own time for the print, and the only time that
+         # describes the trade. **No fallback to `Basic.timestamp` (3)**: that is when the
+         # message was assembled, a different event, and `Quote.venue_time` is the time of
+         # the last trade (family convention MD7). A snapshot with no `trade_time` is
+         # delivered with `venue_time: nil`.
+         timestamp: present(fields, 2)
        }}
     else
       _missing_required -> :error

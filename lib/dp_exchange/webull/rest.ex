@@ -273,7 +273,7 @@ defmodule DpExchange.Webull.Rest do
   defp snapshot_quote(row, native, category) do
     with {:ok, raw_price} <- required(row, ["price", "lastPrice", "last_trade_price"]),
          :ok <- quoted(raw_price),
-         {:ok, price} <- required_decimal(raw_price, :price) do
+         {:ok, price} <- required_price(raw_price, :price) do
       # A snapshot's `volume` is the day's aggregate, so a running total —
       # dp-exchange-core issue #42. `nil`, with no window, where the response has none.
       volume = snapshot_volume(row)
@@ -284,11 +284,12 @@ defmodule DpExchange.Webull.Rest do
          price: price,
          volume: volume,
          volume_window: volume && :running_total,
-         # Read, not required — see `top_of_book_time/1`, which has always answered this
-         # way for the sibling call on the same endpoint. `Core.Types.Quote` enforces
+         # Read, not required - `Core.Types.Quote` enforces
          # `[:symbol, :price, :observed_at, :provider]`; refusing a guarded traded price
-         # over an optional field discards the fact the caller asked for.
-         venue_time: top_of_book_time(row),
+         # over an optional field discards the fact the caller asked for. **The time of the
+         # last trade and nothing else** (`trade_time/1`): a row that states only a
+         # `quote_time` has no trade time, and that quote's time is a different event.
+         venue_time: trade_time(row),
          observed_at: DateTime.utc_now(),
          provider: :webull
        }}
@@ -462,8 +463,27 @@ defmodule DpExchange.Webull.Rest do
   @doc """
   OHLC bars for a symbol and canonical timeframe.
 
-  Bars carry no volume — see the module doc. A bar without a venue timestamp is an
+  Bars carry no volume on crypto — see the module doc. A bar without a venue timestamp is an
   **error**, not a bar stamped with the local clock.
+
+  ## Family conventions (all categories)
+
+    * **The bar still forming is dropped** (`opened_at` plus the width is after now,
+      this machine's clock) unless `include_partial: true`. Core's `Candle` has no flag, so
+      with `include_partial: true` the last bar may still change. `real_time:` is gone
+      (BREAKING) and is `{:error, {:unsupported_option, :real_time}}`; a non-boolean
+      `:include_partial` is `{:error, {:invalid_option, :include_partial, v}}`.
+    * **`:start` inclusive, `:end` exclusive**, on `opened_at`. A crypto or stock read whose
+      page is full while its oldest bar is still after `:start` is
+      `{:error, {:range_too_wide, count}}` (was `{:range_exceeds_count, count}`), never a
+      short answer. Stock bars send `count` (the `:limit`, else the maximum when a `:start`
+      is given) so the venue's default of 200 does not cut a range short.
+    * **A bar must sit on its width's grid** (`DpExchange.Core.Timeframe.aligned?/2`), else
+      the reply is `{:error, {:unaligned_candle, time}}`. **Unmeasured**: the pages call
+      `time` "Bar UTC time" without saying it is the open; this includes whether daily and
+      longer stock bars are stamped at 00:00 UTC of the session date.
+    * An open, high, low or close of zero or less is `{:error, {:non_positive_price, field,
+      raw}}`.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -495,7 +515,7 @@ defmodule DpExchange.Webull.Rest do
   defp futures_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :future),
          {:ok, timespan} <- stock_timespan(timeframe),
-         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
+         :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -507,8 +527,9 @@ defmodule DpExchange.Webull.Rest do
           "timespan" => timespan
         }
 
-      with {:ok, body} <- get("/market-data/futures/bars/list", params, credentials, opts) do
-        decode_stock_bars(body, symbol, timeframe, [])
+      with {:ok, body} <- get("/market-data/futures/bars/list", params, credentials, opts),
+           {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
+        {:ok, finish_bars(bars, timeframe, opts)}
       end
     end
   end
@@ -523,21 +544,24 @@ defmodule DpExchange.Webull.Rest do
   defp event_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :event),
          {:ok, timespan} <- event_timespan(timeframe),
-         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
+         :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
           "category" => "US_EVENT",
           "timespan" => timespan,
-          # Required by the venue. `false` asks for completed bars only: an in-progress bar
-          # has a boundary that has not happened yet.
-          "real_time_required" => to_string(Config.opt(opts, :real_time, false))
+          # Required by the venue. `false` is its default and, per `event-bars.md:93`, does
+          # not include a candle that is not yet finalised; `true` only when the caller
+          # asked for the forming bar (`include_partial: true`). Whatever the venue does,
+          # the forming bar is also removed client-side (`finish_bars/3`).
+          "real_time_required" => to_string(Keyword.get(opts, :include_partial) == true)
         }
         |> put_present("count", Keyword.get(opts, :limit))
 
       with {:ok, body} <-
-             get("/market-data/event-contracts/bars/list", params, credentials, opts) do
-        decode_stock_bars(body, symbol, timeframe, [])
+             get("/market-data/event-contracts/bars/list", params, credentials, opts),
+           {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
+        {:ok, finish_bars(bars, timeframe, opts)}
       end
     end
   end
@@ -563,7 +587,7 @@ defmodule DpExchange.Webull.Rest do
   # parameter the venue does not read; the venue would either ignore it silently or
   # (undocumented either way) reject the call for an unrecognised field. `refuse_bar_range/1`
   # below refuses instead: the venue serves only its most recent `count` bars here, and
-  # letting `decode_stock_bars/4`'s client-side `within?/2` filter run against a caller's
+  # letting a client-side `within?/2` filter run against a caller's
   # range would, for any range outside that most-recent window, produce a real, complete-
   # looking response with every bar then discarded — a truncation that reads as "no data in
   # that range" rather than "count did not reach back far enough", the family's own named
@@ -571,7 +595,7 @@ defmodule DpExchange.Webull.Rest do
   defp option_bars(symbol, timeframe, range, credentials, opts) do
     with :ok <- refuse_bar_range(range, :option),
          {:ok, timespan} <- stock_timespan(timeframe),
-         :ok <- count_within_max(Keyword.get(opts, :limit), 1_200) do
+         :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200) do
       params =
         %{
           "symbols" => symbol,
@@ -580,8 +604,9 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("count", Keyword.get(opts, :limit))
 
-      with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts) do
-        decode_stock_bars(body, symbol, timeframe, [])
+      with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts),
+           {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
+        {:ok, finish_bars(bars, timeframe, opts)}
       end
     end
   end
@@ -638,7 +663,7 @@ defmodule DpExchange.Webull.Rest do
            {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_bars(body, symbol, timeframe),
            :ok <- range_reached(bars, range, Keyword.get(opts, :limit) || @crypto_bar_default) do
-        {:ok, Enum.filter(bars, &within?(&1, range))}
+        {:ok, bars |> Enum.filter(&within?(&1, range)) |> finish_bars(timeframe, opts)}
       end
     end
   end
@@ -667,7 +692,32 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_bars_request(String.t(), keyword(), keyword()) :: :ok | {:error, term()}
   def validate_bars_request(timeframe, range, opts) do
-    with :ok <- validate_range(range), do: validate_category_bars(timeframe, range, opts)
+    with :ok <- validate_bar_options(opts),
+         :ok <- validate_range(range),
+         do: validate_category_bars(timeframe, range, opts)
+  end
+
+  @doc """
+  The bar options every bars path checks first: `:real_time` was renamed `:include_partial`
+  (the family's name for "give me the bar that is still forming") and is refused
+  `{:error, {:unsupported_option, :real_time}}` rather than ignored - silently ignoring it
+  would hand a caller who asked for the forming bar a series without it. `:include_partial`
+  must be a boolean (`{:error, {:invalid_option, :include_partial, value}}`).
+
+  Shared by `get_historical_prices/5`, `get_stock_bars/5` and `DpExchange.Webull.Fake`.
+  """
+  @spec validate_bar_options(keyword()) :: :ok | {:error, term()}
+  def validate_bar_options(opts) do
+    cond do
+      Keyword.has_key?(opts, :real_time) ->
+        {:error, {:unsupported_option, :real_time}}
+
+      Keyword.get(opts, :include_partial) not in [nil, true, false] ->
+        {:error, {:invalid_option, :include_partial, Keyword.get(opts, :include_partial)}}
+
+      true ->
+        :ok
+    end
   end
 
   defp validate_category_bars(timeframe, range, opts) do
@@ -680,22 +730,22 @@ defmodule DpExchange.Webull.Rest do
       "US_OPTION" ->
         with :ok <- refuse_bar_range(range, :option),
              {:ok, _timespan} <- stock_timespan(timeframe),
-             do: count_within_max(limit, 1_200)
+             do: limit_within_max(limit, 1_200)
 
       "US_FUTURES" ->
         with :ok <- refuse_bar_range(range, :future),
              {:ok, _timespan} <- stock_timespan(timeframe),
-             do: count_within_max(limit, 1_200)
+             do: limit_within_max(limit, 1_200)
 
       "US_EVENT" ->
         with :ok <- refuse_bar_range(range, :event),
              {:ok, _timespan} <- event_timespan(timeframe),
-             do: count_within_max(limit, 1_200)
+             do: limit_within_max(limit, 1_200)
 
       category ->
         with :ok <- book_category(category),
              {:ok, timespan} <- stock_timespan(timeframe),
-             do: count_within_max(limit, stock_bar_max(timespan))
+             do: limit_within_max(limit, stock_bar_max(timespan))
     end
   end
 
@@ -740,7 +790,7 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, _path} <- tick_path(category),
-         do: count_within_max(Keyword.get(opts, :limit), tick_max(category))
+         do: limit_within_max(Keyword.get(opts, :limit), tick_max(category))
   end
 
   @doc """
@@ -752,7 +802,15 @@ defmodule DpExchange.Webull.Rest do
   @spec validate_statement_count(atom(), keyword()) :: :ok | {:error, term()}
   def validate_statement_count(kind, opts), do: statement_count(statement_endpoint(kind), opts)
 
-  defp crypto_count_within_limit(n), do: count_within_max(n, @crypto_bar_max)
+  defp crypto_count_within_limit(n), do: limit_within_max(n, @crypto_bar_max)
+
+  # A candle or trade `:limit` above the page's documented maximum (or not a positive whole
+  # number) is `{:invalid_option, :limit, value}` (family convention MD4). It was
+  # `{:limit_out_of_range, n, max: max}`; the `:count` options of the footprint and statement
+  # endpoints keep that shape through `count_within_max/2`.
+  defp limit_within_max(nil, _max), do: :ok
+  defp limit_within_max(n, max) when is_integer(n) and n >= 1 and n <= max, do: :ok
+  defp limit_within_max(n, _max), do: {:error, {:invalid_option, :limit, n}}
 
   # A bar or tick count over a maximum the endpoint's own page states is refused before the
   # request, in the shape the crypto check above has always used. Only endpoints whose page
@@ -769,13 +827,18 @@ defmodule DpExchange.Webull.Rest do
   # whose oldest bar is still after `:start` means older bars exist that this read did not
   # fetch, and filtering it to the range returned a truncated window as complete, or `[]`
   # for a window wholly in the past, which reads as "no trading". A page shorter than
-  # `count` is the venue's whole history, and is answered.
+  # `count` is the venue's whole history, and is answered. The refusal is the family's
+  # `{:range_too_wide, count}` (this was `{:range_exceeds_count, count}`).
+  #
+  # **Run on the bars as the venue sent them, before the range filter** - a filtered page is
+  # shorter than `count` by construction and would never look full. Shared by the crypto
+  # and stock paths.
   defp range_reached(bars, range, count) do
     with %DateTime{} = start <- Keyword.get(range, :start),
          true <- length(bars) >= count,
          %{opened_at: oldest} <- Enum.min_by(bars, & &1.opened_at, DateTime, fn -> nil end),
          :gt <- DateTime.compare(oldest, start) do
-      {:error, {:range_exceeds_count, count}}
+      {:error, {:range_too_wide, count}}
     else
       _reached_or_unbounded -> :ok
     end
@@ -800,8 +863,12 @@ defmodule DpExchange.Webull.Rest do
 
   As in `get_price/3`, a row naming a different symbol than the one asked for is
   `{:error, :not_in_response}`. `bid`, `ask` and the sizes are `nil` where the row does not
-  carry a readable number for them, and `venue_time` is the quote's own time
-  (`quote_time`), falling back to the last trade's only where there is no quote time.
+  carry a number for them: a price of `0` (or the literal `"null"`) is no resting order on
+  that side, so that side and its size are `nil`, while a negative price or text that is not
+  a number is `{:error, {:non_positive_price, side, raw}}` / `{:error, {:invalid_decimal,
+  side, raw}}`. `venue_time` is the quote's own time (`quote_time`) and **`nil` when the row
+  has none** - the stock snapshot states only `last_trade_time`, a different event, and it is
+  not used (family convention MD7).
   """
   @spec get_top_of_book(String.t(), map(), keyword()) ::
           {:ok, TopOfBook.t()} | {:error, term()} | {:refused, term()}
@@ -815,50 +882,83 @@ defmodule DpExchange.Webull.Rest do
       params = snapshot_params(native, category, opts)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, row} <- symbol_row(body, native) do
-        bid = decimal(value(row, ["bidPrice", "bid_price", "bid"]))
-        ask = decimal(value(row, ["askPrice", "ask_price", "ask"]))
-
-        {:ok,
-         %TopOfBook{
-           symbol: snapshot_canonical(native, category),
-           bid: bid,
-           ask: ask,
-           # **A size is the size of a level, and a side with no readable price has no level.**
-           # `bid: nil` beside a `bid_size` read as a one-sided book with depth on the empty
-           # side. `Socket` already keeps each size only with the price it belongs to; this is
-           # the same rule for the same type on the other transport.
-           bid_size: bid && decimal(value(row, ["bidSize", "bid_size"])),
-           ask_size: ask && decimal(value(row, ["askSize", "ask_size"])),
-           venue_time: quote_time(row),
-           observed_at: DateTime.utc_now(),
-           provider: :webull
-         }}
+           {:ok, row} <- symbol_row(body, native),
+           {:ok, bid} <- quote_side_price(row, ["bidPrice", "bid_price", "bid"], :bid),
+           {:ok, ask} <- quote_side_price(row, ["askPrice", "ask_price", "ask"], :ask) do
+        {:ok, top_of_book_row(row, native, category, bid, ask)}
       end
     end
+  end
+
+  # **A bid or ask of zero is "no resting order on that side" (`nil`, size `nil`); a negative
+  # one, or text that is not a number, refuses the reply** (family convention MD6).
+  # The literal `"null"` is the venue's own documented spelling of "no price" (a delisted
+  # pair answers it) and is read as no price on that side, as is an absent field.
+  defp quote_side_price(row, keys, field) do
+    case value(row, keys) do
+      absent when absent in [nil, "null"] -> {:ok, nil}
+      raw -> raw |> required_decimal(field) |> side_price(field, raw)
+    end
+  end
+
+  defp side_price({:ok, price}, field, raw) do
+    cond do
+      Decimal.eq?(price, 0) -> {:ok, nil}
+      Decimal.negative?(price) -> {:error, {:non_positive_price, field, raw}}
+      true -> {:ok, price}
+    end
+  end
+
+  defp side_price({:error, _reason} = error, _field, _raw), do: error
+
+  defp top_of_book_row(row, native, category, bid, ask) do
+    %TopOfBook{
+      symbol: snapshot_canonical(native, category),
+      bid: bid,
+      ask: ask,
+      # **A size is the size of a level, and a side with no readable price has no level.**
+      # `bid: nil` beside a `bid_size` read as a one-sided book with depth on the empty
+      # side. `Socket` already keeps each size only with the price it belongs to; this is
+      # the same rule for the same type on the other transport.
+      bid_size: bid && decimal(value(row, ["bidSize", "bid_size"])),
+      ask_size: ask && decimal(value(row, ["askSize", "ask_size"])),
+      venue_time: quote_time(row),
+      observed_at: DateTime.utc_now(),
+      provider: :webull
+    }
   end
 
   defp refuse_event_top_of_book("US_EVENT"), do: {:error, {:use_get_event_order_book, "US_EVENT"}}
   defp refuse_event_top_of_book(_category), do: :ok
 
-  # **A bid and an ask are stamped with the quote's time, not the last trade's.** The crypto,
+  # **A bid and an ask are stamped with the quote's time, and only the quote's.** The crypto,
   # option and futures snapshots carry both `last_trade_time` and `quote_time`
-  # (`crypto-snapshot.md:183,219`, `option-snapshot.md:221,272`, `futures-snapshot.md:221,232`)
-  # and `venue_time/1` reads `last_trade_time` first, so a `TopOfBook` was dated by the last
-  # print — on a thinly traded pair, hours before a quote that is live now — and a caller's
-  # staleness check on the book judged the trade, not the quote. The stock snapshot has only
-  # `last_trade_time` (`snapshot.md:214`), so a row with no `quote_time` keeps the old
-  # reading rather than losing the only time it has.
+  # (`crypto-snapshot.md:183,219`, `option-snapshot.md:221,272`, `futures-snapshot.md:221,232`),
+  # and a `TopOfBook` dated by the last print judged the trade, not the quote.
+  #
+  # **A row with no `quote_time` is `nil`, not its `last_trade_time`.** The stock snapshot
+  # has only `last_trade_time` (`snapshot.md:214`); this used to fall back to it "rather than
+  # lose the only time it has", which dated a quote with a different event's time - on a
+  # thinly traded name, hours before the quote. `TopOfBook.venue_time` is the venue's stated
+  # time of THAT quote and nil when it states none (family convention MD7); `observed_at`
+  # says when this package read it.
   defp quote_time(row) do
-    case value(row, ["quote_time"]) do
-      nil ->
-        top_of_book_time(row)
+    # `parse_time(nil)` is an error, so an absent field is nil with the unparseable.
+    case parse_time(value(row, ["quote_time"])) do
+      {:ok, at} -> at
+      _absent_or_unparseable -> nil
+    end
+  end
 
-      raw ->
-        case parse_time(raw) do
-          {:ok, at} -> at
-          _unparseable -> nil
-        end
+  # `Quote.venue_time`: the venue's stated time of the last trade. The same keys
+  # `venue_time/1` reads minus `quote_time`; `nil` when the row states none or states one
+  # this package cannot read.
+  defp trade_time(row) do
+    keys = ["time", "ts", "timestamp", "tradeTime", "trade_time", "last_trade_time"]
+
+    case parse_time(value(row, keys)) do
+      {:ok, at} -> at
+      _absent_or_unparseable -> nil
     end
   end
 
@@ -1083,7 +1183,7 @@ defmodule DpExchange.Webull.Rest do
   defp instrument_status(_co_nt_or_unrecognised), do: :unknown
 
   defp all_instrument_rows(_key, _credentials, _opts, _acc, page) when page >= @max_pages,
-    do: {:error, :too_many_instrument_pages}
+    do: {:error, :history_truncated}
 
   defp all_instrument_rows(key, credentials, opts, acc, page) do
     category = Config.opt(opts, :category, "US_CRYPTO")
@@ -1135,13 +1235,14 @@ defmodule DpExchange.Webull.Rest do
   # `nil` on the last page; pages are collected and concatenated once at the end, for the
   # same reason `all_instrument_rows/5`'s own comment gives.
   #
-  # `{:error, {:too_many_pages, n}}` on the bound and `{:error, :pagination_key_did_not_advance}`
-  # on a repeated key — fail closed on both, rather than returning the pages collected so
-  # far as though they were the whole list.
+  # `{:error, :history_truncated}` on the bound (family convention DV7; this was
+  # `{:too_many_pages, n}`) and `{:error, :pagination_key_did_not_advance}` on a repeated
+  # key — fail closed on both, rather than returning the pages collected so far as though
+  # they were the whole list.
   defp paginate(fetch_page), do: paginate(fetch_page, nil, [], 0)
 
   defp paginate(_fetch_page, _key, _acc, page) when page >= @max_pages,
-    do: {:error, {:too_many_pages, page}}
+    do: {:error, :history_truncated}
 
   defp paginate(fetch_page, key, acc, page) do
     with {:ok, {page_rows, next_key}} <- fetch_page.(key) do
@@ -2335,7 +2436,7 @@ defmodule DpExchange.Webull.Rest do
   # unexamined for a day. "Does this package sort?" is the wrong question: a package has
   # one book path per transport and each needs checking.
   #
-  # The `not is_nil(price)` filter this already had is why a nil price cannot reach the sort.
+  # A level cannot reach the sort without a price: `book_level/1` refuses one that has none.
   #
   # **A level that names a price must state a readable size, or the book is refused.**
   # `Core.Types.OrderBook` types a level `{Decimal.t(), Decimal.t()}` and `OrderBook.new/1`
@@ -2344,18 +2445,20 @@ defmodule DpExchange.Webull.Rest do
   # publish a book with a hole in it as though the venue had shown no liquidity at that price,
   # which is a meaning the venue never stated; so the whole answer is
   # `{:missing_required_field, :size}` / `{:invalid_decimal, :size, value}`.
+  #
+  # **A level with no readable price refuses the book too** (family convention MD5). The
+  # filter above ("the `not is_nil(price)` filter") used to drop it, which published a book
+  # with a hole in it as though the venue had shown nothing at that price - the same
+  # substitution, one field earlier. A price of zero or less refuses
+  # (`{:non_positive_price, :price, raw}`); **a level whose size is zero is dropped**
+  # (no liquidity there, nothing was hidden), and a negative size refuses.
   defp book_levels(rows, direction) when is_list(rows) do
     rows
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, levels} ->
-      case decimal(value(row, ["price"])) do
-        nil ->
-          {:cont, {:ok, levels}}
-
-        price ->
-          case required_decimal(value(row, ["size"]), :size) do
-            {:ok, size} -> {:cont, {:ok, [{price, size} | levels]}}
-            {:error, _reason} = error -> {:halt, error}
-          end
+      case book_level(row) do
+        {:ok, level} -> {:cont, {:ok, [level | levels]}}
+        :empty -> {:cont, {:ok, levels}}
+        {:error, _reason} = error -> {:halt, error}
       end
     end)
     |> case do
@@ -2377,6 +2480,17 @@ defmodule DpExchange.Webull.Rest do
   # a side with no liquidity.
   defp book_levels(nil, _direction), do: {:ok, []}
   defp book_levels(_unreadable, _direction), do: {:error, :unexpected_response_shape}
+
+  defp book_level(row) do
+    with {:ok, price} <- required_price(value(row, ["price"]), :price),
+         {:ok, size} <- required_decimal(value(row, ["size"]), :size) do
+      cond do
+        Decimal.positive?(size) -> {:ok, {price, size}}
+        Decimal.eq?(size, 0) -> :empty
+        true -> {:error, {:non_positive_size, :size, value(row, ["size"])}}
+      end
+    end
+  end
 
   # The venue's footprint granularities. **Deliberately narrower than `timeframes/0`** —
   # the footprint endpoint serves five widths and the bars endpoint serves more, and a
@@ -2714,14 +2828,16 @@ defmodule DpExchange.Webull.Rest do
   **The venue marks `trading_sessions` required**, so one is always sent; asking for regular
   hours by default is a choice, and it is the one that matches what `get_price/3` returns.
 
-  ## `side` has five codes and this package knows two of them
+  ## `side` is always `nil`: the venue's five codes are defined nowhere
 
-  The venue documents the field as *"Such as: B S G L N"* and defines none of them. `B` and
-  `S` are unambiguous; **`G`, `L` and `N` are not documented anywhere the vendor publishes**,
-  so they map to `nil` rather than being folded into the nearest of buy or sell.
-
-  A tick whose side is `nil` is a real trade with an unknown aggressor. Guessing would put
-  volume on the wrong side of a delta, which is the number a caller reads a tape for.
+  The venue documents the field as *"Such as: B S G L N"* and defines none of them -
+  **not whose side `B` is** (the taker's, the buyer's, the resting order's). `Core.Types.Trade`
+  says an undocumented code is `nil`, not a mapping nobody has checked, so every tick's
+  `side` is `nil` (**BREAKING**: `B` was `:buy` and `S` was `:sell`). **Unmeasured**: a live
+  read against a known aggressor would settle the meaning; until then the mapping is not
+  claimed. Guessing would put volume on the wrong side of a delta, which is the number a
+  caller reads a tape for. A price of zero or less refuses the reply
+  (`{:non_positive_price, :price, raw}`).
 
   `broken` is `false` on every tick: this venue publishes no bust flag here, and a venue
   with no concept of busts has nothing busted — which is the same answer.
@@ -2732,7 +2848,7 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_STOCK")
 
     with {:ok, path} <- tick_path(category),
-         :ok <- count_within_max(Keyword.get(opts, :limit), tick_max(category)),
+         :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
          :ok <- validate_symbol(symbol) do
       params =
         %{
@@ -2807,14 +2923,22 @@ defmodule DpExchange.Webull.Rest do
 
   defp to_trade(tick, symbol) do
     with {:ok, timestamp} <- venue_time(tick),
-         {:ok, price} <- required_decimal(value(tick, ["price"]), :price),
+         {:ok, price} <- required_price(value(tick, ["price"]), :price),
          {:ok, quantity} <- required_decimal(value(tick, ["volume"]), :quantity) do
       {:ok,
        %Trade{
          # The venue publishes no per-tick id on this endpoint. `nil` says so.
          id: nil,
          symbol: symbol,
-         side: tick_side(value(tick, ["side"])),
+         # **Always `nil`: the venue's `side` code is not defined anywhere it publishes.**
+         # `tick.md` / `futures-tick.md` say only "Such as: B S G L N". `Core.Types.Trade`
+         # types the taker's side as `:buy | :sell | nil` and says a code the venue does not
+         # document is `nil`, rather than a mapping nobody has checked: `B` could be the
+         # buyer's side, the taker's, or the resting order's, and a wrong guess inverts
+         # every delta while every number stays real. It was `B -> :buy`, `S -> :sell`
+         # (BREAKING: those trades now carry `side: nil`). Unmeasured: a live read
+         # comparing a tick against a known aggressor would settle the meaning.
+         side: nil,
          price: price,
          quantity: quantity,
          timestamp: timestamp,
@@ -2825,16 +2949,13 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # `B` and `S` are unambiguous. `G`, `L` and `N` appear in the venue's field description
-  # and are defined nowhere it publishes, so they are `nil` — a real trade with an unknown
-  # aggressor. Folding them into buy or sell would put volume on the wrong side of a delta.
-  defp tick_side("B"), do: :buy
-  defp tick_side("S"), do: :sell
-  defp tick_side(_undocumented), do: nil
-
   # The stock bars endpoint serves **three widths the crypto one does not** — week, month
   # and year — on top of the eight they share.
   @stock_timespans Map.merge(@timespans, %{"1w" => "W", "1M" => "M", "1y" => "Y"})
+
+  # `historical-bars.md`: "Number of bars, default 200" - what the venue returns when no
+  # `count` is sent.
+  @stock_bar_default 200
 
   @doc """
   Historical bars for an equity or ETF — `POST /market-data/stocks/bars/list`.
@@ -2855,13 +2976,39 @@ defmodule DpExchange.Webull.Rest do
   follows from that width by the venue's rule. `adjusted?/1` answers it for a width without
   a request.
 
-  ## `real_time_required` defaults to **Y** here, unlike every other endpoint
+  ## The bar that is still forming is dropped unless `include_partial: true`
 
-  On the crypto bars and the footprints it defaults to false. Here the vendor's default is
-  *"Y: The returned data includes the latest market data"* — an **in-progress bar whose
-  boundary has not happened yet**. This sends `false` unless asked, matching what
-  `get_historical_prices/5` does for crypto: a package that stored the venue's default would
-  save a bar that changes after it is written.
+  Every bars path in this package (crypto, stock, option, futures, event) removes a bar
+  whose `opened_at` plus its width is after now (this machine's clock - the venue sends no
+  clock on this endpoint) unless the caller passes `include_partial: true`. The request asks
+  the venue for `real_time_required: true` (its default, *"Y: The returned data includes the
+  latest market data"*) so that finished bars are not cut off at "the nearest whole hour",
+  and the one still forming is removed here. **The option was `real_time:` and is now
+  `include_partial:`** (BREAKING); `real_time:` is refused
+  `{:error, {:unsupported_option, :real_time}}`. `Core.Types.Candle` has no partial flag, so
+  with `include_partial: true` the last bar may still change after it is returned.
+
+  ## The range
+
+  `:start` is inclusive and `:end` **exclusive**, on `opened_at`. The venue returns the latest
+  `count` bars (default 200 on its side) up to `end_time`, so a range is walked the one way
+  there is: `count` is sent as the caller's `:limit`, or as the endpoint's maximum (1200; 1650
+  for `1m`) when a `:start` is given without one, and a full page whose oldest bar is still
+  after `:start` is `{:error, {:range_too_wide, count}}` - older bars exist that this read did
+  not fetch, and returning the page would present a truncated window as the whole range.
+  Whether the venue returns the latest or the oldest `count` bars of a range is **unmeasured**
+  (the page does not say); only the oldest-bar check above is made.
+
+  ## A bar's `time` must sit on its width
+
+  The page says only "Bar UTC time" (`historical-bars.md`), not that it is the open. A bar
+  whose time is not aligned to its width (`DpExchange.Core.Timeframe.aligned?/2`) refuses the
+  whole reply `{:error, {:unaligned_candle, time}}`. **Unmeasured:** whether daily, weekly,
+  monthly and yearly stock bars are stamped at 00:00 UTC of the session date or at the
+  exchange-local midnight (which is not a UTC day boundary and would be refused here). When a
+  live read shows the local stamp, the mapping to the session date belongs in `decode_bar/3`;
+  until then no instant is guessed. Weeks, months and years have no boundary rule in Core
+  and are not checked.
 
   Widths: the eight the crypto endpoint serves plus `1w`, `1M` and `1y`.
   """
@@ -2870,12 +3017,15 @@ defmodule DpExchange.Webull.Rest do
   def get_stock_bars(symbol, timeframe, range, credentials, opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
-    with :ok <- book_category(category),
+    with :ok <- validate_bar_options(opts),
+         :ok <- book_category(category),
          {:ok, timespan} <- stock_timespan(timeframe),
          # `historical-bars.md`: "maximum limit 1200 (M1 supports up to 1650)".
-         :ok <- count_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)),
+         :ok <- limit_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)),
          :ok <- validate_range(range),
          :ok <- validate_symbol(symbol) do
+      count = stock_count(range, opts, timespan)
+
       body =
         %{
           "symbols" => [symbol],
@@ -2886,29 +3036,46 @@ defmodule DpExchange.Webull.Rest do
           # completed bars from the previous period at the nearest whole hour at the time of
           # request": an intraday read at 10:59 stopped at 10:00, up to an hour of finished
           # bars missing. `true` (the venue's default) returns them all, and the one bar
-          # still forming is removed below. An explicit `real_time:` is still the caller's.
-          "real_time_required" => Config.opt(opts, :real_time, true)
+          # still forming is removed below unless `include_partial: true`.
+          "real_time_required" => true
         }
-        |> put_raw("count", Keyword.get(opts, :limit))
+        |> put_raw("count", count)
         |> put_raw("start_time", epoch_ms(Keyword.get(range, :start)))
         |> put_raw("end_time", epoch_ms(Keyword.get(range, :end)))
         |> put_present("trading_sessions", sessions_param(Keyword.get(opts, :sessions)))
 
       with {:ok, response} <- post("/market-data/stocks/bars/list", body, credentials, opts),
-           {:ok, bars} <- decode_stock_bars(response, symbol, timeframe, range) do
-        {:ok, completed_unless_asked(bars, timeframe, Keyword.get(opts, :real_time))}
+           {:ok, bars} <- decode_stock_bars(response, symbol, timeframe),
+           :ok <- range_reached(bars, range, count || @stock_bar_default) do
+        {:ok, bars |> Enum.filter(&within?(&1, range)) |> finish_bars(timeframe, opts)}
       end
+    end
+  end
+
+  # The venue's own default is 200 and it is applied when no `count` is sent, which is how a
+  # range came back short. A caller's `:limit` is sent; a range with a `:start` and no limit
+  # sends the endpoint's maximum so the read reaches as far back as one request can; no
+  # range and no limit leaves the venue's default (the latest bars, which is what was asked).
+  defp stock_count(range, opts, timespan) do
+    case {Keyword.get(opts, :limit), Keyword.get(range, :start)} do
+      {nil, nil} -> nil
+      {nil, %DateTime{}} -> stock_bar_max(timespan)
+      {limit, _start} -> limit
     end
   end
 
   defp stock_bar_max("M1"), do: 1_650
   defp stock_bar_max(_timespan), do: 1_200
 
-  # A caller who asked for the forming bar (`real_time: true`) keeps it. Otherwise a bar whose
-  # end has not happened yet is not a bar this package returns.
-  defp completed_unless_asked(bars, _timeframe, true), do: bars
+  # Every bars path: a caller who asked for the forming bar (`include_partial: true`) keeps
+  # it. Otherwise a bar whose end has not happened yet is not a bar this package returns.
+  defp finish_bars(bars, timeframe, opts) do
+    if Keyword.get(opts, :include_partial) == true,
+      do: bars,
+      else: drop_in_progress(bars, timeframe)
+  end
 
-  defp completed_unless_asked(bars, timeframe, _default) do
+  defp drop_in_progress(bars, timeframe) do
     now = DateTime.utc_now()
 
     Enum.reject(bars, fn bar ->
@@ -2987,7 +3154,10 @@ defmodule DpExchange.Webull.Rest do
   # with no `"open"`/`"close"`/`"time"` of their own. `decode_bar/3` was asked to decode
   # each group as though it were a bar and failed (or, before `required_decimal` existed,
   # produced an all-nil candle) for every stock and option request this package made.
-  defp decode_stock_bars(response, symbol, timeframe, range) do
+  #
+  # The range is NOT applied here: `get_stock_bars/5` checks `range_reached/3` on the bars as
+  # the venue sent them, then filters.
+  defp decode_stock_bars(response, symbol, timeframe) do
     with {:ok, groups} <- bar_groups(response),
          {:ok, raw_bars} <- nested_results(groups) do
       raw_bars
@@ -2999,11 +3169,7 @@ defmodule DpExchange.Webull.Rest do
       end)
       |> case do
         {:ok, bars} ->
-          {:ok,
-           bars
-           |> Enum.reverse()
-           |> Enum.filter(&within?(&1, range))
-           |> Enum.sort_by(& &1.opened_at, DateTime)}
+          {:ok, bars |> Enum.reverse() |> Enum.sort_by(& &1.opened_at, DateTime)}
 
         error ->
           error
@@ -3043,18 +3209,29 @@ defmodule DpExchange.Webull.Rest do
 
   `status` travels unmapped for that reason: `PENDING`, `NORMAL`, `INVALID` and `EXPIRED`
   are the venue's four, and only the second is a token that works. A response with no
-  `token`, or a `status` outside the four, is refused
-  (`{:error, {:missing_required_field, field}}` / `{:error, {:unknown_token_status, status}}`)
-  rather than handed back as a token.
+  `token`, or a `status` outside the four, is refused rather than handed back as a token -
+  as the `reason` of the `:write_unconfirmed` below (`{:missing_required_field, field}` /
+  `{:unknown_token_status, status}`).
 
   Tokens default to **15 days** and must be recreated, not renewed — there is no refresh on
   this endpoint. `expires_at` is milliseconds.
+
+  **A create that may have reached the venue and is not proven** (a transport error or
+  timeout, a 5xx, a 2xx whose body is unreadable, names no token or states a status outside
+  the four) is `{:error, {:write_unconfirmed, nil, reason}}`: a token may now exist (`nil`:
+  the request carries no idempotency key), and the venue's SMS verification may be waiting.
+  Failures decided before sending (missing credentials, our own limiter refusing a single
+  attempt) stay plain, and a 4xx is `{:refused, reason}`. Sent once.
   """
   @spec create_token(map(), keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_token(credentials, opts) do
-    with {:ok, response} <- post("/auth/tokens/create", %{}, credentials, send_once(opts)),
-         {:ok, row} <- first_row(response),
-         :ok <- token_row(row, :token) do
+    with {:ok, response} <-
+           write_outcome(
+             post("/auth/tokens/create", %{}, credentials, send_once(opts)),
+             send_once(opts)
+           ),
+         {:ok, row} <- write_outcome(first_row(response)),
+         :ok <- write_outcome(token_row(row, :token)) do
       {:ok, row}
     end
   end
@@ -3569,6 +3746,9 @@ defmodule DpExchange.Webull.Rest do
 
   defp bound_write_reason({tag, detail}) when is_atom(tag) and is_atom(detail),
     do: {tag, detail}
+
+  defp bound_write_reason({tag, detail}) when is_atom(tag) and is_binary(detail),
+    do: {tag, String.slice(detail, 0, 2_048)}
 
   defp bound_write_reason({:exchange_error, venue, message})
        when is_atom(venue) and is_binary(message),
@@ -4782,7 +4962,7 @@ defmodule DpExchange.Webull.Rest do
       |> put_present("count", Keyword.get(opts, :limit))
 
     # `event-tick.md`: "maximum limit 1200".
-    with :ok <- count_within_max(Keyword.get(opts, :limit), 1_200),
+    with :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200),
          :ok <- validate_symbol(symbol),
          {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
@@ -5156,12 +5336,21 @@ defmodule DpExchange.Webull.Rest do
   # crypto and a false claim about the other four: reading `value(row, ["volume"])` costs
   # nothing when the field is absent (`decimal(nil)` is already `nil`) and is the honest
   # value when the venue sent one.
+  #
+  # **`time` is not provably the open, so it must sit on the width's grid.** The pages say
+  # "Bar UTC time" / "Bar timestamp in ISO-8601 or Unix time format" and never "open time",
+  # and a bar whose time is off the grid (the pages' own example is `09:00:09.945`) is either
+  # a different instant (a close, a last-trade) or a fabricated one - stored as `opened_at`
+  # it would be a plausible candle in the wrong bucket. The whole reply is refused
+  # `{:unaligned_candle, time}`. **Unmeasured** against a live venue; widths Core has no rule
+  # for (`1w`, `1M`, `1y`) pass. OHLC are prices: zero or negative refuses (`required_price/2`).
   defp decode_bar(row, symbol, timeframe) do
     with {:ok, timestamp} <- venue_time(row),
-         {:ok, open} <- required_decimal(value(row, ["open"]), :open),
-         {:ok, high} <- required_decimal(value(row, ["high"]), :high),
-         {:ok, low} <- required_decimal(value(row, ["low"]), :low),
-         {:ok, close} <- required_decimal(value(row, ["close"]), :close) do
+         :ok <- aligned_bar(timestamp, timeframe),
+         {:ok, open} <- required_price(value(row, ["open"]), :open),
+         {:ok, high} <- required_price(value(row, ["high"]), :high),
+         {:ok, low} <- required_price(value(row, ["low"]), :low),
+         {:ok, close} <- required_price(value(row, ["close"]), :close) do
       {:ok,
        %Candle{
          symbol: symbol,
@@ -5259,7 +5448,14 @@ defmodule DpExchange.Webull.Rest do
   defp after_start?(bar, start), do: DateTime.compare(bar.opened_at, start) != :lt
 
   defp before_end?(_bar, nil), do: true
-  defp before_end?(bar, finish), do: DateTime.compare(bar.opened_at, finish) != :gt
+  # `:end` is exclusive: a bar opening exactly at `:end` belongs to the next window.
+  defp before_end?(bar, finish), do: DateTime.compare(bar.opened_at, finish) == :lt
+
+  defp aligned_bar(timestamp, timeframe) do
+    if Timeframe.aligned?(timestamp, timeframe),
+      do: :ok,
+      else: {:error, {:unaligned_candle, timestamp}}
+  end
 
   # **An envelope is never a row.** The third clause exists for endpoints that answer with a
   # bare object, and it used to catch envelopes too: `%{"code" => "200", "msg" => "ok",
@@ -5631,6 +5827,19 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **A traded price is positive.** `required_decimal/2` reads `"0"` and `"-5"` as numbers,
+  # and a candle, a trade or a last price of zero (or less) is the venue's placeholder for
+  # "no value", not a price - it stays plausible downstream and only the meaning is wrong.
+  # Refused `{:non_positive_price, field, raw}`. (Sizes and quantities keep
+  # `required_decimal/2`: a zero position or fill is real.)
+  defp required_price(raw, field) do
+    with {:ok, price} <- required_decimal(raw, field) do
+      if Decimal.positive?(price),
+        do: {:ok, price},
+        else: {:error, {:non_positive_price, field, raw}}
+    end
+  end
+
   # Absent is `nil`; present and unreadable is an error. `decimal/1` alone answers `nil` for
   # both, which is how a figure the venue DID send, in a shape this package could not read,
   # became indistinguishable from one it never sent.
@@ -5684,18 +5893,21 @@ defmodule DpExchange.Webull.Rest do
 
   A map (`{:invalid_order_request, r}`); no key the builder does not read
   (`{:unsupported_order_field, key}`); `:symbol` (`{:invalid_symbol, v}`); `:side`, `:buy`
-  or `:sell` as an atom or text in any case (`{:invalid_side, v}` - **`:short` is refused**,
+  or `:sell` as an atom or text in any case (`{:missing_field, :side}` when absent,
+  `{:invalid_side, v}` otherwise - **`:short` is refused**,
   `capabilities/0` says `supports_short_selling: false`); `:order_type` and
   `:time_in_force`, **both required and never defaulted** (`{:missing_field, key}`; a type
   the instrument does not use is `{:unsupported_order_type, type}`, a duration it does not
-  serve for the type `{:unsupported_order_combination, type, tif}`); the size
-  (`{:missing_field, :quantity}`, `{:invalid_quantity, v}`, `{:invalid_amount, v}` - a float
-  is refused, it has lost digits); the price fields (`{:unexpected_field, key}` for one the
-  type does not use, `{:missing_field, key}` for one it needs, `{:invalid_price, v}`,
-  `{:invalid_stop_price, v}`, `{:invalid_trailing_stop_step, v}`); `:client_order_id`
-  (`{:invalid_client_order_id, v}`, 32 characters at most); a GTD order's `:expire_date`
-  (`{:missing_field, :expire_date}`; on any other duration
-  `{:unexpected_field, :expire_date}`); then the account option
+  serve for the type `{:unsupported_order_combination, type, tif}`); **with the duration, a
+  GTD order's `:expire_date`** (`{:missing_field, :expire_date}`; on any other duration
+  `{:unexpected_field, :expire_date}`); the size (`{:missing_field, :quantity}` when
+  neither `:quantity` nor `:amount` is given, `{:unexpected_field, :amount}` when both are
+  or when a stop-limit order is sized in cash, `{:invalid_quantity, v}`,
+  `{:invalid_amount, v}` - a float is refused, it has lost digits); the price fields
+  (`{:unexpected_field, key}` for one the type does not use, `{:missing_field, key}` for one
+  it needs, `{:invalid_price, v}`, `{:invalid_stop_price, v}`,
+  `{:invalid_trailing_stop_step, v}`); `:client_order_id`
+  (`{:invalid_client_order_id, v}`, 32 characters at most); then the account option
   (`{:missing_option, :account_id}`) and the credentials.
   """
   @spec place_order(map(), term(), keyword()) ::
@@ -5801,9 +6013,12 @@ defmodule DpExchange.Webull.Rest do
   message is carried through unchanged for that reason.
 
   A missing `:symbol` or `:side`, or a `LIMIT` order with no `:price`, is refused by index as
-  `{:batch_order_rejected, index, {:missing_field, field}}` (`{:invalid_symbol, v}` /
-  `{:invalid_side, v}` for those two) before anything is sent. A key the batch builder does
-  not read is `{:unsupported_order_field, key}`, and a `:price` on a market entry is
+  `{:batch_order_rejected, index, {:missing_field, field}}` (an absent `:symbol` is
+  `{:invalid_symbol, nil}`, a bad one `{:invalid_symbol, v}`; an absent `:side` is
+  `{:missing_field, :side}`, a bad one `{:invalid_side, v}`) before anything is sent. Neither
+  `:quantity` nor `:amount` is `{:missing_field, :quantity}`, and `:amount` at all is
+  `{:unexpected_field, :amount}` (the batch endpoint takes `QTY` only). A key the batch
+  builder does not read is `{:unsupported_order_field, key}`, and a `:price` on a market entry is
   `{:unexpected_field, :price}`, each by index.
 
   A batch that may have been placed - a timeout, a 5xx, or a 2xx with no readable rows - is
@@ -6030,9 +6245,9 @@ defmodule DpExchange.Webull.Rest do
   # than silently sized by quantity instead.
   defp batch_entrust(request) do
     case {Map.get(request, :quantity), Map.get(request, :amount)} do
-      {nil, nil} -> {:error, :missing_order_size}
+      {nil, nil} -> {:error, {:missing_field, :quantity}}
       {quantity, nil} -> {:ok, %{"entrust_type" => "QTY", "quantity" => wire_number(quantity)}}
-      {_quantity, _amount} -> {:error, :cash_sizing_not_supported_for_batch}
+      {_quantity, _amount} -> {:error, {:unexpected_field, :amount}}
     end
   end
 
@@ -6046,7 +6261,7 @@ defmodule DpExchange.Webull.Rest do
   defp batch_support_trading_session(request) do
     case Map.get(request, :support_trading_session) do
       nil ->
-        {:error, :support_trading_session_required}
+        {:error, {:missing_field, :support_trading_session}}
 
       session ->
         wire = session |> to_string() |> String.upcase()
@@ -6223,7 +6438,10 @@ defmodule DpExchange.Webull.Rest do
          :ok <- valid_order_symbol(Map.get(request, :symbol)),
          :ok <- valid_order_side(Map.get(request, :side)),
          {:ok, order_type, tif} <- combination(request),
-         {:ok, leaf} <- order_leaf(request, order_type, tif) do
+         # The expiry belongs to the time-in-force step (DV10): a GTD order without its date
+         # is refused here, before the size and every price field.
+         {:ok, expire} <- expire_date(request, tif),
+         {:ok, leaf} <- order_leaf(request, order_type, tif, expire) do
       {:ok, order_type, tif, leaf}
     end
   end
@@ -6255,7 +6473,7 @@ defmodule DpExchange.Webull.Rest do
 
   defp event_amount_rules(_entrust, _instrument, _request), do: :ok
 
-  defp order_leaf(request, order_type, tif) do
+  defp order_leaf(request, order_type, tif, expire) do
     instrument = instrument_type(request)
 
     with :ok <- positive_numbers(request, [:quantity, :amount]),
@@ -6265,7 +6483,6 @@ defmodule DpExchange.Webull.Rest do
          :ok <- required_order_prices(request, order_type),
          :ok <- positive_numbers(request, sent_price_fields(order_type)),
          :ok <- valid_client_order_id(Map.get(request, :client_order_id)),
-         {:ok, expire} <- expire_date(request, tif),
          {:ok, outcome} <- event_outcome(request),
          {:ok, session} <- support_trading_session(request) do
       leaf =
@@ -6405,8 +6622,10 @@ defmodule DpExchange.Webull.Rest do
       {nil, amount} ->
         amount_entrust(order_type, instrument, amount)
 
+      # Both sizings: the cash one is the unexpected one (DV4), as Core's `place_order/3`
+      # doc has it for `:quote_size` - this venue's key for it is `:amount`.
       {_quantity, _amount} ->
-        {:error, :ambiguous_order_size}
+        {:error, {:unexpected_field, :amount}}
     end
   end
 
@@ -6422,7 +6641,7 @@ defmodule DpExchange.Webull.Rest do
   # in cash is asking for something the venue will not do on one side of the book, and
   # accepting it on the other invites a surprise later.
   defp amount_entrust("STOP_LOSS_LIMIT", _instrument, _amount),
-    do: {:error, :cash_sizing_not_supported_for_stop}
+    do: {:error, {:unexpected_field, :amount}}
 
   defp amount_entrust(_order_type, _instrument, amount),
     do: {:ok, "AMOUNT", %{"total_cash_amount" => wire_number(amount)}}
@@ -6462,6 +6681,11 @@ defmodule DpExchange.Webull.Rest do
   # `:buy` and `:sell`, or `"buy"` and `"sell"` in any case, are accepted; any other value
   # (`:bid`, `:long`, `nil`) would have been upper-cased and sent, failing at the venue after
   # the request and naming nothing the caller wrote.
+  #
+  # **An absent side is `{:missing_field, :side}`, not `{:invalid_side, nil}`** (DV2): the
+  # caller did not write a wrong side, they wrote none. Every other bad value stays
+  # `{:invalid_side, value}`.
+  defp valid_order_side(nil), do: {:error, {:missing_field, :side}}
   defp valid_order_side(side) when side in [:buy, :sell], do: :ok
 
   defp valid_order_side(side) when is_binary(side) do

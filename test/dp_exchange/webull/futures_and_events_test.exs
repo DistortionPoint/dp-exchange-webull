@@ -348,7 +348,8 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
           "symbol" => "KXCPI-26JAN-T0.3",
           "result" => [
             %{
-              "time" => 1_772_730_554_000,
+              # On the minute grid (1_772_730_540 is a multiple of 60).
+              "time" => 1_772_730_540_000,
               "open" => "0.10",
               "high" => "0.12",
               "low" => "0.09",

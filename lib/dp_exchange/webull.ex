@@ -381,9 +381,14 @@ defmodule DpExchange.Webull do
       # silently degrading to the nearest width it does serve.
       historical_timeframes: Rest.wide_timeframes(),
 
-      # Bounded by request parameters rather than a stated page size. `nil` until it is
-      # measured, rather than a number that looks measured.
-      max_candles_per_request: nil,
+      # **1_200: DOCUMENTED, not measured.** Every bars page states it as `count`'s maximum
+      # (`crypto-bars.md`, `historical-bars.md`, `option-historical-bars.md`,
+      # `futures-historical-bars.md`, `event-bars.md`: "maximum limit 1200"), and the stock
+      # page adds "M1 supports up to 1650", which one flat number cannot say, so the figure
+      # that holds on every path is declared. `Rest` refuses a `:limit` above the per-path
+      # maximum (`{:invalid_option, :limit, n}`). No live request has been made
+      # to see the venue return, or refuse, a page of that size - `measured_against` says so.
+      max_candles_per_request: 1_200,
 
       # **`true`, not the crypto-only `false` this declared before 2026-09-06.** Webull's
       # crypto OpenAPI exposes no trade volume anywhere — bars, snapshot or MQTT — and
@@ -485,6 +490,8 @@ defmodule DpExchange.Webull do
           "from developer.webull.com/apis/docs/rate-limits/ — the venue's per-endpoint " <>
           "table, which caps EVERY market-data endpoint at 60/60s in production and " <>
           "30/60s in sandbox — committed to docs/reference/webull/rest-rate-limits.md; " <>
+          "max_candles_per_request (1200) is DOCUMENTED, read from each bars page's `count` " <>
+          "maximum (stock M1: 1650) and never measured against a live response; " <>
           "this replaced a 5 req/s figure taken 2026-09-08 from the Market Data FAQ's " <>
           "\"300 requests per 60 seconds\", which that per-endpoint table contradicts by " <>
           "a factor of five; the FAQ still says it, so this is a venue self-contradiction " <>
@@ -602,8 +609,8 @@ defmodule DpExchange.Webull do
   @doc """
   Tick-by-tick public trades for an equity, ETF, option or future — the tape.
 
-  See `DpExchange.Webull.Rest.get_trades/3`, including why three of the venue's five side
-  codes map to `nil`.
+  See `DpExchange.Webull.Rest.get_trades/3`, including why every trade's `side` is `nil`
+  (the venue's `B`/`S`/`G`/`L`/`N` codes are defined nowhere it publishes).
   """
   @impl true
   def get_trades(symbol, opts \\ []),

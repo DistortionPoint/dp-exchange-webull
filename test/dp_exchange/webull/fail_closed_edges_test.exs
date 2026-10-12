@@ -6,7 +6,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.Config
+  alias DpExchange.Core.{Config, Timeframe}
   alias DpExchange.Webull.{Fake, Rest, Socket}
 
   @moduletag :capture_log
@@ -51,7 +51,8 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
     end
 
     test "a crypto range older than the page reaches is refused, not answered short" do
-      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      # On the minute grid: a bar off its width's grid is refused before the range is judged.
+      now = Timeframe.boundary(DateTime.utc_now(), "1m")
 
       rows =
         for n <- 1..200 do
@@ -70,7 +71,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
       body = [%{"symbol" => "BTCUSD", "result" => rows}]
       plug = fn conn -> Req.Test.json(conn, body) end
 
-      assert {:error, {:range_exceeds_count, 200}} =
+      assert {:error, {:range_too_wide, 200}} =
                Rest.get_historical_prices(
                  "BTC-USD",
                  "1m",
@@ -82,7 +83,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
     end
 
     test "a crypto count past the venue's 1200 is refused" do
-      assert {:error, {:limit_out_of_range, 5_000, max: 1_200}} =
+      assert {:error, {:invalid_option, :limit, 5_000}} =
                Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
                  limit: 5_000,
                  retry_attempts: 0
@@ -116,7 +117,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
         instrument_type: :equity
       }
 
-      assert {:error, {:invalid_side, nil}} = Rest.validate_order_request(request)
+      assert {:error, {:missing_field, :side}} = Rest.validate_order_request(request)
     end
 
     test "a failed place returns the client_order_id, so the caller can look the order up" do

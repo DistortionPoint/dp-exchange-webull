@@ -85,7 +85,7 @@ defmodule DpExchange.Webull.Fake do
 
   @behaviour DpExchange.Core.Venue
 
-  alias DpExchange.Core.{Config, FakeInjection, Instrument, Types, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Instrument, Timeframe, Types, Venue}
   alias DpExchange.Webull.{Auth, Environment, Feed, Rest}
 
   # `XRP-USD` is a real member of `@symbols` (so `get_symbols/1` lists it — this fake
@@ -252,7 +252,7 @@ defmodule DpExchange.Webull.Fake do
       # is the crypto set (`Rest.timeframes/0`) — not `Rest.wide_timeframes/0`: `12h` is
       # unserved anywhere, and `1w`/`1M`/`1y`, which the venue's *equity, option and futures*
       # bars serve, its crypto bars refuse deliberately. A `:limit` over 1200 is refused as
-      # `{:limit_out_of_range, n, max: 1200}`, and an option, futures or event request that
+      # `{:invalid_option, :limit, n}`, and an option, futures or event request that
       # names a range is refused as it is there. This fake models no non-crypto symbol, so a
       # request those endpoints would accept is `{:refused, :not_listed}`, never a crypto bar.
       with :ok <- Rest.validate_bars_request(timeframe, range, opts),
@@ -346,15 +346,15 @@ defmodule DpExchange.Webull.Fake do
       %Types.Trade{
         id: nil,
         symbol: symbol,
-        side: :buy,
+        # `nil` on every tick, as `Rest.get_trades/3` does: the venue's `B`/`S` codes are
+        # undocumented, so no side is claimed (family convention MD10).
+        side: nil,
         price: Decimal.new("48.07"),
         quantity: Decimal.new("1"),
         timestamp: @at,
         broken: false,
         provider: :webull
       },
-      # A tick whose side code the venue does not document. `nil` is the honest answer, and
-      # a fake without one would never exercise a consumer's handling.
       %Types.Trade{
         id: nil,
         symbol: symbol,
@@ -991,7 +991,10 @@ defmodule DpExchange.Webull.Fake do
     %Types.Candle{
       symbol: symbol,
       timeframe: timeframe,
-      opened_at: @at,
+      # The bucket START, aligned to the width (`Timeframe.boundary/2`), as the real decoder
+      # demands: a bar off its grid is refused there (`{:unaligned_candle, time}`). It is long
+      # past, so never the forming bar `get_historical_prices/4` drops unless asked.
+      opened_at: Timeframe.boundary(@at, timeframe),
       open: price,
       high: price,
       low: price,
@@ -1010,7 +1013,8 @@ defmodule DpExchange.Webull.Fake do
   defp after_start?(candle, start), do: DateTime.compare(candle.opened_at, start) != :lt
 
   defp before_end?(_candle, nil), do: true
-  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) != :gt
+  # `:end` is exclusive on `opened_at`, as in `Rest` (family convention MD2).
+  defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) == :lt
 
   # --- Declared but not yet implemented -----------------------------------
   #

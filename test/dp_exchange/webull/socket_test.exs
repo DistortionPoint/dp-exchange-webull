@@ -39,9 +39,11 @@ defmodule DpExchange.Webull.SocketTest do
     varint(bsl(number, 3) ||| 2) <> varint(byte_size(value)) <> value
   end
 
+  # The time rides in `trade_time` (field 2), the only snapshot time that describes a trade.
+  # It was `Basic.timestamp`, which `Quote.venue_time` no longer reads (family convention MD7).
   defp snapshot_payload(symbol, price, timestamp \\ "1787936147000") do
-    basic = proto_field(1, symbol) <> proto_field(3, timestamp)
-    proto_field(1, basic) <> proto_field(3, price)
+    basic = proto_field(1, symbol)
+    proto_field(1, basic) <> proto_field(2, timestamp) <> proto_field(3, price)
   end
 
   defp publish(topic, payload) do
@@ -169,6 +171,56 @@ defmodule DpExchange.Webull.SocketTest do
       assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
     end
 
+    test "a snapshot's venue_time is its trade_time, and the assembly timestamp is never used" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+
+      only_assembly = publish("snapshot", proto_field(1, basic) <> proto_field(3, "1"))
+      assert {:ok, _state} = Socket.handle_frame({:binary, only_assembly}, state())
+      assert_receive {:dp_exchange, :webull, %Quote{} = undated}
+      assert undated.venue_time == nil
+
+      traded =
+        publish(
+          "snapshot",
+          proto_field(1, basic) <> proto_field(2, "1787936148000") <> proto_field(3, "1")
+        )
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, traded}, state())
+      assert_receive {:dp_exchange, :webull, %Quote{} = dated}
+      assert dated.venue_time == DateTime.from_unix!(1_787_936_148_000, :millisecond)
+    end
+
+    for bad <- ["0", "0.0", "-1"] do
+      test "a snapshot price of #{bad} is dropped, never delivered as a traded price" do
+        frame = publish("snapshot", snapshot_payload("BTCUSD", unquote(bad)))
+
+        assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      end
+    end
+
+    test "a tick price of zero is dropped, and a delivered tick carries no side" do
+      basic = proto_field(1, proto_field(1, "BTCUSD"))
+
+      zero =
+        basic <>
+          proto_field(2, "1787936147000") <>
+          proto_field(3, "0") <> proto_field(4, "0.5") <> proto_field(5, "B")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", zero)}, state())
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+
+      good =
+        basic <>
+          proto_field(2, "1787936147000") <>
+          proto_field(3, "77845.79") <> proto_field(4, "0.5") <> proto_field(5, "B")
+
+      assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", good)}, state())
+      assert_receive {:dp_exchange, :webull, %Trade{} = trade}
+      assert trade.side == nil
+    end
+
     test "a microsecond-sized timestamp is no venue time, not a year-50,000 one" do
       # The stream states no unit. Ten digits read as seconds and thirteen as milliseconds;
       # sixteen is neither, and read as milliseconds is a valid DateTime far in the future.
@@ -250,21 +302,40 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
     end
 
-    test "a book with one unreadable level and one readable level still delivers the readable one" do
+    test "a present but unreadable side refuses the frame's top of book, even beside a good one" do
+      # Family convention MD6. It used to deliver the readable side with the other as nil,
+      # which reads as an empty side rather than one the package could not read.
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
 
+      for bad <- ["null", "NaN", "abc", "-1"] do
+        frame =
+          publish(
+            "quote",
+            proto_field(1, basic) <>
+              proto_field(2, proto_field(1, bad)) <> proto_field(3, proto_field(1, "77845.79"))
+          )
+
+        assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+
+        refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+        assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
+      end
+    end
+
+    test "a side priced at zero is no resting order: nil, and no size" do
+      basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
+      zero_ask = proto_field(1, "0") <> proto_field(2, "7")
+      bid = proto_field(1, "77845.79") <> proto_field(2, "0.045")
+
       frame =
-        publish(
-          "quote",
-          proto_field(1, basic) <>
-            proto_field(2, proto_field(1, "null")) <> proto_field(3, proto_field(1, "77845.79"))
-        )
+        publish("quote", proto_field(1, basic) <> proto_field(2, zero_ask) <> proto_field(3, bid))
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
       assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
       assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
       assert top.ask == nil
+      assert top.ask_size == nil
     end
 
     test "the sizes on a book message reach the consumer" do
@@ -1434,9 +1505,9 @@ defmodule DpExchange.Webull.SocketTest do
   end
 
   describe "a size belongs to a level that has a price" do
-    test "a side whose price is unreadable carries no size, however real the size is" do
+    test "a side with no price carries no size, however real the size is" do
       basic = proto_field(1, "BTCUSD") <> proto_field(3, "1787936147000")
-      bid_level = proto_field(1, "null") <> proto_field(2, "5")
+      bid_level = proto_field(2, "5")
       ask_level = proto_field(1, "77846.48") <> proto_field(2, "0.014")
 
       frame =

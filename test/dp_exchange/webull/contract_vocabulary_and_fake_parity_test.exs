@@ -480,7 +480,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
       assert {:error, {:unsupported_timeframe, "1w"}} =
                Fake.get_historical_prices("KX-T1", "1w", [], [category: "US_EVENT"] ++ @opts)
 
-      assert {:error, {:limit_out_of_range, 1_651, max: 1_650}} =
+      assert {:error, {:invalid_option, :limit, 1_651}} =
                Fake.get_historical_prices(
                  "AAPL",
                  "1m",
@@ -523,10 +523,10 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
       assert {:error, {:use_get_event_trades, "US_EVENT"}} =
                Fake.get_trades("KX-T1", [category: "US_EVENT"] ++ @opts)
 
-      assert {:error, {:limit_out_of_range, 1_001, max: 1_000}} =
+      assert {:error, {:invalid_option, :limit, 1_001}} =
                Fake.get_trades("AAPL", [limit: 1_001] ++ @opts)
 
-      assert {:error, {:limit_out_of_range, 1_201, max: 1_200}} =
+      assert {:error, {:invalid_option, :limit, 1_201}} =
                Fake.get_trades("ESZ5", [category: "US_FUTURES", limit: 1_201] ++ @opts)
 
       assert {:ok, [_first | _rest]} =

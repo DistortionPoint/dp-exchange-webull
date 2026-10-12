@@ -197,10 +197,45 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert book.bids != []
     end
 
-    test "a level with no price is dropped rather than carried as nil" do
-      # A level without a price is not a level. Keeping it would put a `{nil, size}` tuple
-      # into a book that a caller will fold over.
-      row = depth_row(%{"bids" => [%{"size" => "5"}, %{"price" => "13.89", "size" => "12"}]})
+    test "a level with no readable price refuses the whole book, never a book with a hole" do
+      # Dropping it published a book with a gap as though the venue had shown nothing at that
+      # price (family convention MD5: an unreadable level refuses the book).
+      absent = depth_row(%{"bids" => [%{"size" => "5"}, %{"price" => "13.89", "size" => "12"}]})
+      unreadable = depth_row(%{"asks" => [%{"price" => "null", "size" => "3"}]})
+
+      assert {:error, {:missing_required_field, :price}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([absent]),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:invalid_decimal, :price, "null"}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([unreadable]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a level priced at zero or less refuses the book" do
+      for bad <- ["0", "-13.9"] do
+        row = depth_row(%{"bids" => [%{"price" => bad, "size" => "5"}]})
+
+        assert {:error, {:non_positive_price, :price, ^bad}} =
+                 Rest.get_order_book("F", @credentials,
+                   plug: responding([row]),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a level of size zero is no liquidity and is dropped; a negative size refuses" do
+      row =
+        depth_row(%{
+          "bids" => [
+            %{"price" => "13.90", "size" => "0"},
+            %{"price" => "13.89", "size" => "12"}
+          ]
+        })
 
       assert {:ok, book} =
                Rest.get_order_book("F", @credentials,
@@ -210,6 +245,22 @@ defmodule DpExchange.Webull.OrderBookTest do
 
       assert [{price, _size}] = book.bids
       assert Decimal.equal?(price, Decimal.new("13.89"))
+
+      negative = depth_row(%{"asks" => [%{"price" => "13.91", "size" => "-3"}]})
+
+      assert {:error, {:non_positive_size, :size, "-3"}} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([negative]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a side that is present and not a list refuses the book" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding([depth_row(%{"bids" => "none"})]),
+                 retry_attempts: 0
+               )
     end
 
     test "a priced level with no readable size refuses the book, never a {price, nil} level" do
@@ -389,23 +440,23 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert t.symbol == "AAPL"
       assert Decimal.equal?(t.price, Decimal.new("48.07"))
       assert Decimal.equal?(t.quantity, Decimal.new("1"))
-      assert t.side == :buy
+      # The row says "B", which the page does not define: nil (family convention MD10).
+      assert t.side == nil
       assert t.provider == :webull
     end
 
-    test "B and S map; G, L and N do NOT" do
-      # The venue documents the field as "Such as: B S G L N" and defines none of them. B
-      # and S are unambiguous; the other three are documented nowhere the vendor publishes.
-      # Folding them into buy or sell would put volume on the wrong side of a delta, which
-      # is the number a caller reads a tape for.
-      for {code, expected} <- [{"B", :buy}, {"S", :sell}, {"G", nil}, {"L", nil}, {"N", nil}] do
+    test "no side code maps: B, S, G, L and N are all nil" do
+      # The venue documents the field as "Such as: B S G L N" and defines none of them, not
+      # even whose side B is. `Core.Types.Trade` says an undocumented code is nil, and a
+      # guessed mapping puts volume on the wrong side of a delta (unmeasured).
+      for code <- ["B", "S", "G", "L", "N"] do
         assert {:ok, [t]} =
                  Rest.get_trades("AAPL", @credentials,
                    plug: responding(tick_body(%{"side" => code})),
                    retry_attempts: 0
                  )
 
-        assert t.side == expected, "side #{code} mapped to #{inspect(t.side)}"
+        assert t.side == nil, "side #{code} mapped to #{inspect(t.side)}"
       end
     end
 
@@ -719,7 +770,9 @@ defmodule DpExchange.Webull.OrderBookTest do
             "instrument_id" => "913256135",
             "result" => [
               %{
-                "time" => "2021-12-28T09:00:09.945+0000",
+                # On the daily grid: a bar's time must be a bucket start (`{:unaligned_candle,
+                # time}` otherwise), and the vendor's own `09:00:09.945` example is not one.
+                "time" => "2021-12-28T00:00:00.000+0000",
                 "open" => "1.3362",
                 "close" => "1.3400",
                 "high" => "1.3450",
@@ -1183,7 +1236,7 @@ defmodule DpExchange.Webull.OrderBookTest do
         )
       end
 
-      assert {:error, :too_many_instrument_pages} =
+      assert {:error, :history_truncated} =
                Rest.get_symbols(@credentials,
                  category: "US_STOCK",
                  plug: plug,

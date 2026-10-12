@@ -22,6 +22,96 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Family market-data and order conventions (tick R). Nothing here was measured against the live
+venue; what is unmeasured is said on each line.
+
+### Changed
+
+- **BREAKING: `real_time:` is now `include_partial:`, on every bars path.** The bar still
+  forming (`opened_at` plus its width is after now) is dropped from crypto, stock, option,
+  futures and event bars unless `include_partial: true`; it was dropped on the stock path
+  only. `real_time:` is `{:error, {:unsupported_option, :real_time}}` (it was read by stock
+  and event bars) and a non-boolean `:include_partial` is `{:error, {:invalid_option,
+  :include_partial, v}}`, in `Rest` and the `Fake` (`Rest.validate_bar_options/1`). The event
+  endpoint is asked for `real_time_required=true` only with `include_partial: true`; crypto
+  keeps sending `"false"` (the vendor page contradicts itself about which value includes the
+  forming bar - unmeasured).
+- **BREAKING: `:end` of a bars range is exclusive** (a bar opening at `:end` is no longer
+  returned), in `Rest` and the `Fake`.
+- **BREAKING (error value): a range the page cannot cover is `{:error, {:range_too_wide,
+  count}}`** (crypto's was `{:range_exceeds_count, count}`), and the stock path now has the
+  check: it sent no `count` unless `:limit` was given, so the venue's default of 200 could cut
+  a range short without a word. Stock bars now send `count` (the `:limit`; the endpoint's
+  maximum - 1200, 1650 for `1m` - when a `:start` is given without one; nothing when there is
+  no range and no limit) and a full page whose oldest bar is after `:start` is refused.
+  Whether the venue returns the latest or the oldest `count` bars of a range is unmeasured.
+- **BREAKING: a bar whose `time` is off its width's grid refuses the whole reply, `{:error,
+  {:unaligned_candle, time}}`**, on every bars path (`Core.Timeframe.aligned?/2`). The pages
+  call `time` "Bar UTC time", not the open, and their own example (`09:00:09.945`) is on no
+  grid. **Unmeasured:** whether daily and longer stock bars are stamped at 00:00 UTC of the
+  session date or at the exchange-local midnight; a local stamp is refused until a live read
+  says which, rather than guessing an instant. `1w`, `1M` and `1y` are not checked (Core has
+  no rule). The `Fake`'s bar is on the grid for its width.
+- **BREAKING (error value): a traded or bar price of zero or less refuses the reply** -
+  `{:error, {:non_positive_price, field, raw}}` for an open/high/low/close, a tick price and a
+  last price (REST), and the frame is dropped and reported once for the stream's snapshot and
+  tick. A REST top-of-book bid or ask of `0` (or `"null"`, the venue's documented no-price
+  spelling) is no resting order: that side and its size are `nil`; a negative or
+  non-numeric one refuses the reply.
+- **BREAKING: an order book level with no readable price refuses the whole book** (REST); it
+  was silently dropped, leaving a hole that read as "nothing at that price". A level priced
+  at zero or less is `{:non_positive_price, :price, raw}`; a level of size zero is dropped
+  (no liquidity); a negative size is `{:non_positive_size, :size, raw}`.
+- **BREAKING: `TopOfBook.venue_time` is `nil` for a REST row with no `quote_time`** (the stock
+  snapshot states only `last_trade_time`, a different event); it fell back to it.
+  **`Quote.venue_time` is the last trade's time and nothing else**: a REST row with only a
+  `quote_time` is `nil`, and a streamed snapshot with no `trade_time` is `nil` instead of the
+  message's `Basic.timestamp` (when the venue assembled the frame).
+- **BREAKING: a trade's `side` is `nil`** on REST and on the stream. The tape's `B`/`S` were
+  mapped to `:buy`/`:sell`, but the pages say only "Such as: B S G L N" and define none of
+  them; whether `B` is the taker's, the buyer's or the resting order's side is **unmeasured**,
+  and `Core.Types.Trade` says an undocumented code is `nil`. The `Fake`'s tape agrees.
+- **`capabilities/0` declares `max_candles_per_request: 1_200`** - *documented* (each bars
+  page's `count` maximum; stock `1m` is 1650, which one flat number cannot say), never
+  measured against a live response, and `measured_against` says so. It was `nil`.
+- **BREAKING (error value): order validation answers in tagged tuples, in the family's
+  order.** An absent side is `{:missing_field, :side}` (was `{:invalid_side, nil}`, also by
+  index in a batch); both `:quantity` and `:amount` is `{:unexpected_field, :amount}` (was
+  `:ambiguous_order_size`); `:amount` on a stop-limit order is `{:unexpected_field, :amount}`
+  (was `:cash_sizing_not_supported_for_stop`); in a batch entry neither size is
+  `{:missing_field, :quantity}` (was `:missing_order_size`), `:amount` is `{:unexpected_field,
+  :amount}` (was `:cash_sizing_not_supported_for_batch`) and no session is `{:missing_field,
+  :support_trading_session}` (was `:support_trading_session_required`). A GTD order's
+  `:expire_date` is now checked with the time in force, before the size and every price
+  field, in `Rest` and the `Fake`.
+- **BREAKING (error value): the page bound of a paginated read is `{:error,
+  :history_truncated}`** (`get_symbols/2`'s was `:too_many_instrument_pages`; the other
+  cursor walks' was `{:too_many_pages, n}`). A repeated cursor stays
+  `:pagination_key_did_not_advance`.
+- **BREAKING (error value): `create_token/2` is a write**: a create that may have reached the
+  venue and is not proven (timeout, 5xx, an unreadable 2xx, a 2xx naming no token or an
+  unknown status) is `{:error, {:write_unconfirmed, nil, reason}}`; the old refusals
+  (`{:missing_required_field, _}`, `{:unknown_token_status, s}`) are now that `reason`.
+  Pre-send failures stay plain and a 4xx is `{:refused, _}`.
+
+- **BREAKING (error value): a candle or trade `:limit` above the page's maximum (or not a
+  positive whole number) is `{:error, {:invalid_option, :limit, value}}`** (MD4), in `Rest`
+  and the `Fake`; it was `{:limit_out_of_range, n, max: max}`. The `:count` of the footprint
+  and statement endpoints keeps the old shape.
+- **BREAKING: a streamed `TopOfBook` side priced `0` is `nil` with no size, and a side that is
+  present but unreadable (`"null"`, `NaN`, text, negative) refuses that frame's top of book**
+  (reported once as a `:data_quality` notice) instead of delivering the other side beside a
+  `nil` (MD6). A frame with neither side priced is still dropped.
+- `Socket`'s trade time still falls back to the frame's `Basic.timestamp` when a tick states
+  no time of its own: deliberate, since `Trade.timestamp` is required and MD7 names only the
+  nullable `Quote` and `TopOfBook` times. Documented at `tick_time/1`.
+- Credo: `quote_time/1` and `trade_time/1` no longer use a negated `is_nil/1` guard.
+
+### Verified
+
+- `subscribe([])` opens nothing: `Feed` plans no shard for an empty list and answers `:ok`
+  without a request (`empty_subscribe_test.exs`); the `Fake` agrees.
+
 ## [0.4.137] - 2026-10-12
 
 ### Fixed

@@ -1,9 +1,10 @@
 defmodule DpExchange.Webull.CountLimitsTest do
   @moduledoc """
-  A bar or tick count over the maximum the endpoint's own page states is refused before the
-  request, in the shape the crypto-bars check has always used,
-  `{:error, {:limit_out_of_range, n, max: max}}`. Only pages that state a maximum are
-  checked; the cases here are each cited to the page.
+  A bar or tick `:limit` over the maximum the endpoint's own page states is refused before
+  the request as `{:error, {:invalid_option, :limit, value}}` (family convention MD4; it was
+  `{:limit_out_of_range, n, max: max}`, which the `:count` options of the footprint and
+  statement endpoints still use). Only pages that state a maximum are checked; the cases here
+  are each cited to the page.
   """
 
   use ExUnit.Case, async: true
@@ -46,11 +47,11 @@ defmodule DpExchange.Webull.CountLimitsTest do
 
   describe "stock bars (historical-bars.md: 1200, M1 up to 1650)" do
     test "1m allows 1650 and refuses 1651" do
-      assert {:error, {:limit_out_of_range, 1_651, max: 1_650}} =
+      assert {:error, {:invalid_option, :limit, 1_651}} =
                Rest.get_stock_bars("AAPL", "1m", [], @credentials, opts(limit: 1_651))
 
       refute match?(
-               {:error, {:limit_out_of_range, _n, _max}},
+               {:error, {:invalid_option, :limit, _n}},
                Rest.get_stock_bars(
                  "AAPL",
                  "1m",
@@ -64,13 +65,13 @@ defmodule DpExchange.Webull.CountLimitsTest do
     end
 
     test "every other width stops at 1200" do
-      assert {:error, {:limit_out_of_range, 1_201, max: 1_200}} =
+      assert {:error, {:invalid_option, :limit, 1_201}} =
                Rest.get_stock_bars("AAPL", "1d", [], @credentials, opts(limit: 1_201))
     end
 
     test "zero and non-integers are out of range" do
       for bad <- [0, -5, "10"] do
-        assert {:error, {:limit_out_of_range, ^bad, max: 1_200}} =
+        assert {:error, {:invalid_option, :limit, ^bad}} =
                  Rest.get_stock_bars("AAPL", "1d", [], @credentials, opts(limit: bad))
       end
     end
@@ -79,7 +80,7 @@ defmodule DpExchange.Webull.CountLimitsTest do
   describe "option, futures and event bars (1200)" do
     test "each refuses 1201" do
       for category <- ["US_OPTION", "US_FUTURES", "US_EVENT"] do
-        assert {:error, {:limit_out_of_range, 1_201, max: 1_200}} =
+        assert {:error, {:invalid_option, :limit, 1_201}} =
                  Rest.get_historical_prices(
                    "SYM",
                    "1d",
@@ -93,19 +94,19 @@ defmodule DpExchange.Webull.CountLimitsTest do
 
   describe "ticks" do
     test "the stock tape stops at 1000 (tick.md)" do
-      assert {:error, {:limit_out_of_range, 1_001, max: 1_000}} =
+      assert {:error, {:invalid_option, :limit, 1_001}} =
                Rest.get_trades("AAPL", @credentials, opts(limit: 1_001))
     end
 
     test "option and futures tapes stop at 1200 (option-tick.md, futures-tick.md)" do
       for category <- ["US_OPTION", "US_FUTURES"] do
-        assert {:error, {:limit_out_of_range, 1_201, max: 1_200}} =
+        assert {:error, {:invalid_option, :limit, 1_201}} =
                  Rest.get_trades("SYM", @credentials, opts(category: category, limit: 1_201))
       end
     end
 
     test "the event tape stops at 1200 (event-tick.md)" do
-      assert {:error, {:limit_out_of_range, 1_201, max: 1_200}} =
+      assert {:error, {:invalid_option, :limit, 1_201}} =
                Rest.get_event_trades("KXCPI-26JAN-T0.3", @credentials, opts(limit: 1_201))
     end
   end

@@ -263,13 +263,20 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:error, {:batch_order_rejected, 1, reason}} =
                Rest.place_orders(@credentials, orders, account_id: "acct-1")
 
-      assert reason == :cash_sizing_not_supported_for_batch
+      assert reason == {:unexpected_field, :amount}
+    end
+
+    test "neither quantity nor amount is the missing quantity, a tagged tuple" do
+      orders = [order(), order(%{quantity: nil})]
+
+      assert {:error, {:batch_order_rejected, 1, {:missing_field, :quantity}}} =
+               Rest.place_orders(@credentials, orders, account_id: "acct-1")
     end
 
     test "support_trading_session is required — no documented default" do
       orders = [order(%{support_trading_session: nil})]
 
-      assert {:error, {:batch_order_rejected, 0, :support_trading_session_required}} =
+      assert {:error, {:batch_order_rejected, 0, {:missing_field, :support_trading_session}}} =
                Rest.place_orders(@credentials, orders, account_id: "acct-1")
     end
 
@@ -319,7 +326,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     test "no side or symbol is refused by index, not raised as a KeyError" do
       exploding = fn _conn -> raise "must not send an unbuildable batch" end
 
-      assert {:error, {:batch_order_rejected, 1, {:invalid_side, nil}}} =
+      assert {:error, {:batch_order_rejected, 1, {:missing_field, :side}}} =
                Rest.place_orders(
                  @credentials,
                  [order(), Map.delete(order(), :side)],

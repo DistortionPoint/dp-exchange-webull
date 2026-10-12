@@ -300,11 +300,23 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       {%{symbol: nil, side: nil}, {:invalid_symbol, nil}},
       {%{symbol: "   ", side: nil}, {:invalid_symbol, "   "}},
       {%{side: :short, order_type: nil}, {:invalid_side, :short}},
-      {%{side: nil, order_type: nil}, {:invalid_side, nil}},
+      {%{side: nil, order_type: nil}, {:missing_field, :side}},
       {%{order_type: nil, time_in_force: nil, quantity: nil}, {:missing_field, :order_type}},
       {%{order_type: :bogus, time_in_force: nil}, {:unsupported_order_type, :bogus}},
       {%{time_in_force: nil, quantity: nil}, {:missing_field, :time_in_force}},
       {%{time_in_force: :ioc, quantity: nil}, {:unsupported_order_combination, :limit, :ioc}},
+      # DV10: the expiry is the time-in-force step's, ahead of the size and every price.
+      {%{instrument_type: :event, time_in_force: :gtd, quantity: nil, price: 0},
+       {:missing_field, :expire_date}},
+      {%{expire_date: "2026-12-01", quantity: 0}, {:unexpected_field, :expire_date}},
+      # DV4: sizing answers are tagged tuples naming the field, never bare atoms.
+      {%{amount: Decimal.new("5")}, {:unexpected_field, :amount}},
+      {%{
+         quantity: nil,
+         amount: Decimal.new("5"),
+         order_type: :stop_limit,
+         stop_price: Decimal.new("9")
+       }, {:unexpected_field, :amount}},
       {%{quantity: 0, price: 0}, {:invalid_quantity, 0}},
       {%{quantity: 1.5}, {:invalid_quantity, 1.5}},
       {%{quantity: nil, price: 0}, {:missing_field, :quantity}},
