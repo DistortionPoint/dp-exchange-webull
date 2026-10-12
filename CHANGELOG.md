@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.146] - 2026-10-12
+
 - **Security: OAuth is https only.** `oauth_token/3` refuses a non-https `:oauth_url` (plain
   http only to a loopback host) with `{:error, {:insecure_oauth_url, :https_required}}`; the
   client secret, code and refresh token were sent in the clear.
