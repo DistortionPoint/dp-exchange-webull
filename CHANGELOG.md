@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.136] - 2026-10-12
+
 ### Changed
 
 Family non-order write conventions (W1, W6, W7) for the watchlist endpoints. Nothing here was
