@@ -22,6 +22,15 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **BREAKING: an order-book `:depth` out of range is `{:error, {:invalid_option, :depth, value}}`.**
+  It was `{:depth_out_of_range, value, min: 1}` (or `max: 10` on futures); the family names an
+  option it cannot honour that way on every venue. The ranges are unchanged and documented.
+- **Test suite (tick V, every test file read line by line):** tests that could not fail now
+  can (plug `flunk` inside a task, self-built comparisons, empty-list sweeps, a signature test
+  comparing two different bodies); timing windows that decided a race now wait on feed state;
+  untested pagination bounds, T13 facade arities and Fake injection/depth refusals are covered;
+  stale and duplicate tests renamed or removed; leaked processes and a retired fixture path fixed.
+
 ## [0.4.141] - 2026-10-12
 
 - **Ticks sharing one timestamp came back newest first.** The tape decoder reversed the venue's

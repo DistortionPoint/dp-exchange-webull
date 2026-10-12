@@ -228,7 +228,6 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
 
       assert tokens["expires_in"] == "1800"
       assert tokens["rt_expires_in"] == "1296000"
-      refute tokens["expires_in"] == tokens["rt_expires_in"]
     end
 
     test "a rejected exchange is a refusal, because the same code cannot be retried" do

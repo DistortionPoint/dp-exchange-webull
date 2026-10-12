@@ -115,6 +115,9 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # The defect itself: the next tick must NOT re-ask the same dead session. The shard
       # is gone from state, so there is nothing left addressed to `"dead-session"`.
       send(feed, :resubscribe)
+      # The tick has been handled once this call answers; any re-ask it made was spawned
+      # inside that handler, so the refute below no longer decides a race.
+      _settled = Feed.coverage(feed)
       refute_receive {:subscribe_attempt, "dead-session"}, 300
 
       assert Process.alive?(feed)
@@ -454,7 +457,14 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
     end
 
     test "a shard that has never linked up is skipped, not asked to subscribe before it can" do
-      plug = fn _conn -> flunk("a shard with no CONNACK yet must never be asked to subscribe") end
+      # Reported to the test process, not `flunk/1`ed in the plug: the plug runs in a reconcile
+      # task, where a flunk only kills the task and the test passed with or without the guard.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        conn
+      end
 
       shard = %{
         session_id: "shard-0",
@@ -464,21 +474,38 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
         reply_to: nil
       }
 
-      feed = start_feed(shards: %{0 => shard}, plug: plug)
+      feed = start_feed(shards: %{0 => shard}, plug: plug, credentials: credentials())
 
       send(feed, :resubscribe)
       _settled = Feed.coverage(feed)
 
+      # The tick spawns its reconcile inside the same handler, so an empty `reconciling`
+      # after the synchronous call proves none was started for the unlinked shard.
+      assert :sys.get_state(feed).reconciling == %{}
+      refute_received {:request, :unexpected}
       assert Process.alive?(feed)
     end
 
     test "a shard with nothing wanted is skipped, not asked to subscribe to an empty list" do
-      plug = fn _conn -> flunk("a shard with nothing wanted must never be asked to subscribe") end
-      feed = start_feed(shards: %{0 => connected_shard("shard-0")}, plug: plug)
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        conn
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => connected_shard("shard-0")},
+          plug: plug,
+          credentials: credentials()
+        )
 
       send(feed, :resubscribe)
       _settled = Feed.coverage(feed)
 
+      assert :sys.get_state(feed).reconciling == %{}
+      refute_received {:request, :unexpected}
       assert Process.alive?(feed)
     end
 
@@ -600,8 +627,12 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
         )
 
       send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
 
-      refute_receive {:request, ["BTCUSD"]}, 1_000
+      # Until the attempt has finished, not for a guessed interval: a blocking attempt
+      # would send its request after the ~300ms wait and BEFORE `reconciling` empties.
+      await_idle(feed)
+      refute_received {:request, ["BTCUSD"]}
       assert Process.alive?(feed)
     end
 
@@ -640,9 +671,27 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
         Feed.subscribe(feed, ["BTC-USD"], credentials: credentials(), rate_limit_blocking: false)
 
       send(feed, :resubscribe)
+      _settled = Feed.coverage(feed)
 
-      refute_receive {:request, ["BTCUSD"]}, 1_000
+      await_idle(feed)
+      refute_received {:request, ["BTCUSD"]}
       assert Process.alive?(feed)
+    end
+
+    # Polled rather than slept: the attempt runs in a reconcile task, and only the feed's
+    # state says when it has finished and been accounted for.
+    defp await_idle(feed, waited \\ 0) do
+      cond do
+        :sys.get_state(feed).reconciling == %{} ->
+          :ok
+
+        waited >= 5_000 ->
+          flunk("the resubscribe attempt never finished")
+
+        true ->
+          Process.sleep(10)
+          await_idle(feed, waited + 10)
+      end
     end
   end
 end

@@ -307,22 +307,23 @@ defmodule DpExchange.Webull.ArgumentValidationTest do
       assert :sys.get_state(feed).wanted == MapSet.new()
     end
 
-    test "the facade has the default-options arities every venue has" do
-      assert function_exported?(Webull, :subscribe, 1)
-      assert function_exported?(Webull, :unsubscribe, 1)
-      assert function_exported?(Webull, :update_symbols, 1)
-      assert function_exported?(Webull, :subscribe_notices, 0)
+    test "the default-options arities refuse a bad symbol list the same way" do
+      assert Webull.subscribe([" "]) == {:error, {:invalid_symbols, [" "]}}
+      assert Webull.unsubscribe([" "]) == {:error, {:invalid_symbols, [" "]}}
+      assert Webull.update_symbols([" "]) == {:error, {:invalid_symbols, [" "]}}
     end
   end
 
   describe "Feed.start_link/1 wraps credentials" do
     test "the credentials in the process are the redacting struct" do
       name = :"wrapped_feed_#{System.unique_integer([:positive])}"
-      {:ok, feed} = Feed.start_link(name: name, credentials: @credentials)
+      # A secret that differs from every field name, so a leak cannot hide behind `app_secret`.
+      leaky = %{app_key: "key-zq9", app_secret: "value-zq9-hunter2"}
+      {:ok, feed} = Feed.start_link(name: name, credentials: leaky)
 
       state = :sys.get_state(feed)
       assert %Credentials{} = state.resubscribe_opts[:credentials]
-      refute inspect(state.resubscribe_opts) =~ "secret"
+      refute inspect(state.resubscribe_opts) =~ "value-zq9-hunter2"
     end
   end
 

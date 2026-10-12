@@ -33,7 +33,7 @@ defmodule DpExchange.Webull.SocketHandshakeDeadlineTest do
     # No tighter wall-clock bound: under a loaded suite 500 ms of deadline measured 3.6 s
     # end to end, and returning at all is the property under test.
     assert {:ok, {:error, %WebSockex.ConnError{original: :timeout}}} =
-             Task.yield(task, 5_000) || Task.shutdown(task, :brutal_kill)
+             Task.yield(task, 15_000) || Task.shutdown(task, :brutal_kill)
   end
 
   test "a reconnect whose upgrade response trickles in fails at the deadline and retries" do

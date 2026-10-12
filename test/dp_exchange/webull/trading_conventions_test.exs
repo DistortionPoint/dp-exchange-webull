@@ -384,7 +384,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       end
     end
 
-    test "a preview of a non-map answered BadMapError before any check; crypto is still first" do
+    test "a crypto preview is refused as unsupported before any other check" do
       assert {:error, {:preview_not_supported, :crypto}} =
                Rest.preview_order(@credentials, %{symbol: "BTC-USD"},
                  account_id: @account,
@@ -507,7 +507,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       end
     end
 
-    test "a whitespace-only id was sent as it stood" do
+    test "a whitespace-only id is refused even with an account and credentials" do
       assert {:error, {:invalid_order_id, "  "}} =
                Rest.cancel_order(@credentials, "  ",
                  account_id: @account,
@@ -657,6 +657,23 @@ defmodule DpExchange.Webull.TradingConventionsTest do
                )
 
       assert :counters.get(counter, 1) == 1
+    end
+  end
+
+  describe "T13: the facade takes opts \\\\ [] on every order call" do
+    test "each order call is callable without options and answers the named refusal" do
+      # No account option and no network: the refusal is decided before anything is sent.
+      missing_account = {:error, {:missing_option, :account_id}}
+
+      assert missing_account == DpExchange.Webull.place_order(@credentials, equity())
+      assert missing_account == DpExchange.Webull.preview_order(@credentials, equity())
+      assert missing_account == DpExchange.Webull.cancel_order(@credentials, "abc")
+      assert missing_account == DpExchange.Webull.get_order(@credentials, "abc")
+      assert missing_account == DpExchange.Webull.get_orders(@credentials)
+
+      # The edit table is named by the caller, never defaulted.
+      assert {:error, {:missing_option, :instrument_type}} =
+               DpExchange.Webull.replace_order(@credentials, "abc", @changes)
     end
   end
 

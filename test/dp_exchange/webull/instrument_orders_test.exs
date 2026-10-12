@@ -84,9 +84,9 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
   end
 
   describe "the matrix is per instrument type" do
-    test "an equity limit DAY is accepted where crypto would refuse it" do
-      # LIMIT/DAY is in crypto's list too, but TRAILING_STOP_LOSS is not — and a stop order
-      # is equity-only. One matrix for all five would be wrong four times.
+    test "an equity limit DAY order goes out as EQUITY, LIMIT and DAY" do
+      # The equity matrix is its own: it takes DAY, which a crypto order does not, and the
+      # stop family is equity-only. One matrix for all five would be wrong four times.
       me = self()
 
       assert {:ok, _order} =

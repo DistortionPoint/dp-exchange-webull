@@ -105,12 +105,26 @@ defmodule DpExchange.Webull.AuthTest do
     test "an empty body omits the MD5 segment rather than hashing the empty string" do
       # `MD5("")` is a real value — using it would produce a different signed string and a
       # signature the venue rejects, with nothing to say why.
-      empty = Auth.signature(@app_key, @app_secret, @path, @query, "", @host, @timestamp, @nonce)
+      #
+      # The expected values are built here from the six steps, independently of `Auth`, so
+      # the test fails if the empty body is ever hashed (comparing against a different body
+      # could not tell the two apart).
+      empty = Auth.signature("k", "s", "/p", %{}, "", "h", "t", "n")
 
-      hashed_empty =
-        Auth.signature(@app_key, @app_secret, @path, @query, " ", @host, @timestamp, @nonce)
+      str1 =
+        "host=h&x-app-key=k&x-signature-algorithm=HMAC-SHA1&x-signature-nonce=n" <>
+          "&x-signature-version=1.0&x-timestamp=t"
 
-      refute empty == hashed_empty
+      sign = fn str3 ->
+        :hmac
+        |> :crypto.mac(:sha, "s&", URI.encode_www_form(str3))
+        |> Base.encode64()
+      end
+
+      md5_of_empty = :md5 |> :crypto.hash("") |> Base.encode16(case: :upper)
+
+      assert empty == sign.("/p&" <> str1)
+      refute empty == sign.("/p&" <> str1 <> "&" <> md5_of_empty)
     end
 
     test "query parameter order does not matter, because the inputs are sorted" do

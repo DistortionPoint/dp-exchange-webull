@@ -455,8 +455,7 @@ defmodule DpExchange.Webull.MicrostructureTest do
                )
 
       ratio = Types.AuctionImbalance.imbalance_ratio(imbalance)
-      assert Decimal.compare(ratio, Decimal.new("0")) == :gt
-      assert Decimal.compare(ratio, Decimal.new("1")) == :lt
+      assert Decimal.equal?(ratio, Decimal.div(Decimal.new("5715"), Decimal.new("701859")))
     end
   end
 end

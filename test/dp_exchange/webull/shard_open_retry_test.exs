@@ -52,7 +52,12 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
 
       # And exactly once while it stays down. The log keeps firing on every attempt by
       # design; a notice per attempt on a sustained outage is a storm, just a slower one.
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      #
+      # A further failed attempt is delivered by hand and the feed is called afterwards, so
+      # the attempt has been handled before the refute runs: no wait window decides it.
+      send(feed, {:reopen_shard, 0, ["BTCUSD"], unopenable_opts(), 2})
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
 
       assert Process.alive?(feed)
     end
@@ -84,8 +89,12 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
 
       refute MapSet.member?(:sys.get_state(feed).open_failed, 0)
 
-      # And it does not go on retrying a slot that is filled.
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      # And it does not go on retrying a slot that is filled: one more retry, delivered by
+      # hand and handled before the refute runs, announces nothing and opens nothing.
+      send(feed, {:reopen_shard, 0, ["BTCUSD"], unopenable_opts(), 3})
+      _settled = Feed.coverage(feed)
+      refute_received {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
+      assert :sys.get_state(feed).shards[0].session_id == "recovered"
     end
 
     test "a retry that succeeds installs the shard and clears the latch" do

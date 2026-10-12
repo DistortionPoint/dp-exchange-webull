@@ -179,8 +179,6 @@ defmodule DpExchange.Webull.AccountsTest do
                )
 
       assert balance.available_balance == nil
-      refute balance.available_balance == Decimal.new("484551")
-      refute balance.available_balance == Decimal.new("305587431.94")
     end
 
     test "the timestamp is when we asked" do
@@ -194,6 +192,7 @@ defmodule DpExchange.Webull.AccountsTest do
                )
 
       assert DateTime.compare(balance.timestamp, before) != :lt
+      assert DateTime.compare(balance.timestamp, DateTime.utc_now()) != :gt
     end
 
     test "an account with no currency assets is an empty list, not an error" do
@@ -670,6 +669,34 @@ defmodule DpExchange.Webull.AccountsTest do
                  account_id: @account,
                  retry_attempts: 0
                )
+    end
+
+    test "a pagination_key that always advances is stopped, not followed forever" do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        page = :counters.get(counter, 1)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{
+            "data" => [%{"activity_id" => "a"}],
+            "pagination_key" => "p-#{page}"
+          })
+        )
+      end
+
+      assert {:error, :history_truncated} =
+               Rest.get_transfers(@credentials,
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+
+      assert :counters.get(counter, 1) in 2..500
     end
 
     test "no range means the venue's own 7-day default, not this package's" do

@@ -31,14 +31,9 @@ defmodule DpExchange.Webull.RateCeilingTest do
       assert caps.public_ceiling == caps.authenticated_ceiling
     end
 
-    test "is stated as a 60s window rather than reduced to a per-second rate" do
-      # `60/60_000` and `1/1_000` are the same average rate and NOT the same limiter: the
-      # venue permits a window, so reducing it to a per-second figure would silently throw
-      # away the burst it actually allows. Transcribe the vendor's units.
-      caps = DpExchange.Webull.capabilities()
-
-      assert caps.public_ceiling.per_ms == 60_000
-    end
+    # The first test above pins `per_ms: 60_000` as well: `60/60_000` and `1/1_000` are the
+    # same average rate and NOT the same limiter. The venue permits a window, so reducing it
+    # to a per-second figure would silently throw away the burst it actually allows.
   end
 
   describe "limits/1 derives the limiter's configuration from that declaration" do
@@ -68,6 +63,7 @@ defmodule DpExchange.Webull.RateCeilingTest do
       uat = WebullSupervisor.limits(environment: :uat)
 
       refute production.webull.limit == uat.webull.limit
+      refute production.default.limit == uat.default.limit
     end
 
     test "defaults to production when no environment is given" do
@@ -88,7 +84,7 @@ defmodule DpExchange.Webull.RateCeilingTest do
       )
 
       bars = "webull /market-data/crypto/bars/list"
-      snapshot = "webull /market-data/crypto/snapshot"
+      snapshot = "webull /market-data/crypto/snapshots/list"
 
       assert :ok = DpExchange.Core.DefaultRateLimiter.check(bars, 1, limiter: name)
       :ok = DpExchange.Core.DefaultRateLimiter.record(bars, 1, limiter: name)

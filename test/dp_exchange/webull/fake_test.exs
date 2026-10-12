@@ -349,17 +349,6 @@ defmodule DpExchange.Webull.FakeTest do
                Fake.get_orders(@credentials, [history: true] ++ @order_opts)
     end
 
-    test "an improper symbol list is refused by name, not raised on" do
-      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
-               Fake.subscribe(["BTC-USD" | :tail], [])
-
-      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
-               Fake.unsubscribe(["BTC-USD" | :tail])
-
-      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
-               Fake.update_symbols(["BTC-USD" | :tail])
-    end
-
     test "every order call needs an account" do
       only_credentials = [credentials: @credentials]
 
@@ -485,6 +474,17 @@ defmodule DpExchange.Webull.FakeTest do
       assert :ok = Fake.subscribe(["BTC-USD"], @opts)
       assert Fake.coverage([])["BTC-USD"] == :stream
       assert :ok = Fake.unsubscribe(["BTC-USD"], @opts)
+    end
+
+    test "an improper symbol list is refused by name, not raised on" do
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.subscribe(["BTC-USD" | :tail], [])
+
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.unsubscribe(["BTC-USD" | :tail])
+
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.update_symbols(["BTC-USD" | :tail])
     end
   end
 

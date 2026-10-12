@@ -895,7 +895,10 @@ defmodule DpExchange.Webull.SocketTest do
     end
 
     test "a text frame is ignored — this venue speaks binary" do
-      assert {:ok, _state} = Socket.handle_frame({:text, "hello"}, state())
+      untouched = state()
+
+      assert {:ok, ^untouched} = Socket.handle_frame({:text, "hello"}, untouched)
+      refute_received {:dp_exchange, :webull, _anything}
     end
   end
 
@@ -1269,7 +1272,10 @@ defmodule DpExchange.Webull.SocketTest do
     test "a QoS 0 frame owes nothing and replies with nothing" do
       frame = publish("snapshot", snapshot_payload("BTCUSD", "1"))
 
-      assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
+      assert {:ok, state} = Socket.handle_frame({:binary, frame}, state())
+
+      assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+      assert Map.get(state, :acks, []) == []
     end
 
     test "a publish on a topic nobody decodes is still acknowledged" do

@@ -740,6 +740,24 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert_receive {:query, query}
       assert query =~ "extend_hour_required=true"
       assert query =~ "overnight_required=false"
+
+      crypto_plug = fn conn ->
+        send(me, {:crypto_query, conn.query_string})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!([%{"symbol" => "BTCUSD", "price" => "40000", "last_trade_time" => 1}])
+        )
+      end
+
+      assert {:ok, _crypto} =
+               Rest.get_price("BTC-USD", @credentials, plug: crypto_plug, retry_attempts: 0)
+
+      assert_receive {:crypto_query, crypto_query}
+      refute crypto_query =~ "extend_hour_required"
+      refute crypto_query =~ "overnight_required"
     end
 
     test "the stock snapshot also serves the top of book" do
@@ -834,10 +852,11 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert body["timespan"] == "D"
     end
 
-    test "the venue default is sent, and the forming bar is dropped here" do
+    test "the venue default real_time_required=true is sent on stock bars" do
       # On the crypto bars and footprints real_time_required defaults to false. Here the
       # vendor's default is Y, which includes an in-progress bar whose boundary has not
       # happened yet. A package storing that saves a bar that changes after it is written.
+      # The local drop itself is asserted in bar_conventions_test.exs.
       me = self()
 
       plug = fn conn ->
@@ -1219,29 +1238,30 @@ defmodule DpExchange.Webull.OrderBookTest do
       # A truncated instrument list is the worst shape this family has — every symbol in it
       # is real and the missing ones are simply never traded — so the walk is bounded
       # rather than trusted.
-      counter = :counters.new(1, [])
+      for {opts, symbol} <- [{[category: "US_STOCK"], "AAPL"}, {[], "BTCUSD"}] do
+        counter = :counters.new(1, [])
 
-      plug = fn conn ->
-        :counters.add(counter, 1, 1)
-        page = :counters.get(counter, 1)
+        plug = fn conn ->
+          :counters.add(counter, 1, 1)
+          page = :counters.get(counter, 1)
 
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(
-          200,
-          Jason.encode!(%{
-            "data" => [%{"symbol" => "AAPL"}],
-            "pagination_key" => "page-#{page}"
-          })
-        )
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(
+            200,
+            Jason.encode!(%{
+              "data" => [%{"symbol" => symbol}],
+              "pagination_key" => "page-#{page}"
+            })
+          )
+        end
+
+        assert {:error, :history_truncated} =
+                 Rest.get_symbols(@credentials, [plug: plug, retry_attempts: 0] ++ opts)
+
+        # Bounded: the walk stopped, it did not run to some huge count.
+        assert :counters.get(counter, 1) in 2..500
       end
-
-      assert {:error, :history_truncated} =
-               Rest.get_symbols(@credentials,
-                 category: "US_STOCK",
-                 plug: plug,
-                 retry_attempts: 0
-               )
     end
   end
 end

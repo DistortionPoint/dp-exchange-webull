@@ -44,23 +44,27 @@ defmodule DpExchange.Webull.FeedTest do
     # The credentials case is the reachable one — a revoked App Key produces CONNACK 3 on the
     # very first subscribe, so a consumer got a crash rather than `{:error, ...}`.
 
-    test "a refused CONNACK answers the caller with the venue's own code" do
-      feed = start_feed(shards: %{0 => connected_shard("s0")})
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
+    # Parks THIS test process as the caller waiting on shard 0's CONNACK. `test_pid` is
+    # captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE the target
+    # process, so `self()` in there is the feed, not this test. Parking a `from` built that
+    # way sends the reply to the feed itself and the assertion sees nothing — which is
+    # exactly how the first draft of these tests failed.
+    defp park_caller(feed) do
       test_pid = self()
 
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
+      _state =
+        :sys.replace_state(feed, fn state ->
+          state
+          |> put_in([:shards, 0, :connected?], false)
+          |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
+        end)
 
-      :sys.replace_state(feed, fn state ->
-        state
-        |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
-      end)
+      :ok
+    end
+
+    test "a refused CONNACK answers the caller with the venue's own code" do
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+      park_caller(feed)
 
       send(
         feed,
@@ -81,21 +85,7 @@ defmodule DpExchange.Webull.FeedTest do
       # key that is fine — `Socket`'s own comment says so, and the reply has to keep them
       # apart as well.
       feed = start_feed(shards: %{0 => connected_shard("s0")})
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
-
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
-      :sys.replace_state(feed, fn state ->
-        state
-        |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
-      end)
+      park_caller(feed)
 
       send(
         feed,
@@ -112,21 +102,7 @@ defmodule DpExchange.Webull.FeedTest do
 
     test "a refusal for a session this feed does not track leaves everything alone" do
       feed = start_feed(shards: %{0 => connected_shard("s0")})
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
-
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
-      :sys.replace_state(feed, fn state ->
-        state
-        |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
-      end)
+      park_caller(feed)
 
       send(
         feed,
@@ -148,21 +124,7 @@ defmodule DpExchange.Webull.FeedTest do
       # frames, and a venue that accepts the connection and stays silent strands the caller
       # with nothing to react to.
       feed = start_feed(shards: %{0 => connected_shard("s0")}, connack_timeout_ms: 50)
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
-
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
-      :sys.replace_state(feed, fn state ->
-        state
-        |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
-      end)
+      park_caller(feed)
 
       send(feed, {:connack_timeout, 0, "s0"})
       _settled = Feed.coverage(feed)
@@ -175,21 +137,7 @@ defmodule DpExchange.Webull.FeedTest do
       # Armed per attempt and matched on the session id, so a timer for a shard that has been
       # rebuilt cannot answer the caller now parked on its replacement.
       feed = start_feed(shards: %{0 => connected_shard("s0")})
-
-      # `test_pid` captured OUTSIDE the fun: `:sys.replace_state/2` runs its function INSIDE
-      # the target process, so `self()` in there is the feed, not this test. Parking a
-      # `from` built that way sends the reply to the feed itself and the assertion sees
-      # nothing — which is exactly how the first draft of these tests failed.
-      test_pid = self()
-
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
-      :sys.replace_state(feed, fn state ->
-        state
-        |> put_in([:shards, 0, :connected?], false)
-        |> put_in([:shards, 0, :reply_to], [{{test_pid, make_ref()}, []}])
-      end)
+      park_caller(feed)
 
       send(feed, {:connack_timeout, 0, "a-previous-session"})
       _settled = Feed.coverage(feed)
@@ -762,13 +710,34 @@ defmodule DpExchange.Webull.FeedTest do
       assert Process.alive?(feed)
     end
 
-    test "a reconnect with nothing wanted sends no request", %{limiter: _limiter} do
+    test "a reconnect with nothing wanted sends no request", %{limiter: limiter} do
+      # Reported to the test process, not `flunk/1`ed in the plug: the plug runs in a
+      # reconcile task, where a flunk only kills the task and the test passes either way.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
+
       session_id = "quiet-session"
-      feed = start_feed(shards: %{0 => connected_shard(session_id)})
+
+      feed =
+        start_feed(
+          shards: %{0 => connected_shard(session_id)},
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug,
+          retry_attempts: 0
+        )
 
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
       _settled = Feed.coverage(feed)
 
+      # The replay's reconcile task is spawned inside the same handler, so an empty
+      # `reconciling` after the synchronous call proves none was started.
+      assert :sys.get_state(feed).reconciling == %{}
+      refute_received {:request, :unexpected}
       assert Process.alive?(feed)
     end
   end
@@ -851,7 +820,9 @@ defmodule DpExchange.Webull.FeedTest do
           Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))
         end)
 
-      refute_receive {:subscribed, _symbols}, 200
+      # Parked in the feed's state, not guessed at with a timeout.
+      wait_for_parked(feed, 1)
+      refute_received {:subscribed, _symbols}
       refute Task.yield(task, 0)
 
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
@@ -876,7 +847,8 @@ defmodule DpExchange.Webull.FeedTest do
           Feed.subscribe(feed, ["ETH-USD"], subscribe_opts(limiter))
         end)
 
-      refute Task.yield(task, 200)
+      wait_for_parked(feed, 1)
+      refute Task.yield(task, 0)
 
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
 
@@ -1205,7 +1177,8 @@ defmodule DpExchange.Webull.FeedTest do
           Feed.subscribe(feed, ["AAA-USD", "BBB-USD"], subscribe_opts(limiter, plug: plug))
         end)
 
-      refute Task.yield(task, 100)
+      wait_for_parked(feed, 1)
+      refute Task.yield(task, 0)
 
       send(feed, {:dp_exchange, :webull, link_up("shard-0")})
 
@@ -1256,10 +1229,6 @@ defmodule DpExchange.Webull.FeedTest do
 
       # `:sys.replace_state/2` runs its function *inside* the target process, so
       # `Process.link/1` here links Feed itself to `crash_pid` — not the test process.
-
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
         state
@@ -1317,9 +1286,6 @@ defmodule DpExchange.Webull.FeedTest do
 
       feed = start_feed(shards: %{0 => shard0})
 
-      stalled = spawn(fn -> Process.sleep(:infinity) end)
-      on_exit(fn -> if Process.alive?(stalled), do: Process.exit(stalled, :kill) end)
-
       :sys.replace_state(feed, fn state ->
         Process.link(crash_pid)
         state
@@ -1331,8 +1297,10 @@ defmodule DpExchange.Webull.FeedTest do
         end)
 
       # `connected?: false` means the subscribe above is deferred, waiting on this
-      # shard's own CONNACK — exactly the window a crash can land in.
-      refute Task.yield(task, 100)
+      # shard's own CONNACK — exactly the window a crash can land in. Waited for in the
+      # feed's own state, not guessed at with a timeout: the caller is parked or it is not.
+      wait_for_parked(feed, 1)
+      refute Task.yield(task, 0)
 
       Process.exit(crash_pid, :kill)
 
@@ -2145,13 +2113,6 @@ defmodule DpExchange.Webull.FeedTest do
       }
     end
 
-    defp fail_n(feed, index, times) do
-      for _attempt <- 1..times do
-        send(feed, {:reconcile_done, {:resubscribe, index}, {:error, :boom}})
-        _settled = Feed.coverage(feed)
-      end
-    end
-
     test "a shard still delivering is NOT reopened, however many reconciles have failed" do
       socket = spawn(fn -> Process.sleep(:infinity) end)
       on_exit(fn -> if Process.alive?(socket), do: Process.exit(socket, :kill) end)
@@ -2168,7 +2129,7 @@ defmodule DpExchange.Webull.FeedTest do
         %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond)}}
       end)
 
-      fail_n(feed, 0, 5)
+      fail_resubscribe(feed, 0, 5)
 
       state = :sys.get_state(feed)
 
@@ -2197,7 +2158,7 @@ defmodule DpExchange.Webull.FeedTest do
       end)
 
       Feed.subscribe_notices(feed, to: self())
-      fail_n(feed, 0, 3)
+      fail_resubscribe(feed, 0, 3)
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
       refute Map.has_key?(:sys.get_state(feed).shards, 0)
@@ -2228,8 +2189,8 @@ defmodule DpExchange.Webull.FeedTest do
         %{state | delivering: %{"ETH-USD" => System.system_time(:millisecond)}}
       end)
 
-      fail_n(feed, 0, 3)
-      fail_n(feed, 1, 3)
+      fail_resubscribe(feed, 0, 3)
+      fail_resubscribe(feed, 1, 3)
 
       state = :sys.get_state(feed)
 

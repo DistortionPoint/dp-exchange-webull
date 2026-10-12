@@ -169,7 +169,9 @@ defmodule DpExchange.Webull.RestTest do
       requests =
         Enum.count(1..20, fn _n -> receive do: (:request -> true), after: (0 -> false) end)
 
-      assert requests <= 11
+      # Bounded above (halving down to one symbol) and below (the first full request was
+      # refused, so at least one further request had to be made for the good symbols).
+      assert requests in 2..11
     end
 
     test "a credential refusal is not split — it would fail every half the same way" do
@@ -783,6 +785,32 @@ defmodule DpExchange.Webull.RestTest do
       refute String.contains?(first_query || "", "pagination_key=")
       assert_receive {:page, second_query}
       assert String.contains?(second_query, "pagination_key=next")
+    end
+
+    test "a venue that always sends a fresh cursor is cut off, not walked forever" do
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        next =
+          case conn.query_params["pagination_key"] do
+            nil -> 1
+            key -> String.to_integer(key) + 1
+          end
+
+        Req.Test.json(conn, %{"data" => [], "pagination_key" => Integer.to_string(next)})
+      end
+
+      assert {:error, :history_truncated} =
+               Rest.list_instruments(@credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor that comes back unchanged is refused rather than looped on" do
+      plug = fn conn ->
+        Req.Test.json(conn, %{"data" => [], "pagination_key" => "same"})
+      end
+
+      assert {:error, :pagination_key_did_not_advance} =
+               Rest.list_instruments(@credentials, plug: plug, retry_attempts: 0)
     end
   end
 

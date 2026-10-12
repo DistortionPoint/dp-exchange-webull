@@ -130,7 +130,9 @@ defmodule DpExchange.Webull.ShardReopenBackoffTest do
   end
 
   test "the delayed reopen fires on its own timer and clears its entry" do
-    feed = start_feed(shards: %{}, open_retry_base_ms: 50, open_retry_max_ms: 50)
+    # A delay long enough that the timer cannot have fired between the second teardown and
+    # the state read below on a loaded machine, and short enough to sit inside the 5s wait.
+    feed = start_feed(shards: %{}, open_retry_base_ms: 1_000, open_retry_max_ms: 1_000)
 
     _first = invalidate(feed, "s1")
     second = invalidate(feed, "s2")

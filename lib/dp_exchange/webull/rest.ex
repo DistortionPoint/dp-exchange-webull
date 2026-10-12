@@ -2390,9 +2390,9 @@ defmodule DpExchange.Webull.Rest do
   # liked. Absent is the documented `10` sent by `get_order_book/3`.
   defp book_depth(_category, nil), do: :ok
   defp book_depth("US_FUTURES", depth) when is_integer(depth) and depth in 1..10, do: :ok
-  defp book_depth("US_FUTURES", depth), do: {:error, {:depth_out_of_range, depth, max: 10}}
+  defp book_depth("US_FUTURES", depth), do: {:error, {:invalid_option, :depth, depth}}
   defp book_depth(_category, depth) when is_integer(depth) and depth >= 1, do: :ok
-  defp book_depth(_category, depth), do: {:error, {:depth_out_of_range, depth, min: 1}}
+  defp book_depth(_category, depth), do: {:error, {:invalid_option, :depth, depth}}
 
   # Futures have their own depth endpoint, at the same two-sided shape. `US_EVENT` does not
   # belong here at all — see `get_event_order_book/3`.
@@ -5019,7 +5019,7 @@ defmodule DpExchange.Webull.Rest do
   level maps and its `quote_time` in milliseconds. A side that is present and not a list is
   `{:error, :unexpected_response_shape}` (an absent one is `[]`), and a row naming another
   market than the one asked for is `{:error, :not_in_response}`. `opts[:depth]` must be a
-  whole number of levels, one or more, or `{:error, {:depth_out_of_range, depth, min: 1}}`
+  whole number of levels, one or more, or `{:error, {:invalid_option, :depth, depth}}`
   before any request.
   """
   @spec get_event_order_book(String.t(), map(), keyword()) ::

@@ -275,6 +275,43 @@ defmodule DpExchange.Webull.OptionsTest do
       assert row.put.right == :put
     end
 
+    test "a cursor that never ends is refused as truncated, not returned as the chain" do
+      # Every reply names a fresh next page, so only the page bound can stop the walk.
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+
+        next =
+          case conn.query_params["pagination_key"] do
+            nil -> 1
+            "page-" <> n -> String.to_integer(n) + 1
+          end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"data" => [contract()], "pagination_key" => "page-#{next}"})
+        )
+      end
+
+      assert {:error, :history_truncated} =
+               Rest.get_option_chain("AAPL", @credentials, plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor that repeats itself is refused rather than followed forever" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(
+          200,
+          Jason.encode!(%{"data" => [contract()], "pagination_key" => "same"})
+        )
+      end
+
+      assert {:error, :pagination_key_did_not_advance} =
+               Rest.get_option_chain("AAPL", @credentials, plug: plug, retry_attempts: 0)
+    end
+
     test "the filters go to the venue rather than being applied here" do
       me = self()
 

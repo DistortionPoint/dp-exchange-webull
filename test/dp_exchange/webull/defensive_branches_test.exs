@@ -167,13 +167,6 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                )
     end
 
-    test "a 404 on an order read, cancel or write is the same refusal" do
-      opts = [account_id: "acct-1", plug: responding(%{}, 404), retry_attempts: 0]
-
-      assert {:refused, :not_found} = Rest.get_order(@credentials, "abc", opts)
-      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc", opts)
-    end
-
     test "a refusal with only a code still carries it" do
       body = %{"code" => "AUTH_FAILED"}
 
@@ -248,17 +241,23 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     end
 
     test "a limit is passed to the venue rather than applied here" do
+      me = self()
+
       plug = fn conn ->
-        assert conn.query_string =~ "count=5"
+        send(me, {:query, conn.query_string})
         Req.Test.json(conn, @bars)
       end
 
-      assert {:ok, _bars} =
+      # Two bars come back and a limit of 1 would cut one if it were applied locally.
+      assert {:ok, [_first, _second]} =
                Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
                  plug: plug,
-                 limit: 5,
+                 limit: 1,
                  retry_attempts: 0
                )
+
+      assert_receive {:query, query}
+      assert query =~ ~r/(\A|&)count=1(&|\z)/
     end
 
     test "a group carrying neither rows nor bar fields contributes nothing" do

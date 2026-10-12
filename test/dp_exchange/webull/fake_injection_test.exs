@@ -21,7 +21,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
   # real success path left to inject a failure into, the same reason `test_connection/2`
   # and `get_rate_limit_status/2` are absent from this list too.
   @whole_call_names ~w(
-    get_symbols/1 get_balances/2 get_accounts/2 get_fees/2 get_transfers/2
+    get_symbols/1 list_instruments/1 get_balances/2 get_accounts/2 get_fees/2 get_transfers/2
     get_transactions/2 preview_order/3 replace_order/4 get_positions/1
     list_watchlists/1 get_watchlist/2 create_watchlist/3 update_watchlist/2
     delete_watchlist/2 get_corporate_events/1 get_news/1 get_screener/2 place_order/3
@@ -40,6 +40,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
   defp whole_call_calls do
     %{
       "get_symbols/1" => fn -> Fake.get_symbols(credentials: @credentials) end,
+      "list_instruments/1" => fn -> Fake.list_instruments(credentials: @credentials) end,
       "get_balances/2" => fn -> Fake.get_balances(@credentials, account_id: "1") end,
       "get_accounts/2" => fn -> Fake.get_accounts(@credentials, []) end,
       "get_fees/2" => fn -> Fake.get_fees(@credentials, []) end,
@@ -130,6 +131,15 @@ defmodule DpExchange.Webull.FakeInjectionTest do
     test "a whole-call queue still reaches a symbol-taking function with no symbol-specific override" do
       FakeInjection.fail_always(:webull, @injected)
       assert Fake.get_price("BTC-USD", credentials: @credentials) == @injected
+    end
+
+    test "get_prices/2 reaches the symbol override through its per-symbol results" do
+      FakeInjection.fail_always(:webull, "BTC-USD", @injected)
+
+      assert {:ok, %{"BTC-USD" => @injected, "ETH-USD" => eth}} =
+               Fake.get_prices(["BTC-USD", "ETH-USD"], credentials: @credentials)
+
+      refute eth == @injected
     end
   end
 

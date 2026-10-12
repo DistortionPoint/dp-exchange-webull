@@ -58,6 +58,45 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       assert_receive {:DOWN, ^ref, :process, ^first_task, _reason}, 5_000
       assert Process.alive?(feed)
     end
+
+    test "a tick over an unfinished attempt leaves that attempt tracked and untouched", %{
+      limiter: limiter
+    } do
+      # The deterministic half of the test above: no timer decides the outcome. An attempt
+      # is in flight under `{:resubscribe, 0}`; a tick is delivered by hand; the tracked
+      # entry must be the very same one afterwards (same pid, ref and attempt), not a
+      # successor that would also have killed this one.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, :unexpected_subscribe)
+        conn
+      end
+
+      feed =
+        start_feed(
+          shards: %{0 => %{connected_shard("s0") | symbols: ["BTC-USD"]}},
+          credentials: credentials(),
+          limiter: limiter,
+          plug: plug
+        )
+
+      live = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> if Process.alive?(live), do: Process.exit(live, :kill) end)
+
+      current = %{pid: live, ref: Process.monitor(live), attempt: make_ref()}
+
+      :sys.replace_state(feed, fn state ->
+        %{state | reconciling: Map.put(state.reconciling, {:resubscribe, 0}, current)}
+      end)
+
+      send(feed, :resubscribe)
+
+      # Answered after the tick above has been handled.
+      assert :sys.get_state(feed).reconciling == %{{:resubscribe, 0} => current}
+      assert Process.alive?(live)
+      refute_received :unexpected_subscribe
+    end
   end
 
   describe "a reconcile superseded under its own tag — issue #3" do

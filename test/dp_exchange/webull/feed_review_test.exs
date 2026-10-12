@@ -133,11 +133,14 @@ defmodule DpExchange.Webull.FeedReviewTest do
 
       # Shard 0 is the primary (the first touched), and takes CCC; shard 1 loses BBB.
       assert :ok = Feed.update_symbols(feed, ["CCC-USD"], subscribe_opts(limiter, plug: plug))
-      assert_receive {:hit, @subscribe_path, ["CCCUSD"]}
+      assert_receive {:hit, @subscribe_path, ["CCCUSD"]}, 5_000
 
-      # The deferred message is handled after the call returns; let it run before looking.
+      # The deferred message is handled after the call returns; let it run before looking,
+      # then wait for every reconcile to finish so a stray request would already be in the
+      # mailbox: the refute below is a check of settled state, not a timing window.
       _settled = Feed.coverage(feed)
-      refute_receive {:hit, @unsubscribe_path, _symbols}, 300
+      wait_until(fn -> :sys.get_state(feed).reconciling == %{} end)
+      refute_receive {:hit, @unsubscribe_path, _symbols}, 0
 
       shard = :sys.get_state(feed).shards[1]
       assert shard.symbols == [], "the new list is recorded for the link-up replay"
@@ -297,13 +300,13 @@ defmodule DpExchange.Webull.FeedReviewTest do
 
       send(feed, {:caller_due, from})
 
-      assert_receive {^ref, {:error, {:connack_timeout, _ms}}}
+      assert_receive {^ref, {:error, {:connack_timeout, _ms}}}, 5_000
       refute_receive {^other_ref, _reply}, 50
       assert [{^other, []}] = :sys.get_state(feed).shards[3].reply_to
 
       send(feed, {:caller_due, other})
 
-      assert_receive {^other_ref, {:error, {:connack_timeout, _ms}}}
+      assert_receive {^other_ref, {:error, {:connack_timeout, _ms}}}, 5_000
       assert :sys.get_state(feed).shards[3].reply_to == nil
     end
 
@@ -329,7 +332,9 @@ defmodule DpExchange.Webull.FeedReviewTest do
 
       send(feed, {:caller_due, from})
 
-      assert_receive {^ref, {:error, {:partial_failure, failed: failed, capacity_exceeded: over}}}
+      assert_receive {^ref, {:error, {:partial_failure, details}}}, 5_000
+
+      assert [failed: failed, capacity_exceeded: over] = details
       assert {:reconcile_pending, _ms} = failed
       assert over == ["ZZZ-USD"]
     end

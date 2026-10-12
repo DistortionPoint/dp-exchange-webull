@@ -50,7 +50,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       assert {:error, _reason} =
                Feed.subscribe(feed, ["AAA-USD"], subscribe_opts(limiter, plug: failing))
 
-      assert_receive {:hit, @subscribe_path, ["AAAUSD"]}
+      assert_receive {:hit, @subscribe_path, ["AAAUSD"]}, 5_000
 
       state = :sys.get_state(feed)
       assert state.shards[0].symbols == [], "the shard must not claim what was never subscribed"
@@ -60,7 +60,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       # Before the fix this diffed empty and answered :ok without sending anything.
       working = recording_plug(self())
       assert :ok = Feed.subscribe(feed, ["AAA-USD"], subscribe_opts(limiter, plug: working))
-      assert_receive {:hit, @subscribe_path, ["AAAUSD"]}
+      assert_receive {:hit, @subscribe_path, ["AAAUSD"]}, 5_000
 
       state = :sys.get_state(feed)
       assert state.shards[0].symbols == ["AAA-USD"]
@@ -100,10 +100,10 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       assert {:error, _reason} =
                Feed.update_symbols(feed, ["NEW-USD"], subscribe_opts(limiter, plug: failing))
 
-      assert_receive {:hit, @unsubscribe_path, ["OLDUSD"]}
+      assert_receive {:hit, @unsubscribe_path, ["OLDUSD"]}, 5_000
 
       assert_receive {:hit, @subscribe_path, ["NEWUSD"]},
-                     1_000,
+                     5_000,
                      "the subscribe must still be attempted when the unsubscribe failed"
 
       # Reverted: OLD may still be subscribed, so the next plan has to see the difference.
@@ -111,8 +111,8 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
 
       working = recording_plug(self())
       assert :ok = Feed.update_symbols(feed, ["NEW-USD"], subscribe_opts(limiter, plug: working))
-      assert_receive {:hit, @unsubscribe_path, ["OLDUSD"]}
-      assert_receive {:hit, @subscribe_path, ["NEWUSD"]}
+      assert_receive {:hit, @unsubscribe_path, ["OLDUSD"]}, 5_000
+      assert_receive {:hit, @subscribe_path, ["NEWUSD"]}, 5_000
       assert :sys.get_state(feed).shards[0].symbols == ["NEW-USD"]
     end
   end
@@ -199,7 +199,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
 
       caller = spawn(fn -> Feed.subscribe(feed, ["BTC-USD"], opts) end)
       on_exit(fn -> Process.exit(caller, :kill) end)
-      assert_receive :in_flight
+      assert_receive :in_flight, 5_000
 
       printed = inspect(:sys.get_state(feed), limit: :infinity, printable_limit: :infinity)
 
@@ -229,7 +229,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       send(feed, {:dp_exchange, :webull, trade})
       _settled = Feed.coverage(feed)
 
-      assert_receive {:dp_exchange, :webull, %Trade{symbol: "BTC-USD"}}
+      assert_receive {:dp_exchange, :webull, %Trade{symbol: "BTC-USD"}}, 5_000
       assert Feed.coverage(feed) == %{}
       refute Map.has_key?(Feed.coverage_by_kind(feed), :trades)
 
@@ -288,26 +288,26 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
 
     test "the first crash reopens at once, a second within the window waits" do
       feed =
-        start_feed(shards: %{}, credentials: credentials(), open_retry_base_ms: 800)
+        start_feed(shards: %{}, credentials: credentials(), open_retry_base_ms: 3_000)
 
       want(feed, ["BTC-USD"])
       Feed.subscribe_notices(feed, to: self())
 
       crash_shard(feed, ["BTC-USD"])
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
 
       # First crash: delay 0, so a fresh socket is installed without waiting for any timer.
       assert_eventually(fn -> match?(%{0 => %{connected?: false}}, shards(feed)) end)
       assert :sys.get_state(feed).crashes[0].count == 1
 
       crash_shard(feed, ["BTC-USD"])
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
 
       assert :sys.get_state(feed).crashes[0].count == 2
       refute Map.has_key?(shards(feed), 0), "the second reopen is held back by the cooldown"
 
-      # And it does come back once the cooldown elapses.
-      assert_eventually(fn -> Map.has_key?(shards(feed), 0) end)
+      # And it does come back once the cooldown (3s here) elapses.
+      assert_eventually(fn -> Map.has_key?(shards(feed), 0) end, 15_000)
     end
 
     defp shards(feed), do: :sys.get_state(feed).shards

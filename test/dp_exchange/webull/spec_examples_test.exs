@@ -1993,8 +1993,15 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(order.quantity, Decimal.new(row["total_quantity"]))
       assert Decimal.equal?(order.price, Decimal.new(row["limit_price"]))
 
-      assert_receive {:seen, path, _query}
+      assert_receive {:seen, path, first_query}
       assert path == "/trading/orders/open-orders/list"
+      refute first_query =~ "pagination_key"
+
+      # The page named a cursor, so a second request must carry it back exactly.
+      assert_receive {:seen, ^path, second_query}
+
+      assert URI.decode_query(second_query)["pagination_key"] ==
+               fixture["response"]["pagination_key"]
     end
   end
 
@@ -3543,7 +3550,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
              )
     end
 
-    test "market_sectors and market_sector both follow the fixture's own pagination_key, bounded" do
+    test "market_sectors and market_sector both follow the fixture's own pagination_key" do
       for name <- ["market_sectors", "market_sector"] do
         base_fixture =
           if name == "market_sectors",

@@ -18,7 +18,10 @@ defmodule DpExchange.WebullTest do
     end
 
     test "an endpoint declared :unsupported actually returns the atom" do
-      for {{name, arity}, :unsupported} <- Webull.capabilities().endpoints do
+      # An empty declaration would make the sweep below vacuous.
+      assert {:market_status, 1} in unsupported_endpoints()
+
+      for {name, arity} <- unsupported_endpoints() do
         assert apply(Webull, name, unsupported_args(name, arity)) == {:error, :not_supported},
                "#{name}/#{arity} is declared :unsupported but did not say so"
       end
@@ -33,7 +36,7 @@ defmodule DpExchange.WebullTest do
       # It also keeps the stubs honest. Thirty-three callbacks arrived with Core 0.1.16 and
       # are declared, not implemented; without this they are uncovered lines that nothing
       # would notice going wrong.
-      for {{name, arity}, :unsupported} <- Webull.capabilities().endpoints do
+      for {name, arity} <- unsupported_endpoints() do
         assert apply(Webull.Fake, name, unsupported_args(name, arity)) ==
                  {:error, :not_supported},
                "#{name}/#{arity} is declared :unsupported but the fake did not say so"
@@ -551,6 +554,10 @@ defmodule DpExchange.WebullTest do
     {:get_conversion, 2} => ["id", []],
     {:get_top_of_book, 2} => ["BTC-USD", []]
   }
+
+  defp unsupported_endpoints do
+    for {key, :unsupported} <- Webull.capabilities().endpoints, do: key
+  end
 
   defp unsupported_args(name, arity) do
     case Map.fetch(@wide_facade_args, {name, arity}) do

@@ -8,11 +8,11 @@ defmodule DpExchange.Webull.ReferenceDataTest do
   calendar, and an unknown parameter is at best ignored and at worst a refusal — neither of
   which tells the caller which happened.
 
-  Two mappings are stated rather than guessed. **`fiscal_period` keeps the venue's integer
-  code**, because "Q1" would lose the distinction between a fiscal and a calendar quarter.
-  And a screener's **rank is the position the venue returned the row in** — this package
-  publishes no ranking of its own, because two venues' "top movers" answer different
-  questions.
+  Two mappings are stated rather than guessed. **`fiscal_period` goes through the venue's own
+  legend** (`0=FY, 1=Q1 .. 4=Q4`; a code outside it is `nil`, the raw integer stays in
+  `line_items`). And a screener's **rank is the position the venue returned the row in** —
+  this package publishes no ranking of its own, because two venues' "top movers" answer
+  different questions.
   """
 
   use ExUnit.Case, async: true
@@ -245,8 +245,9 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert statement.currency == "USD"
     end
 
-    test "fiscal_period keeps the venue's integer code" do
-      # "Q1" would lose the distinction between a fiscal and a calendar quarter.
+    test "fiscal_period 3 is read through the venue's own legend as Q3" do
+      # The legend (`0=FY, 1=Q1 .. 4=Q4`) is the venue's, so the label is its fiscal quarter,
+      # not a calendar one; the raw integer stays in `line_items`.
       body = [%{"fiscal_period" => 3, "end_date" => "2025-09-27"}]
 
       assert {:ok, [statement]} =
@@ -256,6 +257,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                )
 
       assert statement.fiscal_period == "Q3"
+      assert statement.line_items["fiscal_period"] == 3
     end
 
     test "a kind that is real but is not a statement is refused" do
@@ -721,6 +723,36 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                  )
       end
     end
+
+    test "a pagination_key that always advances is stopped, not followed forever" do
+      for name <- ["market_sectors", "market_sector"] do
+        counter = :counters.new(1, [])
+
+        plug = fn conn ->
+          :counters.add(counter, 1, 1)
+          page = :counters.get(counter, 1)
+
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(
+            200,
+            Jason.encode!(%{
+              "data" => [%{"sector_name" => "T"}],
+              "pagination_key" => "p-#{page}"
+            })
+          )
+        end
+
+        assert {:error, :history_truncated} =
+                 Rest.get_screener(name, @credentials,
+                   sector_id: "1",
+                   plug: plug,
+                   retry_attempts: 0
+                 )
+
+        assert :counters.get(counter, 1) in 2..500
+      end
+    end
   end
 
   describe "the fake and the facade" do
@@ -745,7 +777,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert Fake.get_news() == {:error, :symbols_required}
     end
 
-    test "the fake's statement keeps the integer fiscal period" do
+    test "the fake's statement labels the fiscal period through the venue's legend" do
       assert {:ok, [statement]} =
                Fake.get_financials("AAPL", :balance_sheet, credentials: @credentials)
 

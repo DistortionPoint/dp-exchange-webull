@@ -583,19 +583,13 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     refute String.contains?(to_string(leaf["limit_price"]), "E")
   end
 
-  describe "a retried order carries the SAME idempotency key" do
-    test "every attempt sends the client_order_id generated for the first" do
+  describe "a placement is sent once whatever retry_attempts says" do
+    test "a failing placement makes exactly one attempt, carrying a generated id" do
       # `Core.HttpClient` retries anything that is not a 4xx, including a timeout and a
-      # connection reset — exactly the failures where the venue may have received and acted
-      # on the request. That is only safe because a `client_order_id` is generated when the
-      # caller gives none and travels with the body, so a retry asks the venue about the
-      # SAME order rather than placing another.
-      #
-      # The property that makes it true is that the key is generated once, while the body is
-      # built, and `Core.HttpClient`'s retry loop re-sends that body unchanged. Nothing
-      # pinned it: generate it per attempt and each becomes a distinct order, with the suite
-      # still green. `dp_exchange_schwab` and `dp_exchange_gemini` have no such key for their
-      # order writes and therefore do not retry them at all.
+      # connection reset - exactly the failures where the venue may have received and acted
+      # on the request. A write is therefore sent once (`send_once/1`) and a doubtful
+      # outcome is answered `order_unconfirmed` with the id that was sent, so the caller
+      # settles it with `get_order/3` instead of placing a second order.
       me = self()
 
       plug = fn conn ->
@@ -608,22 +602,21 @@ defmodule DpExchange.Webull.PlaceOrderTest do
         |> Plug.Conn.resp(503, Jason.encode!(%{"msg" => "unavailable"}))
       end
 
-      place(limit_request(),
-        plug: plug,
-        account_id: @account,
-        retry_attempts: 3,
-        retry_delay: 1
-      )
+      # The plug runs in this process, so every attempt has sent its message by the time
+      # `place/2` returns; nothing here waits on a timer or a spawned process.
+      assert {:error, {:order_unconfirmed, sent_id, _reason}} =
+               place(limit_request(),
+                 plug: plug,
+                 account_id: @account,
+                 retry_attempts: 3,
+                 retry_delay: 1
+               )
 
       bodies = drain_attempts([])
       ids = Enum.map(bodies, &client_order_id_of/1)
 
-      # A write is sent once whatever the caller passes (`send_once/1` is `Keyword.put`), so
-      # `retry_attempts: 3` produces one attempt, and it carries a generated id.
-      assert length(ids) == 1, "a placement must be sent exactly once: #{inspect(bodies)}"
-
-      assert Enum.all?(ids, &is_binary/1),
-             "every attempt must carry a client_order_id: #{inspect(bodies)}"
+      assert ids == [sent_id], "a placement must be sent exactly once: #{inspect(bodies)}"
+      assert String.length(sent_id) == 32
     end
 
     defp client_order_id_of(body) do
@@ -638,7 +631,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       receive do
         {:attempt, body} -> drain_attempts([body | acc])
       after
-        300 -> Enum.reverse(acc)
+        0 -> Enum.reverse(acc)
       end
     end
   end

@@ -206,7 +206,7 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
   describe "order book depth" do
     test "futures state 1 to 10, so anything else is refused before the request" do
       for depth <- [0, 11, "5", 2.5] do
-        assert {:error, {:depth_out_of_range, ^depth, max: 10}} =
+        assert {:error, {:invalid_option, :depth, ^depth}} =
                  Rest.get_order_book("ESZ6", @credentials,
                    category: "US_FUTURES",
                    depth: depth,
@@ -218,7 +218,7 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
 
     test "a stock book needs a positive whole number" do
       for depth <- [0, -1, "10"] do
-        assert {:error, {:depth_out_of_range, ^depth, min: 1}} =
+        assert {:error, {:invalid_option, :depth, ^depth}} =
                  Rest.get_order_book("AAPL", @credentials,
                    depth: depth,
                    plug: exploding(),
@@ -411,22 +411,6 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
   end
 
   describe "an order id must name an order" do
-    test "cancel, read and replace refuse a missing or empty id before anything is sent" do
-      for id <- [nil, "", "  ", 7] do
-        expected = {:error, {:invalid_order_id, id}}
-        opts = [account_id: @account, plug: exploding(), retry_attempts: 0]
-
-        assert expected == Rest.cancel_order(@credentials, id, opts)
-        assert expected == Rest.get_order(@credentials, id, opts)
-        assert expected == Rest.replace_order(@credentials, id, %{quantity: 1}, opts)
-        assert expected == Fake.cancel_order(@credentials, id, account_id: @account)
-        assert expected == Fake.get_order(@credentials, id, account_id: @account)
-
-        assert expected ==
-                 Fake.replace_order(@credentials, id, %{quantity: 1}, account_id: @account)
-      end
-    end
-
     test "a reply for another order is not_in_response, not this order" do
       group = %{
         "combo_type" => "NORMAL",

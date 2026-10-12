@@ -427,10 +427,10 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
     end
 
     test "an event book refuses a depth that is not a whole number of levels" do
-      assert {:error, {:depth_out_of_range, 0, min: 1}} =
+      assert {:error, {:invalid_option, :depth, 0}} =
                Rest.get_event_order_book("KX-T1", @credentials, depth: 0, plug: exploding())
 
-      assert {:error, {:depth_out_of_range, "ten", min: 1}} =
+      assert {:error, {:invalid_option, :depth, "ten"}} =
                Rest.get_event_order_book("KX-T1", @credentials, depth: "ten", plug: exploding())
     end
   end
@@ -509,10 +509,10 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
       assert {:ok, %Types.OrderBook{}} =
                Fake.get_order_book("ESZ5", [category: "US_FUTURES", depth: 10] ++ @opts)
 
-      assert {:error, {:depth_out_of_range, 11, max: 10}} =
+      assert {:error, {:invalid_option, :depth, 11}} =
                Fake.get_order_book("ESZ5", [category: "US_FUTURES", depth: 11] ++ @opts)
 
-      assert {:error, {:depth_out_of_range, 0, min: 1}} =
+      assert {:error, {:invalid_option, :depth, 0}} =
                Fake.get_order_book("AAPL", [depth: 0] ++ @opts)
 
       assert {:error, {:unsupported_book_category, "US_OPTION"}} =

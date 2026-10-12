@@ -1180,7 +1180,7 @@ and never a JSON number). `replace_order/4` holds its `changes` to the same rule
 (`{:unsupported_order_type, v}` / `{:unsupported_time_in_force, v}`) instead of dropping it.
 `cancel_order/3`, `get_order/3` and `replace_order/4` refuse a missing, empty or blank
 order id as `{:error, {:invalid_order_id, id}}`. `get_order_book/3` on
-`US_FUTURES` takes `depth` 1 to 10 (`{:depth_out_of_range, n, max: 10}`), as the venue's page
+`US_FUTURES` takes `depth` 1 to 10 (`{:invalid_option, :depth, n}`), as the venue's page
 states. The fake refuses all of these identically.
 
 **An order's `expire_date` and `event_outcome` are checked before a request**, in
