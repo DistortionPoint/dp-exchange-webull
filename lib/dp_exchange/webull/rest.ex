@@ -4658,10 +4658,17 @@ defmodule DpExchange.Webull.Rest do
     # alongside `rank_type`, `category` and `direction` — omitted here, a caller's
     # `sort_by:` opt was silently dropped.
     "week52_high_low" =>
-      {"/market-data/screeners/week52-high-low/list", [:rank_type, :sort_by, :direction]}
+      {"/market-data/screeners/week52-high-low/list", [:rank_type, :sort_by, :direction]},
+    # `list-hot-tickers.md` (fetched 2026-10-12, when the vendor's sitemap first listed it):
+    # stocks ranked by community activity, a bare array of `{rank, symbol, category}`. The
+    # page documents NO query parameter at all, so nothing is sent — not even `category`.
+    "hot_stocks" => {"/market-data/communities/stock-rankings/list", []}
   }
 
   @paginated_screeners ["market_sectors", "market_sector"]
+
+  # Screeners whose page documents no `category` parameter.
+  @uncategorised_screeners ["hot_stocks"]
 
   @doc "The screeners this venue publishes, by the identifier `get_screener/3` takes."
   @spec screeners() :: [String.t()]
@@ -4687,6 +4694,10 @@ defmodule DpExchange.Webull.Rest do
   `market_sectors` and `market_sector` both document `pagination_key`
   (`get-market-sectors.md:96`) and this follows it to the end, bounded — see `paginate/1`.
 
+  `hot_stocks` ranks stocks by **community activity**, not by price or volume
+  (`list-hot-tickers.md`). Its page documents no query parameter, so none is sent; each row's
+  `metrics` carries the venue's own `rank` and `category`.
+
   An identifier this venue does not publish is `{:error, {:unknown_screener, name}}`.
   """
   @spec get_screener(String.t(), map(), keyword()) ::
@@ -4696,7 +4707,8 @@ defmodule DpExchange.Webull.Rest do
       {:ok, {path, allowed}} ->
         with :ok <- require_rank_type(name, opts) do
           base_params =
-            %{"category" => fundamental_category(opts)}
+            name
+            |> screener_base_params(opts)
             |> put_allowed(allowed, opts)
             |> screener_defaults(name)
 
@@ -4735,6 +4747,9 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp require_rank_type(_name, _opts), do: :ok
+
+  defp screener_base_params(name, _opts) when name in @uncategorised_screeners, do: %{}
+  defp screener_base_params(_name, opts), do: %{"category" => fundamental_category(opts)}
 
   defp screener_rows(name, path, base_params, credentials, opts)
        when name in @paginated_screeners do

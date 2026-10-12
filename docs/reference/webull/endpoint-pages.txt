@@ -59,6 +59,22 @@
 # Found by running the checker by hand on 2026-09-13, the day before its first scheduled
 # Monday — see the release note for why fifteen never-executed weekly jobs were worth
 # exercising early.
+#
+# ## Re-diffed 2026-10-12 — a "Community" section appeared; one page is now served
+#
+# Seven pages appeared: `community` (a section index), `create-comment`, `create-post`,
+# `get-post`, `list-my-posts`, `list-posts-by-symbol` and `list-hot-tickers`. All were read
+# before this file was touched.
+#
+#   * `list-hot-tickers` (`GET /market-data/communities/stock-rankings/list`) is a RANKING:
+#     stocks ordered by community activity, a bare array of `{rank, symbol, category}`, no
+#     query parameter. That is what `get_screener/2` serves ("a venue screener, mover list or
+#     ranking"), so it is now the `"hot_stocks"` screener. Its page is committed verbatim as
+#     `openapi/list-hot-tickers.md`. It states no rate limit of its own, so the market-data
+#     per-endpoint bucket and the 600/minute global cap govern it like every other screener.
+#   * The other six read and write social posts and comments. `DpExchange.Core.Venue` has no
+#     callback for social content, so no `capabilities/0` declaration rests on their absence
+#     and none is made false by their arrival.
 
 account-balance
 account-list
@@ -191,10 +207,13 @@ common-order-cancel
 common-order-place
 common-order-preview
 common-order-replace
+community
 connect-api/connect
 connect-api/create-and-refresh-token
 connect-api/get-authorization-code
 connect-api/webull-open-api-reference
+create-comment
+create-post
 create-token
 create-watchlist
 crypto-bars
@@ -274,6 +293,7 @@ get-market-sectors
 get-market-sectors-detail
 get-noii-bars
 get-noii-snapshot
+get-post
 get-top-active
 get-transfer-activity-detail
 get-watchlist
@@ -283,6 +303,9 @@ historical-bars
 industry-comparison
 instrument-list
 instruments
+list-hot-tickers
+list-my-posts
+list-posts-by-symbol
 list-transfer-activities
 market-data-streaming
 news

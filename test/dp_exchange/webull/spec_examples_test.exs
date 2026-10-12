@@ -3380,6 +3380,39 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     end
   end
 
+  describe "get_screener/3 \"hot_stocks\" — list-hot-tickers.md" do
+    # The page's own example row (`rank` 1, `symbol` "AAPL", `category` "US_STOCK"), as the
+    # bare array the page documents.
+    @hot_rows [
+      %{"rank" => 1, "symbol" => "AAPL", "category" => "US_STOCK"},
+      %{"rank" => 2, "symbol" => "NVDA", "category" => "US_STOCK"}
+    ]
+
+    test "calls the community ranking path and sends no query parameter, not even category" do
+      me = self()
+
+      assert {:ok, [first, second]} =
+               Rest.get_screener("hot_stocks", @credentials,
+                 plug: capturing(@hot_rows, me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", "/market-data/communities/stock-rankings/list", query,
+                      _raw},
+                     5_000
+
+      assert query == ""
+
+      assert %{symbol: "AAPL", rank: 1, screener: "hot_stocks", provider: :webull} = first
+      assert first.metrics == %{"rank" => 1, "symbol" => "AAPL", "category" => "US_STOCK"}
+      assert %{symbol: "NVDA", rank: 2} = second
+    end
+
+    test "is listed among the venue's screeners" do
+      assert "hot_stocks" in Rest.screeners()
+    end
+  end
+
   describe "get_screener/3 \"week52_high_low\" — vendor field-example fixture" do
     test "requires rank_type (no documented default) and decodes the documented fields" do
       fixture = fixture!("screener_week52.json")

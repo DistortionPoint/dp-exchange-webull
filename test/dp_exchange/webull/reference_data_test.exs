@@ -548,8 +548,8 @@ defmodule DpExchange.Webull.ReferenceDataTest do
   end
 
   describe "get_screener/3" do
-    test "six screeners are published" do
-      assert length(Rest.screeners()) == 6
+    test "seven screeners are published" do
+      assert length(Rest.screeners()) == 7
       assert "gainers_losers" in Rest.screeners()
       assert "week52_high_low" in Rest.screeners()
     end

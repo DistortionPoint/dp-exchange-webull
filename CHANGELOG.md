@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **New screener: `"hot_stocks"`.** The vendor published a Community section on 2026-10-12;
+  its `list-hot-tickers` page (`GET /market-data/communities/stock-rankings/list`) ranks stocks
+  by community activity, which is what `get_screener/2` serves. It sends no query parameter
+  (the page documents none, so not even `category`) and each row's `metrics` is the venue's
+  `{rank, symbol, category}`. The page is committed verbatim; the six social-post pages that
+  appeared with it have no `Venue` callback and change no declaration. The endpoint inventory
+  is re-dated.
+
 ## [0.4.146] - 2026-10-12
 
 - **Security: OAuth is https only.** `oauth_token/3` refuses a non-https `:oauth_url` (plain

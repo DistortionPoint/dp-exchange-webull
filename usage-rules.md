@@ -969,6 +969,11 @@ endpoint never actually worked.
 **A screener's rank is the position the venue returned the row in.** Nothing is re-ranked:
 two venues' "top movers" answer different questions, and so do one venue's under two sorts.
 
+`"hot_stocks"` ranks stocks by **community activity**, not by price or volume, so it is not a
+movers list. It takes no options (the venue documents no query parameter, so not even
+`category` is sent), and each row's `metrics` is the venue's own `rank`, `symbol` and
+`category`.
+
 ## Watchlists: three absences and a boolean
 
 `symbols` is `nil` on a `list_watchlists/1` row — that endpoint names watchlists and does not
