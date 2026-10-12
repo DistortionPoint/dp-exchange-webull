@@ -3346,14 +3346,15 @@ defmodule DpExchange.Webull.Rest do
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def oauth_token(client_id, client_secret, opts)
       when is_binary(client_id) and is_binary(client_secret) do
-    with {:ok, grant} <- oauth_grant(opts) do
+    with {:ok, grant} <- oauth_grant(opts),
+         {:ok, base_url} <- secure_oauth_url(opts) do
       form =
         Map.merge(
           %{"client_id" => client_id, "client_secret" => client_secret},
           grant
         )
 
-      url = Config.opt(opts, :oauth_url, oauth_url(opts)) <> "/oauth2/tokens/create"
+      url = base_url <> "/oauth2/tokens/create"
       headers = [{"Content-Type", "application/x-www-form-urlencoded"}]
 
       # Sent once: an authorization code is single-use and a refresh token may rotate, so a
@@ -3409,6 +3410,28 @@ defmodule DpExchange.Webull.Rest do
 
       _neither ->
         {:error, :code_or_refresh_token_required}
+    end
+  end
+
+  # `:oauth_url` is a consumer-overridable base URL, and the form it receives carries the
+  # `client_secret` plus the authorization code or refresh token in the body. An `http://`
+  # override sent all three in cleartext, silently. Refused instead: https only, with plain
+  # http allowed to a loopback host alone (the test seam). The error names no URL, which may
+  # itself carry userinfo.
+  @loopback_hosts ["127.0.0.1", "localhost", "::1"]
+
+  defp secure_oauth_url(opts) do
+    url = Config.opt(opts, :oauth_url, oauth_url(opts))
+
+    case is_binary(url) and URI.parse(url) do
+      %URI{scheme: "https", host: host} when is_binary(host) and host != "" ->
+        {:ok, url}
+
+      %URI{scheme: "http", host: host} when host in @loopback_hosts ->
+        {:ok, url}
+
+      _insecure_or_malformed ->
+        {:error, {:insecure_oauth_url, :https_required}}
     end
   end
 

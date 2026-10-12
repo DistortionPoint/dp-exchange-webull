@@ -22,6 +22,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Security: OAuth is https only.** `oauth_token/3` refuses a non-https `:oauth_url` (plain
+  http only to a loopback host) with `{:error, {:insecure_oauth_url, :https_required}}`; the
+  client secret, code and refresh token were sent in the clear.
+- **Security: the stream is wss only.** `Socket.start_link/1` refuses a `ws://` URL unless the host
+  is loopback, with `{:error, {:insecure_url, :wss_required}}`; the MQTT CONNECT carries the App
+  Key.
+
 ## [0.4.145] - 2026-10-12
 
 - **Docs (`usage-rules.md` checked line by line against the code):** documents the jittered

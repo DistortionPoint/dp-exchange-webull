@@ -297,6 +297,29 @@ defmodule DpExchange.Webull.Socket do
   def start_link(opts) do
     url = Keyword.fetch!(opts, :url)
 
+    # The first frame on this connection is a CONNECT carrying the App Key. `:url` is a
+    # consumer option and `:websocket_url` an application-config seam; either set to a
+    # `ws://` host sent it in cleartext, silently. Plain `ws://` is refused except to a
+    # loopback host (the tier-1 test seam, which dials a closed local port). The error names
+    # no URL, which may itself carry userinfo.
+    if secure_url?(url),
+      do: start_socket(url, opts),
+      else: {:error, {:insecure_url, :wss_required}}
+  end
+
+  @loopback_hosts ["127.0.0.1", "localhost", "::1"]
+
+  defp secure_url?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: "wss", host: host} when is_binary(host) and host != "" -> true
+      %URI{scheme: "ws", host: host} when host in @loopback_hosts -> true
+      _insecure_or_malformed -> false
+    end
+  end
+
+  defp secure_url?(_not_a_string), do: false
+
+  defp start_socket(url, opts) do
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
       # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
