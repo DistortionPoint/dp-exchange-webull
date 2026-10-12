@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.141] - 2026-10-12
+
 - **Ticks sharing one timestamp came back newest first.** The tape decoder reversed the venue's
   newest-first rows back into venue order before its stable sort, so ties kept the venue's order;
   they are now oldest first like the rest of the tape (`Core.Venue`'s ordering rule).
