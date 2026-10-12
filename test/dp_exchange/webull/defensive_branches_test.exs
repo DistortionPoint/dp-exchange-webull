@@ -156,16 +156,22 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
   end
 
   describe "statuses between success and refusal" do
-    test "a 404 is an error naming the status, not a refusal" do
-      # This venue states refusals in a 400/401/403 body. A 404 is the shape of a wrong
-      # URL, which is our bug rather than the venue's answer.
-      assert {:error, {:exchange_error, :webull, message}} =
+    test "a 404 is a permanent refusal: nothing is there, and asking again will not change it" do
+      # It was `{:error, {:exchange_error, :webull, "HTTP 404 ..."}}`, which Core calls
+      # retryable, and which the Fake (`{:refused, :not_found}` for an unknown order id) never
+      # answered. The same request gets the same 404.
+      assert {:refused, :not_found} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(%{}, 404),
                  retry_attempts: 0
                )
+    end
 
-      assert message =~ "404"
+    test "a 404 on an order read, cancel or write is the same refusal" do
+      opts = [account_id: "acct-1", plug: responding(%{}, 404), retry_attempts: 0]
+
+      assert {:refused, :not_found} = Rest.get_order(@credentials, "abc", opts)
+      assert {:refused, :not_found} = Rest.cancel_order(@credentials, "abc", opts)
     end
 
     test "a refusal with only a code still carries it" do

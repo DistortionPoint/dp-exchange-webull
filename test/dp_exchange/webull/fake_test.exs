@@ -17,6 +17,8 @@ defmodule DpExchange.Webull.FakeTest do
   @credentials %{app_key: "key", app_secret: "secret"}
   @opts [credentials: @credentials]
   @order_opts [credentials: @credentials, account_id: "93IUJ28O9VO2KBGHDHR4H9"]
+  # `replace_order/4` is told which order it edits; neither option has a default.
+  @edit_opts [instrument_type: :equity, order_type: :limit] ++ @order_opts
 
   # The one order the fake always knows (its `get_orders/2` row), a 32-hex `client_order_id`.
   @known_order_id "5f1e9c0a7b2d4e68a3c4d5e6f7081920"
@@ -63,6 +65,7 @@ defmodule DpExchange.Webull.FakeTest do
         symbol: "AAPL",
         side: :buy,
         order_type: :limit,
+        time_in_force: :day,
         quantity: Decimal.new("1"),
         price: Decimal.new("180"),
         support_trading_session: :core
@@ -81,7 +84,12 @@ defmodule DpExchange.Webull.FakeTest do
                )
 
       assert missing ==
-               Fake.replace_order(%{}, "abc", %{price: Decimal.new("1")}, account)
+               Fake.replace_order(
+                 %{},
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 account ++ [instrument_type: :equity, order_type: :limit]
+               )
     end
 
     test "get_fees/2 answers without credentials, because it builds no request" do
@@ -183,22 +191,35 @@ defmodule DpExchange.Webull.FakeTest do
   end
 
   describe "the order matrix the venue states in prose" do
+    @used_prices %{
+      limit: [:price],
+      stop: [:stop_price],
+      stop_limit: [:price, :stop_price],
+      trailing_stop: [:trailing_stop_step],
+      market: []
+    }
+
     defp request(overrides) do
-      Map.merge(
-        %{
-          symbol: "BTC-USD",
-          side: :buy,
-          quantity: Decimal.new("0.5"),
-          price: Decimal.new("40000"),
-          # A stop needs its trigger and a trailing stop its step; the fake now refuses
-          # either without, as the real path does. Inert on every other type.
-          stop_price: Decimal.new("39000"),
-          trailing_stop_step: Decimal.new("1"),
-          order_type: :limit,
-          time_in_force: :gtc
-        },
-        overrides
-      )
+      # A stop needs its trigger and a trailing stop its step, and a price field the type
+      # does not use is refused (`{:unexpected_field, key}`), so the fixture carries
+      # exactly the ones its type sends.
+      merged =
+        Map.merge(
+          %{
+            symbol: "BTC-USD",
+            side: :buy,
+            quantity: Decimal.new("0.5"),
+            price: Decimal.new("40000"),
+            stop_price: Decimal.new("39000"),
+            trailing_stop_step: Decimal.new("1"),
+            order_type: :limit,
+            time_in_force: :gtc
+          },
+          overrides
+        )
+
+      used = Map.fetch!(@used_prices, merged.order_type)
+      Map.drop(merged, [:price, :stop_price, :trailing_stop_step] -- used)
     end
 
     for {type, tif} <- [
@@ -219,7 +240,7 @@ defmodule DpExchange.Webull.FakeTest do
     end
 
     test "MARKET with anything but IOC is refused" do
-      assert {:error, {:unsupported_order_combination, :crypto, :market, :gtc}} =
+      assert {:error, {:unsupported_order_combination, :market, :gtc}} =
                Fake.place_order(
                  @credentials,
                  request(%{order_type: :market, time_in_force: :gtc}),
@@ -228,7 +249,7 @@ defmodule DpExchange.Webull.FakeTest do
     end
 
     test "an order without an account is an error, as on the real venue" do
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Fake.place_order(@credentials, request(%{}), credentials: @credentials)
     end
 
@@ -310,7 +331,7 @@ defmodule DpExchange.Webull.FakeTest do
                  @credentials,
                  @known_order_id,
                  %{price: Decimal.new("41000")},
-                 @order_opts
+                 @edit_opts
                )
 
       assert replaced.status == :pending
@@ -337,13 +358,11 @@ defmodule DpExchange.Webull.FakeTest do
     test "every order call needs an account" do
       only_credentials = [credentials: @credentials]
 
-      assert {:error, :account_id_required} =
-               Fake.cancel_order(@credentials, @known_order_id, only_credentials)
+      missing = {:error, {:missing_option, :account_id}}
 
-      assert {:error, :account_id_required} =
-               Fake.get_order(@credentials, @known_order_id, only_credentials)
-
-      assert {:error, :account_id_required} = Fake.get_orders(@credentials, only_credentials)
+      assert missing == Fake.cancel_order(@credentials, @known_order_id, only_credentials)
+      assert missing == Fake.get_order(@credentials, @known_order_id, only_credentials)
+      assert missing == Fake.get_orders(@credentials, only_credentials)
     end
   end
 
@@ -378,6 +397,7 @@ defmodule DpExchange.Webull.FakeTest do
         symbol: "AAPL",
         side: :buy,
         order_type: :limit,
+        time_in_force: :day,
         quantity: Decimal.new("1"),
         price: Decimal.new("180"),
         support_trading_session: :core
@@ -506,9 +526,11 @@ defmodule DpExchange.Webull.FakeTest do
     test "every account call refuses without an account_id" do
       only_credentials = [credentials: @credentials]
 
-      assert {:error, :account_id_required} = Fake.get_balances(@credentials, only_credentials)
-      assert {:error, :account_id_required} = Fake.get_positions(only_credentials)
-      assert {:error, :account_id_required} = Fake.get_transfers(@credentials, only_credentials)
+      missing = {:error, {:missing_option, :account_id}}
+
+      assert missing == Fake.get_balances(@credentials, only_credentials)
+      assert missing == Fake.get_positions(only_credentials)
+      assert missing == Fake.get_transfers(@credentials, only_credentials)
     end
   end
 
@@ -536,18 +558,18 @@ defmodule DpExchange.Webull.FakeTest do
                  @credentials,
                  "abc",
                  %{price: Decimal.new("1")},
-                 [instrument_type: :crypto] ++ @order_opts
+                 [instrument_type: :crypto, order_type: :limit] ++ @order_opts
                )
     end
 
     test "an empty amendment is refused" do
       assert {:error, :no_order_changes} =
-               Fake.replace_order(@credentials, "abc", %{}, @order_opts)
+               Fake.replace_order(@credentials, "abc", %{}, @edit_opts)
     end
 
     test "an edit the venue does not allow is refused" do
       assert {:error, {:unsupported_order_edit, :limit, [:side]}} =
-               Fake.replace_order(@credentials, "abc", %{side: :sell}, @order_opts)
+               Fake.replace_order(@credentials, "abc", %{side: :sell}, @edit_opts)
     end
 
     test "a price change comes back on the order" do
@@ -556,7 +578,7 @@ defmodule DpExchange.Webull.FakeTest do
                  @credentials,
                  @known_order_id,
                  %{price: Decimal.new("41000")},
-                 @order_opts
+                 @edit_opts
                )
 
       assert order.id == @known_order_id

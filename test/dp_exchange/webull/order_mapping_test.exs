@@ -263,14 +263,14 @@ defmodule DpExchange.Webull.OrderMappingTest do
     test "get_order without an account is refused before the call" do
       exploding = fn _conn -> raise "must not call the venue without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.get_order(@credentials, "abc", plug: exploding, retry_attempts: 0)
     end
 
     test "get_orders without an account is refused before the call" do
       exploding = fn _conn -> raise "must not call the venue without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.get_orders(@credentials, plug: exploding, retry_attempts: 0)
     end
 

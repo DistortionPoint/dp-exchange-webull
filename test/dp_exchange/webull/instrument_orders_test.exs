@@ -47,19 +47,40 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
     end
   end
 
+  # The price fields an order type uses; any other is refused by `place_order/3`
+  # (`{:unexpected_field, key}`), so the fixture carries only the ones its type sends.
+  # `Map.drop/2` is applied after the merge, so an override of an unused field is dropped
+  # too - the refusal itself is tested in `trading_conventions_test.exs`.
+  @used_prices %{
+    limit: [:price],
+    stop: [:stop_price],
+    stop_limit: [:price, :stop_price],
+    trailing_stop: [:trailing_stop_step],
+    market: []
+  }
+
   defp equity_request(overrides \\ %{}) do
-    Map.merge(
-      %{
-        instrument_type: :equity,
-        symbol: "AAPL",
-        side: :buy,
-        quantity: Decimal.new("10"),
-        price: Decimal.new("190.50"),
-        order_type: :limit,
-        time_in_force: :day
-      },
-      overrides
-    )
+    request =
+      Map.merge(
+        %{
+          instrument_type: :equity,
+          symbol: "AAPL",
+          side: :buy,
+          quantity: Decimal.new("10"),
+          price: Decimal.new("190.50"),
+          order_type: :limit,
+          time_in_force: :day
+        },
+        overrides
+      )
+
+    used = Map.fetch!(@used_prices, request.order_type)
+    Map.drop(request, [:price, :stop_price, :trailing_stop_step] -- used)
+  end
+
+  # `replace_order/4` is told which order it edits; neither option has a default.
+  defp edit(instrument_type, order_type, extra) do
+    [instrument_type: instrument_type, order_type: order_type] ++ extra
   end
 
   describe "the matrix is per instrument type" do
@@ -121,7 +142,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
 
       exploding = fn _conn -> raise "must not send a trailing stop on an option" end
 
-      assert {:error, {:unsupported_order_combination, :option, :trailing_stop, :gtc}} =
+      assert {:error, {:unsupported_order_type, :trailing_stop}} =
                Rest.place_order(
                  @credentials,
                  equity_request(%{
@@ -138,7 +159,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
     test "an event contract takes LIMIT and nothing else" do
       exploding = fn _conn -> raise "must not send a market order on an event contract" end
 
-      assert {:error, {:unsupported_order_combination, :event, :market, :gtc}} =
+      assert {:error, {:unsupported_order_type, :market}} =
                Rest.place_order(
                  @credentials,
                  equity_request(%{
@@ -169,7 +190,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
 
       exploding = fn _conn -> raise "must not send FOK on an equity order" end
 
-      assert {:error, {:unsupported_order_combination, :equity, :limit, :fok}} =
+      assert {:error, {:unsupported_order_combination, :limit, :fok}} =
                Rest.place_order(@credentials, equity_request(%{time_in_force: :fok}),
                  plug: exploding,
                  account_id: @account,
@@ -377,11 +398,12 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert body["new_orders"] |> List.first() |> Map.get("expire_date") == "2026-12-01"
     end
 
-    test "a missing GTD date is left missing rather than defaulted" do
-      # A date chosen here would be an expiry the caller never asked for.
+    test "a GTD order with no expire date is refused, not sent without one" do
+      # A date chosen here would be an expiry the caller never asked for, and sending none
+      # leaves the venue to answer about a field the caller never saw.
       me = self()
 
-      assert {:ok, _order} =
+      assert {:error, {:missing_field, :expire_date}} =
                Rest.place_order(
                  @credentials,
                  equity_request(%{instrument_type: :event, time_in_force: :gtd}),
@@ -390,22 +412,20 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:sent, body, _path}
-      refute body["new_orders"] |> List.first() |> Map.has_key?("expire_date")
+      refute_receive {:sent, _body, _path}, 50
     end
 
-    test "a DAY order carries no expire date even when one is given" do
+    test "an expire date on a DAY order is refused, not silently dropped" do
       me = self()
 
-      assert {:ok, _order} =
+      assert {:error, {:unexpected_field, :expire_date}} =
                Rest.place_order(@credentials, equity_request(%{expire_date: "2026-12-01"}),
                  plug: capturing([%{"client_order_id" => "c1"}], me),
                  account_id: @account,
                  retry_attempts: 0
                )
 
-      assert_receive {:sent, body, _path}
-      refute body["new_orders"] |> List.first() |> Map.has_key?("expire_date")
+      refute_receive {:sent, _body, _path}, 50
     end
 
     test "a Date is written as the yyyy-MM-dd the page requires" do
@@ -593,7 +613,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
     test "without an account_id nothing is sent" do
       exploding = fn _conn -> raise "must not preview without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.preview_order(@credentials, equity_request(),
                  plug: exploding,
                  retry_attempts: 0
@@ -606,11 +626,11 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       exploding = fn _conn -> raise "must not amend a crypto order" end
 
       assert {:error, {:preview_not_supported, :crypto}} =
-               Rest.replace_order(@credentials, "abc", %{price: Decimal.new("1")},
-                 instrument_type: :crypto,
-                 plug: exploding,
-                 account_id: @account,
-                 retry_attempts: 0
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 edit(:crypto, :limit, plug: exploding, account_id: @account, retry_attempts: 0)
                )
     end
 
@@ -619,11 +639,11 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       exploding = fn _conn -> raise "must not amend a market order's price" end
 
       assert {:error, {:unsupported_order_edit, :market, [:price]}} =
-               Rest.replace_order(@credentials, "abc", %{price: Decimal.new("1")},
-                 order_type: :market,
-                 plug: exploding,
-                 account_id: @account,
-                 retry_attempts: 0
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 edit(:equity, :market, plug: exploding, account_id: @account, retry_attempts: 0)
                )
     end
 
@@ -658,9 +678,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  @credentials,
                  "abc",
                  %{price: Decimal.new("191.00"), quantity: Decimal.new("5")},
-                 plug: plug,
-                 account_id: @account,
-                 retry_attempts: 0
+                 edit(:equity, :limit, plug: plug, account_id: @account, retry_attempts: 0)
                )
 
       assert_receive {:sent, replace_path, raw}
@@ -714,9 +732,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  @credentials,
                  "abc",
                  %{order_type: :market, quantity: Decimal.new("5")},
-                 plug: plug,
-                 account_id: @account,
-                 retry_attempts: 0
+                 edit(:equity, :limit, plug: plug, account_id: @account, retry_attempts: 0)
                )
 
       assert_receive {:sent, "/trading/orders/replace", raw}
@@ -734,13 +750,16 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
         Req.Test.transport_error(conn, :timeout)
       end
 
-      Rest.replace_order(@credentials, "abc", %{price: Decimal.new("191")},
-        plug: timing_out,
-        account_id: @account,
-        retry_delay: 1
-      )
+      # A transport error on the replace itself may have landed: the id goes back.
+      assert {:error, {:order_unconfirmed, "abc", _reason}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("191")},
+                 edit(:equity, :limit, plug: timing_out, account_id: @account, retry_delay: 1)
+               )
 
-      assert_receive {:sent, "/trading/orders/replace"}
+      assert_receive {:sent, "/trading/orders/replace"}, 5_000
       refute_receive {:sent, "/trading/orders/replace"}, 100
     end
 
@@ -748,11 +767,15 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       exploding = fn _conn -> raise "must not amend a trailing stop's price" end
 
       assert {:error, {:unsupported_order_edit, :trailing_stop, [:price]}} =
-               Rest.replace_order(@credentials, "abc", %{price: Decimal.new("1")},
-                 order_type: :trailing_stop,
-                 plug: exploding,
-                 account_id: @account,
-                 retry_attempts: 0
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 edit(:equity, :trailing_stop,
+                   plug: exploding,
+                   account_id: @account,
+                   retry_attempts: 0
+                 )
                )
     end
 
@@ -762,21 +785,52 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       exploding = fn _conn -> raise "must not send an empty amendment" end
 
       assert {:error, :no_order_changes} =
-               Rest.replace_order(@credentials, "abc", %{},
-                 plug: exploding,
-                 account_id: @account,
-                 retry_attempts: 0
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{},
+                 edit(:equity, :limit, plug: exploding, account_id: @account, retry_attempts: 0)
                )
     end
 
     test "without an account_id nothing is sent" do
       exploding = fn _conn -> raise "must not amend without an account" end
 
-      assert {:error, :account_id_required} =
-               Rest.replace_order(@credentials, "abc", %{price: Decimal.new("1")},
-                 plug: exploding,
-                 retry_attempts: 0
+      assert {:error, {:missing_option, :account_id}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: Decimal.new("1")},
+                 edit(:equity, :limit, plug: exploding, retry_attempts: 0)
                )
+    end
+
+    test "the order being edited is never guessed" do
+      exploding = fn _conn -> raise "must not amend an order of unknown kind" end
+      opts = [plug: exploding, account_id: @account, retry_attempts: 0]
+      changes = %{price: Decimal.new("1")}
+
+      no_instrument = [order_type: :limit] ++ opts
+      no_order_type = [instrument_type: :equity] ++ opts
+
+      assert {:error, {:missing_option, :instrument_type}} =
+               Rest.replace_order(@credentials, "abc", changes, no_instrument)
+
+      assert {:error, {:missing_option, :order_type}} =
+               Rest.replace_order(@credentials, "abc", changes, no_order_type)
+
+      assert {:error, {:unsupported_instrument_type, :bond}} =
+               Rest.replace_order(@credentials, "abc", changes, edit(:bond, :limit, opts))
+    end
+
+    test "changes that are not a map are refused, not raised on" do
+      exploding = fn _conn -> raise "must not amend with a malformed change set" end
+      opts = edit(:equity, :limit, plug: exploding, account_id: @account, retry_attempts: 0)
+
+      for bad <- [nil, [price: 1], "x", 5] do
+        assert {:error, {:invalid_order_request, ^bad}} =
+                 Rest.replace_order(@credentials, "abc", bad, opts)
+      end
     end
   end
 end

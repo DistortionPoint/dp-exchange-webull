@@ -60,13 +60,26 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     )
   end
 
+  defp unused_price_fields(:market), do: [:price, :stop_price]
+  defp unused_price_fields(:limit), do: [:stop_price]
+  defp unused_price_fields(:stop_limit), do: []
+
   describe "the account the venue requires on every order" do
     test "an order with no account_id is an error, and nothing is sent" do
       # An account is where the money is. A package that looked one up and chose would place
       # a real order against the wrong balance for a caller holding several.
       exploding = fn _conn -> raise "must not call the venue without an account" end
 
-      assert {:error, :account_id_required} = place(limit_request(), plug: exploding)
+      assert {:error, {:missing_option, :account_id}} = place(limit_request(), plug: exploding)
+    end
+
+    test "a blank account_id is missing too, and nothing is sent" do
+      exploding = fn _conn -> raise "must not call the venue without an account" end
+
+      for blank <- ["", "   ", nil, 42] do
+        assert {:error, {:missing_option, :account_id}} =
+                 place(limit_request(), plug: exploding, account_id: blank)
+      end
     end
 
     test "the account_id reaches the venue in the body" do
@@ -90,7 +103,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a side the venue has no word for is refused, not upper-cased and sent" do
       exploding = fn _conn -> raise "must not send a side the venue does not list" end
 
-      for bad <- [:bid, :long, "hold", 1, {:buy}] do
+      for bad <- [:bid, :long, :short, "short", "hold", 1, {:buy}, nil] do
         assert {:error, {:invalid_side, ^bad}} =
                  place(limit_request(%{side: bad}), plug: exploding, account_id: @account)
       end
@@ -99,7 +112,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a symbol that is empty or not text is refused" do
       exploding = fn _conn -> raise "must not send an unusable symbol" end
 
-      for bad <- ["", :btc, 42] do
+      for bad <- ["", "   ", :btc, 42, nil] do
         assert {:error, {:invalid_symbol, ^bad}} =
                  place(limit_request(%{symbol: bad}), plug: exploding, account_id: @account)
       end
@@ -131,7 +144,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "empty or not text is refused" do
       exploding = fn _conn -> raise "must not send an invalid id" end
 
-      for bad <- ["", 42] do
+      for bad <- ["", "  ", 42] do
         assert {:error, {:invalid_client_order_id, ^bad}} =
                  place(limit_request(%{client_order_id: bad}),
                    plug: exploding,
@@ -155,7 +168,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a market GTC is refused — MARKET takes IOC only" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :crypto, :market, :gtc}} =
+      assert {:error, {:unsupported_order_combination, :market, :gtc}} =
                place(limit_request(%{order_type: :market, time_in_force: :gtc}),
                  plug: exploding,
                  account_id: @account
@@ -165,14 +178,14 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a limit IOC is refused — LIMIT takes DAY or GTC" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :crypto, :limit, :ioc}} =
+      assert {:error, {:unsupported_order_combination, :limit, :ioc}} =
                place(limit_request(%{time_in_force: :ioc}), plug: exploding, account_id: @account)
     end
 
     test "a stop-limit IOC is refused" do
       exploding = fn _conn -> raise "must not call the venue for an unsupported pair" end
 
-      assert {:error, {:unsupported_order_combination, :crypto, :stop_limit, :ioc}} =
+      assert {:error, {:unsupported_order_combination, :stop_limit, :ioc}} =
                place(limit_request(%{order_type: :stop_limit, time_in_force: :ioc}),
                  plug: exploding,
                  account_id: @account
@@ -187,12 +200,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
             {:stop_limit, :day},
             {:stop_limit, :gtc}
           ] do
+        # Only the price fields the type uses: a `:price` on a market order, or a
+        # `:stop_price` on a limit one, is refused rather than dropped.
         request =
-          limit_request(%{
-            order_type: type,
-            time_in_force: tif,
-            stop_price: Decimal.new("39000")
-          })
+          %{order_type: type, time_in_force: tif, stop_price: Decimal.new("39000")}
+          |> limit_request()
+          |> Map.drop(unused_price_fields(type))
 
         assert {:ok, _order} =
                  place(request, plug: responding(accepted()), account_id: @account),
@@ -243,7 +256,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       request = limit_request() |> Map.delete(:quantity)
       exploding = fn _conn -> raise "must not call the venue with no size" end
 
-      assert {:error, :missing_order_size} =
+      assert {:error, {:missing_field, :quantity}} =
                place(request, plug: exploding, account_id: @account)
     end
 
@@ -302,7 +315,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
 
     test "a market order carries no limit price", %{plug: plug} do
-      request = limit_request(%{order_type: :market, time_in_force: :ioc})
+      request = limit_request(%{order_type: :market, time_in_force: :ioc}) |> Map.delete(:price)
 
       assert {:ok, _order} = place(request, plug: plug, account_id: @account)
 
@@ -367,9 +380,15 @@ defmodule DpExchange.Webull.PlaceOrderTest do
                )
     end
 
-    test "a body with no order row is unreadable" do
-      assert {:error, :unexpected_response_shape} =
-               place(limit_request(), plug: responding([]), account_id: @account)
+    test "a 2xx with no order row is unconfirmed too, with the generated id that was sent" do
+      # `[]`, `{}` and an empty `data` are all "accepted, names nothing": the order may be
+      # live, so a bare shape error (which a caller retries into a duplicate) is wrong.
+      for body <- [[], %{}, %{"data" => []}, %{"data" => "x"}] do
+        assert {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}} =
+                 place(limit_request(), plug: responding(body), account_id: @account)
+
+        assert is_binary(sent_id) and String.length(sent_id) == 32
+      end
     end
 
     test "a stop order's trigger price is on the order it hands back, not just the wire body" do
@@ -415,7 +434,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "cancelling without an account is refused before the call" do
       exploding = fn _conn -> raise "must not call the venue without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.cancel_order(@credentials, "abc", plug: exploding, retry_attempts: 0)
     end
   end

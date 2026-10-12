@@ -259,29 +259,47 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
   describe "an order's numbers must be numbers above zero" do
     test "zero, negative, NaN, text and containers are refused with no request" do
       for bad <- [0, -1, Decimal.new("NaN"), Decimal.new("Infinity"), "abc", %{}, true] do
-        assert {:error, {:invalid_number, :quantity, ^bad}} =
+        assert {:error, {:invalid_quantity, ^bad}} =
                  place(equity_order(%{quantity: bad}), plug: exploding())
       end
 
-      assert {:error, {:invalid_number, :price, bad}} =
+      assert {:error, {:invalid_price, bad}} =
                place(equity_order(%{price: Decimal.new("-0.5")}), plug: exploding())
 
       assert Decimal.equal?(bad, Decimal.new("-0.5"))
     end
 
+    test "a float is refused: it has already lost digits" do
+      assert {:error, {:invalid_quantity, 1.5}} =
+               place(equity_order(%{quantity: 1.5}), plug: exploding())
+
+      assert {:error, {:invalid_price, 10.1}} =
+               place(equity_order(%{price: 10.1}), plug: exploding())
+
+      assert {:error, {:invalid_price, 1.0e-8}} =
+               place(equity_order(%{price: 1.0e-8}), plug: exploding())
+    end
+
     test "the cash amount and the stop trigger are checked too" do
       request = equity_order(%{order_type: :stop, quantity: nil, amount: 0})
 
-      assert {:error, {:invalid_number, :amount, 0}} = place(request, plug: exploding())
+      assert {:error, {:invalid_amount, 0}} = place(request, plug: exploding())
 
-      stop = equity_order(%{order_type: :stop, stop_price: "x"})
-      assert {:error, {:invalid_number, :stop_price, "x"}} = place(stop, plug: exploding())
+      stop = %{order_type: :stop, stop_price: "x"} |> equity_order() |> Map.delete(:price)
+      assert {:error, {:invalid_stop_price, "x"}} = place(stop, plug: exploding())
+
+      trail =
+        %{order_type: :trailing_stop, trailing_stop_step: 0}
+        |> equity_order()
+        |> Map.delete(:price)
+
+      assert {:error, {:invalid_trailing_stop_step, 0}} = place(trail, plug: exploding())
     end
 
-    test "a price left on a market order is not sent, so it is not checked" do
+    test "a price left on a market order is refused, not silently dropped" do
       request = equity_order(%{order_type: :market, price: "junk"})
 
-      assert {:ok, _order} = place(request, plug: capturing(self()))
+      assert {:error, {:unexpected_field, :price}} = place(request, plug: exploding())
     end
 
     test "prices and quantities go out as strings in full notation" do
@@ -296,7 +314,7 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
       assert leaf["limit_price"] == "10"
 
       assert {:ok, _order} =
-               place(equity_order(%{price: 1.0e-8, time_in_force: :gtc}),
+               place(equity_order(%{price: Decimal.new("1E-8"), time_in_force: :gtc}),
                  plug: capturing(self())
                )
 
@@ -316,7 +334,7 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
         support_trading_session: :core
       }
 
-      assert {:error, {:batch_order_rejected, 1, {:invalid_number, :quantity, -1}}} =
+      assert {:error, {:batch_order_rejected, 1, {:invalid_quantity, -1}}} =
                Rest.place_orders(
                  @credentials,
                  [entry, %{entry | quantity: -1}],
@@ -325,25 +343,28 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
                  retry_attempts: 0
                )
 
-      assert {:error, {:batch_order_rejected, 0, {:invalid_number, :quantity, -1}}} =
+      assert {:error, {:batch_order_rejected, 0, {:invalid_quantity, -1}}} =
                Rest.validate_batch_orders([%{entry | quantity: -1}])
     end
 
     test "the fake refuses what the real path refuses" do
-      assert {:error, {:invalid_number, :quantity, 0}} =
+      assert {:error, {:invalid_quantity, 0}} =
                Rest.validate_order_request(equity_order(%{quantity: 0}))
 
-      assert {:error, {:invalid_number, :quantity, 0}} =
+      assert {:error, {:invalid_quantity, 0}} =
                Fake.place_order(@credentials, equity_order(%{quantity: 0}), account_id: @account)
     end
   end
+
+  # `replace_order/4` is told which order it is editing: neither option has a default.
+  @edited [instrument_type: :equity, order_type: :limit]
 
   defp replace(changes, extra) do
     Rest.replace_order(
       @credentials,
       "abc",
       changes,
-      [account_id: @account, retry_attempts: 0] ++ extra
+      [account_id: @account, retry_attempts: 0] ++ @edited ++ extra
     )
   end
 
@@ -362,7 +383,12 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
                replace(%{quantity: nil}, plug: exploding())
 
       assert {:error, :no_order_changes} =
-               Fake.replace_order(@credentials, "abc", %{price: nil}, account_id: @account)
+               Fake.replace_order(
+                 @credentials,
+                 "abc",
+                 %{price: nil},
+                 [account_id: @account] ++ @edited
+               )
     end
 
     test "an order type or time in force with no wire name is refused, not dropped" do
@@ -374,18 +400,20 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
     end
 
     test "a quantity that is not above zero is refused" do
-      assert {:error, {:invalid_number, :quantity, 0}} =
+      assert {:error, {:invalid_quantity, 0}} =
                replace(%{quantity: 0}, plug: exploding())
 
-      assert {:error, {:invalid_number, :price, "x"}} =
-               Rest.validate_amendment(:limit, %{price: "x"})
+      assert {:error, {:invalid_price, "x"}} =
+               Rest.validate_replace("abc", %{price: "x"}, @edited)
+
+      assert {:error, {:invalid_price, 1.5}} = replace(%{price: 1.5}, plug: exploding())
     end
   end
 
   describe "an order id must name an order" do
     test "cancel, read and replace refuse a missing or empty id before anything is sent" do
-      for id <- [nil, "", 7] do
-        expected = {:error, {:invalid_client_order_id, id}}
+      for id <- [nil, "", "  ", 7] do
+        expected = {:error, {:invalid_order_id, id}}
         opts = [account_id: @account, plug: exploding(), retry_attempts: 0]
 
         assert expected == Rest.cancel_order(@credentials, id, opts)
@@ -434,9 +462,19 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
                )
     end
 
-    test "the account is asked for first, as before" do
-      assert {:error, :account_id_required} =
+    test "the id is checked before the account, and the account before the credentials" do
+      assert {:error, {:invalid_order_id, nil}} =
                Rest.cancel_order(@credentials, nil, plug: exploding(), retry_attempts: 0)
+
+      assert {:error, {:missing_option, :account_id}} =
+               Rest.cancel_order(@credentials, "abc", plug: exploding(), retry_attempts: 0)
+
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.cancel_order(%{}, "abc",
+                 account_id: @account,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
     end
   end
 end

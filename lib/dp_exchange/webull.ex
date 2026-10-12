@@ -293,8 +293,8 @@ defmodule DpExchange.Webull do
       # STOP_LOSS_LIMIT take DAY or GTC. There is no market GTC and no limit IOC, and
       # `place_order/3` refuses a pair outside it rather than letting the venue reject it.
       # The union across instrument types. Which pairs a given type accepts is narrower and
-      # is enforced per instrument by `Rest.order_combinations/1` — crypto has five pairs,
-      # an event contract has LIMIT only.
+      # is enforced per instrument by the `@combinations` matrix in `Rest` — crypto has
+      # five pairs, an event contract has LIMIT only.
       supported_order_types: [:market, :limit, :stop, :stop_limit, :trailing_stop],
       supported_time_in_force: [:ioc, :day, :gtc, :gtd, :fok],
 

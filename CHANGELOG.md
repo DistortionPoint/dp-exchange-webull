@@ -22,6 +22,86 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+Family trading conventions (T1-T14), applied to `place_order/3`, `preview_order/3`,
+`replace_order/4`, `cancel_order/3`, `get_order/3` and `Fake`, which answers the same in the
+same order from the same functions. Nothing here was measured against the live venue.
+
+- **BREAKING (error shape): `place_order/3` with a 2xx that has no row at all** (`{}`, an empty
+  or unreadable `data`) **is `{:error, {:order_unconfirmed, client_order_id,
+  :unexpected_response_shape}}`**, was a bare `{:error, :unexpected_response_shape}` that
+  contradicted the function's own `@doc` and that a caller retries into a duplicate order.
+- **BREAKING (error shape): errors decided before anything is sent are no longer wrapped as
+  `:order_unconfirmed`.** No credentials, a blank credential, our own rate limiter refusing
+  (`"Throttled by our own rate limiter"`, `"Rate limiter unavailable"`, `:rate_limit_timeout`)
+  and a signing failure are the plain `{:error, reason}` - `{:error, {:missing_credentials,
+  :webull}}`, the Fake's answer - not `{:order_unconfirmed, id, reason}`, which sent callers
+  looking for an order that was never placed. `replace_order/4` now wraps a transport error or
+  5xx on its own send as `{:order_unconfirmed, order_id, reason}` by the same rule.
+- **BREAKING (error shape): the request is validated, in the family order, by one function**
+  (`Rest.validate_order_request/1`, also used by the Fake and `preview_order/3`): a map
+  (`{:invalid_order_request, r}`; a non-map request raised `BadMapError`, and a non-map preview
+  raised before any check), then unknown keys, symbol, side, order type, duration, size, price
+  fields, client order id, then the account option, then the credentials.
+  - A key the builder does not read is `{:unsupported_order_field, key}`: `post_only`,
+    `reduce_only`, `end_time` were ignored.
+  - **`:order_type` and `:time_in_force` are required** (`{:missing_field, key}`): an absent
+    type became a limit order and an absent duration GTC. A market order with no duration was
+    refused for an unnamed pair.
+  - A type the instrument does not use is `{:unsupported_order_type, type}`; a duration it does
+    not serve for that type is `{:unsupported_order_combination, type, tif}` - **three
+    elements, the instrument is gone from the tuple** (it was four).
+  - **A price field the type does not use is `{:unexpected_field, key}`**: `:price` on a market
+    or stop order and `:stop_price` on a limit or market one were silently dropped, as was
+    `:trailing_stop_step` on any other type. A GTD order with no `:expire_date` is
+    `{:missing_field, :expire_date}` (it was sent without one) and an `:expire_date` on any
+    other duration is `{:unexpected_field, :expire_date}` (it was dropped).
+  - **BREAKING: every `place_orders/3` row must name `:order_type` and `:time_in_force`**
+    (`{:batch_order_rejected, index, {:missing_field, :order_type | :time_in_force}}`). An
+    absent type became a limit order and an absent duration DAY for each of up to fifty
+    orders. The Fake's batch rows read both from the validated request.
+  - **`side: :short` is `{:invalid_side, :short}`** - `capabilities/0` declares
+    `supports_short_selling: false`, yet it was sent on every instrument and returned an
+    `Order` with `side: nil`. A missing side is `{:invalid_side, nil}` and a missing or blank
+    symbol `{:invalid_symbol, v}` (both were `{:missing_required_field, field}`).
+  - Tags: `{:missing_required_field, field}` for an order is `{:missing_field, field}`
+    (`:missing_order_size` is `{:missing_field, :quantity}`);
+    `{:invalid_number, field, v}` is `{:invalid_quantity, v}`, `{:invalid_amount, v}`,
+    `{:invalid_price, v}`, `{:invalid_stop_price, v}` or `{:invalid_trailing_stop_step, v}`,
+    and **a float is refused** (it has already lost digits); a blank `client_order_id` or
+    symbol is refused. The batch entry checks (`place_orders/3`) share all of this, by index,
+    and refuse a key the batch builder does not read.
+- **BREAKING (error shape): the order id of `get_order/3`, `cancel_order/3` and
+  `replace_order/4`** that is `nil`, not text or blank (`"  "` was sent) **is
+  `{:error, {:invalid_order_id, v}}`**, checked before the account option and the credentials
+  (it was `{:invalid_client_order_id, v}`, checked after the account, and a nil id answered
+  `:account_id_required` first). `{:invalid_client_order_id, v}` now means only the
+  `client_order_id` inside a placement (32 characters at most, the venue's format rule).
+- **BREAKING (error shape): a missing account option is `{:error, {:missing_option,
+  :account_id}}`**, was the bare atom `:account_id_required`, on every account and order call
+  in `Rest` and `Fake`. Whitespace-only is missing too.
+- **BREAKING (error shape): an HTTP 404 is `{:refused, :not_found}`** from every REST read and
+  write, was `{:error, {:exchange_error, :webull, "HTTP 404 ..."}}` (retryable by Core's
+  definition). It now matches what `Fake` answers for an order id it never issued.
+- **BREAKING (options): `replace_order/4` requires `opts[:instrument_type]` and
+  `opts[:order_type]`** - the order being edited - and answers `{:error, {:missing_option,
+  key}}` without them. They defaulted to an equity limit order, where `place_order/3` defaults
+  to crypto, so the edit table of an order the caller never named decided the call. `changes`
+  that is not a map is `{:error, {:invalid_order_request, changes}}` (it raised in
+  `Map.keys/1`). The check order is: order id, `changes`, the two options, crypto, the edit
+  table, the account option, the credentials. `Rest.validate_amendment/2` and
+  `Rest.order_combinations/1` (used only by the Fake) are removed; `Rest.validate_replace/3`,
+  `Rest.validate_preview_request/1` and `Rest.unsent?/1` are added.
+- **`Fake.place_order/3` refuses a reused `client_order_id`** as `{:refused,
+  {:duplicate_client_order_id, id}}` (permanent), instead of overwriting the stored order. The
+  venue requires the id unique per account; its own wording for a duplicate is **unmeasured**
+  (the vendor reference is silent), so the shape is the contract. Ids the Fake generates are
+  unique per placement.
+- Tests: `trading_conventions_test.exs` pins every answer above in `Rest` and `Fake` (and that
+  both agree on every faulty request, in the same order); existing tests moved to the new
+  tags. The contract suite names `instrument_type`/`order_type` for its replace.
+
 ## [0.4.134] - 2026-10-11
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

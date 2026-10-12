@@ -221,7 +221,7 @@ defmodule DpExchange.Webull.AccountsTest do
     test "without an account_id nothing is sent" do
       exploding = fn _conn -> raise "must not read balances without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.get_balances(@credentials, plug: exploding, retry_attempts: 0)
     end
   end
@@ -406,7 +406,7 @@ defmodule DpExchange.Webull.AccountsTest do
     test "without an account_id nothing is sent" do
       exploding = fn _conn -> raise "must not read positions without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.get_positions(@credentials, plug: exploding, retry_attempts: 0)
     end
   end
@@ -698,7 +698,7 @@ defmodule DpExchange.Webull.AccountsTest do
     test "without an account_id nothing is sent" do
       exploding = fn _conn -> raise "must not read activities without an account" end
 
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Rest.get_transfers(@credentials, plug: exploding, retry_attempts: 0)
     end
   end
@@ -752,7 +752,7 @@ defmodule DpExchange.Webull.AccountsTest do
     end
 
     test "the account id is required, as it is on get_transfers/2" do
-      assert {:error, :account_id_required} = Rest.get_transactions(@credentials, [])
+      assert {:error, {:missing_option, :account_id}} = Rest.get_transactions(@credentials, [])
     end
 
     test "a cross-year range is refused up front here too" do

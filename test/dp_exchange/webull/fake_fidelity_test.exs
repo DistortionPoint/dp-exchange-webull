@@ -17,6 +17,8 @@ defmodule DpExchange.Webull.FakeFidelityTest do
   @credentials %{app_key: "key", app_secret: "secret"}
   @opts [credentials: @credentials]
   @order_opts [credentials: @credentials, account_id: "acct-1"]
+  # `replace_order/4` is told which order it edits; neither option has a default.
+  @edit_opts [instrument_type: :equity, order_type: :limit] ++ @order_opts
 
   defp equity_request(overrides \\ %{}) do
     Map.merge(
@@ -40,7 +42,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
     end
 
     test "a limit order with no price is refused" do
-      assert {:error, {:missing_required_field, :price}} =
+      assert {:error, {:missing_field, :price}} =
                Fake.preview_order(
                  @credentials,
                  equity_request(%{price: nil}),
@@ -49,7 +51,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
     end
 
     test "an order with no size is refused" do
-      assert {:error, :missing_order_size} =
+      assert {:error, {:missing_field, :quantity}} =
                Fake.preview_order(
                  @credentials,
                  equity_request(%{quantity: nil}),
@@ -57,8 +59,15 @@ defmodule DpExchange.Webull.FakeFidelityTest do
                )
     end
 
+    test "a request that is not a map is refused, not raised on" do
+      for bad <- [nil, [symbol: "AAPL"], "AAPL"] do
+        assert {:error, {:invalid_order_request, ^bad}} =
+                 Fake.preview_order(@credentials, bad, @order_opts)
+      end
+    end
+
     test "the order is refused before credentials are looked at" do
-      assert {:error, :missing_order_size} =
+      assert {:error, {:missing_field, :quantity}} =
                Fake.preview_order(%{}, equity_request(%{quantity: nil}), @order_opts)
     end
   end
@@ -66,7 +75,12 @@ defmodule DpExchange.Webull.FakeFidelityTest do
   describe "replace_order/4 follows Rest's order and reads the order back" do
     test "an unknown order type wins over an empty amendment" do
       assert {:error, {:unsupported_order_type, :bogus}} =
-               Fake.replace_order(@credentials, "abc", %{}, [order_type: :bogus] ++ @order_opts)
+               Fake.replace_order(
+                 @credentials,
+                 "abc",
+                 %{},
+                 [instrument_type: :equity, order_type: :bogus] ++ @order_opts
+               )
     end
 
     test "a quantity-only edit applies the quantity and keeps the price" do
@@ -76,7 +90,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
                  # The fixed order every fake knows (its `get_orders/2` row).
                  "5f1e9c0a7b2d4e68a3c4d5e6f7081920",
                  %{quantity: Decimal.new("2")},
-                 @order_opts
+                 @edit_opts
                )
 
       assert Decimal.equal?(order.quantity, Decimal.new("2"))
@@ -96,7 +110,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
                  @credentials,
                  "replace-1",
                  %{quantity: Decimal.new("7")},
-                 @order_opts
+                 @edit_opts
                )
 
       assert Decimal.equal?(replaced.quantity, Decimal.new("7"))
@@ -115,7 +129,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
                  @credentials,
                  "replace-unplaced",
                  %{quantity: Decimal.new("2")},
-                 @order_opts
+                 @edit_opts
                )
 
       # Nothing was invented: the id still reads back as unknown.
@@ -134,7 +148,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
                  @credentials,
                  fixed,
                  %{price: Decimal.new("41000")},
-                 @order_opts
+                 @edit_opts
                )
 
       assert {:ok, %Types.Order{id: ^fixed} = read} =
@@ -145,7 +159,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
 
     test "a refused replace remembers nothing" do
       assert {:error, :no_order_changes} =
-               Fake.replace_order(@credentials, "replace-refused", %{}, @order_opts)
+               Fake.replace_order(@credentials, "replace-refused", %{}, @edit_opts)
 
       assert {:refused, :not_found} =
                Fake.get_order(@credentials, "replace-refused", @order_opts)
@@ -217,7 +231,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
     end
 
     test "the account is checked before the range" do
-      assert {:error, :account_id_required} =
+      assert {:error, {:missing_option, :account_id}} =
                Fake.get_transactions(@credentials, @cross_year ++ [credentials: @credentials])
     end
 

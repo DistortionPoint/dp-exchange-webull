@@ -100,10 +100,10 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
         instrument_type: :equity
       }
 
-      assert {:error, {:missing_required_field, :price}} =
+      assert {:error, {:missing_field, :price}} =
                Rest.validate_order_request(Map.put(base, :order_type, :limit))
 
-      assert {:error, {:missing_required_field, :stop_price}} =
+      assert {:error, {:missing_field, :stop_price}} =
                Rest.validate_order_request(Map.put(base, :order_type, :stop))
     end
 
@@ -116,7 +116,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
         instrument_type: :equity
       }
 
-      assert {:error, {:missing_required_field, :side}} = Rest.validate_order_request(request)
+      assert {:error, {:invalid_side, nil}} = Rest.validate_order_request(request)
     end
 
     test "a failed place returns the client_order_id, so the caller can look the order up" do
@@ -164,7 +164,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
 
       assert {:ok, %{id: "mine-2"}} = Fake.place_order(@credentials, request, account_id: "a")
 
-      assert {:error, :missing_order_size} =
+      assert {:error, {:missing_field, :quantity}} =
                Fake.place_order(@credentials, Map.delete(request, :quantity), account_id: "a")
     end
 
@@ -172,6 +172,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
       assert {:error, {:unsupported_order_edit, :limit, [:stop_price]}} =
                Fake.replace_order(@credentials, "id-1", %{stop_price: Decimal.new(1)},
                  account_id: "a",
+                 instrument_type: :equity,
                  order_type: :limit
                )
     end

@@ -97,14 +97,20 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
       assert %Types.Order{side: :buy} = Types.Order.new(Map.from_struct(order))
     end
 
-    test "SHORT has no slot in the contract and is nil, as a read-back of it is" do
-      assert {:ok, %Types.Order{side: nil}} =
+    test "SHORT is refused: capabilities say supports_short_selling is false" do
+      # It used to be sent on every instrument and come back as an `%Order{side: nil}`.
+      assert {:error, {:invalid_side, :short}} =
                Rest.place_order(
                  @credentials,
                  equity_request(%{side: :short}),
-                 [account_id: @account, retry_attempts: 0] ++
-                   [plug: responding([%{"client_order_id" => "abc"}])]
+                 [account_id: @account, retry_attempts: 0] ++ [plug: exploding()]
                )
+
+      assert {:error, {:invalid_side, :short}} =
+               Fake.place_order(@credentials, equity_request(%{side: :short}), @order_opts)
+
+      assert {:error, {:invalid_side, "SHORT"}} =
+               Fake.preview_order(@credentials, equity_request(%{side: "SHORT"}), @order_opts)
     end
 
     test "the fake builds its order with the same function" do
@@ -121,7 +127,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                  @credentials,
                  "norm-1",
                  %{quantity: 7, price: "181"},
-                 @order_opts
+                 [instrument_type: :equity, order_type: :limit] ++ @order_opts
                )
 
       assert Decimal.equal?(amended.quantity, Decimal.new(7))
@@ -142,6 +148,8 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
     defp replace(plug) do
       Rest.replace_order(@credentials, "abc", %{quantity: 3},
         account_id: @account,
+        instrument_type: :equity,
+        order_type: :limit,
         plug: plug,
         retry_attempts: 0
       )
@@ -188,13 +196,13 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
   describe "account_id is text, here and in the fake" do
     test "a number, false or an empty string is not an account" do
       for bad <- [123, false, "", :acct] do
-        assert {:error, :account_id_required} =
+        assert {:error, {:missing_option, :account_id}} =
                  Rest.get_balances(@credentials, account_id: bad, plug: exploding())
 
-        assert {:error, :account_id_required} =
+        assert {:error, {:missing_option, :account_id}} =
                  Fake.get_balances(@credentials, account_id: bad)
 
-        assert {:error, :account_id_required} =
+        assert {:error, {:missing_option, :account_id}} =
                  Fake.place_orders(@credentials, [equity_request(%{})], account_id: bad)
       end
     end

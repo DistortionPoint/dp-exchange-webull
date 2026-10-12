@@ -43,7 +43,14 @@ defmodule DpExchange.WebullContractTest do
       {:get_orders, 2} => [account_id: "contract-account"],
       {:place_order, 3} => [account_id: "contract-account"],
       {:cancel_order, 3} => [account_id: "contract-account"],
-      {:get_order, 3} => [account_id: "contract-account"]
+      {:get_order, 3} => [account_id: "contract-account"],
+      # `replace_order/4` is told which order it edits - the instrument and the type, whose
+      # edit table applies - and has no default for either, so the suite's replace names them.
+      {:replace_order, 4} => [
+        account_id: "contract-account",
+        instrument_type: :equity,
+        order_type: :limit
+      ]
     },
     # This venue serves an order book for US stocks and ETFs and refuses one for a crypto
     # pair — the venue publishes no crypto depth endpoint, and `Fake.get_order_book/2`

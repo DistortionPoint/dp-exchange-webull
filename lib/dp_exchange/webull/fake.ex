@@ -684,29 +684,20 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def preview_order(credentials, request, opts \\ []) do
     with_injection(fn ->
-      # Crypto is refused here as it is in production. A fake that priced a crypto order
-      # would let a consumer's suite go green on a call the venue rejects.
-      instrument = Map.get(request, :instrument_type, :crypto)
-
-      if instrument == :crypto do
-        {:error, {:preview_not_supported, :crypto}}
-      else
-        # Account, then the order itself, credentials last — matching
-        # `Rest.preview_order/3`'s own order (account, combination, order body, THEN
-        # `post/4` -> `Auth.headers/2`). The order body is checked through
-        # `Rest.validate_order_request/1`, which includes the combination: a preview with
-        # no size, or a limit with no price, is refused here as it is there. It used to
-        # check the combination alone and price anything.
-        with :ok <- fake_account(opts),
-             :ok <- Rest.validate_order_request(request),
-             :ok <- credentialed(credentials) do
-          {:ok,
-           %{
-             instrument_type: instrument,
-             estimated_cost: Decimal.new("100"),
-             estimated_fee: Decimal.new("1")
-           }}
-        end
+      # `Rest.preview_order/3`'s own order, from the same function: the request is a map,
+      # crypto is refused (a fake that priced a crypto order would let a consumer's suite go
+      # green on a call the venue rejects), then the order itself (including the
+      # combination: a preview with no size, or a limit with no price, is refused here as
+      # it is there), THEN the account and the credentials (`post/4` -> `Auth.headers/2`).
+      with :ok <- Rest.validate_preview_request(request),
+           :ok <- fake_account(opts),
+           :ok <- credentialed(credentials) do
+        {:ok,
+         %{
+           instrument_type: Map.fetch!(request, :instrument_type),
+           estimated_cost: Decimal.new("100"),
+           estimated_fee: Decimal.new("1")
+         }}
       end
     end)
   end
@@ -717,18 +708,13 @@ defmodule DpExchange.Webull.Fake do
   end
 
   defp do_replace_order(credentials, client_order_id, changes, opts) do
-    instrument = Config.opt(opts, :instrument_type, :equity)
-    order_type = Config.opt(opts, :order_type, :limit)
-
-    # The real package's own order: crypto, then the per-type edit table (which also refuses
-    # an empty amendment, AFTER an unknown order type - an empty `changes` used to be
-    # `:no_order_changes` ahead of `{:unsupported_order_type, _}`), then the account, then
-    # `post/4` -> `Auth.headers/2`. The edit table is the real one, not a union of every
-    # type's fields.
-    with :ok <- fake_replaceable(instrument),
-         :ok <- Rest.validate_amendment(order_type, changes),
+    # The real package's own order, from the same function: the order id, `changes` being a
+    # map, the two options naming the order being edited (neither defaulted), crypto, the
+    # per-type edit table (which also refuses an empty amendment, AFTER an unknown order
+    # type), then the account, then `post/4` -> `Auth.headers/2`. The edit table is the
+    # real one, not a union of every type's fields.
+    with :ok <- Rest.validate_replace(client_order_id, changes, opts),
          :ok <- fake_account(opts),
-         :ok <- Rest.validate_order_id(client_order_id),
          :ok <- credentialed(credentials),
          {:ok, base} <- replaceable_order(client_order_id) do
       # Remembered (per process) under the same id, as the venue amends in place and
@@ -747,9 +733,6 @@ defmodule DpExchange.Webull.Fake do
       :error -> {:refused, :not_found}
     end
   end
-
-  defp fake_replaceable(:crypto), do: {:error, {:preview_not_supported, :crypto}}
-  defp fake_replaceable(_instrument), do: :ok
 
   # The order as the venue reads it back after the amendment (`Rest.replace_order/4` reads
   # the order back rather than echoing the request): the fields that changed are the new
@@ -1580,24 +1563,37 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
-      # The fake enforces the venue's crypto matrix, its account requirement and its
-      # credential requirement, in the same order `Rest.place_order/3` does (account,
-      # combination, THEN `post/4` -> `Auth.headers/2`), so a consumer's suite cannot go
-      # green on an order the venue would reject.
-      with :ok <- fake_account(opts),
-           :ok <- fake_combination(request),
-           # The real path's own request checks (sizing, required prices, session), so the
-           # fake refuses what the venue would. It skipped them, and accepted a limit with
-           # no price or a market order sized twice.
-           :ok <- Rest.validate_order_request(request),
-           :ok <- credentialed(credentials) do
+      # The request checks are `Rest.place_order/3`'s own, from the same function and in
+      # the same order (map, keys, symbol, side, type, duration and combination, sizing,
+      # prices, client order id), then the account option, then the credentials
+      # (`post/4` -> `Auth.headers/2`), so a consumer's suite cannot go green on an order the
+      # venue would reject.
+      with :ok <- Rest.validate_order_request(request),
+           :ok <- fake_account(opts),
+           :ok <- credentialed(credentials),
+           id = client_order_id(request),
+           :ok <- unused_client_order_id(id) do
         # Remembered (per process), so the id this issues can be cancelled and read back:
         # the caller's own `client_order_id` when it gave one, as the venue echoes it, and
         # otherwise a new one in the venue's format, as `Rest` generates. A fixed id made
         # two placements share one order.
-        {:ok, remember_order(placed_order(request, client_order_id(request)))}
+        {:ok, remember_order(placed_order(request, id))}
       end
     end)
+  end
+
+  # **The venue requires a `client_order_id` unique per account** (`common-order-place.md`
+  # names it `<unique_id>`; `place_orders/3` says the same). Reusing one used to overwrite
+  # the stored order, so a second placement silently replaced the first. It is refused as
+  # `{:refused, {:duplicate_client_order_id, id}}` - permanent for the request as sent. The
+  # vendor reference does not state the venue's own answer to a duplicate, so the exact
+  # wording of a real refusal is UNMEASURED; the shape (a refusal, never a second order and
+  # never a silent overwrite) is the part a consumer can rely on.
+  defp unused_client_order_id(id) do
+    case lookup_order(id) do
+      {:ok, _existing} -> {:refused, {:duplicate_client_order_id, id}}
+      :error -> :ok
+    end
   end
 
   # Round-tripped through the real module's own encode then decode — not the caller's atom
@@ -1668,41 +1664,25 @@ defmodule DpExchange.Webull.Fake do
 
   defp batch_row(request, _index) do
     id = client_order_id(request)
-    remember_order(placed_order(Map.put_new(request, :time_in_force, :day), id))
+    # The row already passed `Rest.validate_batch_orders/1`, which requires the type and the
+    # duration: `placed_order/2` reads both from the request.
+    remember_order(placed_order(request, id))
 
     %{"client_order_id" => id, "order_id" => next_issued(:system)}
   end
 
-  # The real validator, not a copy: text and non-empty, or `:account_id_required`.
+  # The real validator, not a copy: non-blank text, or `{:missing_option, :account_id}`.
   defp fake_account(opts) do
     with {:ok, _account_id} <- Rest.validate_account(opts), do: :ok
-  end
-
-  # The fake enforces the same per-instrument matrix the real package does, from the same
-  # source of truth — `Rest.order_combinations/1`. A hand-copied list here would drift from
-  # the builder it stands in for, one instrument type at a time.
-  defp fake_combination(request) do
-    instrument = Map.get(request, :instrument_type, :crypto)
-    type = Map.get(request, :order_type, :limit)
-    tif = Map.get(request, :time_in_force, :gtc)
-
-    case Rest.order_combinations(instrument) do
-      {:ok, allowed} ->
-        if {type, tif} in allowed,
-          do: :ok,
-          else: {:error, {:unsupported_order_combination, instrument, type, tif}}
-
-      error ->
-        error
-    end
   end
 
   @impl true
   def cancel_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
-      # Account first, credentials second — matching `Rest.cancel_order/3`'s own order.
-      with :ok <- fake_account(opts),
-           :ok <- Rest.validate_order_id(client_order_id),
+      # The order id first, then the account, then credentials — `Rest.cancel_order/3`'s
+      # own order.
+      with :ok <- Rest.validate_order_id(client_order_id),
+           :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
         case lookup_order(client_order_id) do
           {:ok, order} ->
@@ -1719,9 +1699,10 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def get_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
-      # Account first, credentials second — matching `Rest.get_order/3`'s own order.
-      with :ok <- fake_account(opts),
-           :ok <- Rest.validate_order_id(client_order_id),
+      # The order id first, then the account, then credentials — `Rest.get_order/3`'s own
+      # order.
+      with :ok <- Rest.validate_order_id(client_order_id),
+           :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
         case lookup_order(client_order_id) do
           {:ok, order} -> {:ok, order}

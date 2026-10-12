@@ -233,12 +233,28 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       # `order-batch-place.md:227-234`'s `order_type` enum is MARKET and LIMIT only — the
       # STOP_LOSS/STOP_LOSS_LIMIT/TRAILING_STOP_LOSS types real for `place_order/3` are not
       # offered on this endpoint at all.
-      orders = [order(), order(%{order_type: :stop, stop_price: Decimal.new("170")})]
+      orders = [order(), order(%{order_type: :stop})]
 
       assert {:error, {:batch_order_rejected, 1, reason}} =
                Rest.place_orders(@credentials, orders, account_id: "acct-1")
 
       assert reason == {:unsupported_batch_order_type, :stop}
+    end
+
+    test "a key the batch builder does not read is refused by index, not ignored" do
+      for key <- [:stop_price, :expire_date, :post_only] do
+        orders = [order(), order(%{key => Decimal.new("170")})]
+
+        assert {:error, {:batch_order_rejected, 1, {:unsupported_order_field, ^key}}} =
+                 Rest.place_orders(@credentials, orders, account_id: "acct-1")
+      end
+    end
+
+    test "a price on a market entry is refused by index, not dropped" do
+      orders = [order(), order(%{order_type: :market})]
+
+      assert {:error, {:batch_order_rejected, 1, {:unexpected_field, :price}}} =
+               Rest.place_orders(@credentials, orders, account_id: "acct-1")
     end
 
     test "AMOUNT sizing is refused by index — this endpoint's entrust_type is QTY only" do
@@ -258,7 +274,8 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     end
 
     test "the account id is required, as it is on the single-order call" do
-      assert {:error, :account_id_required} = Rest.place_orders(@credentials, [order()], [])
+      assert {:error, {:missing_option, :account_id}} =
+               Rest.place_orders(@credentials, [order()], [])
     end
   end
 
@@ -302,7 +319,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     test "no side or symbol is refused by index, not raised as a KeyError" do
       exploding = fn _conn -> raise "must not send an unbuildable batch" end
 
-      assert {:error, {:batch_order_rejected, 1, {:missing_required_field, :side}}} =
+      assert {:error, {:batch_order_rejected, 1, {:invalid_side, nil}}} =
                Rest.place_orders(
                  @credentials,
                  [order(), Map.delete(order(), :side)],
@@ -311,7 +328,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
                  retry_attempts: 0
                )
 
-      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :symbol}}} =
+      assert {:error, {:batch_order_rejected, 0, {:invalid_symbol, nil}}} =
                Rest.place_orders(
                  @credentials,
                  [Map.delete(order(), :symbol)],
@@ -321,10 +338,31 @@ defmodule DpExchange.Webull.BatchPlaceTest do
                )
     end
 
+    test "an entry with no order type or no duration is refused by index, never defaulted" do
+      exploding = fn _conn -> raise "must not send an entry with a defaulted field" end
+
+      for {field, expected} <- [
+            {:order_type, {:missing_field, :order_type}},
+            {:time_in_force, {:missing_field, :time_in_force}}
+          ] do
+        batch = [order(), Map.delete(order(), field)]
+
+        assert {:error, {:batch_order_rejected, 1, ^expected}} =
+                 Rest.place_orders(@credentials, batch,
+                   account_id: "acct-1",
+                   plug: exploding,
+                   retry_attempts: 0
+                 )
+
+        assert {:error, {:batch_order_rejected, 1, ^expected}} =
+                 Fake.place_orders(@credentials, batch, account_id: "acct-1")
+      end
+    end
+
     test "a limit order with no price is refused rather than sent without limit_price" do
       exploding = fn _conn -> raise "must not send a limit order with no price" end
 
-      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :price}}} =
+      assert {:error, {:batch_order_rejected, 0, {:missing_field, :price}}} =
                Rest.place_orders(
                  @credentials,
                  [Map.delete(order(), :price)],
@@ -337,7 +375,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
 
   describe "the fake and the facade" do
     test "the fake holds the same limits" do
-      assert {:error, :account_id_required} = Fake.place_orders(%{}, [order()], [])
+      assert {:error, {:missing_option, :account_id}} = Fake.place_orders(%{}, [order()], [])
       assert {:error, :empty_batch} = Fake.place_orders(%{}, [], account_id: "a")
 
       big = for i <- 1..51, do: order(%{symbol: "SYM#{i}"})
@@ -362,7 +400,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:error, ^real} = Fake.place_orders(@credentials, batch, account_id: "a")
       assert {:batch_order_rejected, 1, _reason} = real
 
-      assert {:error, {:batch_order_rejected, 0, {:missing_required_field, :price}}} =
+      assert {:error, {:batch_order_rejected, 0, {:missing_field, :price}}} =
                Fake.place_orders(@credentials, [Map.delete(order(), :price)], account_id: "a")
     end
 

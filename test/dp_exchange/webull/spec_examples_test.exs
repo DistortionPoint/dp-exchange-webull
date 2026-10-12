@@ -1722,6 +1722,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                    quantity: Decimal.new(modify["quantity"]),
                    time_in_force: :day
                  },
+                 instrument_type: :equity,
                  order_type: :limit,
                  plug: plug,
                  account_id: fixture["request"]["account_id"],

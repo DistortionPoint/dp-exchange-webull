@@ -1266,6 +1266,12 @@ defmodule DpExchange.Webull.Rest do
       {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
         {:refused, refusal(status, body)}
 
+      # Nothing at that id: permanent for the request as sent, and the answer the Fake gives
+      # for an order it never issued. It was `{:exchange_error, :webull, "HTTP 404 ..."}`,
+      # which Core calls retryable.
+      {:ok, %{status: 404}} ->
+        {:refused, :not_found}
+
       {:ok, %{status: status, body: body}} ->
         {:error,
          {:exchange_error, :webull,
@@ -1298,6 +1304,9 @@ defmodule DpExchange.Webull.Rest do
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
         {:refused, refusal(status, response)}
+
+      {:ok, %{status: 404}} ->
+        {:refused, :not_found}
 
       {:ok, %{status: status, body: response}} ->
         {:error,
@@ -1332,6 +1341,9 @@ defmodule DpExchange.Webull.Rest do
 
       {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
         {:refused, refusal(status, response)}
+
+      {:ok, %{status: 404}} ->
+        {:refused, :not_found}
 
       {:ok, %{status: status, body: response}} ->
         {:error,
@@ -1914,15 +1926,14 @@ defmodule DpExchange.Webull.Rest do
   absent `estimated_cost` is `{:error, :unexpected_response_shape}`, and an absent fee is
   `nil`.
   """
-  @spec preview_order(map(), map(), keyword()) ::
+  @spec preview_order(map(), term(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def preview_order(credentials, request, opts) do
-    instrument = instrument_type(request)
+    with :ok <- preview_target(request),
+         {:ok, _order_type, _tif, leaf} <- checked_order(request),
+         {:ok, account_id} <- account_id(opts) do
+      instrument = instrument_type(request)
 
-    with :ok <- previewable(instrument),
-         {:ok, account_id} <- account_id(opts),
-         {:ok, order_type, tif} <- combination(request),
-         {:ok, leaf} <- order_leaf(request, order_type, tif) do
       body = %{
         "account_id" => account_id,
         "new_orders" => [Map.put(leaf, "client_order_id", client_order_id(request))]
@@ -2019,17 +2030,25 @@ defmodule DpExchange.Webull.Rest do
   answer) is `{:error, {:replace_accepted_unread, client_order_id, reason}}` - the id goes
   back as `place_order/3` returns `{:order_unconfirmed, id, reason}` - and `get_order/3`
   says what the order is now. Retrying the replace is not the remedy.
+
+  ## Which order is being edited is not guessed
+
+  `opts[:instrument_type]` and `opts[:order_type]` (the type of the order being amended -
+  its edit table is chosen from it) are **required**: absent, each is
+  `{:error, {:missing_option, key}}`. They used to default to an equity limit order, where
+  `place_order/3` defaults to crypto. `changes` that is not a map is
+  `{:error, {:invalid_order_request, changes}}`, and an order id that is `nil`, not text or
+  blank is `{:error, {:invalid_order_id, id}}`, checked first.
+
+  A transport error or 5xx on the replace itself (it may have landed) is
+  `{:error, {:order_unconfirmed, client_order_id, reason}}`; no credentials or our own
+  limiter refusing, decided before anything is sent, stay the plain `{:error, reason}`.
   """
-  @spec replace_order(map(), String.t(), map(), keyword()) ::
+  @spec replace_order(map(), term(), term(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def replace_order(credentials, client_order_id, changes, opts) do
-    instrument = Config.opt(opts, :instrument_type, :equity)
-    order_type = Config.opt(opts, :order_type, :limit)
-
-    with :ok <- previewable(instrument),
-         :ok <- amendable(order_type, changes),
-         {:ok, account_id} <- account_id(opts),
-         :ok <- validate_order_id(client_order_id) do
+    with :ok <- validate_replace(client_order_id, changes, opts),
+         {:ok, account_id} <- account_id(opts) do
       # Money fields as the venue's strings (`common-order-replace.md` types all four as
       # `"type": "string"`); an integer `quantity` went out as a JSON number.
       modification =
@@ -2048,14 +2067,20 @@ defmodule DpExchange.Webull.Rest do
       # effect, sent again, is at best refused, telling the caller a success failed. The
       # `client_order_id` names the order being changed, not this change, so the venue cannot
       # tell a repeat from a second replace.
-      with {:ok, _response} <-
-             post(
-               "/trading/orders/replace",
-               body,
-               credentials,
-               send_once(opts)
-             ) do
-        read_back_replaced(get_order(credentials, client_order_id, opts), client_order_id)
+      case post("/trading/orders/replace", body, credentials, send_once(opts)) do
+        {:ok, _response} ->
+          read_back_replaced(get_order(credentials, client_order_id, opts), client_order_id)
+
+        # A transport error or 5xx does not say whether the amendment landed: the id goes
+        # back so the caller reads the order instead of resending. Decided-before-sending
+        # outcomes (no credentials, our own limiter) are plain, as for `place_order/3`.
+        {:error, reason} ->
+          if unsent?(reason),
+            do: {:error, reason},
+            else: {:error, {:order_unconfirmed, client_order_id, reason}}
+
+        refused ->
+          refused
       end
     end
   end
@@ -2079,11 +2104,37 @@ defmodule DpExchange.Webull.Rest do
   }
 
   @doc """
-  Whether `changes` is an amendment the venue accepts for an order of `order_type`, per its
-  own per-type edit table. The check `replace_order/4` makes, for `DpExchange.Webull.Fake`.
+  Every check `replace_order/4` makes before the account option and the credentials, in its
+  order: the order id (`{:invalid_order_id, v}`), `changes` being a map
+  (`{:invalid_order_request, changes}`), the two options that say WHICH order is being
+  edited (`opts[:instrument_type]` and `opts[:order_type]`, each `{:missing_option, key}`
+  when absent), crypto (`{:preview_not_supported, :crypto}`), and the per-type edit table.
+
+  **Neither option is defaulted.** `replace_order/4` used to assume an equity limit order
+  where `place_order/3` assumes crypto, so a caller who forgot to say was checked against,
+  and edited under, the table of an order it never placed.
   """
-  @spec validate_amendment(atom(), map()) :: :ok | {:error, term()}
-  def validate_amendment(order_type, changes), do: amendable(order_type, changes)
+  @spec validate_replace(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_replace(client_order_id, changes, opts) do
+    with :ok <- validate_order_id(client_order_id),
+         :ok <- replace_changes(changes),
+         {:ok, instrument} <- replace_option(opts, :instrument_type),
+         {:ok, order_type} <- replace_option(opts, :order_type),
+         :ok <- previewable(instrument),
+         {:ok, _allowed} <- allowed_combinations(instrument) do
+      amendable(order_type, changes)
+    end
+  end
+
+  defp replace_changes(changes) when is_map(changes), do: :ok
+  defp replace_changes(changes), do: {:error, {:invalid_order_request, changes}}
+
+  defp replace_option(opts, key) do
+    case Config.opt(opts, key, nil) do
+      nil -> {:error, {:missing_option, key}}
+      found -> {:ok, found}
+    end
+  end
 
   defp amendable(order_type, changes) do
     case Map.fetch(@amendable, order_type) do
@@ -2129,16 +2180,20 @@ defmodule DpExchange.Webull.Rest do
   @doc """
   Whether `client_order_id` names an order a call can address: text, and not empty.
 
-  The check `cancel_order/3`, `get_order/3` and `replace_order/4` make after the account and
-  before anything is signed, for `DpExchange.Webull.Fake` to refuse what the real path
-  refuses. A `nil` or an empty id went out as `"client_order_id": null` (or `=`) for the venue
-  to answer, in whatever way it chose, about no order at all. Length is not checked here: the
-  32-character cap is the venue's for an id the CALLER chose (`place_order/3` enforces it),
-  and an id the venue issued is not this package's to refuse.
+  The check `cancel_order/3`, `get_order/3` and `replace_order/4` make FIRST - before the
+  account option and before anything is signed - for `DpExchange.Webull.Fake` to refuse what
+  the real path refuses. A `nil`, an empty or a whitespace-only id (`"  "` was sent as it
+  stood) is `{:error, {:invalid_order_id, id}}`. Length is not checked here: the
+  32-character cap is the venue's for an id the CALLER chose (`place_order/3` enforces it,
+  as `{:invalid_client_order_id, id}`), and an id the venue issued is not this package's to
+  refuse.
   """
-  @spec validate_order_id(term()) :: :ok | {:error, {:invalid_client_order_id, term()}}
-  def validate_order_id(id) when is_binary(id) and id != "", do: :ok
-  def validate_order_id(id), do: {:error, {:invalid_client_order_id, id}}
+  @spec validate_order_id(term()) :: :ok | {:error, {:invalid_order_id, term()}}
+  def validate_order_id(id) when is_binary(id) do
+    if String.trim(id) == "", do: {:error, {:invalid_order_id, id}}, else: :ok
+  end
+
+  def validate_order_id(id), do: {:error, {:invalid_order_id, id}}
 
   @doc """
   The order book for an equity, ETF or future — `/market-data/stocks/depths/list`, or
@@ -5395,17 +5450,28 @@ defmodule DpExchange.Webull.Rest do
   # `NaN`, an `Infinity`, a boolean or text that is not a number all used to be sent as typed
   # (or, for a map or a list, raised out of `to_string/1` in the caller's process) on a
   # money-moving write; the venue's refusal then arrived after the request and named a field
-  # the caller never wrote. `:error` is `{:invalid_number, field, value}` for the first
-  # offending field, in the order given.
+  # the caller never wrote. `:error` is `{:invalid_<field>, value}` (`:invalid_quantity`,
+  # `:invalid_amount`, `:invalid_price`, `:invalid_stop_price`,
+  # `:invalid_trailing_stop_step`) for the first offending field, in the order given.
+  #
+  # **A float is refused**: it has already lost digits (`0.1 + 0.2`), and what reached the
+  # wire was the digits of the float, not the number the caller meant. A `Decimal`, an
+  # integer or a numeric string is exact.
   defp positive_numbers(request, fields) do
     Enum.find_value(fields, :ok, fn field ->
       value = Map.get(request, field)
 
       if is_nil(value) or positive_number?(value),
         do: nil,
-        else: {:error, {:invalid_number, field, value}}
+        else: {:error, {invalid_number_tag(field), value}}
     end)
   end
+
+  defp invalid_number_tag(:quantity), do: :invalid_quantity
+  defp invalid_number_tag(:amount), do: :invalid_amount
+  defp invalid_number_tag(:price), do: :invalid_price
+  defp invalid_number_tag(:stop_price), do: :invalid_stop_price
+  defp invalid_number_tag(:trailing_stop_step), do: :invalid_trailing_stop_step
 
   defp positive_number?(%Decimal{} = value) do
     not (Decimal.nan?(value) or Decimal.inf?(value) or absurd_exponent?(value)) and
@@ -5413,7 +5479,6 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp positive_number?(value) when is_integer(value), do: value > 0
-  defp positive_number?(value) when is_float(value), do: value > 0.0
 
   defp positive_number?(value) when is_binary(value) do
     case decimal(value) do
@@ -5510,17 +5575,40 @@ defmodule DpExchange.Webull.Rest do
 
   ## An accepted response that names no order is `:order_unconfirmed`
 
-  A 2xx whose row carries no `client_order_id` is
+  A 2xx whose row carries no `client_order_id`, **or no row at all** (`{}` with an empty or
+  unreadable `data`), is
   `{:error, {:order_unconfirmed, client_order_id, :unexpected_response_shape}}` - the same
   shape a timeout gets, with the id this package sent, because the order may be live. Use
   `get_order/3` with that id to find out.
+
+  **Only an outcome that may have reached the venue is wrapped.** Missing credentials, our
+  own rate limiter refusing and a signing failure are decided before anything is sent and
+  are the plain `{:error, reason}` (`{:missing_credentials, :webull}`, ...): there is no
+  order to reconcile.
+
+  ## The request is checked, in this order, before anything is signed
+
+  A map (`{:invalid_order_request, r}`); no key the builder does not read
+  (`{:unsupported_order_field, key}`); `:symbol` (`{:invalid_symbol, v}`); `:side`, `:buy`
+  or `:sell` as an atom or text in any case (`{:invalid_side, v}` - **`:short` is refused**,
+  `capabilities/0` says `supports_short_selling: false`); `:order_type` and
+  `:time_in_force`, **both required and never defaulted** (`{:missing_field, key}`; a type
+  the instrument does not use is `{:unsupported_order_type, type}`, a duration it does not
+  serve for the type `{:unsupported_order_combination, type, tif}`); the size
+  (`{:missing_field, :quantity}`, `{:invalid_quantity, v}`, `{:invalid_amount, v}` - a float
+  is refused, it has lost digits); the price fields (`{:unexpected_field, key}` for one the
+  type does not use, `{:missing_field, key}` for one it needs, `{:invalid_price, v}`,
+  `{:invalid_stop_price, v}`, `{:invalid_trailing_stop_step, v}`); `:client_order_id`
+  (`{:invalid_client_order_id, v}`, 32 characters at most); a GTD order's `:expire_date`
+  (`{:missing_field, :expire_date}`; on any other duration
+  `{:unexpected_field, :expire_date}`); then the account option
+  (`{:missing_option, :account_id}`) and the credentials.
   """
-  @spec place_order(map(), map(), keyword()) ::
+  @spec place_order(map(), term(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def place_order(credentials, request, opts) do
-    with {:ok, account_id} <- account_id(opts),
-         {:ok, order_type, tif} <- combination(request),
-         {:ok, leaf} <- order_leaf(request, order_type, tif) do
+    with {:ok, order_type, tif, leaf} <- checked_order(request),
+         {:ok, account_id} <- account_id(opts) do
       client_order_id = client_order_id(request)
 
       body = %{
@@ -5529,16 +5617,47 @@ defmodule DpExchange.Webull.Rest do
       }
 
       case post("/trading/orders/place", body, credentials, send_once(opts)) do
-        {:ok, response} -> to_placed_order(response, request, order_type, tif, client_order_id)
-        # **The id goes back with the failure.** An `{:error, _}` (a timeout, a 5xx) does
-        # not say whether the order landed, and a generated id was returned only on
-        # success, so a caller left holding a possibly live order had no way to look it up
-        # or cancel it. `get_order/3` with this id is how to find out.
-        {:error, reason} -> {:error, {:order_unconfirmed, client_order_id, reason}}
-        refused -> refused
+        {:ok, response} ->
+          to_placed_order(response, request, order_type, tif, client_order_id)
+
+        # **The id goes back with the failure - when the request may have been sent.** An
+        # `{:error, _}` (a timeout, a 5xx) does not say whether the order landed, and a
+        # generated id was returned only on success, so a caller left holding a possibly
+        # live order had no way to look it up or cancel it. `get_order/3` with this id is
+        # how to find out. An error decided BEFORE anything left (no credentials, our own
+        # limiter refusing, a signing failure) sent nothing, so there is nothing to
+        # reconcile and wrapping it would send the caller looking for an order that was
+        # never placed: it stays a plain `{:error, reason}`.
+        {:error, reason} ->
+          if unsent?(reason),
+            do: {:error, reason},
+            else: {:error, {:order_unconfirmed, client_order_id, reason}}
+
+        refused ->
+          refused
       end
     end
   end
+
+  @doc """
+  Whether an `{:error, reason}` from a signed request was decided before anything was sent:
+  missing or unusable credentials (`Auth.headers/2`), or `Core.HttpClient`'s own limiter
+  refusing (`"Throttled by our own rate limiter ..."` / `"Rate limiter unavailable"` /
+  `:rate_limit_timeout` from a blocking limiter, bare or inside
+  `{:exchange_error, provider, message}`).
+
+  Such an outcome cannot have placed or changed anything, so `place_order/3` does not wrap
+  it as `:order_unconfirmed`. Anything else (a transport error, a timeout, a 5xx, an
+  undecodable body) may have reached the venue.
+  """
+  @spec unsent?(term()) :: boolean()
+  def unsent?({:missing_credentials, _venue}), do: true
+  def unsent?({:invalid_credentials, _venue}), do: true
+  def unsent?({:exchange_error, _venue, message}), do: unsent?(message)
+  def unsent?(:rate_limit_timeout), do: true
+  def unsent?("Throttled by our own rate limiter" <> _rest), do: true
+  def unsent?("Rate limiter unavailable" <> _rest), do: true
+  def unsent?(_possibly_sent), do: false
 
   @doc """
   Places several orders in one request — `POST /trading/orders/batch-place`.
@@ -5558,7 +5677,10 @@ defmodule DpExchange.Webull.Rest do
   message is carried through unchanged for that reason.
 
   A missing `:symbol` or `:side`, or a `LIMIT` order with no `:price`, is refused by index as
-  `{:batch_order_rejected, index, {:missing_required_field, field}}` before anything is sent.
+  `{:batch_order_rejected, index, {:missing_field, field}}` (`{:invalid_symbol, v}` /
+  `{:invalid_side, v}` for those two) before anything is sent. A key the batch builder does
+  not read is `{:unsupported_order_field, key}`, and a `:price` on a market entry is
+  `{:unexpected_field, :price}`, each by index.
 
   Each order takes the same shape `place_order/3` builds, and `client_order_id` is generated
   per order where the caller did not supply one — the venue requires one per order and
@@ -5650,6 +5772,40 @@ defmodule DpExchange.Webull.Rest do
 
   @batch_order_types [:market, :limit]
 
+  # Every key `checked_order/1` and `order_leaf/3` read. Any other key is refused by name
+  # rather than ignored: `post_only: true` or `reduce_only: true` is a promise the venue
+  # would never be told about.
+  @order_request_keys [
+    :symbol,
+    :side,
+    :order_type,
+    :time_in_force,
+    :quantity,
+    :amount,
+    :price,
+    :stop_price,
+    :trailing_stop_step,
+    :client_order_id,
+    :instrument_type,
+    :expire_date,
+    :event_outcome,
+    :support_trading_session
+  ]
+
+  # The batch builder reads fewer: no stop, trail, expiry or event outcome.
+  @batch_request_keys [
+    :symbol,
+    :side,
+    :order_type,
+    :time_in_force,
+    :quantity,
+    :amount,
+    :price,
+    :client_order_id,
+    :instrument_type,
+    :support_trading_session
+  ]
+
   # **The batch endpoint's own schema, narrower than `place_order/3`'s.**
   # `order-batch-place.md:157-244` requires `order_type` MARKET or LIMIT — not `STOP_LOSS`,
   # `STOP_LOSS_LIMIT` or `TRAILING_STOP_LOSS`, all real for the single-order endpoint —
@@ -5665,8 +5821,10 @@ defmodule DpExchange.Webull.Rest do
   # money-moving write, and a `LIMIT` entry with no `:price` was sent with no `limit_price`
   # at all, one entry of up to fifty failing at the venue instead of by index here.
   defp batch_leaf(request) do
-    with :ok <- required_order_identity(request),
+    with :ok <- known_order_keys(request, @batch_request_keys),
+         :ok <- required_order_identity(request),
          {:ok, order_type} <- batch_order_type(request),
+         :ok <- unexpected_price_fields(request, order_type),
          :ok <- required_order_prices(request, order_type),
          :ok <- positive_numbers(request, [:quantity, :amount]),
          :ok <- positive_numbers(request, sent_price_fields(order_type)),
@@ -5692,21 +5850,24 @@ defmodule DpExchange.Webull.Rest do
   end
 
   # The batch schema's `time_in_force` enum has exactly one member, `DAY`
-  # (order-batch-place.md:236-243). `DAY` is sent explicitly when the caller left it
-  # unset — the same reasoning `get_order_book/3`'s `overnight_required` already states
-  # for a required field with one legal value — but a caller who explicitly asked for
-  # something else (`:gtc`, `:fok`, …) is refused rather than silently switched to `DAY`:
-  # sending the one legal value regardless of what was asked for would be exactly the
-  # substitution `entrust/3` above and `CLAUDE.md`'s fail-closed rule both refuse to make.
+  # (order-batch-place.md:236-243). **It is still required per row** (`{:missing_field,
+  # :time_in_force}`): a duration the caller never named is not defaulted, even to the one
+  # legal value, the same as on `place_order/3`. A caller who asked for something else
+  # (`:gtc`, `:fok`, …) is refused rather than silently switched to `DAY`: sending the one
+  # legal value regardless of what was asked for would be exactly the substitution
+  # `entrust/3` above and `CLAUDE.md`'s fail-closed rule both refuse to make.
   defp batch_time_in_force(request) do
-    case Map.get(request, :time_in_force, :day) do
+    case Map.get(request, :time_in_force) do
       :day -> :ok
+      nil -> {:error, {:missing_field, :time_in_force}}
       other -> {:error, {:unsupported_batch_time_in_force, other}}
     end
   end
 
+  # Required per row, never defaulted: an absent type used to become a limit order.
   defp batch_order_type(request) do
-    case Map.get(request, :order_type, :limit) do
+    case Map.get(request, :order_type) do
+      nil -> {:error, {:missing_field, :order_type}}
       type when type in @batch_order_types -> {:ok, order_type_name(type)}
       other -> {:error, {:unsupported_batch_order_type, other}}
     end
@@ -5753,16 +5914,24 @@ defmodule DpExchange.Webull.Rest do
   The account every account and order call is made against: `opts[:account_id]`, which must
   be non-empty text.
 
-  Anything else (absent, `nil`, `false`, a number, `""`) is `{:error, :account_id_required}`.
-  A number went into a JSON body as a number and a query as its `to_string/1`, where the
-  venue types the account id as a string. The check each account call makes first, for
-  `DpExchange.Webull.Fake` to refuse exactly what the real path refuses.
+  Anything else (absent, `nil`, `false`, a number, `""`, whitespace only) is
+  `{:error, {:missing_option, :account_id}}` - the family's answer for a missing account
+  option, replacing the bare atom `:account_id_required`. A number went into a JSON body as
+  a number and a query as its `to_string/1`, where the venue types the account id as a
+  string. The check each account call makes, for `DpExchange.Webull.Fake` to refuse exactly
+  what the real path refuses.
   """
-  @spec validate_account(keyword()) :: {:ok, String.t()} | {:error, :account_id_required}
+  @spec validate_account(keyword()) ::
+          {:ok, String.t()} | {:error, {:missing_option, :account_id}}
   def validate_account(opts) do
     case Keyword.get(opts, :account_id) do
-      account_id when is_binary(account_id) and account_id != "" -> {:ok, account_id}
-      _missing -> {:error, :account_id_required}
+      account_id when is_binary(account_id) ->
+        if String.trim(account_id) == "",
+          do: {:error, {:missing_option, :account_id}},
+          else: {:ok, account_id}
+
+      _missing ->
+        {:error, {:missing_option, :account_id}}
     end
   end
 
@@ -5848,37 +6017,67 @@ defmodule DpExchange.Webull.Rest do
   @spec order_instrument_types() :: [atom()]
   def order_instrument_types, do: @combinations |> Map.keys() |> Enum.sort()
 
-  @doc """
-  The type/time-in-force pairs this venue accepts for `instrument`, or an error naming an
-  instrument type this package cannot build an order for.
-
-  Exposed so the fake enforces the same matrix rather than a hand-copied one that drifts.
-  """
-  @spec order_combinations(atom()) :: {:ok, [{atom(), atom()}]} | {:error, term()}
-  def order_combinations(instrument), do: allowed_combinations(instrument)
-
   # A request that does not say is crypto, which is what this package served before the
   # instrument types widened. Changing that default would silently re-route existing
   # callers' orders onto a different market.
   defp instrument_type(request), do: Map.get(request, :instrument_type, :crypto)
 
+  # **Nothing about the order type or its duration is defaulted.** An absent `:order_type`
+  # used to become a limit order and an absent `:time_in_force` a GTC one, so a request that
+  # forgot to say it wanted a market order was sent as a limit order, and one that forgot
+  # its duration rested on the book until cancelled. Every value stays plausible and only
+  # the meaning is wrong; the caller is told which field is missing instead.
+  #
+  # Order of the answers: a type no combination of the instrument uses is
+  # `{:unsupported_order_type, type}`; a duration the instrument does not serve for that
+  # type is `{:unsupported_order_combination, type, tif}`.
   defp combination(request) do
-    instrument = instrument_type(request)
-    type = Map.get(request, :order_type, :limit)
-    tif = Map.get(request, :time_in_force, default_tif(instrument))
-
-    with {:ok, allowed} <- allowed_combinations(instrument) do
+    with {:ok, allowed} <- allowed_combinations(instrument_type(request)),
+         {:ok, type} <- required_field(request, :order_type),
+         :ok <- served_order_type(allowed, type),
+         {:ok, tif} <- required_field(request, :time_in_force) do
       if {type, tif} in allowed do
         {:ok, @order_type_names[type], @tif_names[tif]}
       else
-        {:error, {:unsupported_order_combination, instrument, type, tif}}
+        {:error, {:unsupported_order_combination, type, tif}}
       end
     end
   end
 
-  # GTC on everything the venue lists it for; crypto keeps the default it always had.
-  defp default_tif(:event), do: :gtc
-  defp default_tif(_instrument), do: :gtc
+  defp required_field(request, field) do
+    case Map.get(request, field) do
+      nil -> {:error, {:missing_field, field}}
+      found -> {:ok, found}
+    end
+  end
+
+  defp served_order_type(allowed, type) do
+    if Enum.any?(allowed, fn {served, _tif} -> served == type end),
+      do: :ok,
+      else: {:error, {:unsupported_order_type, type}}
+  end
+
+  defp known_order_keys(request, allowed) do
+    case request |> Map.keys() |> Enum.sort() |> Enum.find(&(&1 not in allowed)) do
+      nil -> :ok
+      key -> {:error, {:unsupported_order_field, key}}
+    end
+  end
+
+  # The order of the checks is the family's: request is a map, unknown keys, symbol, side,
+  # order type, duration and combination, quantity, price fields, client order id (all inside
+  # `order_leaf/3`). The account option and the credentials come after, in the callers.
+  defp checked_order(request) when is_map(request) do
+    with :ok <- known_order_keys(request, @order_request_keys),
+         :ok <- valid_order_symbol(Map.get(request, :symbol)),
+         :ok <- valid_order_side(Map.get(request, :side)),
+         {:ok, order_type, tif} <- combination(request),
+         {:ok, leaf} <- order_leaf(request, order_type, tif) do
+      {:ok, order_type, tif, leaf}
+    end
+  end
+
+  defp checked_order(request), do: {:error, {:invalid_order_request, request}}
 
   defp allowed_combinations(instrument) do
     case Map.fetch(@combinations, instrument) do
@@ -5890,11 +6089,12 @@ defmodule DpExchange.Webull.Rest do
   defp order_leaf(request, order_type, tif) do
     instrument = instrument_type(request)
 
-    with :ok <- required_order_identity(request),
-         :ok <- positive_numbers(request, [:quantity, :amount]),
+    with :ok <- positive_numbers(request, [:quantity, :amount]),
          {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+         :ok <- unexpected_price_fields(request, order_type),
          :ok <- required_order_prices(request, order_type),
          :ok <- positive_numbers(request, sent_price_fields(order_type)),
+         :ok <- valid_client_order_id(Map.get(request, :client_order_id)),
          {:ok, expire} <- expire_date(request, tif),
          {:ok, outcome} <- event_outcome(request),
          {:ok, session} <- support_trading_session(request) do
@@ -5963,16 +6163,26 @@ defmodule DpExchange.Webull.Rest do
   # `DateTime` (JSON-encoded as a full timestamp), `"20261201"`, `"2026-12-01T00:00:00Z"` or a
   # number reached the venue as a refusal about nothing the caller wrote. A `Date` is written
   # in that form; a string must already be one real date in it.
+  #
+  # **A GTD order with no expiry is refused**, `{:missing_field, :expire_date}`: it used to
+  # be sent without one and left to the venue. The converse is refused too - an
+  # `:expire_date` on any other duration was read only for GTD and silently dropped, so a
+  # caller who set one believed the order would lapse on that day.
   defp expire_date(request, "GTD") do
     case Map.get(request, :expire_date) do
-      nil -> {:ok, nil}
+      nil -> {:error, {:missing_field, :expire_date}}
       %Date{} = date -> {:ok, Date.to_iso8601(date)}
       text when is_binary(text) -> expire_date_text(text)
       other -> {:error, {:invalid_expire_date, other}}
     end
   end
 
-  defp expire_date(_request, _tif), do: {:ok, nil}
+  defp expire_date(request, _tif) do
+    case Map.get(request, :expire_date) do
+      nil -> {:ok, nil}
+      _given -> {:error, {:unexpected_field, :expire_date}}
+    end
+  end
 
   defp expire_date_text(text) do
     with {:ok, date} <- Date.from_iso8601(text),
@@ -6017,7 +6227,7 @@ defmodule DpExchange.Webull.Rest do
 
     case {quantity, amount} do
       {nil, nil} ->
-        {:error, :missing_order_size}
+        {:error, {:missing_field, :quantity}}
 
       {quantity, nil} ->
         {:ok, "QTY", %{"quantity" => wire_number(quantity)}}
@@ -6058,35 +6268,34 @@ defmodule DpExchange.Webull.Rest do
   # absent, because `put_present/3` skips `nil`. The venue refuses it, but only after the
   # request; refused here it names the field, and spends no write.
   # `Map.fetch!/2` on `:side` raised `KeyError` in the caller's process, on an order write.
+  # (The batch endpoint's identity check; `checked_order/1` makes the same three for a
+  # single order, in the same order.)
   defp required_order_identity(request) do
-    case Enum.find([:symbol, :side], &is_nil(Map.get(request, &1))) do
-      nil ->
-        with :ok <- valid_order_symbol(Map.get(request, :symbol)),
-             :ok <- valid_order_side(Map.get(request, :side)),
-             do: valid_client_order_id(Map.get(request, :client_order_id))
-
-      field ->
-        {:error, {:missing_required_field, field}}
-    end
+    with :ok <- valid_order_symbol(Map.get(request, :symbol)),
+         :ok <- valid_order_side(Map.get(request, :side)),
+         do: valid_client_order_id(Map.get(request, :client_order_id))
   end
 
   # A symbol that is not text raised `FunctionClauseError` in `SymbolFormat` (crypto) or went
-  # to the wire as `to_string/1` of whatever it was; an empty one is no product.
-  defp valid_order_symbol(symbol) when is_binary(symbol) and symbol != "", do: :ok
+  # to the wire as `to_string/1` of whatever it was; an empty or whitespace-only one is no
+  # product. A missing symbol is the same `{:invalid_symbol, nil}`.
+  defp valid_order_symbol(symbol) when is_binary(symbol) do
+    if String.trim(symbol) == "", do: {:error, {:invalid_symbol, symbol}}, else: :ok
+  end
+
   defp valid_order_symbol(symbol), do: {:error, {:invalid_symbol, symbol}}
 
-  # `common-order-place.md`'s `side` is BUY, SELL, or SHORT (options only, by its note). Any
-  # other value was upper-cased and SENT, so `:bid` or `:long` reached the venue as `"BID"`
-  # on a money write and failed there, after the request, naming nothing the caller wrote.
-  # Atoms and strings are both accepted, in any case, as `to_string/1 |> upcase` always did.
-  # Whether SHORT suits the instrument is the venue's to say: the page states it for options
-  # only and this package does not guess a narrower rule for the others.
-  @order_sides ~w(BUY SELL SHORT)
+  # `common-order-place.md`'s `side` is BUY, SELL, or SHORT (options only, by its note), and
+  # this package's own `capabilities/0` says `supports_short_selling: false`. **`:short` is
+  # refused here** - `{:invalid_side, :short}` - so the declaration and the builder agree: it
+  # used to be sent on every instrument and come back as an `Order` with `side: nil`.
+  # `:buy` and `:sell`, or `"buy"` and `"sell"` in any case, are accepted; any other value
+  # (`:bid`, `:long`, `nil`) would have been upper-cased and sent, failing at the venue after
+  # the request and naming nothing the caller wrote.
+  defp valid_order_side(side) when side in [:buy, :sell], do: :ok
 
-  defp valid_order_side(side) when is_atom(side) or is_binary(side) do
-    if String.upcase(to_string(side)) in @order_sides,
-      do: :ok,
-      else: {:error, {:invalid_side, side}}
+  defp valid_order_side(side) when is_binary(side) do
+    if String.downcase(side) in ["buy", "sell"], do: :ok, else: {:error, {:invalid_side, side}}
   end
 
   defp valid_order_side(side), do: {:error, {:invalid_side, side}}
@@ -6098,7 +6307,7 @@ defmodule DpExchange.Webull.Rest do
   defp valid_client_order_id(nil), do: :ok
 
   defp valid_client_order_id(id) when is_binary(id) do
-    if id != "" and String.length(id) <= 32,
+    if String.trim(id) != "" and String.length(id) <= 32,
       do: :ok,
       else: {:error, {:invalid_client_order_id, id}}
   end
@@ -6110,17 +6319,43 @@ defmodule DpExchange.Webull.Rest do
   sizing, and the prices its type requires. The same checks `place_order/3` makes before
   it signs anything, for `DpExchange.Webull.Fake` to answer exactly as the real path does.
   """
-  @spec validate_order_request(map()) :: :ok | {:error, term()}
+  @spec validate_order_request(term()) :: :ok | {:error, term()}
   def validate_order_request(request) do
-    with {:ok, order_type, tif} <- combination(request),
-         {:ok, _leaf} <- order_leaf(request, order_type, tif),
-         do: :ok
+    with {:ok, _order_type, _tif, _leaf} <- checked_order(request), do: :ok
   end
+
+  @doc """
+  Whether `request` is an order `preview_order/3` would price: a map, an instrument the
+  venue can preview (crypto is `{:preview_not_supported, :crypto}`), then every check
+  `validate_order_request/1` makes. The same first steps `preview_order/3` takes, for
+  `DpExchange.Webull.Fake`; a request that is not a map is `{:invalid_order_request, r}`
+  instead of a `BadMapError`.
+  """
+  @spec validate_preview_request(term()) :: :ok | {:error, term()}
+  def validate_preview_request(request) do
+    with :ok <- preview_target(request), do: validate_order_request(request)
+  end
+
+  defp preview_target(request) when is_map(request), do: previewable(instrument_type(request))
+  defp preview_target(request), do: {:error, {:invalid_order_request, request}}
 
   defp required_order_prices(request, order_type) do
     case Enum.find(sent_price_fields(order_type), &is_nil(Map.get(request, &1))) do
       nil -> :ok
-      field -> {:error, {:missing_required_field, field}}
+      field -> {:error, {:missing_field, field}}
+    end
+  end
+
+  # **A price the order type does not use is refused, not dropped.** `:price` on a market or
+  # stop order, `:stop_price` on a limit or market one, `:trailing_stop_step` on anything but
+  # a trailing stop were skipped by the builder, so the caller believed a protective stop or
+  # a limit was in force on an order that went out without it.
+  defp unexpected_price_fields(request, order_type) do
+    unused = [:price, :stop_price, :trailing_stop_step] -- sent_price_fields(order_type)
+
+    case Enum.find(unused, &(not is_nil(Map.get(request, &1)))) do
+      nil -> :ok
+      key -> {:error, {:unexpected_field, key}}
     end
   end
 
@@ -6187,8 +6422,11 @@ defmodule DpExchange.Webull.Rest do
             {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
         end
 
+      # No row at all (`{}`, `{"data": []}`, an unreadable `data`): the request was sent and
+      # the venue answered 2xx, so the order may be live. Not a bare shape error, which a
+      # caller would retry into a duplicate.
       _no_row ->
-        {:error, :unexpected_response_shape}
+        {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
     end
   end
 
@@ -6204,10 +6442,10 @@ defmodule DpExchange.Webull.Rest do
       symbol: Map.fetch!(request, :symbol),
       # **The contract's own vocabulary and number type, not the caller's spelling.**
       # `Core.Types.Order.side` is `:buy | :sell` and its numbers are `Decimal`; the request
-      # is validated for what the venue accepts (`"BUY"`, `:sell`, `:short`, an integer or a
-      # numeric string for a size), and this echoed it as typed, so a `"buy"` side or a `5`
-      # quantity came back inside an `%Order{}` that `Order.new/1` would refuse. `SHORT`
-      # has no slot (`side_atom/1`), so it is `nil`, as a read-back of it is.
+      # is validated for what the venue accepts (`"BUY"`, `:sell`, an integer or a numeric
+      # string for a size), and this echoed it as typed, so a `"buy"` side or a `5`
+      # quantity came back inside an `%Order{}` that `Order.new/1` would refuse. `:short` is
+      # refused before this point, so the side is always `:buy` or `:sell`.
       side: request |> Map.fetch!(:side) |> to_string() |> String.upcase() |> side_atom(),
       order_type: order_type_atom(order_type),
       time_in_force: tif_atom(tif),
@@ -6238,16 +6476,16 @@ defmodule DpExchange.Webull.Rest do
   The `Order` `place_order/3` answers for `request` under `id`, built by the same code.
 
   For `DpExchange.Webull.Fake`, which used to echo the request as typed. The request must
-  already have passed `validate_order_request/1`; the type and time in force default as
-  `place_order/3` defaults them.
+  already have passed `validate_order_request/1`, which requires the type and the time in
+  force: neither is defaulted.
   """
   @spec order_from_request(String.t(), map()) :: Order.t()
   def order_from_request(id, request) do
     placed_order(
       id,
       request,
-      request |> Map.get(:order_type, :limit) |> order_type_name(),
-      request |> Map.get(:time_in_force, default_tif(instrument_type(request))) |> tif_name()
+      request |> Map.get(:order_type) |> order_type_name(),
+      request |> Map.get(:time_in_force) |> tif_name()
     )
   end
 
@@ -6290,11 +6528,11 @@ defmodule DpExchange.Webull.Rest do
 
   Requires `opts[:account_id]`, as every order call on this venue does.
   """
-  @spec cancel_order(map(), String.t(), keyword()) ::
+  @spec cancel_order(map(), term(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
   def cancel_order(credentials, client_order_id, opts) do
-    with {:ok, account_id} <- account_id(opts),
-         :ok <- validate_order_id(client_order_id) do
+    with :ok <- validate_order_id(client_order_id),
+         {:ok, account_id} <- account_id(opts) do
       body = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, send_once(opts)) do
@@ -6317,11 +6555,11 @@ defmodule DpExchange.Webull.Rest do
   `Order` every field of which is `nil` except `provider` — a response that looks like an
   order and answers no question about one. See `to_order/1`.
   """
-  @spec get_order(map(), String.t(), keyword()) ::
+  @spec get_order(map(), term(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
   def get_order(credentials, client_order_id, opts) do
-    with {:ok, account_id} <- account_id(opts),
-         :ok <- validate_order_id(client_order_id) do
+    with :ok <- validate_order_id(client_order_id),
+         {:ok, account_id} <- account_id(opts) do
       params = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
       with {:ok, body} <- get("/trading/orders/get", params, credentials, opts),

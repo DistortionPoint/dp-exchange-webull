@@ -955,13 +955,66 @@ only — `:amount` is refused here, where `place_order/3` accepts it for equitie
 `:support_trading_session` (`:core`, `:all` or `:night`) is **required per order**, with
 no documented venue default, unlike on `place_order/3` where it is optional.
 
-An entry with no `:symbol` or `:side`, or a `LIMIT` entry with no `:price`, is refused by
-index before anything is sent: `{:error, {:batch_order_rejected, index,
-{:missing_required_field, field}}}`.
+An entry with no `:symbol` or `:side` (`{:invalid_symbol, nil}` / `{:invalid_side, nil}`), or
+a `LIMIT` entry with no `:price` (`{:missing_field, :price}`), is refused by index before
+anything is sent: `{:error, {:batch_order_rejected, index, reason}}`. So is a key the batch
+builder does not read (`{:unsupported_order_field, key}`, e.g. `:stop_price`) and a `:price`
+on a market entry (`{:unexpected_field, :price}`).
 
 `place_order/3` answers `{:error, {:order_unconfirmed, client_order_id,
-:unexpected_response_shape}}` when the venue accepts (2xx) but its row names no order. The
-order may be live: settle it with `get_order/3` and the id in the tuple.
+:unexpected_response_shape}}` when the venue accepts (2xx) but its row names no order **or
+the response has no row at all** (`{}`, an empty or unreadable `data`; it was a bare
+`{:error, :unexpected_response_shape}`, which a caller retries into a duplicate). The order
+may be live: settle it with `get_order/3` and the id in the tuple. **Only an outcome that may
+have reached the venue is wrapped**: no credentials (`{:error, {:missing_credentials,
+:webull}}`, the same as the Fake), our own rate limiter refusing and a signing failure are
+decided before anything is sent and are the plain `{:error, reason}`. `replace_order/4`
+follows the same rule for its own send (`{:order_unconfirmed, order_id, reason}`).
+
+## `place_order/3` and `preview_order/3` check the request, in this order, before signing
+
+A map (`{:invalid_order_request, r}`), then **no key the builder does not read**
+(`{:unsupported_order_field, key}`: `post_only`, `reduce_only`, `end_time` were ignored), the
+symbol (`{:invalid_symbol, v}`, blank counts), the side (`{:invalid_side, v}`: `:buy`/`:sell`,
+or text in any case; **`:short` is refused**, `capabilities/0` says
+`supports_short_selling: false`, where it used to be sent and come back as `side: nil`),
+**`:order_type` and `:time_in_force`, both required, never defaulted**
+(`{:missing_field, key}`: an absent type used to become a limit order and an absent duration
+a GTC one), a type the instrument does not use (`{:unsupported_order_type, type}`), a
+duration it does not serve for that type (`{:unsupported_order_combination, type, tif}`, the
+instrument no longer in the tuple), the size (`{:missing_field, :quantity}`), the price
+fields (`{:unexpected_field, key}` for a `:price` on a market or stop order, a `:stop_price`
+on a limit or market one, a `:trailing_stop_step` on anything else; `{:missing_field, key}`
+for one the type needs), the numbers (`{:invalid_quantity, v}`, `{:invalid_amount, v}`,
+`{:invalid_price, v}`, `{:invalid_stop_price, v}`, `{:invalid_trailing_stop_step, v}`; **a
+float is refused**, it has lost digits - use a `Decimal`, an integer or numeric text), the
+caller's `client_order_id` (`{:invalid_client_order_id, v}`, 32 characters at most, blank
+refused), a GTD order's expiry (`{:missing_field, :expire_date}`; an `:expire_date` on any
+other duration is `{:unexpected_field, :expire_date}`), then the account option
+(`{:error, {:missing_option, :account_id}}`) and the credentials. `Fake` answers the same, in
+the same order, from the same function. A preview that is not a map is
+`{:invalid_order_request, r}` (it raised), and a preview of crypto is still
+`{:preview_not_supported, :crypto}` first.
+
+**`replace_order/4` is told which order it edits.** `opts[:instrument_type]` and
+`opts[:order_type]` (the type of the order being amended, whose edit table applies) are
+required: absent, each is `{:error, {:missing_option, key}}`. They used to default to an equity
+limit order, where `place_order/3` defaults to crypto. `changes` that is not a map is
+`{:error, {:invalid_order_request, changes}}` (it raised).
+
+**Order ids** (`get_order/3`, `cancel_order/3`, `replace_order/4`): `nil`, non-text or blank
+(`"  "` was sent) is `{:error, {:invalid_order_id, v}}`, checked **before** the account option
+and the credentials (it was `{:invalid_client_order_id, v}`, after the account). The tag
+`{:invalid_client_order_id, v}` now means only the `client_order_id` inside a placement.
+
+**A 404 is a permanent refusal**: `{:refused, :not_found}` from every REST read and write (it
+was `{:error, {:exchange_error, :webull, "HTTP 404..."}}`, which Core calls retryable). The
+Fake answers the same for an order id it never issued.
+
+**The Fake refuses a reused `client_order_id`** as `{:refused, {:duplicate_client_order_id,
+id}}` instead of overwriting the stored order: the venue requires the id unique per account.
+The vendor reference does not state the venue's own wording for a duplicate, so that wording
+is unmeasured; the shape (a refusal, never a second order) is what to rely on.
 
 ## Tokens: a token that exists is not a token that works
 
@@ -1011,22 +1064,24 @@ yourself only if you have your own reason to believe a repeat is harmless.
 ## An order's numbers and ids are checked before anything is signed
 
 `quantity`, `amount`, and the price fields the order type sends (`price`, `stop_price`,
-`trailing_stop_step`) must be a finite number above zero, in any of `Decimal`, integer, float
-or numeric text: otherwise `{:error, {:invalid_number, field, value}}`, by index inside a
+`trailing_stop_step`) must be a finite number above zero, in any of `Decimal`, integer or
+numeric text (a float is refused): otherwise `{:error, {:invalid_quantity, v}}` /
+`{:invalid_amount, v}` / `{:invalid_price, v}` / `{:invalid_stop_price, v}` /
+`{:invalid_trailing_stop_step, v}` (it was `{:invalid_number, field, v}`), by index inside a
 batch. They go out as the venue's strings in full notation (`"0.00000001"`, never `"1.0e-8"`
 and never a JSON number). `replace_order/4` holds its `changes` to the same rule, treats a
 `nil` value as no change (`{:error, :no_order_changes}` when nothing is left), and refuses an
 `:order_type` or `:time_in_force` it has no wire name for
 (`{:unsupported_order_type, v}` / `{:unsupported_time_in_force, v}`) instead of dropping it.
-`cancel_order/3`, `get_order/3` and `replace_order/4` refuse a missing or empty
-`client_order_id` as `{:error, {:invalid_client_order_id, id}}`. `get_order_book/3` on
+`cancel_order/3`, `get_order/3` and `replace_order/4` refuse a missing, empty or blank
+order id as `{:error, {:invalid_order_id, id}}`. `get_order_book/3` on
 `US_FUTURES` takes `depth` 1 to 10 (`{:depth_out_of_range, n, max: 10}`), as the venue's page
 states. The fake refuses all of these identically.
 
 **An order's `expire_date` and `event_outcome` are checked before a request**, in
 `place_order/3` and `preview_order/3` (and the fake). A GTD `expire_date` is a `Date` or one
 real `yyyy-MM-dd` string (`{:error, {:invalid_expire_date, v}}` otherwise; a missing one is
-still left missing); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
+`{:missing_field, :expire_date}`); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
 (`{:error, {:invalid_event_outcome, v}}`). **Time bounds** (`:start`/`:end` on
 `get_transfers/2` and `get_transactions/2`, `:since`/`:until` on a `history: true`
 `get_orders/2`) are `DateTime`s or absent: anything else is
@@ -1034,15 +1089,15 @@ still left missing); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
 `quantity` (negative is `:short`), which the vendor page does not document and which has not
 been measured against a live short position.
 
-**`opts[:account_id]` must be non-empty text** on every account and order call; `nil`, a number,
-`false` and `""` are `{:error, :account_id_required}`, here and in the fake (`place_orders/3`
-included). `:activity_types` on `get_transfers/2` and `get_transactions/2` is a non-empty list
+**`opts[:account_id]` must be non-blank text** on every account and order call; `nil`, a number,
+`false`, `""` and whitespace are `{:error, {:missing_option, :account_id}}` (it was the bare
+atom `:account_id_required`), here and in the fake (`place_orders/3` included). `:activity_types` on `get_transfers/2` and `get_transactions/2` is a non-empty list
 of text or the venue's own comma-joined string; anything else is
 `{:error, {:invalid_activity_types, value}}`.
 
 **An `Order` that `place_order/3` hands back is in the contract's vocabulary, not in your
-spelling of the request**: `side` is `:buy` or `:sell` (`nil` for `SHORT`, which `Order` has no
-word for, as a read-back of one is), and `quantity`, `price` and `stop_price` are `Decimal`s
+spelling of the request**: `side` is `:buy` or `:sell` (a read-back of a `SHORT` order is `nil`,
+which `Order` has no word for; placing one is refused), and `quantity`, `price` and `stop_price` are `Decimal`s
 whatever you sent (an integer, a numeric string). The fake builds its orders with the same
 function. **A replace the venue accepted whose read-back then fails** is
 `{:error, {:replace_accepted_unread, client_order_id, reason}}`: the amendment took effect,

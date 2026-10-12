@@ -353,6 +353,8 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.replace_order(@credentials, "abc", %{price: Decimal.new("191")},
                  credentials: @credentials,
                  account_id: @account,
+                 instrument_type: :equity,
+                 order_type: :limit,
                  plug: plug,
                  retry_attempts: 0
                )
