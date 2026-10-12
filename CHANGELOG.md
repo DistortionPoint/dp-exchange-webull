@@ -22,6 +22,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Docs (`usage-rules.md` checked line by line against the code):** documents the jittered
+  reconnect backoff and its `delay_ms` telemetry, `get_order_book/2` categories, default depth and
+  `{:invalid_option, :depth, value}`, the batch refusals (`batch_too_large`, `empty_batch`,
+  `invalid_batch`, `unsupported_batch_*`), `oauth_token` being sent once,
+  `support_trading_session` on `place_order/3`, and the full not-ported list.
+
 ## [0.4.144] - 2026-10-12
 
 - **A Socket in its reconnect backoff ignored its parent stopping it.** The wait, up to 30s, was

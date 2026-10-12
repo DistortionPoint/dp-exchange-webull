@@ -215,6 +215,13 @@ connects and dies cannot spin through the venue's five-connections-per-key budge
 goes for a socket that reaches the broker's CONNACK and drops within 30 s: it counts as a
 failed attempt toward the reconnect backoff instead of resetting it.
 
+**That reconnect backoff is jittered.** A shard's socket redials at once on its first failure,
+then waits 1 s doubling to 30 s. Each wait is shortened by a random amount of up to a quarter
+(`Socket.jittered_delay_ms/1`, never lengthened), so five shards the venue dropped together
+do not all redial on the same turn. The `delay_ms` its telemetry event reports is the delay
+actually waited. The wait ends when `Feed` stops the socket, so a stopped or orphaned shard
+does not dial the venue once more after its parent has gone.
+
 **Your `app_secret` and `access_token` will not appear in `Feed`'s crash log.** `Feed`
 keeps what you passed at start (or on a later `subscribe/2`) so it can replay your
 subscriptions after a reconnect — see above — and a crash of `Feed` logs its state via
@@ -664,6 +671,13 @@ instead of storing `nil` where `VolumeProfile.point_of_control/1` adds sizes.
 is `Core.Types.OrderBook`'s contract rather than this package's convenience. You do not need
 to sort what you receive, and you should not assume the venue's row order means anything.
 
+**Books exist for `US_STOCK` (the default), `US_ETF` and `US_FUTURES` only**; crypto and
+option categories are refused before any request, `{:error, {:unsupported_book_category,
+category}}`. `opts[:depth]` is levels per side and defaults to `10`. A `depth` that is not a
+positive whole number is `{:error, {:invalid_option, :depth, value}}` (it was
+`depth_out_of_range`), and on `US_FUTURES`, where the venue states 1 to 10, so is one
+outside that range. Nothing is clamped to the nearest depth the venue would accept.
+
 A level whose price this package cannot read is dropped rather than passed on with a `nil`
 price, because `level/0` is `{Decimal.t(), Decimal.t()}` and `hd(bids)` must be able to
 answer with a real number. A level with a readable price and **no readable size refuses the
@@ -794,7 +808,7 @@ before this version and saw nothing, that was not your venue being quiet:
 `:telemetry.attach/4` against a name nobody emits succeeds, so an empty panel was
 indistinguishable from no traffic. Every one of them fires now.
 
-Four things to know before you build on them:
+Five things to know before you build on them:
 
 - **Telemetry is the metrics channel; `Core.Notice` is the action channel.** Telemetry is
   aggregate and lossy by design. Alarm on notices. Graph telemetry. Alarming on a gauge
@@ -810,6 +824,12 @@ Four things to know before you build on them:
 - **`:bytes` may be absent from `[:dp_exchange, :link, :event]`**, and absent is not zero. A
   polling route has no frame, so there is no byte count that means what a socket's does.
   Treat a missing `:bytes` as "this route cannot measure that", not as no data.
+- **`delay_ms` on `[:dp_exchange, :link, :reconnect_attempt]` is the delay actually waited**,
+  not the ladder's rung. A socket whose session dropped waits 0 ms on the first attempt, then
+  1 s doubling to 30 s, each wait shortened by a random amount of up to a quarter so that five
+  shards the venue dropped together do not redial together. Only shortened, never lengthened:
+  30 s stays the ceiling. A session that lived under 30 s counts as another failed attempt, not
+  a reset. The wait ends at once if the socket's parent stops it.
 
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
@@ -847,7 +867,8 @@ the venue yourself.
 accounts, transfers and order book are all implemented, along with options, futures, event
 contracts, fundamentals, screeners, news and watchlists. `get_trade_history/2` and
 `get_market_overview/1` are **not** — both still answer `{:error, :not_supported}`, as
-not-yet-ported rather than as an absence at the venue. What remains `:unsupported` is listed
+not-yet-ported rather than as an absence at the venue (so are `get_funding/2`,
+`get_contract_stats/2`, `get_rate_limit_status/2` and `test_connection/2`). What remains `:unsupported` is listed
 there and per endpoint.
 
 The **money-movement** callbacks are the ones that will not arrive: Webull's published API
@@ -1014,7 +1035,8 @@ sent and rejected by the venue.
 `place_orders/3` is **not `place_order/3` in a loop** — the venue accepts the batch as one
 request. Both of its limits are enforced before the request: **50 orders** and **equities
 only**. A batch over the cap is refused rather than split, because splitting turns one atomic
-request into several.
+request into several: `{:error, {:batch_too_large, count, 50}}`. An empty list is
+`{:error, :empty_batch}` and a non-list `{:error, :invalid_batch}`.
 
 **The result is per order.** The venue validates each and returns each; a batch where three
 of five were accepted is the normal shape. The vendor also notes the endpoint is not
@@ -1025,7 +1047,9 @@ against, not discovered.** `order_type` is `MARKET` or `LIMIT` only — no `STOP
 `STOP_LOSS_LIMIT` or `TRAILING_STOP_LOSS`, all real for a single order.
 `order_type` and `time_in_force` are **required per row** (`{:missing_field, key}`, never
 defaulted). `time_in_force` is `DAY`, the one member of this endpoint's own enum; a caller who
-asks for anything else is refused rather than silently switched to `DAY`. Sizing is `QTY`
+asks for anything else is refused rather than silently switched to `DAY`
+(`{:unsupported_batch_time_in_force, v}`, and `{:unsupported_batch_order_type, v}` for the
+order type). Sizing is `QTY`
 only — `:amount` is refused here, where `place_order/3` accepts it for equities. And
 `:support_trading_session` (`:core`, `:all` or `:night`) is **required per order**, with
 no documented venue default, unlike on `place_order/3` where it is optional.
@@ -1157,7 +1181,8 @@ Every request is signed afresh for each attempt, so a retry after a timeout or a
 real second request rather than a replay the venue refuses. That makes a retried write able
 to take effect twice, and the venue documents no idempotency key that would deduplicate a
 repeated order. So `place_order`, `place_orders`, `replace_order`, `cancel_order`,
-`create_token` and every watchlist write are **sent once**. A timeout on one of them means
+`create_token`, `oauth_token` (an authorization code is single-use and a refresh token may
+rotate) and every watchlist write are **sent once**. A timeout on one of them means
 "unknown": read the order or watchlist back before sending it again. This is a guarantee:
 a `:retry_attempts` you pass on one of these calls is overridden with 1.
 
@@ -1187,7 +1212,9 @@ states. The fake refuses all of these identically.
 `place_order/3` and `preview_order/3` (and the fake). A GTD `expire_date` is a `Date` or one
 real `yyyy-MM-dd` string (`{:error, {:invalid_expire_date, v}}` otherwise; a missing one is
 `{:missing_field, :expire_date}`); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
-(`{:error, {:invalid_event_outcome, v}}`). **Time bounds** (`:start`/`:end` on
+(`{:error, {:invalid_event_outcome, v}}`). `:support_trading_session` is `:core`, `:all` or
+`:night` (`{:error, {:unsupported_support_trading_session, v}}` otherwise); optional on
+`place_order/3`, left off the wire when absent. **Time bounds** (`:start`/`:end` on
 `get_transfers/2` and `get_transactions/2`, `:since`/`:until` on a `history: true`
 `get_orders/2`) are `DateTime`s or absent: anything else is
 `{:error, {:invalid_time, key, value}}`. A `get_positions/2` side is read from the sign of
@@ -1383,6 +1410,9 @@ Everything above is about a shard whose socket is up and has stopped delivering.
 whose socket never opened at all — a handshake that timed out, a venue refusing connections
 — cannot be judged that way: it has never delivered anything, so there is no last-delivery
 instant to age, and **"never worked" is not "stopped working"**.
+
+(A socket that *was* up and dropped is a different thing again: it reconnects itself, with the
+jittered backoff described under Telemetry.)
 
 Such a shard is retried on its own schedule: one second, doubling, capped at a minute, until
 it opens or the slot is filled by a resubscribe of its own. A `:coverage_change` warning
