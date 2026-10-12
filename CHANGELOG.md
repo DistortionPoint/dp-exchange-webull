@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.140] - 2026-10-12
+
 ### Fixed
 
 - **Docs that contradicted the code, corrected (tick T).** `Rest.get_trades/3` said the tape
