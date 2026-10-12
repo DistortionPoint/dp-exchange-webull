@@ -601,19 +601,18 @@ defmodule DpExchange.Webull.WatchlistsTest do
       assert :counters.get(counter, 1) == 1
     end
 
-    test "a caller can still ask for retries" do
-      # `put_new`, not `put`. The control: proves the harness sees retries at all, so the
-      # "exactly once" above is this function's choice and not a transport that never retries.
+    test "a caller's retry_attempts: 3 still sends a create exactly once" do
+      # "Sent once" is a guarantee: `Keyword.put`, not `put_new`.
       counter = :counters.new(1, [])
 
-      assert {:error, _reason} =
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
                Rest.create_watchlist("desk", [], @credentials,
                  plug: counting_failure(counter),
                  retry_delay: 1,
                  retry_attempts: 3
                )
 
-      assert :counters.get(counter, 1) > 1
+      assert :counters.get(counter, 1) == 1
     end
   end
 end

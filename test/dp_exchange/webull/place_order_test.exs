@@ -614,13 +614,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       bodies = drain_attempts([])
       ids = Enum.map(bodies, &client_order_id_of/1)
 
-      assert length(ids) > 1,
-             "the retry loop must actually have retried for this to mean anything"
+      # A write is sent once whatever the caller passes (`send_once/1` is `Keyword.put`), so
+      # `retry_attempts: 3` produces one attempt, and it carries a generated id.
+      assert length(ids) == 1, "a placement must be sent exactly once: #{inspect(bodies)}"
 
       assert Enum.all?(ids, &is_binary/1),
              "every attempt must carry a client_order_id: #{inspect(bodies)}"
-
-      assert length(Enum.uniq(ids)) == 1, "a retry must not mint a new key: got #{inspect(ids)}"
     end
 
     defp client_order_id_of(body) do

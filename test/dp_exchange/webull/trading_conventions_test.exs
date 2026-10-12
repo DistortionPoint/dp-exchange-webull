@@ -86,6 +86,22 @@ defmodule DpExchange.Webull.TradingConventionsTest do
     )
   end
 
+  defp batch_entry(overrides) do
+    Map.merge(
+      %{
+        instrument_type: :equity,
+        symbol: "AAPL",
+        side: :buy,
+        order_type: :limit,
+        time_in_force: :day,
+        quantity: Decimal.new("1"),
+        price: Decimal.new("10"),
+        support_trading_session: :core
+      },
+      overrides
+    )
+  end
+
   # The real call, with `extra` taking precedence over the defaults.
   defp place(request, extra \\ [], credentials \\ @credentials) do
     Rest.place_order(
@@ -176,6 +192,89 @@ defmodule DpExchange.Webull.TradingConventionsTest do
                  "abc",
                  %{quantity: 2},
                  [plug: exploding(), retry_attempts: 0] ++ edit
+               )
+    end
+
+    test "retry_attempts: 3 still sends place, replace and a watchlist write once" do
+      # Every write is sent once whatever the caller passes (`send_once/1`): a timeout after
+      # that one send is unconfirmed for place, replace and a watchlist write alike, and the
+      # plug sees exactly one request per call. The limiter (the setup's permissive one)
+      # grants every call.
+      counter = :counters.new(1, [])
+
+      timing_out = fn conn ->
+        :counters.add(counter, 1, 1)
+        Req.Test.transport_error(conn, :timeout)
+      end
+
+      retrying = [retry_attempts: 3, retry_delay: 1]
+
+      assert {:error, {:order_unconfirmed, "mine-1", _reason}} =
+               place(equity(%{client_order_id: "mine-1"}), [plug: timing_out] ++ retrying)
+
+      assert :counters.get(counter, 1) == 1
+
+      assert {:error, {:order_unconfirmed, "abc", _reason}} =
+               Rest.replace_order(
+                 @credentials,
+                 "abc",
+                 %{quantity: 2},
+                 [plug: timing_out, account_id: @account, instrument_type: :equity] ++
+                   [order_type: :limit] ++ retrying
+               )
+
+      assert :counters.get(counter, 1) == 2
+
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
+               Rest.delete_watchlist("wl-1", @credentials, [plug: timing_out] ++ retrying)
+
+      assert :counters.get(counter, 1) == 3
+
+      throttled = {:exchange_error, :webull, "Throttled by our own rate limiter (x)"}
+      assert Rest.unsent?(throttled, retry_attempts: 1)
+      assert Rest.unsent?(throttled, retry_attempts: 0)
+      assert Rest.unsent?(throttled, [])
+      refute Rest.unsent?(throttled, retry_attempts: 3)
+      refute Rest.unsent?(:rate_limit_timeout, retry_attempts: 3)
+      refute Rest.unsent?("Rate limiter unavailable", retry_attempts: nil)
+      assert Rest.unsent?({:missing_credentials, :webull}, retry_attempts: 3)
+    end
+
+    test "a batch that may have been placed carries every id; one never sent does not" do
+      timing_out = fn conn -> Req.Test.transport_error(conn, :timeout) end
+      batch = [batch_entry(%{client_order_id: "b-1"}), batch_entry(%{symbol: "MSFT"})]
+
+      assert {:error, {:order_unconfirmed, ["b-1", generated], _reason}} =
+               Rest.place_orders(@credentials, batch,
+                 account_id: @account,
+                 plug: timing_out,
+                 retry_attempts: 0
+               )
+
+      assert is_binary(generated) and String.length(generated) == 32
+
+      # A 2xx that holds no row at all is as unproven as a timeout.
+      assert {:error, {:order_unconfirmed, ["b-1"], :unexpected_response_shape}} =
+               Rest.place_orders(@credentials, [batch_entry(%{client_order_id: "b-1"})],
+                 account_id: @account,
+                 plug: responding([], 200),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.place_orders(%{}, batch,
+                 account_id: @account,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
+
+      Config.put_override(:rate_limit_module, FullLimiter)
+
+      assert {:error, {:exchange_error, :webull, "Throttled by our own rate limiter" <> _rest}} =
+               Rest.place_orders(@credentials, batch,
+                 account_id: @account,
+                 plug: exploding(),
+                 retry_attempts: 0
                )
     end
 
@@ -486,6 +585,66 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       expected = {:error, {:unsupported_instrument_type, :bond}}
       assert expected == Rest.replace_order(@credentials, "abc", @changes, opts)
       assert expected == Fake.replace_order(@credentials, "abc", @changes, opts)
+    end
+  end
+
+  describe "event contract AMOUNT sizing is BUY-only and FOK-only (common-order-place.md)" do
+    defp event_amount(overrides) do
+      Map.merge(
+        %{
+          instrument_type: :event,
+          symbol: "EVT-1",
+          side: :buy,
+          order_type: :limit,
+          time_in_force: :fok,
+          amount: Decimal.new("25"),
+          price: Decimal.new("0.5"),
+          event_outcome: :yes
+        },
+        overrides
+      )
+    end
+
+    test "a SELL or a non-FOK duration is refused before the request, by Rest and the Fake" do
+      for {overrides, expected} <- [
+            {%{side: :sell}, {:invalid_side, :sell}},
+            {%{time_in_force: :gtc}, {:unsupported_order_combination, :amount, :gtc}}
+          ] do
+        request = event_amount(overrides)
+        refusal = {:error, expected}
+
+        assert refusal == Rest.validate_order_request(request)
+        assert refusal == place(request)
+        assert refusal == Fake.place_order(@credentials, request, account_id: @account)
+      end
+    end
+
+    test "BUY at FOK is accepted, and quantity sizing is not restricted" do
+      assert :ok == Rest.validate_order_request(event_amount(%{}))
+
+      sold = event_amount(%{side: :sell, amount: nil, quantity: Decimal.new("3")})
+      assert :ok == Rest.validate_order_request(sold)
+    end
+  end
+
+  describe "cancel_order/3 is sent once whatever the caller passes" do
+    test "retry_attempts: 3 on a failing cancel makes exactly one request" do
+      counter = :counters.new(1, [])
+
+      plug = fn conn ->
+        :counters.add(counter, 1, 1)
+        responding(%{"msg" => "down"}, 503).(conn)
+      end
+
+      assert {:error, _reason} =
+               Rest.cancel_order(@credentials, "abc",
+                 account_id: @account,
+                 plug: plug,
+                 retry_attempts: 3,
+                 retry_delay: 1
+               )
+
+      assert :counters.get(counter, 1) == 1
     end
   end
 

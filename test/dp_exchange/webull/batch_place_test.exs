@@ -158,7 +158,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, _results} =
                Rest.place_orders(@credentials, [order(), order(%{symbol: "MSFT"})],
                  account_id: "acct-1",
-                 plug: capturing([], me),
+                 plug: capturing([%{"order_id" => "1"}, %{"order_id" => "2"}], me),
                  retry_attempts: 0
                )
 
@@ -174,7 +174,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, _results} =
                Rest.place_orders(@credentials, [order(%{client_order_id: "mine-1"})],
                  account_id: "acct-1",
-                 plug: capturing([], me),
+                 plug: capturing([%{"order_id" => "1"}], me),
                  retry_attempts: 0
                )
 
@@ -203,7 +203,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, _results} =
                Rest.place_orders(@credentials, orders,
                  account_id: "acct-1",
-                 plug: responding([]),
+                 plug: responding([%{"order_id" => "1"}]),
                  retry_attempts: 0
                )
     end
@@ -416,7 +416,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, _results} =
                DpExchange.Webull.place_orders(@credentials, [order()],
                  account_id: "acct-1",
-                 plug: responding([]),
+                 plug: responding([%{"order_id" => "1"}]),
                  retry_attempts: 0
                )
     end

@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **BREAKING: a write is sent exactly once whatever `:retry_attempts` the caller passes.**
+  `send_once/1` was `Keyword.put_new`, so `retry_attempts: 3` made a cancel, a placement, a
+  replace or a watchlist write up to three requests. It is now `Keyword.put(..., 1)`. This
+  also makes the limiter-on-retry case below unreachable through `Rest`'s writes;
+  `unsent?/2` stays for callers of the public helper.
+- **BREAKING (error value): an event contract order sized by `:amount` is refused unless it
+  is a BUY at FOK**, as `common-order-place.md` states: `{:invalid_side, side}` or
+  `{:unsupported_order_combination, :amount, time_in_force}`, before the request, in `Rest`
+  and the `Fake`. It was sent and left to the venue.
+- **BREAKING (error value): `place_orders/3` answers `{:error, {:order_unconfirmed, ids,
+  reason}}` for a timeout, a 5xx or a 2xx with no readable rows.** It was a bare
+  `{:error, reason}` (or `{:ok, []}` for an empty body), so the per-order `client_order_id`s
+  this package generated were lost and a retry placed every order again. `ids` lists every id
+  sent, in order. Missing credentials and our own limiter refusing stay plain.
+- New `Rest.unsent?/2` and `Rest.write_outcome/2` take the options a request was sent under:
+  a limiter refusal counts as "never sent" only for a single attempt, because
+  `Core.HttpClient` asks the limiter again before every retry, after attempt one may have
+  landed. Since writes are now always sent once (first entry), no `Rest` write reaches that
+  case; the helpers are defensive and behave as before for the single-attempt default.
+  Missing credentials stay plain.
+- `usage-rules.md` said a price field the order type does not use is "dropped rather than
+  sent"; it is refused as `{:unexpected_field, key}`. The batch section now says `order_type`
+  and `time_in_force` are required per row.
+
 ## [0.4.136] - 2026-10-12
 
 ### Changed

@@ -1375,9 +1375,10 @@ defmodule DpExchange.Webull.Rest do
   # watchlist or token changed. The venue documents no idempotency key — `client_order_id`
   # names the order, and nothing in the reference says a repeated place is deduplicated
   # rather than refused or placed again — so a 5xx whose request in fact landed, retried,
-  # would at best tell the caller a success failed and at worst act twice. `put_new`, so a
-  # caller that has its own reason can still ask for retries.
-  defp send_once(opts), do: Keyword.put_new(opts, :retry_attempts, 1)
+  # would at best tell the caller a success failed and at worst act twice. `put`, not
+  # `put_new`: "sent once" is a guarantee, so a caller's own `retry_attempts: 3` does not
+  # turn a cancel or a placement into three requests.
+  defp send_once(opts), do: Keyword.put(opts, :retry_attempts, 1)
 
   # `:rate_limit_blocking` was absent from this allowlist entirely — the same
   # family-wide gap traced and fixed on `Subscription`'s copy of this function while
@@ -2075,7 +2076,7 @@ defmodule DpExchange.Webull.Rest do
         # back so the caller reads the order instead of resending. Decided-before-sending
         # outcomes (no credentials, our own limiter) are plain, as for `place_order/3`.
         {:error, reason} ->
-          if unsent?(reason),
+          if unsent?(reason, send_once(opts)),
             do: {:error, reason},
             else: {:error, {:order_unconfirmed, client_order_id, reason}}
 
@@ -3362,7 +3363,8 @@ defmodule DpExchange.Webull.Rest do
                body,
                credentials,
                send_once(opts)
-             )
+             ),
+             send_once(opts)
            ),
          {:ok, row} <- write_outcome(first_row(response)),
          # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
@@ -3487,7 +3489,8 @@ defmodule DpExchange.Webull.Rest do
       with :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
            {:ok, response} <-
              write_outcome(
-               post("/market-data/watchlists/update", body, credentials, send_once(opts))
+               post("/market-data/watchlists/update", body, credentials, send_once(opts)),
+               send_once(opts)
              ),
            # `update-watchlist.md:168-186` documents the same `SuccessResponseVo`
            # `{"success": boolean}` shape every other watchlist write already guards with
@@ -3530,7 +3533,8 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, response} <-
            write_outcome(
-             post("/market-data/watchlists/delete", body, credentials, send_once(opts))
+             post("/market-data/watchlists/delete", body, credentials, send_once(opts)),
+             send_once(opts)
            ),
          :ok <- write_outcome(watchlist_success(response)) do
       {:ok, :ok}
@@ -3546,16 +3550,20 @@ defmodule DpExchange.Webull.Rest do
   happened, so it is `{:error, {:write_unconfirmed, nil, reason}}` (`nil`: this venue takes no
   idempotency key for a watchlist write; `reason` bounded). A caller that read a bare
   `{:error, _}` as "worth retrying" would repeat a create or a delete. Pre-send failures,
-  `{:refused, _}` and `:ok`/`{:ok, _}` pass through unchanged. For `DpExchange.Webull.Fake`.
+  `{:refused, _}` and `:ok`/`{:ok, _}` pass through unchanged. `opts` are the options the
+  request was sent under (`unsent?/2`): a limiter refusal on a RETRY of a write that was
+  already sent is not proof that nothing was sent. For `DpExchange.Webull.Fake`.
   """
-  @spec write_outcome(term()) :: term()
-  def write_outcome({:error, reason} = error) do
-    if unsent?(reason),
+  @spec write_outcome(term(), keyword()) :: term()
+  def write_outcome(result, opts \\ [])
+
+  def write_outcome({:error, reason} = error, opts) do
+    if unsent?(reason, opts),
       do: error,
       else: {:error, {:write_unconfirmed, nil, bound_write_reason(reason)}}
   end
 
-  def write_outcome(other), do: other
+  def write_outcome(other, _opts), do: other
 
   defp bound_write_reason(reason) when is_atom(reason), do: reason
 
@@ -3653,7 +3661,8 @@ defmodule DpExchange.Webull.Rest do
     path = "/market-data/watchlists/instruments/#{action}"
 
     with :ok <- validate_watchlist_target(:id, watchlist_id),
-         {:ok, response} <- write_outcome(post(path, body, credentials, send_once(opts))),
+         {:ok, response} <-
+           write_outcome(post(path, body, credentials, send_once(opts)), send_once(opts)),
          :ok <- write_outcome(watchlist_success(response)) do
       {:ok, %{"success" => true}}
     end
@@ -5714,7 +5723,7 @@ defmodule DpExchange.Webull.Rest do
         # reconcile and wrapping it would send the caller looking for an order that was
         # never placed: it stays a plain `{:error, reason}`.
         {:error, reason} ->
-          if unsent?(reason),
+          if unsent?(reason, send_once(opts)),
             do: {:error, reason},
             else: {:error, {:order_unconfirmed, client_order_id, reason}}
 
@@ -5745,6 +5754,36 @@ defmodule DpExchange.Webull.Rest do
   def unsent?(_possibly_sent), do: false
 
   @doc """
+  `unsent?/1` for a request sent under `opts`: a refusal by our own limiter proves nothing
+  was sent only when the request had a single attempt.
+
+  `Core.HttpClient` asks the limiter again before every retry. With `retry_attempts: 3` a
+  limiter refusal on the second attempt follows a first attempt that was sent and may have
+  landed, so reporting it as the plain `{:error, reason}` would send the caller to place the
+  order again. `Rest` sends every write once (`retry_attempts: 1`) unless the caller asked
+  otherwise, so the common case is unchanged. Missing or unusable credentials are decided
+  before the first attempt whatever `retry_attempts` is. A `:retry_attempts` that is not an
+  integer is treated as retrying (the conservative answer).
+  """
+  @spec unsent?(term(), keyword()) :: boolean()
+  def unsent?(reason, opts) do
+    unsent?(reason) and (not limiter_refusal?(reason) or single_attempt?(opts))
+  end
+
+  defp limiter_refusal?({:exchange_error, _venue, message}), do: limiter_refusal?(message)
+  defp limiter_refusal?(:rate_limit_timeout), do: true
+  defp limiter_refusal?("Throttled by our own rate limiter" <> _rest), do: true
+  defp limiter_refusal?("Rate limiter unavailable" <> _rest), do: true
+  defp limiter_refusal?(_other), do: false
+
+  defp single_attempt?(opts) do
+    case Keyword.get(opts, :retry_attempts, 1) do
+      attempts when is_integer(attempts) -> attempts <= 1
+      _other -> false
+    end
+  end
+
+  @doc """
   Places several orders in one request — `POST /trading/orders/batch-place`.
 
   **Not `place_order/3` in a loop.** The venue accepts the batch as one request, and a
@@ -5767,6 +5806,10 @@ defmodule DpExchange.Webull.Rest do
   not read is `{:unsupported_order_field, key}`, and a `:price` on a market entry is
   `{:unexpected_field, :price}`, each by index.
 
+  A batch that may have been placed - a timeout, a 5xx, or a 2xx with no readable rows - is
+  `{:error, {:order_unconfirmed, ids, reason}}`, `ids` being every `client_order_id` sent, in
+  order (generated ones included). Decided-before-sending failures (`unsent?/2`) stay plain.
+
   Each order takes the same shape `place_order/3` builds, and `client_order_id` is generated
   per order where the caller did not supply one — the venue requires one per order and
   requires them unique per account.
@@ -5782,12 +5825,35 @@ defmodule DpExchange.Webull.Rest do
          {:ok, orders} <- batch_orders(requests) do
       body = %{"account_id" => account_id, "batch_orders" => orders}
 
-      with {:ok, response} <-
-             post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
-        batch_rows(response)
+      ids = Enum.map(orders, &Map.fetch!(&1, "client_order_id"))
+
+      case post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
+        {:ok, response} ->
+          batch_result(batch_rows(response), ids)
+
+        {:error, reason} ->
+          if unsent?(reason, send_once(opts)),
+            do: {:error, reason},
+            else: {:error, {:order_unconfirmed, ids, reason}}
+
+        refused ->
+          refused
       end
     end
   end
+
+  # **A batch that may have been placed is never a bare error.** A timeout, a 5xx, or a 2xx
+  # whose envelope holds no readable rows does not say that none of the orders landed, and the
+  # ids this package generated per order were otherwise lost with the failure, so a caller
+  # retrying the batch would place every order again under new ids. The ids go back as a list
+  # in `{:order_unconfirmed, ids, reason}` (`place_order/3`'s tag, with the ids of the whole
+  # batch in order); `get_order/3` per id settles each.
+  defp batch_result({:ok, [_row | _rest]} = result, _ids), do: result
+
+  defp batch_result({:ok, []}, ids),
+    do: {:error, {:order_unconfirmed, ids, :unexpected_response_shape}}
+
+  defp batch_result({:error, reason}, ids), do: {:error, {:order_unconfirmed, ids, reason}}
 
   # `order-batch-place.md:266-328` documents this endpoint's OWN response envelope —
   # `{total, success, failed, batch_orders: [...]}` — not the generic `{"data": [...]}`
@@ -6171,11 +6237,30 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # `common-order-place.md` (`entrust_type`): "When placing Event Contract orders using
+  # AMOUNT, only BUY orders are supported (side=BUY), and time_in_force must be FOK." A rule
+  # the page states is enforced before the request, not left to the venue: a SELL is
+  # `{:invalid_side, side}`, any other duration is
+  # `{:unsupported_order_combination, :amount, time_in_force}`.
+  defp event_amount_rules("AMOUNT", :event, request) do
+    side = Map.get(request, :side)
+    tif = Map.get(request, :time_in_force)
+
+    cond do
+      side |> to_string() |> String.downcase() != "buy" -> {:error, {:invalid_side, side}}
+      tif != :fok -> {:error, {:unsupported_order_combination, :amount, tif}}
+      true -> :ok
+    end
+  end
+
+  defp event_amount_rules(_entrust, _instrument, _request), do: :ok
+
   defp order_leaf(request, order_type, tif) do
     instrument = instrument_type(request)
 
     with :ok <- positive_numbers(request, [:quantity, :amount]),
          {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+         :ok <- event_amount_rules(entrust, instrument, request),
          :ok <- unexpected_price_fields(request, order_type),
          :ok <- required_order_prices(request, order_type),
          :ok <- positive_numbers(request, sent_price_fields(order_type)),

@@ -939,9 +939,10 @@ which ones matter depends on `:order_type`:
 | `:stop_limit` | the sizing field, plus `:price` and `:stop_price` |
 | `:trailing_stop` | the sizing field, plus `:trailing_stop_step` |
 
-A field a given order type does not use is dropped rather than sent — a `:stop` request
-built from a `:limit` template (with `:price` left over) will not carry a stray
-`limit_price` the venue's schema for `STOP_LOSS` does not have. Read the fields back the
+A field a given order type does not use is **refused, not dropped**
+(`{:error, {:unexpected_field, key}}`) — a `:stop` request built from a `:limit` template
+(with `:price` left over) is told so instead of going out without the limit the caller
+believed was in force. Read the fields back the
 same way: `get_order/3` and the struct `place_order/3` hands back both carry `:stop_price`
 on a stop or stop-limit order, `nil` on anything else.
 
@@ -967,11 +968,20 @@ available to every client, so a refusal can mean the account is not entitled.
 **The batch endpoint's own matrix is narrower than `place_order/3`'s, and it is checked
 against, not discovered.** `order_type` is `MARKET` or `LIMIT` only — no `STOP_LOSS`,
 `STOP_LOSS_LIMIT` or `TRAILING_STOP_LOSS`, all real for a single order.
-`time_in_force` is `DAY`, the one member of this endpoint's own enum; a caller who asks
-for anything else is refused rather than silently switched to `DAY`. Sizing is `QTY`
+`order_type` and `time_in_force` are **required per row** (`{:missing_field, key}`, never
+defaulted). `time_in_force` is `DAY`, the one member of this endpoint's own enum; a caller who
+asks for anything else is refused rather than silently switched to `DAY`. Sizing is `QTY`
 only — `:amount` is refused here, where `place_order/3` accepts it for equities. And
 `:support_trading_session` (`:core`, `:all` or `:night`) is **required per order**, with
 no documented venue default, unlike on `place_order/3` where it is optional.
+
+**A batch that may have been placed is never a bare error.** A timeout, a 5xx, or a 2xx whose
+envelope holds no rows is `{:error, {:order_unconfirmed, ids, reason}}` where `ids` is the
+list of every `client_order_id` sent, in order (the ones this package generated included; it
+was a bare `{:error, reason}` and the generated ids were lost, so a retry placed every order
+again). Settle each with `get_order/3`. Missing credentials and our own limiter refusing a
+write stay the plain `{:error, reason}` (`place_order/3`, `replace_order/4` and the watchlist
+writes likewise).
 
 An entry with no `:symbol` or `:side` (`{:invalid_symbol, nil}` / `{:invalid_side, nil}`), or
 a `LIMIT` entry with no `:price` (`{:missing_field, :price}`), is refused by index before
@@ -1076,8 +1086,13 @@ real second request rather than a replay the venue refuses. That makes a retried
 to take effect twice, and the venue documents no idempotency key that would deduplicate a
 repeated order. So `place_order`, `place_orders`, `replace_order`, `cancel_order`,
 `create_token` and every watchlist write are **sent once**. A timeout on one of them means
-"unknown": read the order or watchlist back before sending it again. Pass `:retry_attempts`
-yourself only if you have your own reason to believe a repeat is harmless.
+"unknown": read the order or watchlist back before sending it again. This is a guarantee:
+a `:retry_attempts` you pass on one of these calls is overridden with 1.
+
+**Event contract orders sized by `:amount` are BUY-only and FOK-only** (the vendor page
+states both): a sell is `{:invalid_side, side}` and any other duration
+`{:unsupported_order_combination, :amount, time_in_force}`, before the request, in `Fake`
+too. Sizing by `:quantity` is not restricted.
 
 ## An order's numbers and ids are checked before anything is signed
 
