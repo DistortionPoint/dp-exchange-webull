@@ -41,9 +41,11 @@ defmodule DpExchange.Webull do
 
   ## Trade volume is real on stocks, absent on crypto
 
-  Webull's crypto OpenAPI reports no **aggregate** volume: not on bars, not on the
-  snapshot's `Quote.volume`. That field is `nil`, never `0` on a crypto quote — zero
-  would claim a genuinely flat interval.
+  Webull's crypto OpenAPI documents no **aggregate** volume: not on bars, not on the
+  snapshot's `Quote.volume`. That field is `nil`, never `0`, on a crypto quote whose response
+  carries none — zero would claim a genuinely flat interval. A response that does carry a
+  `volume` is delivered as a `:running_total` (a documented field list is not a
+  measurement); a crypto bar's `volume` is likewise `nil` unless the row states one.
 
   The stock snapshot is different: `get_price/2` with `category: "US_STOCK"` or
   `"US_ETF"` carries a real `volume`, the day's aggregate. `capabilities/0` says

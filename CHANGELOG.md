@@ -22,6 +22,22 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Docs that contradicted the code, corrected (tick T).** `Rest.get_trades/3` said the tape
+  came "newest first" (it is returned oldest first) and that `trading_sessions` is always
+  sent (stock tape only); `Rest.get_event_trades/3` said the venue's default count is 30
+  "not the 200 its other tapes use" (every tape defaults to 30; `tick.md`, `event-tick.md`);
+  `Rest.place_order/3` was headed "Places a crypto order" though it serves five instrument
+  types; `Rest.get_top_of_book/3` did not state that an empty bid/ask field is no price;
+  `DpExchange.Webull`'s volume section said a crypto quote or bar has no volume though one
+  the response carries is delivered; several `@doc`s named the wrong arity
+  (`get_symbols/1`, `get_historical_prices/4`, `get_screener/4`, `get_price/2`,
+  `decode_bar/3`). `usage-rules.md` now says which bars paths send `real_time_required`
+  for `include_partial: true`.
+- `place_orders/3` / `validate_batch_orders/1` build the batch list by prepending and
+  reversing once instead of `acc ++ [order]` per entry (identical result and order).
+
 ## [0.4.139] - 2026-10-12
 
 ### Fixed

@@ -7,7 +7,7 @@ defmodule DpExchange.Webull.Rest do
   There is no anonymous path here. `/market-data/crypto/snapshots/list` needs the same
   App Key and signature as an order. That is why this venue declares
   `credential_benefit: :required` — the first in the family to do so — and why
-  `get_price/2` takes credentials that other venues' `get_price/2` does not need.
+  `get_price/3` takes credentials that other venues' `get_price` does not need.
 
   A consumer branching on `capabilities/0` learns this before it calls; a consumer that
   assumed market data is free learns it from a 401.
@@ -49,7 +49,7 @@ defmodule DpExchange.Webull.Rest do
   bars each document a required `volume` on their own `"result"` row
   (`historical-bars.md:269,298`, `option-historical-bars.md`,
   `futures-historical-bars.md:214`, `event-bars.md:236`); only the crypto bar schema
-  (`crypto-bars.md`) carries none. `decode_bar/3` previously hard-coded `nil` for every
+  (`crypto-bars.md`) carries none. `decode_bar/4` previously hard-coded `nil` for every
   caller, which understated the four documented cases the same way the old
   `reports_trade_volume: false` understated the venue as a whole. `get_volume_profile/4`
   remains the separate equity endpoint that splits traded volume by price and side — this
@@ -883,8 +883,8 @@ defmodule DpExchange.Webull.Rest do
 
   As in `get_price/3`, a row naming a different symbol than the one asked for is
   `{:error, :not_in_response}`. `bid`, `ask` and the sizes are `nil` where the row does not
-  carry a number for them: a price of `0` (or the literal `"null"`) is no resting order on
-  that side, so that side and its size are `nil`, while a negative price or text that is not
+  carry a number for them: a price of `0` (or the literal `"null"`; an empty string is an
+  absent field) is no resting order on that side, so that side and its size are `nil`, while a negative price or text that is not
   a number is `{:error, {:non_positive_price, side, raw}}` / `{:error, {:invalid_decimal,
   side, raw}}`. `venue_time` is the quote's own time (`quote_time`) and **`nil` when the row
   has none** - the stock snapshot states only `last_trade_time`, a different event, and it is
@@ -1284,7 +1284,7 @@ defmodule DpExchange.Webull.Rest do
   @doc """
   Rounds a price and quantity to what the venue will actually accept.
 
-  Reads the same `instruments/.../profiles/list` endpoint `get_symbols/1` already calls —
+  Reads the same `instruments/.../profiles/list` endpoint `get_symbols/2` already calls —
   filtered to one symbol — rather than a separate lookup. **Crypto and stock instruments
   publish disjoint fields**, verified against the vendor's own live schema, 2026-09-03:
 
@@ -2526,7 +2526,7 @@ defmodule DpExchange.Webull.Rest do
   credential without it gets the venue's own refusal; this package does not pretend to know
   in advance which credentials carry it.
 
-  Widths are `5s`, `15s`, `1m`, `5m` and `30m` — five, where `get_historical_prices/4`
+  Widths are `5s`, `15s`, `1m`, `5m` and `30m` — five, where `get_historical_prices/5`
   serves more. A width outside them is `{:unsupported_timeframe, width}` rather than the
   closest one this endpoint does have.
 
@@ -2539,7 +2539,7 @@ defmodule DpExchange.Webull.Rest do
   The vendor marks it required and says it controls whether an unfinished bar is included.
   `false` asks for completed intervals only: **an in-progress footprint has a boundary that
   has not happened yet**, and its buy/sell split will change before the interval closes. The
-  same reasoning `get_historical_prices/4` uses for bars.
+  same reasoning `get_historical_prices/5` uses for bars.
 
   The price maps come back **keyed on the venue's own price strings**. See
   `Core.Types.VolumeProfile` for why they are not re-keyed on `Decimal`.
@@ -2842,12 +2842,15 @@ defmodule DpExchange.Webull.Rest do
   `{:use_get_event_trades, "US_EVENT"}`. `opts[:sessions]` reaches the stock tape only.
 
   **The tape, not `get_trade_history/2`.** That returns the credential's own fills; this
-  returns everyone's executions, newest first as the venue sorts them.
+  returns everyone's executions. The venue sends them newest first; they are returned
+  **oldest first** by the venue's own time, as `Core.Venue` asks.
 
-  `opts[:limit]` is the venue's `count` (default 30, max 1000). `opts[:sessions]` takes the
-  venue's own list — `PRE`, `RTH`, `ATH`, `OVN`, comma-joined — and defaults to `RTH`.
-  **The venue marks `trading_sessions` required**, so one is always sent; asking for regular
-  hours by default is a choice, and it is the one that matches what `get_price/3` returns.
+  `opts[:limit]` is the venue's `count` (default 30; max 1000 on the stock tape, 1200 on the
+  option and futures tapes). `opts[:sessions]` reaches the stock tape only and takes the
+  venue's own list — `PRE`, `RTH`, `ATH`, `OVN`, comma-joined — defaulting to `RTH`.
+  **The venue marks `trading_sessions` required on the stock tape**, so one is always sent
+  there; asking for regular hours by default is a choice, and it is the one that matches what
+  `get_price/3` returns. The option and futures tapes take no such parameter and none is sent.
 
   ## `side` is always `nil`: the venue's five codes are defined nowhere
 
@@ -4634,7 +4637,7 @@ defmodule DpExchange.Webull.Rest do
 
   @paginated_screeners ["market_sectors", "market_sector"]
 
-  @doc "The screeners this venue publishes, by the identifier `get_screener/4` takes."
+  @doc "The screeners this venue publishes, by the identifier `get_screener/3` takes."
   @spec screeners() :: [String.t()]
   def screeners, do: @screeners |> Map.keys() |> Enum.sort()
 
@@ -4975,7 +4978,8 @@ defmodule DpExchange.Webull.Rest do
   instrument of a two-instrument market, and the number would look right. So the venue's own
   rows are returned and nothing is normalised.
 
-  The venue's default count here is **30**, not the 200 its other tapes use.
+  The venue's default count here is **30**, the same as its other tapes (`event-tick.md`,
+  `tick.md`); the maximum is 1200.
   """
   @spec get_event_trades(String.t(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -5365,8 +5369,10 @@ defmodule DpExchange.Webull.Rest do
   # and a bar whose time is off the grid (the pages' own example is `09:00:09.945`) is either
   # a different instant (a close, a last-trade) or a fabricated one - stored as `opened_at`
   # it would be a plausible candle in the wrong bucket. The whole reply is refused
-  # `{:unaligned_candle, time}`. **Unmeasured** against a live venue; widths Core has no rule
-  # for (`1w`, `1M`, `1y`) pass. OHLC are prices: zero or negative refuses (`required_price/2`).
+  # `{:unaligned_candle, time}`. **Unmeasured** against a live venue. The crypto endpoint
+  # serves no width Core lacks a rule for; on the session endpoints `1w`, `1M` and `1y` have
+  # none in Core and pass wherever `session_bar_time/2` leaves them as sent. OHLC are prices:
+  # zero or negative refuses (`required_price/2`).
   #
   # `kind` is `:crypto` (a 24h market: the strict UTC grid) or `:session` (stock, option,
   # futures, event: see `session_bar_time/2`).
@@ -5918,7 +5924,10 @@ defmodule DpExchange.Webull.Rest do
   defp optional_decimal(value, field), do: required_decimal(value, field)
 
   @doc """
-  Places a crypto order.
+  Places an order. `request[:instrument_type]` picks the instrument (`:crypto` when absent,
+  which is what this package served first; see `order_instrument_types/0`), and each
+  instrument has its own type and time-in-force matrix. The crypto matrix is the short one,
+  described first.
 
   ## The venue documents which type/time-in-force pairs it accepts, and the list is short
 
@@ -6183,10 +6192,14 @@ defmodule DpExchange.Webull.Rest do
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {request, index}, {:ok, acc} ->
       case batch_order(request, index) do
-        {:ok, order} -> {:cont, {:ok, acc ++ [order]}}
+        {:ok, order} -> {:cont, {:ok, [order | acc]}}
         error -> {:halt, error}
       end
     end)
+    |> case do
+      {:ok, orders} -> {:ok, Enum.reverse(orders)}
+      error -> error
+    end
   end
 
   # Equities only, by the venue's own note. A crypto order in a batch is refused by index so

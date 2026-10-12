@@ -506,7 +506,10 @@ DpExchange.Webull.adjusted?("1m")  #=> false
   is `{:error, {:invalid_option, :include_partial, v}}`. Whether the crypto endpoint's
   `real_time_required` includes the forming bar for `"false"` or `"true"` is the vendor
   page's own contradiction (see `Rest.crypto_bars/5`), so `include_partial: true` there
-  returns the bar only if the page's bullets are right - **unmeasured**.
+  returns the bar only if the page's bullets are right - **unmeasured**. Event bars send
+  `real_time_required` as `true` only for `include_partial: true`; option bars (where the
+  parameter is optional, default `false`) send it only then; stock bars always ask for
+  `true` and drop the forming bar here; futures bars take no such parameter.
 * **`:start` is inclusive and `:end` is exclusive**, on `opened_at` (it was inclusive).
 * **A range is never answered short.** Stock bars send `count` (your `:limit`, else the
   maximum - 1200, 1650 for `1m` - when a `:start` is given; no range and no limit leaves the
