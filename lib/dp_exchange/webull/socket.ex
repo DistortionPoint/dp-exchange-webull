@@ -271,12 +271,38 @@ defmodule DpExchange.Webull.Socket do
     min(@base_reconnect_delay_ms * Bitwise.bsl(1, exponent), @max_reconnect_delay_ms)
   end
 
+  @doc """
+  `delay_ms` shortened by a random amount of up to a quarter of itself, never lengthened.
+
+  **Every shard has its own socket, and the venue drops them together.** `Feed` opens up to
+  five sockets (one per 100 symbols, against the venue's five-connections-per-App-Key
+  ceiling), and a venue-side restart or a network fault closes every one of them in the same
+  instant. `reconnect_delay_ms/1` is a pure function of the attempt number, so all of them
+  then retried on identical schedules: 1s, 2s, 4s, 8s... together, a connect burst of the
+  whole fleet on every turn of the ladder. This package's own `Feed` staggers its opens by
+  `shard_spacing_ms` because a connect burst is answered with resets, and the retry ladder
+  undid that stagger at the one time the venue is already refusing connections. A random
+  shortening per socket spreads the turns apart.
+
+  Only shortened, so `reconnect_delay_ms/1` stays the ceiling it documents (30 seconds).
+  `0` stays `0`: attempt 1 is a live session that just dropped and reconnects at once.
+  """
+  @spec jittered_delay_ms(non_neg_integer()) :: non_neg_integer()
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms) and delay_ms < 4, do: delay_ms
+
+  def jittered_delay_ms(delay_ms) when is_integer(delay_ms),
+    do: delay_ms - :rand.uniform(div(delay_ms, 4))
+
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     url = Keyword.fetch!(opts, :url)
 
     state = %{
       subscriber: Keyword.fetch!(opts, :subscriber),
+      # The process that started this socket (`Feed`, or a test), for `wait_to_reconnect/2`:
+      # the link to it is how this socket learns it was stopped, and a backoff has to keep
+      # listening for that.
+      parent: self(),
       session_id: Keyword.fetch!(opts, :session_id),
       # Wrapped: `Credentials` redacts `app_key` from `inspect/1`, and this map is printed in
       # full by OTP's crash report when the socket terminates abnormally, which happens
@@ -450,13 +476,15 @@ defmodule DpExchange.Webull.Socket do
       if stable_session?(state), do: 0, else: Map.get(state, :unconnected_sessions, 0) + 1
 
     attempt = max(Map.get(status, :attempt_number, 1), unconnected + 1)
-    delay = reconnect_delay_ms(attempt)
+    # Jittered per socket — see `jittered_delay_ms/1`. The telemetry event below reports the
+    # delay actually waited, not the ladder's rung.
+    delay = attempt |> reconnect_delay_ms() |> jittered_delay_ms()
 
     Telemetry.link_reconnect_attempt(:webull, attempt, delay)
 
     # Blocks THIS socket process only, and only while it has no connection to serve anyway —
     # the same trade `dp_exchange_schwab.Socket` already makes.
-    if delay > 0, do: Process.sleep(delay)
+    wait_to_reconnect(state, delay)
 
     {:reconnect,
      Map.merge(state, %{
@@ -472,6 +500,31 @@ defmodule DpExchange.Webull.Socket do
        ping: nil,
        unconnected_sessions: unconnected
      })}
+  end
+
+  # The backoff wait, which still hears its parent stop it.
+  #
+  # `WebSockex` traps exits and learns that its parent has gone (or that `Feed` stopped it,
+  # as `rebuild_stale_shard/3` does for a session the venue discarded) from an `{:EXIT,
+  # parent, reason}` message that only its own receive loops read. This wait used to be a
+  # bare `Process.sleep/1` of up to `@max_reconnect_delay_ms`, during which that message sat
+  # unread: a socket told to stop, or orphaned by a `Feed` restart, slept out the whole delay
+  # and then dialled the venue once more before it noticed. Against a five-connections-per-
+  # App-Key ceiling that is a stray connection from a socket nobody owns.
+  #
+  # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
+  # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
+  # exit and waits the full delay, exactly as the sleep did.
+  defp wait_to_reconnect(_state, 0), do: :ok
+
+  defp wait_to_reconnect(state, delay) do
+    parent = Map.get(state, :parent)
+
+    receive do
+      {:EXIT, ^parent, reason} when is_pid(parent) -> exit(reason)
+    after
+      delay -> :ok
+    end
   end
 
   # Connected, and for at least `@stable_session_ms`. A state with no `:connected_at` (a

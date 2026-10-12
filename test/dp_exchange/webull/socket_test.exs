@@ -1185,7 +1185,8 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reconnect, after_first} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, flapper)
 
-      assert System.monotonic_time(:millisecond) - started >= 1_000
+      # The 1_000ms rung, jittered down by up to a quarter.
+      assert System.monotonic_time(:millisecond) - started >= 750
       assert after_first.unconnected_sessions == 1
       assert after_first.connected_at == nil
 
@@ -1197,7 +1198,8 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reconnect, after_second} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 1}, second)
 
-      assert System.monotonic_time(:millisecond) - started >= 2_000
+      # The 2_000ms rung, jittered down by up to a quarter.
+      assert System.monotonic_time(:millisecond) - started >= 1_500
       assert after_second.unconnected_sessions == 2
     end
 
@@ -1220,7 +1222,48 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reconnect, _state} =
                Socket.handle_disconnect(%{reason: :closed, attempt_number: 3}, state())
 
-      assert System.monotonic_time(:millisecond) - started >= 2_000
+      # Jittered downward by up to a quarter (`Socket.jittered_delay_ms/1`): 1500..2000.
+      assert System.monotonic_time(:millisecond) - started >= 1_500
+    end
+
+    test "jittered_delay_ms/1 only ever shortens, by at most a quarter, and varies" do
+      # The reconnect ladder was a pure function of the attempt number, so every shard's socket
+      # (up to five), dropped together by one venue restart, retried on identical schedules:
+      # a connect burst of the whole fleet on every rung.
+      draws = for _draw <- 1..200, do: Socket.jittered_delay_ms(30_000)
+
+      assert Enum.all?(draws, &(&1 >= 22_500 and &1 < 30_000))
+      assert length(Enum.uniq(draws)) > 1
+    end
+
+    test "jittered_delay_ms/1 leaves an immediate reconnect immediate" do
+      assert Socket.jittered_delay_ms(0) == 0
+    end
+
+    test "handle_disconnect/2 reports a jittered delay, not the ladder's rung" do
+      # Attempt 2 is the 1_000ms rung. Without the jitter the telemetry event reports exactly
+      # 1_000 every time; with it the value is strictly below the rung and within a quarter.
+      test_pid = self()
+      handler_id = "reconnect-jitter-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:dp_exchange, :link, :reconnect_attempt],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.provider == :webull and self() == test_pid,
+            do: send(test_pid, {:reconnect_attempt, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed, attempt_number: 2}, state())
+
+      assert_receive {:reconnect_attempt, %{attempt: 2, delay_ms: delay_ms}}, 5_000
+      assert delay_ms >= 750
+      assert delay_ms < 1_000
     end
   end
 

@@ -196,7 +196,8 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
         :timer.tc(fn -> Socket.handle_disconnect(%{reason: :closed}, state) end)
 
       assert after_drop.unconnected_sessions == 2
-      assert elapsed_us >= Socket.reconnect_delay_ms(3) * 1_000
+      # The rung, jittered down by up to a quarter (`Socket.jittered_delay_ms/1`).
+      assert elapsed_us >= Socket.reconnect_delay_ms(3) * 750
     end
   end
 end
