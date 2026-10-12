@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.144] - 2026-10-12
+
 - **A Socket in its reconnect backoff ignored its parent stopping it.** The wait, up to 30s, was
   a bare sleep, so a socket that `Feed` had stopped (a stale shard rebuilt) or orphaned (a
   `Feed` restart) slept out the delay and then dialled the venue once more, a stray connection
