@@ -3223,13 +3223,35 @@ defmodule DpExchange.Webull.Rest do
   two are not the same answer.
 
   The venue caps an account at 20 watchlists.
+
+  A row with no text `watchlist_id` refuses the whole reply as `{:error,
+  {:missing_required_field, :id}}`; it is never dropped.
   """
   @spec list_watchlists(map(), keyword()) ::
           {:ok, [Watchlist.t()]} | {:error, term()} | {:refused, term()}
   def list_watchlists(credentials, opts) do
     with {:ok, body} <- get("/market-data/watchlists/list", %{}, credentials, opts),
          {:ok, watchlist_rows} <- rows(body) do
-      {:ok, watchlist_rows |> Enum.map(&to_watchlist(&1, nil)) |> Enum.reject(&is_nil/1)}
+      collect_watchlists(watchlist_rows)
+    end
+  end
+
+  # **A listing is every watchlist or a refusal - never the ones this package could read.** A
+  # row with no text `watchlist_id` used to be dropped, and a caller reading the list then
+  # believed the watchlist did not exist (and might create a second one). One row that cannot
+  # name itself refuses the whole reply as `{:error, {:missing_required_field, :id}}`, the
+  # answer `get_watchlist/3` and `create_watchlist/4` already give for the same shape.
+  defp collect_watchlists(watchlist_rows) do
+    watchlist_rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_watchlist(row, nil) do
+        nil -> {:halt, {:error, {:missing_required_field, :id}}}
+        watchlist -> {:cont, {:ok, [watchlist | acc]}}
+      end
+    end)
+    |> case do
+      {:ok, watchlists} -> {:ok, Enum.reverse(watchlists)}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -3291,6 +3313,11 @@ defmodule DpExchange.Webull.Rest do
   `{:ok, watchlist}` would believe the membership took. The id is in the error term so the
   watchlist can be found and dealt with.
 
+  **If the add itself is unproven** (a timeout or 5xx: it may have landed) the answer is
+  `{:error, {:watchlist_created_members_unconfirmed, id, reason}}` - the watchlist exists and
+  its membership is UNKNOWN, so read it with `get_watchlist/3` before adding again. Only a
+  definite failure is `{:watchlist_created_without_members, id, reason}`.
+
   An empty `symbols` list makes one request and creates an empty watchlist, which is a real
   thing to want.
 
@@ -3301,6 +3328,11 @@ defmodule DpExchange.Webull.Rest do
   is `{:error, {:invalid_symbols, symbols}}`, and `opts[:sort]` must be a whole number
   (`{:error, {:invalid_sort, sort}}`), so a mistake knowable from the arguments does not
   leave an empty watchlist behind.
+
+  **A create that may have reached the venue and is not proven** (a transport error or
+  timeout, a 5xx, a 2xx whose body is unreadable or names no id) is `{:error,
+  {:write_unconfirmed, nil, reason}}`: the watchlist may exist, so list before retrying.
+  Failures decided before sending stay plain.
   """
   @spec create_watchlist(String.t(), [String.t()], map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
@@ -3324,13 +3356,15 @@ defmodule DpExchange.Webull.Rest do
     with {:ok, members} <- validate_watchlist_symbols(symbols),
          :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
          {:ok, response} <-
-           post(
-             "/market-data/watchlists/create",
-             body,
-             credentials,
-             send_once(opts)
+           write_outcome(
+             post(
+               "/market-data/watchlists/create",
+               body,
+               credentials,
+               send_once(opts)
+             )
            ),
-         {:ok, row} <- first_row(response),
+         {:ok, row} <- write_outcome(first_row(response)),
          # `:id` is in `Types.Watchlist`'s `@enforce_keys`, so its `new/1` refuses a `nil`
          # there — and nothing here calls `new/1`, the struct being built literally as
          # everywhere in this family, so that check never ran. A created watchlist with no
@@ -3340,7 +3374,7 @@ defmodule DpExchange.Webull.Rest do
          # `to_watchlist/2` further down already refuses a row with no `watchlist_id`,
          # citing `dp_exchange_robinhood`'s rule — "a nil key there is worse than one fewer
          # row this cycle". This is the same rule on the create path.
-         {:ok, id} <- created_watchlist_id(row) do
+         {:ok, id} <- write_outcome(created_watchlist_id(row)) do
       add_created_members(id, name, members, credentials, opts)
     end
   end
@@ -3407,6 +3441,11 @@ defmodule DpExchange.Webull.Rest do
         {:ok,
          %Watchlist{id: id, name: name, symbols: symbols, venue_time: nil, provider: :webull}}
 
+      # The add may have landed: the watchlist exists, its membership is UNKNOWN. Not
+      # "without members", which would send the caller to add them a second time.
+      {:error, {:write_unconfirmed, nil, reason}} ->
+        {:error, {:watchlist_created_members_unconfirmed, id, reason}}
+
       {:error, reason} ->
         {:error, {:watchlist_created_without_members, id, reason}}
 
@@ -3426,6 +3465,9 @@ defmodule DpExchange.Webull.Rest do
   `{:error, :membership_not_updatable_here}`.
 
   Only what is given is changed: the venue leaves unprovided fields alone.
+
+  A write that may have reached the venue and is not proven is `{:error,
+  {:write_unconfirmed, nil, reason}}`; failures decided before sending stay plain.
   """
   @spec update_watchlist(String.t(), map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
@@ -3444,14 +3486,16 @@ defmodule DpExchange.Webull.Rest do
 
       with :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
            {:ok, response} <-
-             post("/market-data/watchlists/update", body, credentials, send_once(opts)),
+             write_outcome(
+               post("/market-data/watchlists/update", body, credentials, send_once(opts))
+             ),
            # `update-watchlist.md:168-186` documents the same `SuccessResponseVo`
            # `{"success": boolean}` shape every other watchlist write already guards with
            # `watchlist_success/1` (see its own comment: a `false` here is "a 200 that did
            # nothing"). This was the one watchlist write that discarded the response body
            # and reported `{:ok, watchlist}` for any 2xx, including a documented
            # `{"success": false}`.
-           :ok <- watchlist_success(response) do
+           :ok <- write_outcome(watchlist_success(response)) do
         {:ok,
          %Watchlist{
            id: watchlist_id,
@@ -3471,7 +3515,9 @@ defmodule DpExchange.Webull.Rest do
   **Irreversible, in the venue's own words.** Returns `:ok` rather than the venue's
   `%{"success" => true}`, because the contract's `delete_watchlist/2` is documented as
   returning `:ok` — and a `false` in that field is an error here rather than a successful
-  call that deleted nothing.
+  call that deleted nothing. A delete that may have reached the venue and is not proven is
+  `{:error, {:write_unconfirmed, nil, reason}}` (re-listing shows whether it took); an unknown
+  id is `{:refused, :not_found}`.
   """
   @spec delete_watchlist(String.t(), map(), keyword()) ::
           {:ok, :ok} | {:error, term()} | {:refused, term()}
@@ -3483,17 +3529,54 @@ defmodule DpExchange.Webull.Rest do
     body = %{"watchlist_id" => watchlist_id}
 
     with {:ok, response} <-
-           post("/market-data/watchlists/delete", body, credentials, send_once(opts)),
-         :ok <- watchlist_success(response) do
+           write_outcome(
+             post("/market-data/watchlists/delete", body, credentials, send_once(opts))
+           ),
+         :ok <- write_outcome(watchlist_success(response)) do
       {:ok, :ok}
     end
   end
+
+  @doc """
+  Re-tags the outcome of a watchlist write that may have reached the venue.
+
+  An `{:error, reason}` that was NOT decided before sending (`unsent?/1`: missing credentials,
+  our own limiter refusing) - a transport error or timeout, a 5xx, a 2xx whose body cannot be
+  read or that lacks the id or `success` the write needs - does not say whether the write
+  happened, so it is `{:error, {:write_unconfirmed, nil, reason}}` (`nil`: this venue takes no
+  idempotency key for a watchlist write; `reason` bounded). A caller that read a bare
+  `{:error, _}` as "worth retrying" would repeat a create or a delete. Pre-send failures,
+  `{:refused, _}` and `:ok`/`{:ok, _}` pass through unchanged. For `DpExchange.Webull.Fake`.
+  """
+  @spec write_outcome(term()) :: term()
+  def write_outcome({:error, reason} = error) do
+    if unsent?(reason),
+      do: error,
+      else: {:error, {:write_unconfirmed, nil, bound_write_reason(reason)}}
+  end
+
+  def write_outcome(other), do: other
+
+  defp bound_write_reason(reason) when is_atom(reason), do: reason
+
+  defp bound_write_reason({tag, detail}) when is_atom(tag) and is_atom(detail),
+    do: {tag, detail}
+
+  defp bound_write_reason({:exchange_error, venue, message})
+       when is_atom(venue) and is_binary(message),
+       do: {:exchange_error, venue, String.slice(message, 0, 2_048)}
+
+  defp bound_write_reason(reason) when is_binary(reason), do: String.slice(reason, 0, 2_048)
+  defp bound_write_reason(reason), do: inspect(reason, limit: 50, printable_limit: 2_048)
 
   @doc """
   Adds instruments to an existing watchlist — `POST /market-data/watchlists/instruments/add`.
 
   The venue caps an account at **1000 instruments across all watchlists** and rejects event
   contracts, futures and options here.
+
+  A write that may have reached the venue and is not proven is `{:error,
+  {:write_unconfirmed, nil, reason}}` (`write_outcome/1`); read the watchlist before retrying.
   """
   @spec add_watchlist_instruments(String.t(), [String.t()], map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -3505,7 +3588,8 @@ defmodule DpExchange.Webull.Rest do
   `POST /market-data/watchlists/instruments/remove`.
 
   Removal is by symbol and category, not by the instrument id the listing returns — the
-  venue's own asymmetry.
+  venue's own asymmetry. An unproven write is `{:error, {:write_unconfirmed, nil, reason}}`,
+  as for `add_watchlist_instruments/4`.
   """
   @spec remove_watchlist_instruments(String.t(), [String.t()], map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -3569,8 +3653,8 @@ defmodule DpExchange.Webull.Rest do
     path = "/market-data/watchlists/instruments/#{action}"
 
     with :ok <- validate_watchlist_target(:id, watchlist_id),
-         {:ok, response} <- post(path, body, credentials, send_once(opts)),
-         :ok <- watchlist_success(response) do
+         {:ok, response} <- write_outcome(post(path, body, credentials, send_once(opts))),
+         :ok <- write_outcome(watchlist_success(response)) do
       {:ok, %{"success" => true}}
     end
   end
@@ -3596,8 +3680,9 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # A row that cannot supply its own identity is dropped rather than published under an
-  # empty one. `Core.Types.Watchlist`, `NewsItem` and `ScreenerResult` each enforce their
+  # A row that cannot supply its own identity is never published under an empty one (`nil`
+  # here; `list_watchlists/2` refuses the whole listing for it, see `collect_watchlists/1`).
+  # `Core.Types.Watchlist`, `NewsItem` and `ScreenerResult` each enforce their
   # identifying field, and `new/1` refuses a `nil` there — but these build the struct
   # literally, as everywhere in this family, so `|| ""` satisfied the requirement while
   # saying nothing.

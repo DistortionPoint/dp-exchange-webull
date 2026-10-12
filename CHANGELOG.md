@@ -22,6 +22,39 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+Family non-order write conventions (W1, W6, W7) for the watchlist endpoints. Nothing here was
+measured against the live venue.
+
+- **BREAKING (error value): `{:error, {:invalid_symbols, v}}` from `subscribe`, `unsubscribe`
+  and `update_symbols` (facade, `Feed`, `Fake`) carries the caller's whole argument as given.**
+  It carried only the offending elements (at most five), and an improper list's tail alone.
+
+- **BREAKING (error shape): `create_watchlist/3`, `update_watchlist/2` and `delete_watchlist/2`
+  answer `{:error, {:write_unconfirmed, nil, reason}}` when the write may have reached the
+  venue and is not proven** - a transport error or timeout, a 5xx, a 2xx whose body is
+  undecodable or has no `success`, a create whose 2xx names no `watchlist_id`. Was a bare
+  `{:error, reason}`, which Core calls retryable: a caller retried its way into a second
+  watchlist or a repeated delete. The key is `nil` (this venue takes no idempotency key for a
+  watchlist write); `reason` is bounded. Pre-send failures (no credentials, our own rate
+  limiter, an invalid id / name / sort / symbols) stay plain, and the venue's own answers stay
+  `{:refused, _}` (including `{:refused, :watchlist_write_rejected}` for `success: false`).
+  `Rest.write_outcome/1` is the shared classifier.
+- **BREAKING (error shape): `add_watchlist_instruments/3`, `remove_watchlist_instruments/3` and
+  `sort_watchlist_instruments/2` answer `{:error, {:write_unconfirmed, nil, reason}}`** for the
+  same possibly-sent outcomes (was a bare `{:error, reason}`), through `Rest.write_outcome/1`.
+- **BREAKING (error shape): `create_watchlist/3` whose add step is unproven answers `{:error,
+  {:watchlist_created_members_unconfirmed, id, reason}}`**: the watchlist exists and its
+  membership is unknown (read it before adding again). It was `{:watchlist_created_without_members,
+  id, reason}`, which claimed the members were absent. A definite failure of the add (a
+  refusal, `success: false`) is still `:watchlist_created_without_members`.
+- **BREAKING: `Fake.delete_watchlist/2` of an unknown id is `{:refused, :not_found}`**, as the
+  real path answers a 404. It was `{:ok, :ok}`. A watchlist already deleted is unknown too.
+- **BREAKING: `list_watchlists/1` refuses a reply with a row that has no text `watchlist_id`**
+  as `{:error, {:missing_required_field, :id}}`. The row was silently dropped, so a list
+  missing a watchlist read as "it does not exist".
+
 ## [0.4.135] - 2026-10-12
 
 ### Changed

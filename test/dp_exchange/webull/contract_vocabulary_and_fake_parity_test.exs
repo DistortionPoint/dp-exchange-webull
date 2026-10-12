@@ -331,14 +331,20 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
   end
 
   describe "watchlists" do
-    test "a row whose id is not text is dropped, and a name that is not text is nil" do
+    test "a row whose id is not text refuses the listing, and a name that is not text is nil" do
       body = [
         %{"watchlist_id" => 5, "name" => "numeric id"},
         %{"watchlist_id" => "w1", "name" => %{"x" => 1}}
       ]
 
-      assert {:ok, [%Types.Watchlist{id: "w1", name: nil}]} =
+      assert {:error, {:missing_required_field, :id}} =
                Rest.list_watchlists(@credentials, plug: responding(body), retry_attempts: 0)
+
+      assert {:ok, [%Types.Watchlist{id: "w1", name: nil}]} =
+               Rest.list_watchlists(@credentials,
+                 plug: responding(tl(body)),
+                 retry_attempts: 0
+               )
     end
 
     test "membership keeps only text symbols" do
@@ -353,8 +359,9 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                Rest.get_watchlist("w1", @credentials, plug: responding(body), retry_attempts: 0)
     end
 
-    test "a created watchlist whose id is not text is refused" do
-      assert {:error, {:missing_required_field, :id}} =
+    test "a created watchlist whose id is not text is unconfirmed, not returned" do
+      # The create was accepted (2xx) but names no usable id: it may exist.
+      assert {:error, {:write_unconfirmed, nil, {:missing_required_field, :id}}} =
                Rest.create_watchlist("n", [], @credentials,
                  plug: responding([%{"watchlist_id" => 7}]),
                  retry_attempts: 0

@@ -38,13 +38,13 @@ defmodule DpExchange.Webull.FeedReviewTest do
       feed = start_feed()
       opts = subscribe_opts(limiter)
 
-      assert {:error, {:invalid_symbols, [:eth, nil, ""]}} =
+      assert {:error, {:invalid_symbols, ["BTC-USD", :eth, nil, ""]}} =
                Feed.subscribe(feed, ["BTC-USD", :eth, nil, ""], opts)
 
       assert {:error, {:invalid_symbols, nil}} = Feed.subscribe(feed, nil, opts)
       assert {:error, {:invalid_symbols, "BTC-USD"}} = Feed.subscribe(feed, "BTC-USD", opts)
 
-      assert {:error, {:invalid_symbols, [1, 2, 3, 4, 5]}} =
+      assert {:error, {:invalid_symbols, [1, 2, 3, 4, 5, 6, 7]}} =
                Feed.subscribe(feed, [1, 2, 3, 4, 5, 6, 7], opts)
 
       state = :sys.get_state(feed)
@@ -56,13 +56,13 @@ defmodule DpExchange.Webull.FeedReviewTest do
       feed = start_feed()
       opts = subscribe_opts(limiter)
 
-      assert {:error, {:invalid_symbols, [:tail]}} =
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
                Feed.subscribe(feed, ["BTC-USD" | :tail], opts)
 
-      assert {:error, {:invalid_symbols, [:tail]}} =
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
                Feed.update_symbols(feed, ["BTC-USD" | :tail], opts)
 
-      assert {:error, {:invalid_symbols, [:tail]}} =
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
                Feed.unsubscribe(feed, ["BTC-USD" | :tail], opts)
 
       assert Process.alive?(feed)
@@ -74,7 +74,9 @@ defmodule DpExchange.Webull.FeedReviewTest do
       want(feed, ["BTC-USD"])
 
       assert {:error, {:invalid_symbols, :btc}} = Feed.unsubscribe(feed, :btc, opts)
-      assert {:error, {:invalid_symbols, [42]}} = Feed.unsubscribe(feed, ["BTC-USD", 42], opts)
+
+      assert {:error, {:invalid_symbols, ["BTC-USD", 42]}} =
+               Feed.unsubscribe(feed, ["BTC-USD", 42], opts)
 
       assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"]),
              "a refused unsubscribe removes nothing"
@@ -86,7 +88,9 @@ defmodule DpExchange.Webull.FeedReviewTest do
       want(feed, ["BTC-USD"])
 
       assert {:error, {:invalid_symbols, nil}} = Feed.update_symbols(feed, nil, opts)
-      assert {:error, {:invalid_symbols, [:x]}} = Feed.update_symbols(feed, ["ETH-USD", :x], opts)
+
+      assert {:error, {:invalid_symbols, ["ETH-USD", :x]}} =
+               Feed.update_symbols(feed, ["ETH-USD", :x], opts)
 
       assert :sys.get_state(feed).wanted == MapSet.new(["BTC-USD"]),
              "a refused update replaces nothing"
@@ -104,7 +108,7 @@ defmodule DpExchange.Webull.FeedReviewTest do
 
     test "the fake answers the same way, because it may not be differently capable" do
       assert {:error, {:invalid_symbols, nil}} = Fake.subscribe(nil)
-      assert {:error, {:invalid_symbols, [:x]}} = Fake.subscribe(["BTC-USD", :x])
+      assert {:error, {:invalid_symbols, ["BTC-USD", :x]}} = Fake.subscribe(["BTC-USD", :x])
       assert {:error, {:invalid_symbols, "BTC-USD"}} = Fake.unsubscribe("BTC-USD")
       assert {:error, {:invalid_symbols, [""]}} = Fake.update_symbols([""])
     end

@@ -537,13 +537,11 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert item.id == "42"
     end
 
-    test "a watchlist row with no id is dropped" do
+    test "a watchlist row with no id refuses the whole listing, it is not dropped" do
       rows = [%{"watchlist_id" => "w-1", "name" => "Mine"}, %{"name" => "nameless"}]
 
-      assert {:ok, [list]} =
+      assert {:error, {:missing_required_field, :id}} =
                Rest.list_watchlists(@credentials, plug: responding(rows), retry_attempts: 0)
-
-      assert list.id == "w-1"
     end
   end
 

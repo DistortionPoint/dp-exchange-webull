@@ -1343,10 +1343,25 @@ defmodule DpExchange.Webull.Fake do
     with_injection(fn ->
       with :ok <- Rest.validate_watchlist_target(:id, id),
            :ok <- authenticated(opts) do
-        put_watchlist(id, :deleted)
-        {:ok, :ok}
+        # An id this process does not hold - never created, or already deleted - is the
+        # refusal the real path gives a 404 (`{:refused, :not_found}`), not `{:ok, :ok}`.
+        # What the venue itself answers for an unknown watchlist id is UNMEASURED.
+        if watchlist_exists?(id) do
+          put_watchlist(id, :deleted)
+          {:ok, :ok}
+        else
+          {:refused, :not_found}
+        end
       end
     end)
+  end
+
+  defp watchlist_exists?(id) do
+    case Map.fetch(watchlists(), id) do
+      {:ok, :deleted} -> false
+      {:ok, %{}} -> true
+      :error -> id == @canned_watchlist_id
+    end
   end
 
   @impl true

@@ -155,9 +155,151 @@ defmodule DpExchange.Webull.WatchlistsTest do
       # this cycle". The create path was the one that did not.
       me = self()
 
-      assert {:error, {:missing_required_field, :id}} =
+      # The create may well have happened: unconfirmed, not a plain error a caller retries.
+      assert {:error, {:write_unconfirmed, nil, {:missing_required_field, :id}}} =
                Rest.create_watchlist("Nameless", [], @credentials,
                  plug: capturing([%{"name" => "Nameless"}], me),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a write that may have reached the venue is :write_unconfirmed, on all three" do
+      server_error = fn conn -> Plug.Conn.resp(conn, 500, "upstream broke") end
+      not_json = fn conn -> Plug.Conn.resp(conn, 200, "<html>maintenance</html>") end
+      no_verdict = responding([%{"status" => "done"}])
+      opts = fn plug -> [plug: plug, retry_attempts: 0] end
+
+      for plug <- [server_error, not_json] do
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.create_watchlist("Tech", [], @credentials, opts.(plug))
+
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.update_watchlist("wl-1", @credentials, [name: "X"] ++ opts.(plug))
+
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.delete_watchlist("wl-1", @credentials, opts.(plug))
+      end
+
+      # A 2xx that does not say whether it happened.
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
+               Rest.update_watchlist("wl-1", @credentials, [name: "X"] ++ opts.(no_verdict))
+
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
+               Rest.delete_watchlist("wl-1", @credentials, opts.(no_verdict))
+
+      assert {:error, {:write_unconfirmed, nil, {:exchange_error, :webull, message}}} =
+               Rest.delete_watchlist("wl-1", @credentials, opts.(server_error))
+
+      assert message =~ "500"
+    end
+
+    test "membership writes (add, remove, sort) are :write_unconfirmed when possibly sent" do
+      server_error = fn conn -> Plug.Conn.resp(conn, 500, "upstream broke") end
+      not_json = fn conn -> Plug.Conn.resp(conn, 200, "<html>maintenance</html>") end
+      no_verdict = responding([%{"status" => "done"}])
+
+      for plug <- [server_error, not_json, no_verdict] do
+        opts = [plug: plug, retry_attempts: 0]
+
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.add_watchlist_instruments("wl-1", ["AAPL"], @credentials, opts)
+
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.remove_watchlist_instruments("wl-1", ["AAPL"], @credentials, opts)
+
+        assert {:error, {:write_unconfirmed, nil, _reason}} =
+                 Rest.sort_watchlist_instruments(
+                   "wl-1",
+                   @credentials,
+                   [sorts: %{"AAPL" => 1}] ++ opts
+                 )
+      end
+
+      # Decided before sending: plain. The venue's own answers: refused, as before.
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.add_watchlist_instruments("wl-1", ["AAPL"], %{},
+                 plug: ok(),
+                 retry_attempts: 0
+               )
+
+      assert {:error, :symbols_required} =
+               Rest.remove_watchlist_instruments("wl-1", [], @credentials, [])
+
+      assert {:refused, :watchlist_write_rejected} =
+               Rest.add_watchlist_instruments("wl-1", ["AAPL"], @credentials,
+                 plug: responding([%{"success" => false}]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a create whose add may have landed says the membership is unknown, not absent" do
+      plug = fn conn ->
+        if conn.request_path =~ "create" do
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.resp(200, Jason.encode!([%{"watchlist_id" => "wl-maybe"}]))
+        else
+          Plug.Conn.resp(conn, 500, "upstream broke")
+        end
+      end
+
+      assert {:error, {:watchlist_created_members_unconfirmed, "wl-maybe", reason}} =
+               Rest.create_watchlist("Tech", ["AAPL"], @credentials,
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert {:exchange_error, :webull, message} = reason
+      assert message =~ "500"
+    end
+
+    test "failures decided before sending, and the venue's own refusals, stay as they were" do
+      sent = fn conn -> Plug.Conn.resp(conn, 200, Jason.encode!([%{"success" => true}])) end
+      opts = [plug: sent, retry_attempts: 0]
+
+      # Nothing left this process: no credentials, an invalid argument.
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.create_watchlist("Tech", [], %{}, opts)
+
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.update_watchlist("wl-1", %{}, [name: "X"] ++ opts)
+
+      assert {:error, {:missing_credentials, :webull}} =
+               Rest.delete_watchlist("wl-1", %{}, opts)
+
+      assert {:error, {:invalid_sort, "x"}} =
+               Rest.create_watchlist("Tech", [], @credentials, [sort: "x"] ++ opts)
+
+      # The venue said no (4xx / 404): a refusal, not unconfirmed.
+      refusing = fn status ->
+        [plug: fn conn -> Plug.Conn.resp(conn, status, "{}") end, retry_attempts: 0]
+      end
+
+      assert {:refused, :not_found} =
+               Rest.delete_watchlist("nope", @credentials, refusing.(404))
+
+      assert {:refused, _reason} = Rest.delete_watchlist("wl-1", @credentials, refusing.(403))
+
+      assert {:refused, :watchlist_write_rejected} =
+               Rest.delete_watchlist("wl-1", @credentials,
+                 plug: responding([%{"success" => false}]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a listing row with no id refuses the listing, whichever row it is" do
+      for rows <- [
+            [%{"name" => "nameless"}, %{"watchlist_id" => "w-1"}],
+            [%{"watchlist_id" => "w-1"}, %{"name" => "nameless"}],
+            [%{"watchlist_id" => ""}, %{"watchlist_id" => 7}, "not a row"]
+          ] do
+        assert {:error, {:missing_required_field, :id}} =
+                 Rest.list_watchlists(@credentials, plug: responding(rows), retry_attempts: 0)
+      end
+
+      assert {:ok, [%Types.Watchlist{id: "w-1"}, %Types.Watchlist{id: "w-2"}]} =
+               Rest.list_watchlists(@credentials,
+                 plug: responding([%{"watchlist_id" => "w-1"}, %{"watchlist_id" => "w-2"}]),
                  retry_attempts: 0
                )
     end
@@ -325,7 +467,7 @@ defmodule DpExchange.Webull.WatchlistsTest do
       # be reported as `:ok`, a write this package had no evidence of.
       opts = [plug: responding([%{"status" => "done"}]), retry_attempts: 0]
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.add_watchlist_instruments("wl-1", ["AAPL"], @credentials, opts)
     end
 

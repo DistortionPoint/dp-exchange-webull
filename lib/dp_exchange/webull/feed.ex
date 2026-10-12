@@ -368,8 +368,8 @@ defmodule DpExchange.Webull.Feed do
   ## A symbol list that cannot be used is refused, not crashed on
 
   `subscribe/3`, `unsubscribe/3` and `update_symbols/3` take a list of non-empty strings and
-  answer `{:error, {:invalid_symbols, invalid}}` (at most five offenders; the whole value when
-  it is not a list) before any state moves. This is one named process for every caller, and a
+  answer `{:error, {:invalid_symbols, symbols}}` (the argument exactly as given) before any
+  state moves. This is one named process for every caller, and a
   raise inside `handle_call/3` restarted it from its static options with everyone's symbols
   gone. The facade has long returned the same tuple when the VENUE refused a symbol, which is
   what a caller who matches on it wants either way. `DpExchange.Webull.Fake` answers alike.
@@ -846,14 +846,16 @@ defmodule DpExchange.Webull.Feed do
   # malformed list answers the same whether or not the feed runs. `Fake` calls it too.
   @doc """
   Whether `symbols` is a proper list of non-blank strings (blank means empty or only
-  whitespace after trimming). Anything else is `{:error, {:invalid_symbols, offenders}}` -
-  at most five offenders, or the whole value when it is not a list.
+  whitespace after trimming). Anything else is `{:error, {:invalid_symbols, symbols}}` where
+  the value is the caller's WHOLE argument exactly as given (the family convention, Core's
+  assertion 32): a list with a bad element comes back as that list, an improper list as itself,
+  and a non-list as itself.
   """
   @spec check_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
   def check_symbols(symbols) when is_list(symbols) do
     case invalid_symbols(symbols, []) do
       [] -> :ok
-      invalid -> {:error, {:invalid_symbols, invalid |> Enum.reverse() |> Enum.take(5)}}
+      _invalid -> {:error, {:invalid_symbols, symbols}}
     end
   end
 

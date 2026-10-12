@@ -350,9 +350,14 @@ defmodule DpExchange.Webull.FakeTest do
     end
 
     test "an improper symbol list is refused by name, not raised on" do
-      assert {:error, {:invalid_symbols, [:tail]}} = Fake.subscribe(["BTC-USD" | :tail], [])
-      assert {:error, {:invalid_symbols, [:tail]}} = Fake.unsubscribe(["BTC-USD" | :tail])
-      assert {:error, {:invalid_symbols, [:tail]}} = Fake.update_symbols(["BTC-USD" | :tail])
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.subscribe(["BTC-USD" | :tail], [])
+
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.unsubscribe(["BTC-USD" | :tail])
+
+      assert {:error, {:invalid_symbols, ["BTC-USD" | :tail]}} =
+               Fake.update_symbols(["BTC-USD" | :tail])
     end
 
     test "every order call needs an account" do
@@ -455,7 +460,9 @@ defmodule DpExchange.Webull.FakeTest do
     test "a deleted id is never reissued to a later create" do
       assert {:ok, first} = Fake.create_watchlist("A", ["AAPL"], @opts)
       assert {:ok, :ok} = Fake.delete_watchlist(first.id, @opts)
-      assert {:ok, :ok} = Fake.delete_watchlist("never-created", @opts)
+      # Already deleted, and never created: the real path's 404.
+      assert {:refused, :not_found} = Fake.delete_watchlist(first.id, @opts)
+      assert {:refused, :not_found} = Fake.delete_watchlist("never-created", @opts)
       assert {:ok, second} = Fake.create_watchlist("B", ["MSFT"], @opts)
 
       refute second.id == first.id

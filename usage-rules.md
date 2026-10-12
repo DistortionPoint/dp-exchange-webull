@@ -180,7 +180,8 @@ one in the venue's format (32 lower-case hex characters, as `Rest` generates), a
 `Fake.create_watchlist/3` gets its own id, is read back by `get_watchlist/2` with the symbols
 it was created with, appears in `list_watchlists/1` under its name (and its renames), and
 reads as no rows (`{:error, :unexpected_response_shape}`) once deleted; `wl-1` is the canned
-one before you create any.
+one before you create any. Deleting an id the Fake does not hold (never created, or already
+deleted) is `{:refused, :not_found}`, as the real path answers a 404.
 These were missed by the earlier sweep because `dp_exchange_core`'s assertion 17 checks a
 fixed list of nine callback names that predates this surface and does not include any of
 them — passing that assertion is not evidence that the rest of your fake gates credentials.
@@ -618,8 +619,10 @@ releases passed `{price, nil}` through, a pair `OrderBook.new/1` refuses.)
 
 ## A row the venue did not identify is dropped, not given an empty id
 
-As of 0.4.38, `get_screener/2` and `list_watchlists/1` drop a row that cannot supply its
-own identifying field rather than publishing it with `""`.
+As of 0.4.38, `get_screener/2` drops a row that cannot supply its own identifying field
+rather than publishing it with `""`. **`list_watchlists/1` no longer drops one: a listing row
+with no text `watchlist_id` refuses the whole reply as `{:error, {:missing_required_field,
+:id}}`**, because a list missing a watchlist reads as "that watchlist does not exist".
 
 An empty string is worse than the `nil` it replaced: a `nil` is detectable and `""` is a
 value, so a consumer keying coverage by symbol used to get a live entry named `""`.
@@ -904,9 +907,24 @@ changed.
 **Every watchlist write answers `{"success": …}` rather than an error status**, so a `false`
 is a 200 that did nothing — reported here as `{:refused, :watchlist_write_rejected}`.
 
+**A watchlist write that may have reached the venue and is not proven is
+`{:error, {:write_unconfirmed, nil, reason}}`** - `create_watchlist/3`, `update_watchlist/2`,
+`delete_watchlist/2` and the membership writes `add_watchlist_instruments/3`,
+`remove_watchlist_instruments/3` and `sort_watchlist_instruments/2`: a transport error or timeout, a 5xx, a 2xx whose body is unreadable,
+has no `success`, or (on create) names no id. The write may have happened, so do not retry it
+blind: list the watchlists first (`nil` is the key - this venue takes no idempotency key for a
+watchlist write). Failures decided before anything is sent (no credentials, our own rate
+limiter, an invalid argument) stay plain `{:error, reason}`, and the venue's own refusals stay
+`{:refused, _}`.
+
+**`delete_watchlist/2` of an id the venue does not hold is `{:refused, :not_found}`** (a 404),
+on `Fake` too; the Fake used to answer `{:ok, :ok}`.
+
 **Creating with members is two requests.** Where the add fails, the watchlist exists and is
 empty: `{:error, {:watchlist_created_without_members, id, reason}}` carries its id so you can
-deal with it.
+deal with it. Where the add is itself unproven (it may have landed) the answer is
+`{:error, {:watchlist_created_members_unconfirmed, id, reason}}`: the watchlist exists and its
+membership is unknown, so read it with `get_watchlist/2` before adding again.
 
 ## A stop order needs `:stop_price`; a trailing stop needs `:trailing_stop_step`
 
@@ -1175,8 +1193,8 @@ another shard because the first was full or the venue refused one: the ten secon
 when your call arrived, not from the latest internal retry.
 
 A list that is not made of non-blank strings (empty or whitespace-only is blank) is refused at
-once with `{:error, {:invalid_symbols, offenders}}` (at most five named; the whole value if it
-was not a list), and nothing is subscribed or removed. This is decided in **your** process,
+once with `{:error, {:invalid_symbols, symbols}}` (your argument exactly as given, whole, even
+an improper list), and nothing is subscribed or removed. This is decided in **your** process,
 before `{:error, :feed_not_started}`: a malformed list answers the same whether or not the feed
 runs, and `unsubscribe(nil)` is refused rather than `:ok`. After the symbols, `subscribe/2` and
 `subscribe_notices/1` check `to:`: anything but a pid or a registered-name atom - `true` and
