@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.137] - 2026-10-12
+
 ### Fixed
 
 - **BREAKING: a write is sent exactly once whatever `:retry_attempts` the caller passes.**
