@@ -42,11 +42,19 @@ defmodule DpExchange.Webull.SymbolFormat do
   @spec quotes() :: [String.t()]
   def quotes, do: mapping().quotes
 
+  @doc """
+  Native `BTCUSD` to canonical `BTC-USD`, through `DpExchange.Core.CanonicalPair`.
+  See `c:DpExchange.Core.SymbolNormalizer.to_canonical_symbol/1`.
+  """
   @impl true
   @spec to_canonical_symbol(String.t()) :: String.t()
   def to_canonical_symbol(native) when is_binary(native),
     do: CanonicalPair.to_canonical(mapping(), native)
 
+  @doc """
+  Canonical `BTC-USD` to native `BTCUSD`, through `DpExchange.Core.CanonicalPair`.
+  See `c:DpExchange.Core.SymbolNormalizer.to_exchange_symbol/1`.
+  """
   @impl true
   @spec to_exchange_symbol(String.t()) :: String.t()
   def to_exchange_symbol(canonical) when is_binary(canonical),

@@ -126,25 +126,57 @@ defmodule DpExchange.Webull.Fake do
   @targets_key {__MODULE__, :targets}
   @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
 
+  @doc """
+  A child spec that starts nothing: `start_link/1` answers `:ignore`.
+
+  Unlike `DpExchange.Webull.child_spec/1` it does not wrap credentials or declare a
+  supervisor. See `c:DpExchange.Core.Venue.child_spec/1`.
+  """
   @impl true
   def child_spec(opts),
     do: %{id: Keyword.get(opts, :name, __MODULE__), start: {__MODULE__, :start_link, [opts]}}
 
+  @doc """
+  Answers `:ignore`: the fake has no processes. See `c:DpExchange.Core.Venue.start_link/1`.
+  """
   @impl true
   def start_link(_opts), do: :ignore
 
+  @doc """
+  The real adapter's name, `DpExchange.Webull.provider_name/0`.
+  See `c:DpExchange.Core.Venue.provider_name/0`.
+  """
   @impl true
   def provider_name, do: DpExchange.Webull.provider_name()
 
+  @doc """
+  The real adapter's id, `DpExchange.Webull.runtime_id/0`.
+  See `c:DpExchange.Core.Venue.runtime_id/0`.
+  """
   @impl true
   def runtime_id, do: DpExchange.Webull.runtime_id()
 
+  @doc """
+  The real adapter's asset classes, `DpExchange.Webull.asset_classes/0`.
+  See `c:DpExchange.Core.Venue.asset_classes/0`.
+  """
   @impl true
   def asset_classes, do: DpExchange.Webull.asset_classes()
 
+  @doc """
+  The real adapter's declaration, `DpExchange.Webull.capabilities/0`, unchanged.
+  See `c:DpExchange.Core.Venue.capabilities/0`.
+  """
   @impl true
   def capabilities, do: DpExchange.Webull.capabilities()
 
+  @doc """
+  A fixed fixture price for `BTC-USD`, `ETH-USD`, `SOL-USD` or `XRP-USD`.
+
+  Requires `opts[:credentials]` (`{:error, {:missing_credentials, :webull}}` without them);
+  `volume` is `nil`; any other symbol or category is refused. See
+  `c:DpExchange.Core.Venue.get_price/2`.
+  """
   @impl true
   def get_price(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -210,6 +242,12 @@ defmodule DpExchange.Webull.Fake do
   defp proper_list?([_head | tail]), do: proper_list?(tail)
   defp proper_list?(_other), do: false
 
+  @doc """
+  A fixture bid and ask around the symbol's fixture price, with `nil` sizes.
+
+  Requires `opts[:credentials]`; an unlisted symbol is refused. See
+  `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -243,6 +281,12 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  One fixture candle for a listed symbol, kept only if it falls inside `range`.
+
+  Requires `opts[:credentials]`; `volume` is `nil`. See
+  `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
     with_injection(symbol, fn ->
@@ -267,6 +311,10 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  The four fixture crypto symbols. Requires `opts[:credentials]`.
+  See `c:DpExchange.Core.Venue.get_symbols/1`.
+  """
   @impl true
   def get_symbols(opts \\ []) do
     with_injection(fn ->
@@ -280,6 +328,12 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  A fixed two-level book for an equity-style symbol; a crypto pair is refused.
+
+  Requires `opts[:credentials]` and honours `opts[:depth]`. See
+  `c:DpExchange.Core.Venue.get_order_book/2`.
+  """
   @impl true
   def get_order_book(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -336,6 +390,11 @@ defmodule DpExchange.Webull.Fake do
       else: :ok
   end
 
+  @doc """
+  Two fixed prints for an equity-style symbol; a crypto pair is refused.
+
+  Requires `opts[:credentials]`. See `c:DpExchange.Core.Venue.get_trades/2`.
+  """
   @impl true
   def get_trades(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -384,6 +443,10 @@ defmodule DpExchange.Webull.Fake do
     ]
   end
 
+  @doc """
+  One fixed volume-profile row for the symbol. Requires `opts[:credentials]`.
+  See `c:DpExchange.Core.Venue.get_volume_profile/3`.
+  """
   @impl true
   def get_volume_profile(symbol, timeframe, opts \\ []) do
     with_injection(symbol, fn ->
@@ -417,6 +480,13 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  One fixed auction imbalance row.
+
+  `opts[:auction]` is required (`:opening` or `:closing`): `{:error, :auction_required}`
+  without it. Requires `opts[:credentials]`. See
+  `c:DpExchange.Core.Venue.get_auction_imbalance/2`.
+  """
   @impl true
   def get_auction_imbalance(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -458,9 +528,19 @@ defmodule DpExchange.Webull.Fake do
     }
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
 
+  @doc """
+  The four fixture crypto instruments; `XRP-USD` has status `:unknown`.
+
+  Requires `opts[:credentials]`; only the `US_CRYPTO` category is served. See
+  `DpExchange.Webull.list_instruments/1`.
+  """
   @impl true
   def list_instruments(opts \\ []) do
     with_injection(fn ->
@@ -501,6 +581,12 @@ defmodule DpExchange.Webull.Fake do
     )
   end
 
+  @doc """
+  One fixture USD balance, `available_balance` `nil`, stamped with the current time.
+
+  Requires `opts[:account_id]` and the credentials. See
+  `c:DpExchange.Core.Venue.get_balances/2`.
+  """
   @impl true
   def get_balances(credentials, opts) do
     with_injection(fn ->
@@ -526,6 +612,10 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Two fixture accounts, one `CRYPTO` and one `INDIVIDUAL_MARGIN`. Requires the credentials.
+  See `DpExchange.Webull.get_accounts/2`.
+  """
   @impl true
   def get_accounts(credentials, _opts) do
     with_injection(fn ->
@@ -553,6 +643,11 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  The captured published crypto spread, as the real adapter answers it.
+
+  Needs no credentials: it builds no request. See `c:DpExchange.Core.Venue.get_fees/2`.
+  """
   @impl true
   def get_fees(_credentials, _opts) do
     with_injection(fn ->
@@ -572,6 +667,12 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Fixture cash activity, filtered to `opts[:activity_types]` (default deposits, withdrawals
+  and transfers).
+
+  Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.get_transfers/2`.
+  """
   @impl true
   def get_transfers(credentials, opts) do
     with_injection(fn ->
@@ -614,6 +715,11 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Fixture cash activity of every type, filtered to `opts[:activity_types]` when given.
+
+  Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.get_transactions/2`.
+  """
   @impl true
   def get_transactions(credentials, opts) do
     with_injection(fn ->
@@ -661,42 +767,91 @@ defmodule DpExchange.Webull.Fake do
   defp filter_activity_types(rows, types),
     do: filter_activity_types(rows, types |> to_string() |> String.split(",", trim: true))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_payment_methods/2`.
+  """
   @impl true
   def list_payment_methods(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_payment_method/3`.
+  """
   @impl true
   def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.add_payment_method/2`.
+  """
   @impl true
   def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.transfer_internal/4`.
+  """
   @impl true
   def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.request_approved_address/4`.
+  """
   @impl true
   def request_approved_address(_asset, _network, _address, _opts \\ []),
     do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.remove_approved_address/3`.
+  """
   @impl true
   def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_networks/2`.
+  """
   @impl true
   def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_fee_promos/1`.
+  """
   @impl true
   def list_fee_promos(_opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_fx_rate/3`.
+  """
   @impl true
   def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_notional_balances/3`.
+  """
   @impl true
   def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_custody_fees/2`.
+  """
   @impl true
   def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
 
   # Both refused, matching the real venue. A fake that answered where the real one
   # refuses lets a consumer's suite go green against behaviour that cannot happen.
+  @doc """
+  A fixed estimated cost and fee for a valid request; no order is remembered.
+
+  Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.preview_order/3`.
+  """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
     with_injection(fn ->
@@ -718,6 +873,11 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Amends an order this process remembers; an unknown id is `{:refused, :not_found}`.
+
+  Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.replace_order/4`.
+  """
   @impl true
   def replace_order(credentials, client_order_id, changes, opts \\ []) do
     with_injection(fn -> do_replace_order(credentials, client_order_id, changes, opts) end)
@@ -774,21 +934,54 @@ defmodule DpExchange.Webull.Fake do
 
   defp amended_value(_field, new), do: new
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.cancel_all_orders/2`.
+  """
   @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_trade_history/2`.
+  """
   @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()
+
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(_credentials, _opts), do: Venue.not_supported()
+
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_rate_limit_status/2`.
+  """
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
+
+  @doc """
+  Fixture increments and limits: crypto pairs get cent and 1e-8 steps, other symbols a
+  whole-share increment. An unlisted crypto pair is refused.
+
+  Requires `opts[:credentials]`. See `c:DpExchange.Core.Venue.quantization/1`.
+  """
   @impl true
   def quantization(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -839,9 +1032,20 @@ defmodule DpExchange.Webull.Fake do
   # market-status or trading-calendar endpoint this package can reach. See
   # `DpExchange.Webull.market_status/1`'s own doc for the full reasoning. The real facade
   # never dials out for this either, so there is nothing for `with_injection/2` to wrap.
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.market_status/1`.
+  """
   @impl true
   def market_status(_opts), do: Venue.not_supported()
 
+  @doc """
+  Delivers a fixture quote and top of book for each listed symbol to `opts[:to]` (default
+  `self()`), as `{:dp_exchange, :webull, payload}`.
+
+  Under `environment: :uat` it answers `{:error, {:streaming_unavailable, :uat}}`, as the
+  real feed does. State is per process. See `c:DpExchange.Core.Venue.subscribe/2`.
+  """
   @impl true
   def subscribe(symbols, opts \\ []) do
     # Refused in the real `Feed`'s order: the symbol list, then the subscriber.
@@ -918,6 +1122,10 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @doc """
+  Drops the named symbols from this process's fake subscription and answers `:ok`.
+  See `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, _opts \\ []) do
     with :ok <- Feed.check_symbols(symbols) do
@@ -932,6 +1140,10 @@ defmodule DpExchange.Webull.Fake do
   # the subscribers it already has. A symbol dropped stops being covered at once; one added is
   # covered only when it has been pushed to a subscriber, so an update before any `subscribe/2`
   # covers nothing.
+  @doc """
+  Narrows this process's fake subscription to the listed symbols and delivers fixtures for
+  newly added ones. See `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, _opts \\ []) do
     with :ok <- Feed.check_symbols(symbols) do
@@ -946,6 +1158,10 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @doc """
+  Every symbol this process's fake has delivered to, as `%{symbol => :stream}`.
+  See `c:DpExchange.Core.Venue.coverage/1`.
+  """
   @impl true
   def coverage(_opts \\ []),
     do: Map.new(MapSet.union(subscribed(), top()), &{&1, :stream})
@@ -953,6 +1169,10 @@ defmodule DpExchange.Webull.Fake do
   # Both kinds the real feed streams (`capabilities/0`'s `streamable`), each reported only
   # while it has covered symbols - the real feed's per-kind map likewise has no entry for a
   # kind nothing has arrived for.
+  @doc """
+  This process's delivered symbols split into `:quotes` and `:top_of_book`; an empty kind
+  is omitted. See `c:DpExchange.Core.Venue.coverage_by_kind/1`.
+  """
   @impl true
   def coverage_by_kind(_opts \\ []) do
     for {kind, symbols} <- [quotes: subscribed(), top_of_book: top()],
@@ -963,6 +1183,10 @@ defmodule DpExchange.Webull.Fake do
 
   # No `:link_up` is sent on registration: the real feed sends one only when a link actually
   # comes up (or replays one it has recorded), and this fake has no link.
+  @doc """
+  Validates `opts[:to]` and answers `:ok`; this fake emits no notices.
+  See `c:DpExchange.Core.Venue.subscribe_notices/1`.
+  """
   @impl true
   def subscribe_notices(opts \\ []) do
     Feed.check_subscriber(Config.opt(opts, :to, self()))
@@ -1043,6 +1267,10 @@ defmodule DpExchange.Webull.Fake do
   # venue had no streaming API when it had fifteen services. Where the venue genuinely does
   # not offer something, the comment beside it says so.
 
+  @doc """
+  Fixture open positions for one account. Requires `opts[:account_id]` and the credentials.
+  See `DpExchange.Webull.get_positions/1`.
+  """
   @impl true
   def get_positions(opts \\ []) do
     with_injection(fn ->
@@ -1076,64 +1304,140 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_funding/2`.
+  """
   @impl true
   def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_contract_stats/2`.
+  """
   @impl true
   def get_contract_stats(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_rates/1`.
+  """
   @impl true
   def get_staking_rates(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_balances/1`.
+  """
   @impl true
   def get_staking_balances(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_rewards/1`.
+  """
   @impl true
   def get_staking_rewards(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_history/1`.
+  """
   @impl true
   def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.stake/3`.
+  """
   @impl true
   def stake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.unstake/3`.
+  """
   @impl true
   def unstake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.quote_conversion/4`.
+  """
   @impl true
   def quote_conversion(_from, _to, _amount, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.commit_conversion/2`.
+  """
   @impl true
   def commit_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.convert/4`.
+  """
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_trade_volume/2`.
+  """
   @impl true
   def get_trade_volume(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_deposit_address/3`.
+  """
   @impl true
   def get_deposit_address(_asset, _network, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_approved_addresses/1`.
+  """
   @impl true
   def list_approved_addresses(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
+  """
   @impl true
   def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.withdraw/5`.
+  """
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts \\ []),
     do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  A small fixture option chain for the underlying. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_option_chain/2`.
+  """
   @impl true
   def get_option_chain(underlying, opts \\ []) do
     with_injection(underlying, fn ->
@@ -1153,6 +1457,10 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  The sorted expiry dates of the fixture chain. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_option_expirations/2`.
+  """
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
     with_injection(underlying, fn ->
@@ -1227,9 +1535,17 @@ defmodule DpExchange.Webull.Fake do
     }
   end
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  The fixture watchlist `wl-1` plus any this process created, with `symbols` `nil`.
+  Requires `opts[:credentials]`. See `DpExchange.Webull.list_watchlists/1`.
+  """
   @impl true
   def list_watchlists(opts \\ []) do
     with_injection(fn ->
@@ -1269,6 +1585,10 @@ defmodule DpExchange.Webull.Fake do
   defp put_watchlist(id, value),
     do: Process.put(@watchlists_key, Map.put(watchlists(), id, value))
 
+  @doc """
+  One watchlist with its members: the fixture `wl-1` or one this process created.
+  Any other id is `{:refused, :not_found}`. See `DpExchange.Webull.get_watchlist/2`.
+  """
   @impl true
   def get_watchlist(id, opts \\ []) do
     with_injection(fn ->
@@ -1299,6 +1619,10 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Remembers a watchlist for this process and returns it with its members.
+  Requires `opts[:credentials]`. See `DpExchange.Webull.create_watchlist/3`.
+  """
   @impl true
   def create_watchlist(name, symbols, opts \\ []) do
     with_injection(fn ->
@@ -1328,6 +1652,10 @@ defmodule DpExchange.Webull.Fake do
     if Map.has_key?(watchlists(), id), do: new_watchlist_id(), else: id
   end
 
+  @doc """
+  Renames a watchlist; `opts[:symbols]` is refused because membership is not changed here.
+  Requires `opts[:credentials]`. See `DpExchange.Webull.update_watchlist/2`.
+  """
   @impl true
   def update_watchlist(id, opts \\ []) do
     with_injection(fn ->
@@ -1358,6 +1686,10 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @doc """
+  Deletes a watchlist this process knows; an unknown id is `{:refused, :not_found}`.
+  Requires `opts[:credentials]`. See `DpExchange.Webull.delete_watchlist/2`.
+  """
   @impl true
   def delete_watchlist(id, opts \\ []) do
     with_injection(fn ->
@@ -1384,6 +1716,10 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @doc """
+  One fixture financial statement of the requested kind. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_financials/3`.
+  """
   @impl true
   def get_financials(symbol, kind, opts \\ []) do
     with_injection(symbol, fn ->
@@ -1439,6 +1775,11 @@ defmodule DpExchange.Webull.Fake do
     }
   end
 
+  @doc """
+  Fixture corporate events for `opts[:symbol]`, which is required
+  (`{:error, :symbol_required}` without it). Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_corporate_events/1`.
+  """
   @impl true
   def get_corporate_events(opts \\ []) do
     with_injection(fn ->
@@ -1503,6 +1844,10 @@ defmodule DpExchange.Webull.Fake do
     }
   end
 
+  @doc """
+  One fixture filing for the symbol. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_filings/2`.
+  """
   @impl true
   def get_filings(symbol, opts \\ []) do
     with_injection(symbol, fn ->
@@ -1525,6 +1870,9 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  One fixture news item. Requires `opts[:credentials]`. See `DpExchange.Webull.get_news/1`.
+  """
   @impl true
   def get_news(opts \\ []) do
     with_injection(fn ->
@@ -1561,6 +1909,10 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  One fixture screener row for the named screener. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_screener/2`.
+  """
   @impl true
   def get_screener(name, opts \\ []) do
     with_injection(fn ->
@@ -1586,15 +1938,33 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.create_account/1`.
+  """
   @impl true
   def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.rename_account/3`.
+  """
   @impl true
   def rename_account(_id, _name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_roles/1`.
+  """
   @impl true
   def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
 
+  @doc """
+  Remembers an order for this process and returns it, so `get_order/3` and `cancel_order/3`
+  accept its id. A repeated client order id is refused.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.place_order/3`.
+  """
   @impl true
   def place_order(credentials, request, opts \\ []) do
     with_injection(fn ->
@@ -1662,6 +2032,11 @@ defmodule DpExchange.Webull.Fake do
     count |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(width, "0")
   end
 
+  @doc """
+  One fixture row per request in the batch; the orders are not remembered.
+
+  Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.place_orders/3`.
+  """
   @impl true
   def place_orders(credentials, requests, opts) do
     # The venue's two limits, and a per-order result. A fake that answered ok-or-error would
@@ -1711,6 +2086,12 @@ defmodule DpExchange.Webull.Fake do
     with {:ok, _account_id} <- Rest.validate_account(opts), do: :ok
   end
 
+  @doc """
+  Marks a remembered order cancelled and answers `{:ok, :cancelled}`; an unknown id is
+  `{:refused, :not_found}`.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.cancel_order/3`.
+  """
   @impl true
   def cancel_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
@@ -1731,6 +2112,11 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  @doc """
+  A remembered order by client order id; an unknown id is `{:refused, :not_found}`.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_order/3`.
+  """
   @impl true
   def get_order(credentials, client_order_id, opts \\ []) do
     with_injection(fn ->
@@ -1768,6 +2154,11 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  @doc """
+  The one fixed order plus every order this process placed.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []) do
     with_injection(fn ->

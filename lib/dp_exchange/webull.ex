@@ -193,6 +193,13 @@ defmodule DpExchange.Webull do
 
   # --- lifecycle ---------------------------------------------------------
 
+  @doc """
+  The supervisor child spec for this venue's tree, with `:credentials` wrapped so they never
+  appear in a crash report.
+
+  Supervise it as `{DpExchange.Webull, opts}`; nothing starts until you do. The child is a
+  `:supervisor` and `opts[:name]` becomes its id. See `c:DpExchange.Core.Venue.child_spec/1`.
+  """
   @impl true
   def child_spec(opts) do
     # Credentials are wrapped HERE, and not in `start_link/1` or `init/1` — that
@@ -218,14 +225,28 @@ defmodule DpExchange.Webull do
     }
   end
 
+  @doc """
+  Starts this venue's supervision tree (`DpExchange.Webull.Supervisor.start_link/1`).
+
+  Prefer supervising `child_spec/1`. Calling this directly wraps the credentials too, but a
+  child spec you build yourself does not. See `c:DpExchange.Core.Venue.start_link/1`.
+  """
   @impl true
   def start_link(opts), do: DpExchange.Webull.Supervisor.start_link(opts)
 
   # --- declaration -------------------------------------------------------
 
+  @doc """
+  The venue's display name, `"Webull"`.
+  See `c:DpExchange.Core.Venue.provider_name/0`.
+  """
   @impl true
   def provider_name, do: "Webull"
 
+  @doc """
+  The venue's runtime id, `:webull`.
+  See `c:DpExchange.Core.Venue.runtime_id/0`.
+  """
   @impl true
   def runtime_id, do: :webull
 
@@ -275,6 +296,13 @@ defmodule DpExchange.Webull do
   @impl true
   def asset_classes, do: [:crypto, :equity, :option, :future, :event_contract]
 
+  @doc """
+  What this package claims about Webull, per endpoint and with the evidence in
+  `measured_against`.
+
+  Every callback not in `venue_does_not_serve/0` or the not-ported list is `:experimental`;
+  the rest are `:unsupported`. See `c:DpExchange.Core.Venue.capabilities/0`.
+  """
   @impl true
   def capabilities do
     Capabilities.new(
@@ -548,6 +576,12 @@ defmodule DpExchange.Webull do
 
   # --- market data -------------------------------------------------------
 
+  @doc """
+  The last price for one symbol, from the venue's signed snapshot endpoint.
+
+  Reads `opts[:credentials]` (required: every Webull call is signed), `opts[:category]` and
+  `opts[:environment]`. See `c:DpExchange.Core.Venue.get_price/2`.
+  """
   @impl true
   def get_price(symbol, opts \\ []),
     do: Rest.get_price(symbol, credentials(opts), with_limiter(opts))
@@ -570,10 +604,23 @@ defmodule DpExchange.Webull do
   def get_prices(symbols, opts \\ []),
     do: Rest.get_prices(symbols, credentials(opts), with_limiter(opts))
 
+  @doc """
+  The best bid and ask for one symbol, from the signed REST API.
+
+  Reads `opts[:credentials]` (required), `opts[:category]` and `opts[:environment]`.
+  See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  """
   @impl true
   def get_top_of_book(symbol, opts \\ []),
     do: Rest.get_top_of_book(symbol, credentials(opts), with_limiter(opts))
 
+  @doc """
+  Candles for one symbol at one of the eleven declared widths.
+
+  A width the symbol's category does not serve (`1w`, `1M`, `1y` on crypto and event
+  contracts) is refused, not rounded to a neighbour. Reads `opts[:credentials]` (required)
+  and `opts[:category]`. See `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []),
     do:
@@ -595,6 +642,12 @@ defmodule DpExchange.Webull do
   @spec adjusted?(String.t()) :: boolean() | nil
   def adjusted?(timeframe), do: Rest.adjusted?(timeframe)
 
+  @doc """
+  The tradable symbols, read from the venue's paginated instrument catalogue.
+
+  Reads `opts[:credentials]` (required) and `opts[:category]`. See
+  `c:DpExchange.Core.Venue.get_symbols/1`.
+  """
   @impl true
   def get_symbols(opts \\ []), do: Rest.get_symbols(credentials(opts), with_limiter(opts))
 
@@ -638,6 +691,10 @@ defmodule DpExchange.Webull do
   def get_auction_imbalance(symbol, opts \\ []),
     do: Rest.get_auction_imbalance(symbol, credentials(opts), with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_market_overview/1`.
+  """
   @impl true
   def get_market_overview(_opts), do: Venue.not_supported()
 
@@ -694,6 +751,14 @@ defmodule DpExchange.Webull do
   for an empty answer.
   """
   def get_transfers(credentials, opts), do: Rest.get_transfers(credentials, with_limiter(opts))
+
+  @doc """
+  Places one order. **This moves funds.**
+
+  Requires `opts[:account_id]` and the credentials; the request is checked against the
+  venue's order-type and time-in-force matrix before anything is sent. See
+  `c:DpExchange.Core.Venue.place_order/3`.
+  """
   @impl true
   def place_order(credentials, request, opts \\ []),
     do: Rest.place_order(credentials, request, with_limiter(opts))
@@ -729,25 +794,57 @@ defmodule DpExchange.Webull do
   def replace_order(credentials, client_order_id, changes, opts \\ []),
     do: Rest.replace_order(credentials, client_order_id, changes, with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. Use `preview_order/3` and
+  `replace_order/4`. See `c:DpExchange.Core.Venue.preview_replace/4`.
+  """
   @impl true
   def preview_replace(_credentials, _id, _changes, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.close_position/3`.
+  """
   @impl true
   def close_position(_credentials, _symbol, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.cancel_all_orders/2`.
+  """
   @impl true
   def cancel_all_orders(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Cancels one order by its client order id. **This acts on a live account.**
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.cancel_order/3`.
+  """
   @impl true
   def cancel_order(credentials, client_order_id, opts \\ []),
     do: Rest.cancel_order(credentials, client_order_id, with_limiter(opts))
 
+  @doc """
+  One order by its client order id.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_order/3`.
+  """
   @impl true
   def get_order(credentials, client_order_id, opts \\ []),
     do: Rest.get_order(credentials, client_order_id, with_limiter(opts))
 
+  @doc """
+  Orders on one account.
+
+  Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_orders/2`.
+  """
   @impl true
   def get_orders(credentials, opts \\ []), do: Rest.get_orders(credentials, with_limiter(opts))
+
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_trade_history/2`.
+  """
   @impl true
   def get_trade_history(_credentials, _opts), do: Venue.not_supported()
 
@@ -767,6 +864,14 @@ defmodule DpExchange.Webull do
   # 3): a malformed symbol list or subscriber answers the same whether or not the feed runs,
   # and `unsubscribe(nil)` can no longer answer `:ok` merely because nothing is running.
   # `Feed` repeats the check on arrival for direct callers.
+  @doc """
+  Subscribes `opts[:to]` (default `self()`) to the symbols over the venue's MQTT stream.
+
+  Symbols are upper-cased, the caller's arguments are validated before the feed is reached,
+  and a stopped feed answers `{:error, :feed_not_started}`. Under `environment: :uat`
+  there is no stream: `{:error, {:streaming_unavailable, :uat}}`. Credentials are required.
+  See `c:DpExchange.Core.Venue.subscribe/2`.
+  """
   @impl true
   def subscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
@@ -778,6 +883,12 @@ defmodule DpExchange.Webull do
     end
   end
 
+  @doc """
+  Stops delivery for the named symbols; a stopped feed answers `:ok`.
+
+  Symbols are upper-cased and validated before the feed is reached.
+  See `c:DpExchange.Core.Venue.unsubscribe/2`.
+  """
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols) do
@@ -788,6 +899,13 @@ defmodule DpExchange.Webull do
     end
   end
 
+  @doc """
+  Replaces the live subscription's symbol set; a stopped feed answers
+  `{:error, :feed_not_started}`.
+
+  Symbols are upper-cased and validated before the feed is reached.
+  See `c:DpExchange.Core.Venue.update_symbols/2`.
+  """
   @impl true
   def update_symbols(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols) do
@@ -805,6 +923,13 @@ defmodule DpExchange.Webull do
   # `app_secret` from the rest. `Feed` wraps again on arrival, for direct callers.
   defp feed_opts(opts), do: opts |> with_limiter() |> DpExchange.Webull.Credentials.wrap_opt()
 
+  @doc """
+  Which symbols are arriving on the stream, as `%{symbol => :stream}` read from the running
+  feed.
+
+  Answers `%{}` when no feed is running or it does not answer. Reads `opts[:feed]` to name
+  a feed other than the default. See `c:DpExchange.Core.Venue.coverage/1`.
+  """
   @impl true
   def coverage(opts \\ []) do
     feed = feed(opts)
@@ -855,6 +980,12 @@ defmodule DpExchange.Webull do
     if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
 
+  @doc """
+  Subscribes `opts[:to]` (default `self()`) to the feed's notices.
+
+  A stopped feed answers `{:error, :feed_not_started}`.
+  See `c:DpExchange.Core.Venue.subscribe_notices/1`.
+  """
   @impl true
   def subscribe_notices(opts \\ []) do
     with :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
@@ -867,9 +998,17 @@ defmodule DpExchange.Webull do
 
   # --- health ------------------------------------------------------------
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.test_connection/2`.
+  """
   @impl true
   def test_connection(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_rate_limit_status/2`.
+  """
   @impl true
   def get_rate_limit_status(_credentials, _opts), do: Venue.not_supported()
 
@@ -1043,57 +1182,129 @@ defmodule DpExchange.Webull do
   """
   def get_positions(opts), do: Rest.get_positions(credentials(opts), with_limiter(opts))
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_funding/2`.
+  """
   @impl true
   def get_funding(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_contract_stats/2`.
+  """
   @impl true
   def get_contract_stats(_symbol, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_rates/1`.
+  """
   @impl true
   def get_staking_rates(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_balances/1`.
+  """
   @impl true
   def get_staking_balances(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_rewards/1`.
+  """
   @impl true
   def get_staking_rewards(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_staking_history/1`.
+  """
   @impl true
   def get_staking_history(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.stake/3`.
+  """
   @impl true
   def stake(_asset, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.unstake/3`.
+  """
   @impl true
   def unstake(_asset, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.quote_conversion/4`.
+  """
   @impl true
   def quote_conversion(_from, _to, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.commit_conversion/2`.
+  """
   @impl true
   def commit_conversion(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_conversion/2`.
+  """
   @impl true
   def get_conversion(_id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.convert/4`.
+  """
   @impl true
   def convert(_from, _to, _amount, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_trade_volume/2`.
+  """
   @impl true
   def get_trade_volume(_credentials, _opts \\ []), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_portfolios/1`.
+  """
   @impl true
   def list_portfolios(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_deposit_address/3`.
+  """
   @impl true
   def get_deposit_address(_asset, _network, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_approved_addresses/1`.
+  """
   @impl true
   def list_approved_addresses(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
+  """
   @impl true
   def estimate_withdrawal_fee(_asset, _network, _amount, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.withdraw/5`.
+  """
   @impl true
   def withdraw(_asset, _network, _amount, _address, _opts), do: Venue.not_supported()
 
@@ -1108,36 +1319,80 @@ defmodule DpExchange.Webull do
   def get_transactions(credentials, opts),
     do: Rest.get_transactions(credentials, with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_payment_methods/2`.
+  """
   @impl true
   def list_payment_methods(_credentials, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_payment_method/3`.
+  """
   @impl true
   def get_payment_method(_credentials, _id, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.add_payment_method/2`.
+  """
   @impl true
   def add_payment_method(_details, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.transfer_internal/4`.
+  """
   @impl true
   def transfer_internal(_asset, _amount, _opts, _request_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.request_approved_address/4`.
+  """
   @impl true
   def request_approved_address(_asset, _network, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.remove_approved_address/3`.
+  """
   @impl true
   def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_networks/2`.
+  """
   @impl true
   def list_networks(_asset, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_fee_promos/1`.
+  """
   @impl true
   def list_fee_promos(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_fx_rate/3`.
+  """
   @impl true
   def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_notional_balances/3`.
+  """
   @impl true
   def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.list_custody_fees/2`.
+  """
   @impl true
   def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
 
@@ -1252,6 +1507,10 @@ defmodule DpExchange.Webull do
   def get_event_order_book(symbol, opts \\ []),
     do: Rest.get_event_order_book(symbol, credentials(opts), with_limiter(opts))
 
+  @doc """
+  Not served by this venue: answers `{:error, :not_supported}`. Webull publishes no greeks.
+  See `c:DpExchange.Core.Venue.get_option_greeks/2`.
+  """
   @impl true
   def get_option_greeks(_symbol, _opts), do: Venue.not_supported()
 
@@ -1437,12 +1696,24 @@ defmodule DpExchange.Webull do
   def oauth_token(client_id, client_secret, opts \\ []),
     do: Rest.oauth_token(client_id, client_secret, with_limiter(opts))
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.create_account/1`.
+  """
   @impl true
   def create_account(_opts), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.rename_account/3`.
+  """
   @impl true
   def rename_account(_id, _name, _opts), do: Venue.not_supported()
 
+  @doc """
+  Not ported: answers `{:error, :not_supported}`.
+  See `c:DpExchange.Core.Venue.get_roles/1`.
+  """
   @impl true
   def get_roles(_opts), do: Venue.not_supported()
 end

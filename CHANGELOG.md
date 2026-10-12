@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- Docs: every public facade function is documented in HexDocs (148 added); docs build is warning-free.
+
 ## [0.4.142] - 2026-10-12
 
 - **BREAKING: an order-book `:depth` out of range is `{:error, {:invalid_option, :depth, value}}`.**
@@ -428,7 +430,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   for the CONNECT). `usage-rules.md` no longer says the key shows in a shard's crash report.
 - **`DpExchange.Webull.start_link/1` called directly left the raw credential map in the
   supervisor's init argument and in `Feed`'s child spec.** Only `child_spec/1` wrapped it.
-  `Supervisor.start_link/1` now wraps too (idempotent). `Credentials.wrap/1` passes a value
+  `DpExchange.Webull.Supervisor.start_link/1` now wraps too (idempotent). `Credentials.wrap/1` passes a value
   that is not a map through instead of raising `FunctionClauseError` with it in the printed
   arguments.
 
@@ -644,7 +646,7 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   add/remove writes; `sort_watchlist_instruments/3` refuses a position that is not a whole
   number (`{:invalid_sorts, sorts}`). The fake runs the same validators.
 - **`extended_hours: nil`, `overnight: nil` and `real_time: nil` were sent as an empty string
-  or JSON `null`**, where `nil` means the default everywhere else (`Config.opt/3`).
+  or JSON `null`**, where `nil` means the default everywhere else (`DpExchange.Core.Config.opt/3`).
 - **`get_event_order_book/3` sent any `:depth`.** A value that is not a whole number of levels
   is `{:error, {:depth_out_of_range, depth, min: 1}}` before a request.
 
@@ -1997,8 +1999,8 @@ _No consumer-facing changes. Internal or packaging work only — recorded so eve
   a fake exists not to have.
 
   `c:DpExchange.Core.Venue.subscribe/2`'s own doc does not state which it is, and it does not
-  need to — the contract settles it by shape. `c:update_symbols/2` exists to "change a live
-  subscription's symbol set" and `c:unsubscribe/2` to stop delivery for named symbols; neither
+  need to — the contract settles it by shape. `c:DpExchange.Core.Venue.update_symbols/2` exists to "change a live
+  subscription's symbol set" and `c:DpExchange.Core.Venue.unsubscribe/2` to stop delivery for named symbols; neither
   has any purpose if `subscribe/2` already replaces, since a caller would just subscribe the
   new list. Two callbacks the contract distinguishes, implemented as one function, is the tell.
 
