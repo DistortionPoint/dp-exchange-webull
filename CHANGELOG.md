@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.147] - 2026-10-12
+
 - **New screener: `"hot_stocks"`.** The vendor published a Community section on 2026-10-12;
   its `list-hot-tickers` page (`GET /market-data/communities/stock-rankings/list`) ranks stocks
   by community activity, which is what `get_screener/2` serves. It sends no query parameter
