@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.142] - 2026-10-12
+
 - **BREAKING: an order-book `:depth` out of range is `{:error, {:invalid_option, :depth, value}}`.**
   It was `{:depth_out_of_range, value, min: 1}` (or `max: 10` on futures); the family names an
   option it cannot honour that way on every venue. The ranges are unchanged and documented.
