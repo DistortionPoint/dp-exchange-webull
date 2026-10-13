@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.148] - 2026-10-13
+
 - **Tests:** every line the suite never executed was read and either tested, proven dead and
   removed (`canonical_case/1`, `shard_changed?/3`'s nil arm, `kind_for/1`'s trade clause,
   `iso_millis/1`, `epoch_ms/1`, `Socket.decimal/1`'s catch-all), or kept as a commented
