@@ -974,6 +974,10 @@ defmodule DpExchange.Webull.Socket do
       else: n
   end
 
+  # DELIBERATE DEFENSIVE CLAUSE, unreachable for valid UTF-8: a character is at most four
+  # bytes, so a run of continuation bytes reaching back to index 0 cannot occur in text. It
+  # is kept so the walk terminates (rather than raising on `:binary.at/2` at a negative
+  # index) should this ever be handed bytes that are not text.
   defp utf8_boundary(_text, 0), do: 0
 
   # **Severity is read from the frame; it used to be a constant.** Every frame on the
@@ -1328,7 +1332,8 @@ defmodule DpExchange.Webull.Socket do
     end
   end
 
-  defp decimal(_other), do: nil
+  # No clause for a value that is neither `nil` nor text: every caller passes a field read
+  # through `QuoteProto`'s `present/2`, which yields a binary or `nil` and nothing else.
 
   # `Quote.price`, `Trade.price` and `Trade.quantity` are all required, and a `nil` there
   # is the same substitution a raise would have been, wearing a quieter shape — a struct's

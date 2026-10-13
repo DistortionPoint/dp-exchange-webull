@@ -428,6 +428,10 @@ defmodule DpExchange.Webull.Rest do
   defp content_rejection?({:error, {:exchange_error, :webull, "HTTP " <> rest}}) do
     case Integer.parse(rest) do
       {status, _rest} when status in 400..499 and status not in [401, 403, 429] -> true
+      # Deliberately defensive, and unreachable today: `get/4` only words a status "HTTP ..."
+      # when `HttpClient` (`raw_status: true`) handed it back, which is a 4xx; 400, 401, 403
+      # and 404 are refused before that clause and a 429 never arrives as a response. Kept so
+      # a change in `get/4`'s wording fails closed (no split) rather than raising.
       _other -> false
     end
   end
@@ -2021,9 +2025,10 @@ defmodule DpExchange.Webull.Rest do
   # the fraction on a second-precision value, and neither is the documented format.
   defp iso_millis(nil), do: nil
 
+  # No clause for any other term: every caller runs `window_times/2` first (through
+  # `validate_activity_range/1` or `validate_orders_window/1`), which refuses a bound that is
+  # neither `nil` nor a `DateTime` as `{:invalid_time, key, value}`, so nothing else arrives.
   defp iso_millis(%DateTime{} = at), do: at |> utc_millis() |> DateTime.to_iso8601()
-
-  defp iso_millis(other), do: other
 
   defp utc_millis(%DateTime{} = at),
     do: at |> DateTime.to_unix(:millisecond) |> DateTime.from_unix!(:millisecond)
@@ -3132,6 +3137,10 @@ defmodule DpExchange.Webull.Rest do
   defp calendar_bar_end(opened_at, "1w"), do: {:ok, DateTime.add(opened_at, 7 * 86_400)}
   defp calendar_bar_end(opened_at, "1M"), do: {:ok, DateTime.shift(opened_at, month: 1)}
   defp calendar_bar_end(opened_at, "1y"), do: {:ok, DateTime.shift(opened_at, year: 1)}
+  # Deliberately defensive, and unreachable today: every bars path has already refused a width
+  # outside `@timespans` / `@stock_timespans`, and each of those is either a width Core can
+  # size or one of the three above. It stays so that a width added to a map later keeps its
+  # bars (as documented above) rather than raising a `FunctionClauseError` mid-read.
   defp calendar_bar_end(_opened_at, _timeframe), do: :error
 
   defp stock_timespan(timeframe) do
@@ -3165,8 +3174,9 @@ defmodule DpExchange.Webull.Rest do
   defp put_raw(map, key, value), do: Map.put(map, key, value)
 
   defp epoch_ms(nil), do: nil
+  # No clause for any other term: `get_stock_bars/5` runs `validate_range/1` first, which
+  # admits only `nil` and a `DateTime` for either bound, so nothing else can arrive here.
   defp epoch_ms(%DateTime{} = at), do: DateTime.to_unix(at, :millisecond)
-  defp epoch_ms(other), do: other
 
   # **Two envelope shapes across this decoder's four callers, and neither is "one level of
   # `result`" the way the old code (and this package's own moduledoc) assumed.**
@@ -5739,6 +5749,9 @@ defmodule DpExchange.Webull.Rest do
   defp bound_reason(text) when byte_size(text) <= @max_reason_bytes, do: :binary.copy(text)
 
   defp bound_reason(text) do
+    # DELIBERATE DEFENSIVE ARM (no test reaches the invalid-UTF-8 side): every caller passes
+    # text `Jason` decoded, valid UTF-8 by construction. Kept so a more lenient body decoder
+    # cannot make `String.slice/3` misread bytes that are not text.
     cut =
       if String.valid?(text),
         do: String.slice(text, 0, div(@max_reason_bytes, 4)),
@@ -5840,6 +5853,10 @@ defmodule DpExchange.Webull.Rest do
 
   defp wire_number(value) when is_binary(value) do
     case decimal(value) do
+      # DELIBERATE DEFENSIVE ARM: every money caller runs `positive_numbers/2` first, which
+      # refuses text that is not a number, so this is unreachable today. Kept so a field
+      # added later without that check sends the text as typed (the venue refuses it by
+      # name) rather than raising out of the caller's process on a money write.
       nil -> value
       parsed -> wire_number(parsed)
     end

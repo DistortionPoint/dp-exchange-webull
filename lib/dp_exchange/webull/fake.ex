@@ -2229,7 +2229,9 @@ defmodule DpExchange.Webull.Fake do
   defp canonical_case(symbols) when is_list(symbols),
     do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
 
-  defp canonical_case(other), do: other
+  # No fallback clause: every caller (`subscribe/2`, `unsubscribe/2`, `update_symbols/2`) runs
+  # `Feed.check_symbols/1` first, which refuses anything but a proper list of non-blank
+  # binaries, so a non-list never arrives here.
 
   # The symbol list is checked by `Feed.check_symbols/1` itself - the one validator the real
   # facade and `Feed` use - so this fake answers `{:error, {:invalid_symbols, ...}}` exactly as

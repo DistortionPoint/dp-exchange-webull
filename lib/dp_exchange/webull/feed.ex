@@ -2177,6 +2177,8 @@ defmodule DpExchange.Webull.Feed do
   # have its reply counted once and its death counted again.
   defp forget_reconcile(state, tag) do
     case Map.pop(state.reconciling, tag) do
+      # Deliberately defensive: forgetting is idempotent. Every current caller names a tag it
+      # has just found in `reconciling`, so this is not reached in production.
       {nil, _reconciling} ->
         state
 
@@ -2591,6 +2593,10 @@ defmodule DpExchange.Webull.Feed do
     match?(%{session_id: ^session_id}, Map.get(state.shards, index))
   end
 
+  # Deliberately defensive: every context this module records names its session, so this is
+  # not reached in production. A record that does not is treated like `nil` (no claim about a
+  # session) rather than raising `FunctionClauseError` inside the one process every consumer
+  # shares.
   defp current_session?(_state, _index, _context_without_a_session), do: true
 
   # A venue-level refusal is true whichever session carried it, so `INVALID_SYMBOL` is still
@@ -2628,11 +2634,17 @@ defmodule DpExchange.Webull.Feed do
         state = put_in(state.shards[index].symbols, reverted)
         %{state | unsettled: MapSet.put(state.unsettled, index)}
 
+      # Deliberately defensive: a context that names a session only passes
+      # `current_session?/3` while that session's shard exists, so the shard is present here
+      # in practice. A record that names no session can reach this with the shard gone.
       :error ->
         state
     end
   end
 
+  # Deliberately defensive: a context that carries no `added`/`removed` delta has nothing to
+  # revert, so it only clears the index's unsettled mark. Every context recorded for a primary
+  # or background reconcile carries both.
   defp revert_failed_delta(state, index, _no_delta, _result), do: forget_unsettled(state, index)
 
   defp forget_unsettled(state, index),
@@ -2758,6 +2770,9 @@ defmodule DpExchange.Webull.Feed do
     :ok
   end
 
+  # Deliberately defensive: a shard's socket is always a pid when `Socket.start_link/1` has
+  # opened it, but stopping a shard must never be the thing that crashes the Feed, so a shard
+  # record with no pid to stop is simply left.
   defp stop_socket(_no_socket), do: :ok
 
   # Mirrors, on purpose, the exact classification `handle_subscribe_result/3` just applied
@@ -3235,11 +3250,13 @@ defmodule DpExchange.Webull.Feed do
     {Map.reject(shards, fn {_index, symbols} -> symbols == [] end), overflow}
   end
 
+  # Only asked of an index `plan_reshard/1` has found in `state.shards`: an index that is not
+  # there is in `new_indices`, and the `or` in front of this call short-circuits before it
+  # runs. So the shard is always present, and the `nil -> false` clause this used to carry
+  # could never be reached.
   defp shard_changed?(state, index, new_shards) do
-    case Map.get(state.shards, index) do
-      nil -> false
-      %{symbols: current} -> current != Map.get(new_shards, index, [])
-    end
+    %{symbols: current} = Map.fetch!(state.shards, index)
+    current != Map.get(new_shards, index, [])
   end
 
   defp shard_index_for_session(state, session_id) do
@@ -3348,7 +3365,8 @@ defmodule DpExchange.Webull.Feed do
   # silently absorbed.
   defp kind_for(%Quote{}), do: {:ok, :quotes}
   defp kind_for(%TopOfBook{}), do: {:ok, :top_of_book}
-  defp kind_for(%Trade{}), do: {:ok, :trades}
+  # No `%Trade{}` clause: `record_quote/3` delivers a trade without counting it (see there)
+  # before this is ever asked, so such a clause could never be reached.
   defp kind_for(_other), do: :error
 
   defp drop_symbols_by_kind(delivering_by_kind, symbols) do
@@ -3367,6 +3385,10 @@ defmodule DpExchange.Webull.Feed do
   defp unwanted?(%{symbol: symbol}, wanted) when is_binary(symbol),
     do: not MapSet.member?(wanted, symbol)
 
+  # Deliberately defensive: a payload that names no usable symbol cannot be matched against
+  # `wanted`, so it is not called unwanted. `Socket` only emits structs with a binary symbol,
+  # so this is not reached in production; refusing here would instead crash the one process
+  # every subscriber shares.
   defp unwanted?(_payload, _wanted), do: false
 
   # A `Trade` is delivered and not counted — see the moduledoc's "`:trades` is delivered but

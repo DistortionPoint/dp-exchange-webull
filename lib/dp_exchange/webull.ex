@@ -1109,10 +1109,11 @@ defmodule DpExchange.Webull do
   # `update_symbols(["btc-usd"])`, then a `BTC-USD` quote, and `coverage/1` was `%{}`.
   # Case is the one difference normalised here. Anything else that is not canonical is the
   # caller's to fix.
+  #
+  # Only ever called after `Feed.check_symbols/1`, which refuses every non-list, so there is
+  # no clause for one: it cannot arrive, and a clause for it would be an untested guess.
   defp canonical_case(symbols) when is_list(symbols),
     do: Enum.map(symbols, fn s -> if is_binary(s), do: String.upcase(s), else: s end)
-
-  defp canonical_case(other), do: other
 
   # Credentials are an argument on this venue's market data too, because it has no
   # anonymous endpoints. An absent map reaches `Auth` and is refused there with
