@@ -110,7 +110,8 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # dark, which is what fourteen hours of WARN lines never said.
       assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 5_000
       assert notice.details.session_id == "dead-session"
-      assert notice.details.reason =~ "INVALID_SESSION"
+      assert notice.details.reason == :invalid_session
+      assert notice.details.message =~ "INVALID_SESSION"
 
       # The defect itself: the next tick must NOT re-ask the same dead session. The shard
       # is gone from state, so there is nothing left addressed to `"dead-session"`.

@@ -158,9 +158,10 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
   describe "statuses between success and refusal" do
     test "a 404 is a permanent refusal: nothing is there, and asking again will not change it" do
       # It was `{:error, {:exchange_error, :webull, "HTTP 404 ..."}}`, which Core calls
-      # retryable, and which the Fake (`{:refused, :not_found}` for an unknown order id) never
-      # answered. The same request gets the same 404.
-      assert {:refused, :not_found} =
+      # retryable. The same request gets the same 404. On a single-symbol read what is missing
+      # is the symbol, so the word is `:not_listed` (facade consistency D1); a 404 on an order
+      # or watchlist is still `:not_found`.
+      assert {:refused, :not_listed} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(%{}, 404),
                  retry_attempts: 0

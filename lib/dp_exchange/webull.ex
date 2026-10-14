@@ -937,6 +937,21 @@ defmodule DpExchange.Webull do
   end
 
   @doc """
+  The symbols the consumer asked this package to stream, sorted, as opposed to `coverage/1`,
+  which is what is observed arriving.
+
+  A symbol stays here for as long as it is wanted, whether or not anything has arrived for it
+  (a rejected or dark symbol is wanted and not covered). Answers `[]` when no feed is running
+  or it does not answer. Reads `opts[:feed]` to name a feed other than the default.
+  """
+  @spec wanted(keyword()) :: [DpExchange.Core.Venue.symbol()]
+  @impl true
+  def wanted(opts \\ []) do
+    feed = feed(opts)
+    if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
+  end
+
+  @doc """
   What is arriving, per symbol, split by **which kind** of data it is.
 
   `coverage/1` answers "is anything arriving for this symbol" with one boolean per

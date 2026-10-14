@@ -412,6 +412,14 @@ defmodule DpExchange.Webull.Fake do
     end)
   end
 
+  # The equity-only reads (volume profile, auction imbalance, financials, filings) are modelled
+  # by one fixed row for any ticker, as `get_price/2`'s docs say. A crypto-shaped pair is not an
+  # equity the venue lists, and its stock endpoints answer it `INVALID_SYMBOL`, so it is the
+  # same `{:refused, :not_listed}` the real path gives.
+  defp equity_listed(symbol) do
+    if String.contains?(symbol, "-"), do: {:refused, :not_listed}, else: :ok
+  end
+
   defp fake_tape_symbol(symbol) do
     if String.contains?(symbol, "-"),
       do: {:error, {:unsupported_book_category, "US_CRYPTO"}},
@@ -458,7 +466,8 @@ defmodule DpExchange.Webull.Fake do
       # here; only `OVN` was refused.
       with :ok <- Rest.validate_footprint_request(timeframe, opts),
            :ok <- Rest.validate_symbol(symbol),
-           :ok <- authenticated(opts) do
+           :ok <- authenticated(opts),
+           :ok <- equity_listed(symbol) do
         {:ok,
          [
            %Types.VolumeProfile{
@@ -495,7 +504,8 @@ defmodule DpExchange.Webull.Fake do
       case Keyword.get(opts, :auction) do
         auction when auction in [:opening, :closing] ->
           with :ok <- Rest.validate_symbol(symbol),
-               :ok <- authenticated(opts) do
+               :ok <- authenticated(opts),
+               :ok <- equity_listed(symbol) do
             {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
           end
 
@@ -1168,6 +1178,15 @@ defmodule DpExchange.Webull.Fake do
   def coverage(_opts \\ []),
     do: Map.new(MapSet.union(subscribed(), top()), &{&1, :stream})
 
+  @doc """
+  The symbols this process's fake was asked to stream, sorted. The fake delivers at once, so
+  this is the union of what it has delivered to; see `DpExchange.Webull.wanted/1`.
+  """
+  @spec wanted(keyword()) :: [DpExchange.Core.Venue.symbol()]
+  @impl true
+  def wanted(_opts \\ []),
+    do: subscribed() |> MapSet.union(top()) |> MapSet.to_list() |> Enum.sort()
+
   # Both kinds the real feed streams (`capabilities/0`'s `streamable`), each reported only
   # while it has covered symbols - the real feed's per-kind map likewise has no entry for a
   # kind nothing has arrived for.
@@ -1732,7 +1751,8 @@ defmodule DpExchange.Webull.Fake do
            # A `:count` over the 20 the statement pages state is refused before credentials.
            :ok <- Rest.validate_statement_count(kind, opts),
            :ok <- Rest.validate_symbol(symbol),
-           :ok <- authenticated(opts) do
+           :ok <- authenticated(opts),
+           :ok <- equity_listed(symbol) do
         {:ok, [statement(symbol, kind)]}
       end
     end)
@@ -1854,7 +1874,8 @@ defmodule DpExchange.Webull.Fake do
   def get_filings(symbol, opts \\ []) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_symbol(symbol),
-           :ok <- authenticated(opts) do
+           :ok <- authenticated(opts),
+           :ok <- equity_listed(symbol) do
         {:ok,
          [
            %Types.Filing{

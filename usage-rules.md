@@ -130,6 +130,19 @@ hands that back as `""`. Signing with it produced a well-formed request the venu
 for a reason naming signatures, which points at the signing code rather than at the
 credential.
 
+**A malformed credential is `{:error, {:invalid_credentials, :webull}}`.** An `:app_key`,
+`:app_secret` or `:access_token` with surrounding whitespace or a control character (a `.env`
+value pasted with its trailing newline signed as `"key\n"`) is refused before signing, never
+sent, and never echoed in the reason. Real and Fake alike. Blank is still
+`:missing_credentials`.
+
+**Plaintext URLs are refused as `{:error, {:insecure_url, :webull}}`**: a non-loopback `ws://`
+stream URL and a non-https `:oauth_url`. These were `{:insecure_url, :wss_required}` and
+`{:insecure_oauth_url, :https_required}`.
+
+**`wanted/1` is what you asked to stream; `coverage/1` is what is arriving.** `wanted/1` answers
+the sorted symbol list (`[]` with no feed), and a dark or rejected symbol stays in it.
+
 **`DpExchange.Webull.Fake` enforces this too, and it did not before.** Before this
 fix, `Fake.get_accounts/2`, `Fake.get_balances/2`,
 `Fake.get_transfers/2`, `Fake.get_transactions/2`, `Fake.place_order/3`,
@@ -746,6 +759,19 @@ limit rather than an oversight: `Core.Notice`'s kinds are a deliberately closed 
 slot for "the venue reported on itself and nothing is wrong", and widening a shared
 vocabulary is not one venue package's call.
 
+**A venue notice that did not parse is `:data_quality`, not `:degraded`.** A `notice` payload
+that is not JSON (the venue sends plain text such as `Permission grabbed by other session`) is
+`kind: :data_quality` with `details: %{reason: :unparsed_venue_notice, message: text,
+session_id: id}`; `message` is the venue's own words, cut at 1,024 bytes with a marker. (It
+was `:degraded` with `details.venue_notice_unparsed`; that key is gone.)
+
+**`details.reason` is always an atom; the text is `details.message`.** `:link_down` from a
+dropped socket is `reason: :disconnected`, from a crashed shard `:socket_crashed`, from a dead
+session `:invalid_session`; a `:coverage_change` for a shard that could not open is
+`:open_failed` and for a failed resubscribe `:resubscribe_failed`. The free text (what the
+transport or venue said) is `details.message`. These carried an `inspect/1` string in
+`details.reason` before: that is a breaking change of the notice shape.
+
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
 If your process falls far enough behind that its mailbox reaches **10,000 queued
@@ -1144,6 +1170,17 @@ and the credentials (it was `{:invalid_client_order_id, v}`, after the account).
 **A 404 is a permanent refusal**: `{:refused, :not_found}` from every REST read and write (it
 was `{:error, {:exchange_error, :webull, "HTTP 404..."}}`, which Core calls retryable). The
 Fake answers the same for an order id it never issued.
+
+**A symbol the venue does not list is `{:refused, :not_listed}`** on every single-symbol read
+(`get_price/2`, `get_top_of_book/2`, `get_order_book/2`, `get_trades/2`, `get_historical_prices/4`,
+`quantization/1`, and every other read of exactly one symbol: futures/option/event/stock bars,
+`get_volume_profile/3`, `get_auction_imbalance/2`, `get_financials/3`, `get_filings/2`,
+`get_event_trades/2`, `get_event_order_book/2`), real and Fake alike (the Fake answers it for a
+crypto-shaped pair on the equity-only reads): a 404, or a 4xx whose body names `INVALID_SYMBOL`. A
+417 `INVALID_SYMBOL` used to surface as the retryable `{:error, {:exchange_error, :webull,
+"HTTP 417..."}}` and a 404 as `{:refused, :not_found}` here; both changed, which is a breaking
+change of a returned reason. No venue text rides in the reason. A 404 on an order or a
+watchlist is still `:not_found`.
 
 **The Fake refuses a reused `client_order_id`** as `{:refused, {:duplicate_client_order_id,
 id}}` instead of overwriting the stored order: the venue requires the id unique per account.

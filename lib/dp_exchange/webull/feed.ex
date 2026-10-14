@@ -575,6 +575,13 @@ defmodule DpExchange.Webull.Feed do
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed), do: GenServer.call(feed, :coverage, @call_timeout)
 
+  @doc """
+  The symbols the consumer asked this feed to stream, sorted; not what is arriving
+  (`coverage/1`). A symbol stays here while it is wanted, delivering or not.
+  """
+  @spec wanted(GenServer.server()) :: [String.t()]
+  def wanted(feed), do: GenServer.call(feed, :wanted, @call_timeout)
+
   @spec coverage_by_kind(GenServer.server()) :: %{
           DpExchange.Core.Capabilities.data_kind() => %{
             String.t() => :stream | :internal_poll | :not_covered
@@ -769,7 +776,9 @@ defmodule DpExchange.Webull.Feed do
        open_retry_max_ms: Config.opt(opts, :open_retry_max_ms, @open_retry_max_ms),
        # See `@shard_spacing_ms`. Overridable so a test proving the stagger need not wait
        # out several real five-second gaps.
-       shard_spacing_ms: Config.opt(opts, :shard_spacing_ms, @shard_spacing_ms)
+       shard_spacing_ms: Config.opt(opts, :shard_spacing_ms, @shard_spacing_ms),
+       # Monotonic ms of the last background (staggered) open; see `{:open_staggered, ...}`.
+       last_background_open: nil
      }}
   end
 
@@ -799,6 +808,10 @@ defmodule DpExchange.Webull.Feed do
 
   def handle_call(:coverage, _from, state) do
     {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+  end
+
+  def handle_call(:wanted, _from, state) do
+    {:reply, state.wanted |> MapSet.to_list() |> Enum.sort(), state}
   end
 
   def handle_call(:coverage_by_kind, _from, state) do
@@ -1210,6 +1223,34 @@ defmodule DpExchange.Webull.Feed do
     if Map.get(state.open_chains, index) == token,
       do: {:noreply, reopen(state, index, symbols, opts, attempt, token)},
       else: {:noreply, state}
+  end
+
+  # A background open armed by `touch_background_shard/5`. Every open of a plan is armed at plan
+  # time (`spacing * position`), so a Feed busy past several deadlines receives them back to
+  # back and used to dial in a burst (seen under the full gate, 4 microseconds apart). The
+  # spacing is therefore enforced when the message is HANDLED: an open arriving less than
+  # `shard_spacing_ms` after the last background open is re-armed for the remainder. A shard
+  # already open at that point needs no dial and neither waits nor counts as one.
+  def handle_info({:open_staggered, index, symbols, opts} = message, state) do
+    now = System.monotonic_time(:millisecond)
+
+    cond do
+      Map.has_key?(state.shards, index) ->
+        {:noreply, state}
+
+      is_integer(state.last_background_open) and
+          now - state.last_background_open < state.shard_spacing_ms ->
+        Process.send_after(
+          self(),
+          message,
+          state.shard_spacing_ms - (now - state.last_background_open)
+        )
+
+        {:noreply, state}
+
+      true ->
+        handle_info({:open_shard, index, symbols, opts}, %{state | last_background_open: now})
+    end
   end
 
   def handle_info({:open_shard, index, symbols, opts}, state) do
@@ -1981,7 +2022,7 @@ defmodule DpExchange.Webull.Feed do
       nil ->
         Process.send_after(
           self(),
-          {:open_shard, index, wanted_symbols, opts},
+          {:open_staggered, index, wanted_symbols, opts},
           state.shard_spacing_ms * position
         )
 
@@ -2420,7 +2461,11 @@ defmodule DpExchange.Webull.Feed do
       state.notice_subscribers,
       {:dp_exchange, :webull,
        Notice.new(:link_down, :webull,
-         details: %{session_id: shard.session_id, reason: inspect(reason)}
+         details: %{
+           session_id: shard.session_id,
+           reason: :socket_crashed,
+           message: inspect(reason, limit: 50, printable_limit: 1_024)
+         }
        )}
     )
 
@@ -2825,7 +2870,8 @@ defmodule DpExchange.Webull.Feed do
            Notice.new(:link_down, :webull,
              details: %{
                session_id: named,
-               reason: "INVALID_SESSION — reopening the shard on a fresh session"
+               reason: :invalid_session,
+               message: "INVALID_SESSION — reopening the shard on a fresh session"
              }
            )}
         )
@@ -3056,7 +3102,12 @@ defmodule DpExchange.Webull.Feed do
           message:
             "shard #{index} could not be opened (#{inspect(reason)}) — " <>
               "#{length(symbols)} symbol(s) are not covered at all until it opens",
-          details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
+          details: %{
+            shard: index,
+            symbol_count: length(symbols),
+            reason: :open_failed,
+            message: inspect(reason, limit: 50, printable_limit: 1_024)
+          }
         )
 
       fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
@@ -3103,7 +3154,12 @@ defmodule DpExchange.Webull.Feed do
             "shard #{index} resubscribe has failed (#{inspect(reason)}) — " <>
               "#{length(symbols)} symbol(s) stay on whatever they last delivered " <>
               "until it recovers",
-          details: %{shard: index, symbol_count: length(symbols), reason: inspect(reason)}
+          details: %{
+            shard: index,
+            symbol_count: length(symbols),
+            reason: :resubscribe_failed,
+            message: inspect(reason, limit: 50, printable_limit: 1_024)
+          }
         )
 
       fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})

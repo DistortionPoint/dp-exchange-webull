@@ -85,13 +85,14 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
                       kind: :link_down,
                       details: %{session_id: "issue-27-malformed-close"} = details
                     }},
-                   10_000
+                   25_000
 
     # Ties this assertion to the actual defect, not just "something disconnected": the
     # reason WebSockex handed to `handle_disconnect/2` names the exact frame error
     # `WebSockex.Frame.parse_frame/1` returned for these bytes.
-    assert details.reason =~ "invalid_close_code"
-    assert details.reason =~ "WebSockex.FrameError"
+    assert details.reason == :disconnected
+    assert details.message =~ "invalid_close_code"
+    assert details.message =~ "WebSockex.FrameError"
 
     # The process did not crash — it is the same pid, still alive, mid-reconnect (the
     # ordinary `{:reconnect, state}` `Socket.handle_disconnect/2` already returns for
@@ -101,7 +102,9 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
   end
 
   defp accept_upgrade_then_send_malformed_close(listen_socket) do
-    {:ok, client_socket} = :gen_tcp.accept(listen_socket, 5_000)
+    # 20 s, not 5: this helper failed `{:error, :timeout}` here under the full gate, where the
+    # client's connect can be scheduled that late. A longer wait costs nothing when it passes.
+    {:ok, client_socket} = :gen_tcp.accept(listen_socket, 20_000)
     {:ok, request} = recv_until_headers_end(client_socket, "")
 
     response =
@@ -127,7 +130,7 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
     # on a read instead. `{:error, :closed}` arrives exactly when the client has finished
     # with the frame and torn down — the event this test is actually waiting for — which
     # makes the ordering deterministic without guessing at a sleep.
-    _client_closed = :gen_tcp.recv(client_socket, 0, 5_000)
+    _client_closed = :gen_tcp.recv(client_socket, 0, 20_000)
     :gen_tcp.close(client_socket)
   end
 
@@ -135,7 +138,7 @@ defmodule DpExchange.Webull.SocketMalformedCloseTest do
     if String.contains?(acc, "\r\n\r\n") do
       {:ok, acc}
     else
-      case :gen_tcp.recv(socket, 0, 5_000) do
+      case :gen_tcp.recv(socket, 0, 20_000) do
         {:ok, data} -> recv_until_headers_end(socket, acc <> data)
         {:error, _reason} = error -> error
       end

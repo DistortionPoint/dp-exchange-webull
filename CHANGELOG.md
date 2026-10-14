@@ -22,6 +22,48 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Hot-path audit (tick AD). Tests in `test/dp_exchange/webull/tick_ad_hotpath_test.exs`.
+
+- **A reported drop no longer pins the frame it came from.** `Socket`'s `:data_quality` notice
+  for an unreadable `tick`, `snapshot` or `quote` carried the symbol, price, volume and time as
+  views into the inbound frame, so a consumer holding the notice kept the whole frame (up to
+  1 MiB) alive, once for each of up to 64 reasons per connection. The fields are copied when
+  the notice is built (once per reason per connection); the per-message decode stays copy-free.
+- **An `INVALID_SESSION` answer's session id is copied out of the response body.** It was a
+  view into the whole body and outlived it in the `{:invalid_session, id}` error `Feed` holds.
+
+Facade consistency (design `2026-10-14_design-facade-consistency`, D1/D4/D7/D8/D10). Tests in
+`test/dp_exchange/webull/tick_ad2_facade_test.exs`. **Several returned reasons change, which is
+a breaking change for a consumer matching on the old ones.**
+
+- **D1: an unlisted symbol is `{:refused, :not_listed}`.** On every single-symbol read
+  (`get_price`, `get_top_of_book`, `get_order_book`, `get_trades`, `get_historical_prices` for
+  every category, `quantization`, `get_volume_profile`, `get_auction_imbalance`,
+  `get_financials`, `get_filings`, `get_fundamental`, `get_event_trades`,
+  `get_event_order_book`; `get_prices` is multi-symbol and unchanged) a 4xx whose body names `INVALID_SYMBOL` (it surfaced as the retryable
+  `{:error, {:exchange_error, :webull, "HTTP 417..."}}`) and a 404 (it was `{:refused,
+  :not_found}`) are `{:refused, :not_listed}`, as the Fake already was. A 404 on an order or
+  watchlist stays `:not_found`. Existing test updated: `defensive_branches_test.exs` (a 404 on
+  `get_price`).
+- **D4: notice shapes.** A `notice` payload that did not parse is `:data_quality` (was
+  `:degraded`), `details.reason: :unparsed_venue_notice`, the text in `details.message`
+  (`details.venue_notice_unparsed` is gone). `details.reason` on `:link_down` and
+  `:coverage_change` is an atom (`:disconnected`, `:socket_crashed`, `:invalid_session`,
+  `:open_failed`, `:resubscribe_failed`) and the free text moved to `details.message`.
+- **D7: malformed credentials.** A value with surrounding whitespace or a control character is
+  `{:error, {:invalid_credentials, :webull}}` before signing, never echoed, real and Fake (blank
+  is still `:missing_credentials`).
+- **D8: plaintext URLs.** `{:insecure_url, :wss_required}` and
+  `{:insecure_oauth_url, :https_required}` are both `{:insecure_url, :webull}`.
+- **D10: `wanted/1`** on the facade and the Fake: the sorted symbols asked to stream.
+- **Shard opens enforce their spacing when handled.** The background opens are armed at plan
+  time, so a Feed busy past their deadlines received them back to back and dialled in a burst
+  (4 microseconds apart under the full gate). The open is now the internal `{:open_staggered,
+  ...}` message and one arriving less than `shard_spacing_ms` after the last background open
+  is re-armed for the remainder.
+- Test hardening: `socket_malformed_close_test.exs`'s server helper waited 5 s and failed
+  `{:error, :timeout}` under load; now 20 s.
+
 ## [0.4.150] - 2026-10-14
 
 Decoder robustness against hostile or malformed venue payloads. Each fix has a test in

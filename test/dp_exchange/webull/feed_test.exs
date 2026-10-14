@@ -1916,7 +1916,8 @@ defmodule DpExchange.Webull.FeedTest do
       # itself `{:open_shard, ...}`, so what a consumer sees is the shard going away and a
       # `:link_down` notice explaining why.
       assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 5_000
-      assert notice.details.reason =~ "reopening the shard on a fresh session"
+      assert notice.details.reason == :invalid_session
+      assert notice.details.message =~ "reopening the shard on a fresh session"
 
       refute Map.has_key?(:sys.get_state(feed).resubscribe_failed, 0)
       assert Process.alive?(feed)
@@ -1969,8 +1970,9 @@ defmodule DpExchange.Webull.FeedTest do
       # choosing between waiting and reconnecting needs that distinction to be IN the value
       # rather than inferred from its absence.
       assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 5_000
-      assert notice.details.reason =~ "no_venue_response"
-      assert notice.details.reason =~ "reconcile_timeout"
+      assert notice.details.reason == :resubscribe_failed
+      assert notice.details.message =~ "no_venue_response"
+      assert notice.details.message =~ "reconcile_timeout"
     end
   end
 

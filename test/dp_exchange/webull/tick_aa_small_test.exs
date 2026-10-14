@@ -116,7 +116,7 @@ defmodule DpExchange.Webull.TickAASmallTest do
 
   describe "Socket" do
     test "a non-string :url is refused as insecure, before anything is dialled" do
-      assert {:error, {:insecure_url, :wss_required}} =
+      assert {:error, {:insecure_url, :webull}} =
                Socket.start_link(url: nil, subscriber: self(), session_id: "s", app_key: "k")
     end
 

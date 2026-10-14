@@ -321,7 +321,9 @@ defmodule DpExchange.Webull.Subscription do
   # message this parser has not seen before.
   defp session_id_from(%{"message" => message}) when is_binary(message) do
     case Regex.run(~r/session:\s*([A-Za-z0-9_-]+)/, message) do
-      [_match, session_id] -> session_id
+      # Copied: the capture is a view into the whole response body, and the id outlives it in
+      # the `{:invalid_session, id}` error that `Feed` logs and holds.
+      [_match, session_id] -> :binary.copy(session_id)
       nil -> nil
     end
   end

@@ -85,16 +85,18 @@ defmodule DpExchange.Webull.Auth do
   Returns `{:error, {:missing_credentials, :webull}}` rather than signing with a partial
   credential — a request signed with an absent secret fails at the venue with an error
   about signatures, which sends the reader looking in the wrong place.
+
+  A value with surrounding whitespace or a control character (a pasted trailing newline) is
+  `{:error, {:invalid_credentials, :webull}}`, also before signing and never echoed.
   """
   @spec headers(request(), credentials()) :: {:ok, [{String.t(), String.t()}]} | {:error, term()}
   def headers(request, credentials)
 
   def headers(%{} = request, %{app_key: app_key, app_secret: app_secret} = credentials)
       when is_binary(app_key) and is_binary(app_secret) do
-    if blank?(app_key) or blank?(app_secret) do
-      {:error, {:missing_credentials, :webull}}
-    else
-      signed_headers(request, credentials, app_key, app_secret)
+    case present?(credentials) do
+      :ok -> signed_headers(request, credentials, app_key, app_secret)
+      {:error, _reason} = refused -> refused
     end
   end
 
@@ -162,8 +164,9 @@ defmodule DpExchange.Webull.Auth do
   `DpExchange.Webull.Fake` calls this too, for the same reason its own credentialed
   callbacks need it: so the fake's gate cannot drift from this one.
   """
-  @spec present?(credentials() | term()) :: :ok | {:error, {:missing_credentials, :webull}}
-  def present?(%{app_key: app_key, app_secret: app_secret})
+  @spec present?(credentials() | term()) ::
+          :ok | {:error, {:missing_credentials, :webull} | {:invalid_credentials, :webull}}
+  def present?(%{app_key: app_key, app_secret: app_secret} = credentials)
       when is_binary(app_key) and is_binary(app_secret) do
     # The same blank check as `headers/2`, and it has to be the same one: this function's
     # whole contract is "the shape `headers/2` accepts", and it answered `:ok` for
@@ -171,12 +174,32 @@ defmodule DpExchange.Webull.Auth do
     # `get_fees/2` — the endpoint that has no request to hang the real gate on — and
     # `DpExchange.Webull.Fake` both claim a credential the package does not have, which is
     # exactly the drift this function exists to prevent.
-    if blank?(app_key) or blank?(app_secret),
-      do: {:error, {:missing_credentials, :webull}},
-      else: :ok
+    cond do
+      blank?(app_key) or blank?(app_secret) ->
+        {:error, {:missing_credentials, :webull}}
+
+      malformed_credentials?(app_key, app_secret, Map.get(credentials, :access_token)) ->
+        {:error, {:invalid_credentials, :webull}}
+
+      true ->
+        :ok
+    end
   end
 
   def present?(_credentials), do: {:error, {:missing_credentials, :webull}}
+
+  # A value that is present but carries surrounding whitespace or a control character: the
+  # commonest cause is a `.env` line pasted with a trailing newline, which signed as
+  # `"key\n"` and came back from the venue as a signature or key error naming neither. Refused
+  # before signing, and never echoed - the reason carries the venue only, not the value.
+  defp malformed_credentials?(app_key, app_secret, access_token) do
+    Enum.any?([app_key, app_secret, access_token], &malformed?/1)
+  end
+
+  defp malformed?(value) when is_binary(value) and value != "",
+    do: String.trim(value) != value or String.match?(value, ~r/[\x00-\x1F\x7F]/)
+
+  defp malformed?(_absent_or_not_a_string), do: false
 
   @doc """
   The raw signature value.

@@ -16,7 +16,7 @@ defmodule DpExchange.Webull.CleartextDowngradeTest do
       plug = fn _conn -> flunk("no request may be sent over cleartext") end
 
       for url <- ["http://oauth.example.test", "ftp://x.test", "//no-scheme.test", "garbage"] do
-        assert {:error, {:insecure_oauth_url, :https_required}} =
+        assert {:error, {:insecure_url, :webull}} =
                  Rest.oauth_token("CLIENT", "test-secret-not-real",
                    code: "c",
                    oauth_url: url,
@@ -27,7 +27,7 @@ defmodule DpExchange.Webull.CleartextDowngradeTest do
     end
 
     test "a non-string :oauth_url is refused rather than raising" do
-      assert {:error, {:insecure_oauth_url, :https_required}} =
+      assert {:error, {:insecure_url, :webull}} =
                Rest.oauth_token("CLIENT", "test-secret-not-real",
                  code: "c",
                  oauth_url: :not_a_url,
@@ -39,7 +39,7 @@ defmodule DpExchange.Webull.CleartextDowngradeTest do
   describe "Socket.start_link/1 URL" do
     test "a non-loopback ws:// URL is refused before any connection is attempted" do
       for url <- ["ws://data.example.test/mqtt", "http://data.example.test", "not a url"] do
-        assert {:error, {:insecure_url, :wss_required}} =
+        assert {:error, {:insecure_url, :webull}} =
                  Socket.start_link(
                    url: url,
                    subscriber: self(),

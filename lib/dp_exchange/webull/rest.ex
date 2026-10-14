@@ -221,7 +221,7 @@ defmodule DpExchange.Webull.Rest do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, native) do
         snapshot_quote(row, native, category)
       end
@@ -550,7 +550,8 @@ defmodule DpExchange.Webull.Rest do
           "timespan" => timespan
         }
 
-      with {:ok, body} <- get("/market-data/futures/bars/list", params, credentials, opts),
+      with {:ok, body} <-
+             get_symbol("/market-data/futures/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
         {:ok, finish_bars(bars, timeframe, opts)}
       end
@@ -582,7 +583,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("count", Keyword.get(opts, :limit))
 
       with {:ok, body} <-
-             get("/market-data/event-contracts/bars/list", params, credentials, opts),
+             get_symbol("/market-data/event-contracts/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
         {:ok, finish_bars(bars, timeframe, opts)}
       end
@@ -634,7 +635,8 @@ defmodule DpExchange.Webull.Rest do
           if(Keyword.get(opts, :include_partial) == true, do: "true")
         )
 
-      with {:ok, body} <- get("/market-data/options/bars/list", params, credentials, opts),
+      with {:ok, body} <-
+             get_symbol("/market-data/options/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_stock_bars(body, symbol, timeframe) do
         {:ok, finish_bars(bars, timeframe, opts)}
       end
@@ -699,7 +701,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("count", count)
 
       with :ok <- crypto_count_within_limit(Keyword.get(opts, :limit)),
-           {:ok, body} <- get("/market-data/crypto/bars/list", params, credentials, opts),
+           {:ok, body} <- get_symbol("/market-data/crypto/bars/list", params, credentials, opts),
            {:ok, bars} <- decode_bars(body, symbol, timeframe),
            :ok <- range_reached(bars, range, count || @crypto_bar_default) do
         {:ok, bars |> Enum.filter(&within?(&1, range)) |> finish_bars(timeframe, opts)}
@@ -960,7 +962,7 @@ defmodule DpExchange.Webull.Rest do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, native),
            {:ok, bid} <- quote_side_price(row, ["bidPrice", "bid_price", "bid"], :bid),
            {:ok, ask} <- quote_side_price(row, ["askPrice", "ask_price", "ask"], :ask) do
@@ -1375,7 +1377,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, path} <- instruments_path(category),
          params = %{"category" => category, "symbols" => native},
-         {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, body} <- get_symbol(path, params, credentials, opts),
          {:ok, row} <- symbol_row(body, native) do
       {:ok, quantum_from_row(row, category)}
     end
@@ -1431,14 +1433,65 @@ defmodule DpExchange.Webull.Rest do
 
   # --- request ------------------------------------------------------------
 
-  defp get(path, params, credentials, opts) do
+  defp get(path, params, credentials, opts), do: get(path, params, credentials, opts, :resource)
+
+  # A single-symbol read (`:symbol`): the venue's "no such symbol" answers are
+  # `{:refused, :not_listed}` and nothing else - see `not_listed_response?/1`.
+  defp get_symbol(path, params, credentials, opts),
+    do: get(path, params, credentials, opts, :symbol)
+
+  defp get(path, params, credentials, opts, kind) do
     environment = Environment.resolve(opts)
     host = Environment.host(environment)
 
     request = %{path: path, query_params: stringify(params), body: "", host: host}
     url = Environment.rest_url(environment) <> path <> query(params)
 
-    case HttpClient.request(:get, url, signer(request, credentials), nil, request_opts(opts)) do
+    :get
+    |> HttpClient.request(url, signer(request, credentials), nil, request_opts(opts))
+    |> symbol_verdict(kind)
+    |> get_result()
+  end
+
+  # **A symbol the venue does not list is a refusal, not a retryable error.** The venue
+  # answers an unlisted symbol on a single-symbol read with a 4xx `INVALID_SYMBOL` (a 417 in
+  # practice) or a 404, and the 4xx used to surface as the generic
+  # `{:error, {:exchange_error, :webull, "HTTP 417: ..."}}`, which Core calls retryable: a
+  # consumer retried a symbol that will never exist. Both are `{:refused, :not_listed}` now,
+  # the one word every venue in the family uses; the venue's text is not carried (it is not
+  # stable across venues). Only on single-symbol reads: a 404 on an order or a watchlist is
+  # still `:not_found`, which is a different thing that is missing.
+  defp symbol_verdict(response, :symbol) do
+    if not_listed_response?(response), do: {:refused, :not_listed}, else: response
+  end
+
+  defp symbol_verdict(response, :resource), do: response
+
+  defp not_listed_response?({:ok, %{status: 404}}), do: true
+
+  defp not_listed_response?({:ok, %{status: status, body: body}})
+       when status in 400..499 and status not in [401, 403, 429],
+       do: invalid_symbol_body?(body)
+
+  defp not_listed_response?(_other), do: false
+
+  defp invalid_symbol_body?(body) when is_binary(body),
+    do: String.contains?(body, "INVALID_SYMBOL")
+
+  defp invalid_symbol_body?(body) when is_map(body) do
+    body
+    |> Map.take(["error_code", "code", "msg", "message", "error"])
+    |> Map.values()
+    |> Enum.any?(&(is_binary(&1) and String.contains?(&1, "INVALID_SYMBOL")))
+  end
+
+  defp invalid_symbol_body?(_other), do: false
+
+  defp get_result(result) do
+    case result do
+      {:refused, _reason} = verdict ->
+        verdict
+
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         decoded_body(body)
 
@@ -1470,7 +1523,13 @@ defmodule DpExchange.Webull.Rest do
   # encoding twice risks two different orderings of the same map and a signature that does
   # not match the payload, which the venue would reject as an authentication failure rather
   # than as the encoding bug it is.
-  defp post(path, body, credentials, opts) do
+  defp post(path, body, credentials, opts), do: post(path, body, credentials, opts, :resource)
+
+  # A single-symbol read made by POST (stock bars); see `symbol_verdict/2`.
+  defp post_symbol(path, body, credentials, opts),
+    do: post(path, body, credentials, opts, :symbol)
+
+  defp post(path, body, credentials, opts, kind) do
     environment = Environment.resolve(opts)
     host = Environment.host(environment)
     encoded = Jason.encode!(body)
@@ -1479,7 +1538,17 @@ defmodule DpExchange.Webull.Rest do
     url = Environment.rest_url(environment) <> path
     headers = signer(request, credentials)
 
-    case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
+    :post
+    |> HttpClient.request(url, headers, encoded, request_opts(opts))
+    |> symbol_verdict(kind)
+    |> post_result()
+  end
+
+  defp post_result(result) do
+    case result do
+      {:refused, _reason} = verdict ->
+        verdict
+
       {:ok, %{status: status, body: response}} when status in 200..299 ->
         decoded_body(response)
 
@@ -2442,7 +2511,7 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("overnight_required", book_overnight(category, opts))
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, symbol) do
         to_order_book(row, symbol)
       end
@@ -2632,7 +2701,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("count", Keyword.get(opts, :count))
         |> put_present("trading_sessions", session)
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, symbol) do
         decode_profiles(row, symbol, timeframe)
       end
@@ -2809,7 +2878,7 @@ defmodule DpExchange.Webull.Rest do
         "imbalance_action_type" => action_type
       }
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, imbalance_rows} <- rows(body) do
         to_imbalances(imbalance_rows, symbol, auction, observed_at)
       end
@@ -2956,7 +3025,7 @@ defmodule DpExchange.Webull.Rest do
         }
         |> put_present("trading_sessions", tick_sessions(category, opts))
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, symbol) do
         decode_ticks(row, symbol)
       end
@@ -3147,7 +3216,8 @@ defmodule DpExchange.Webull.Rest do
         |> put_raw("end_time", epoch_ms(Keyword.get(range, :end)))
         |> put_present("trading_sessions", sessions_param(Keyword.get(opts, :sessions)))
 
-      with {:ok, response} <- post("/market-data/stocks/bars/list", body, credentials, opts),
+      with {:ok, response} <-
+             post_symbol("/market-data/stocks/bars/list", body, credentials, opts),
            {:ok, bars} <- decode_stock_bars(response, symbol, timeframe),
            :ok <- range_reached(bars, range, count || @stock_bar_default) do
         {:ok, bars |> Enum.filter(&within?(&1, range)) |> finish_bars(timeframe, opts)}
@@ -3510,7 +3580,7 @@ defmodule DpExchange.Webull.Rest do
         {:ok, url}
 
       _insecure_or_malformed ->
-        {:error, {:insecure_oauth_url, :https_required}}
+        {:error, {:insecure_url, :webull}}
     end
   end
 
@@ -4153,7 +4223,7 @@ defmodule DpExchange.Webull.Rest do
     fetch_page = fn key ->
       params = put_present(base_params, "pagination_key", key)
 
-      with {:ok, body} <- get(path, params, credentials, opts),
+      with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, page_rows} <- rows(body),
            {:ok, objects} <- object_rows(page_rows) do
         {:ok, {objects, next_pagination_key(body)}}
@@ -4166,7 +4236,7 @@ defmodule DpExchange.Webull.Rest do
   # `[map()]`, as `get_fundamental/4` promises: a row that is not an object is refused rather
   # than handed back as one.
   defp fundamental_rows(_kind, path, params, credentials, opts) do
-    with {:ok, body} <- get(path, params, credentials, opts),
+    with {:ok, body} <- get_symbol(path, params, credentials, opts),
          {:ok, listed} <- rows(body) do
       object_rows(listed)
     end
@@ -5203,7 +5273,7 @@ defmodule DpExchange.Webull.Rest do
          :ok <- validate_symbol(symbol),
          params = event_params(symbol, "count", Keyword.get(opts, :limit)),
          {:ok, body} <-
-           get("/market-data/event-contracts/ticks/list", params, credentials, opts),
+           get_symbol("/market-data/event-contracts/ticks/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol),
          {:ok, ticks} <- list_value(row, ["result"]) do
       object_rows(ticks)
@@ -5253,7 +5323,7 @@ defmodule DpExchange.Webull.Rest do
          :ok <- validate_symbol(symbol),
          params = event_params(symbol, "depth", Keyword.get(opts, :depth)),
          {:ok, body} <-
-           get("/market-data/event-contracts/depths/list", params, credentials, opts),
+           get_symbol("/market-data/event-contracts/depths/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol),
          {:ok, yes_bids} <- list_value(row, ["yes_bids"]),
          {:ok, yes_asks} <- list_value(row, ["yes_asks"]),

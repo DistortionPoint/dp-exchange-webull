@@ -304,7 +304,7 @@ defmodule DpExchange.Webull.Socket do
     # no URL, which may itself carry userinfo.
     if secure_url?(url),
       do: start_socket(url, opts),
-      else: {:error, {:insecure_url, :wss_required}}
+      else: {:error, {:insecure_url, :webull}}
   end
 
   @loopback_hosts ["127.0.0.1", "localhost", "::1"]
@@ -471,7 +471,11 @@ defmodule DpExchange.Webull.Socket do
     notify(
       state,
       Notice.new(:link_down, :webull,
-        details: %{reason: inspect(reason), session_id: state.session_id}
+        details: %{
+          reason: :disconnected,
+          message: bound_text(inspect(reason)),
+          session_id: state.session_id
+        }
       )
     )
 
@@ -954,9 +958,16 @@ defmodule DpExchange.Webull.Socket do
     if String.valid?(payload) and String.trim(payload) != "" do
       notify(
         state,
-        Notice.new(:degraded, :webull,
+        Notice.new(:data_quality, :webull,
           message: payload |> String.trim() |> bound_text(),
-          details: %{venue_notice_unparsed: bound_text(payload)}
+          # A payload that did not parse is `:data_quality` (the venue's words were not
+          # understood), not `:degraded` (a slower path in use). `details.reason` is an atom;
+          # the venue's text rides in `details.message`, bounded.
+          details: %{
+            reason: :unparsed_venue_notice,
+            message: bound_text(payload),
+            session_id: Map.get(state, :session_id)
+          }
         )
       )
     end
@@ -1256,12 +1267,25 @@ defmodule DpExchange.Webull.Socket do
         state,
         Notice.new(:data_quality, :webull,
           message: "dropped #{inspect(key)} (first on this connection)",
-          details: Map.put(details, :dropped, key)
+          details: details |> own_binaries() |> Map.put(:dropped, key)
         )
       )
 
       Map.put(state, :drops_reported, MapSet.put(reported, key))
     end
+  end
+
+  # The raw fields a drop reports are views into the frame they came from (`QuoteProto` walks
+  # the frame without copying), and a `Notice` is the one thing a consumer may keep for a long
+  # time. A 20-byte symbol or price would pin the whole frame - up to the 1 MiB `MqttPacket`
+  # allows - for as long as the notice is held, once for each of up to `@max_reported_drops`
+  # reasons. Copied here, on the cold path (once per reason per connection), so the per-message
+  # decode stays copy-free.
+  defp own_binaries(details) do
+    Map.new(details, fn
+      {field, value} when is_binary(value) -> {field, :binary.copy(value)}
+      other -> other
+    end)
   end
 
   # The reason a frame was dropped, without the venue's value in it. See `report_drop/3`.

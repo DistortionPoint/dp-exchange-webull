@@ -643,9 +643,12 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}
+      # A payload that did not parse is `:data_quality`; `details.reason` is an atom and the
+      # venue's text is `details.message` (facade consistency D4).
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality} = notice}
       assert notice.message == "Permission grabbed by other session"
-      assert notice.details.venue_notice_unparsed == "Permission grabbed by other session"
+      assert notice.details.reason == :unparsed_venue_notice
+      assert notice.details.message == "Permission grabbed by other session"
     end
 
     test "a notice does not pin the frame it arrived in" do
@@ -702,15 +705,16 @@ defmodule DpExchange.Webull.SocketTest do
         assert {:ok, _state} =
                  Socket.handle_frame({:binary, publish("notice", payload)}, state())
 
-        assert_receive {:dp_exchange, :webull, %Notice{kind: :degraded} = notice}, 5_000
+        assert_receive {:dp_exchange, :webull, %Notice{kind: kind} = notice}, 5_000
+        assert kind == if(field == :unparsed, do: :data_quality, else: :degraded)
         assert String.valid?(notice.message)
         assert byte_size(notice.message) < 1_100
         assert notice.message =~ "[truncated, #{byte_size(text)} bytes in all]"
         assert String.starts_with?(notice.message, "a" <> String.duplicate("é", 511))
 
         if field == :unparsed do
-          assert String.valid?(notice.details.venue_notice_unparsed)
-          assert byte_size(notice.details.venue_notice_unparsed) < 1_100
+          assert String.valid?(notice.details.message)
+          assert byte_size(notice.details.message) < 1_100
         end
 
         refute_receive {:dp_exchange, :webull, %Notice{}}, 50
