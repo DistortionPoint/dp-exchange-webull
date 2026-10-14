@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.151] - 2026-10-14
+
 Hot-path audit (tick AD). Tests in `test/dp_exchange/webull/tick_ad_hotpath_test.exs`.
 
 - **A reported drop no longer pins the frame it came from.** `Socket`'s `:data_quality` notice
