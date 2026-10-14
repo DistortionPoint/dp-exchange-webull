@@ -22,6 +22,66 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Decoder robustness against hostile or malformed venue payloads. Each fix has a test in
+`test/dp_exchange/webull/tick_ac_decoder_test.exs` that fails on the old code.
+
+- **A negative size is no size, on both transports.** A streamed `tick` of `-5` was delivered as
+  `Trade.quantity: -5` (now dropped with a `:data_quality` notice,
+  `{:tick, {:non_positive_size, :quantity}}`); a REST tape row of `-5` likewise (now
+  `{:error, {:non_positive_size, :quantity, "-5"}}`); a footprint level of `-3` was stored and
+  summed by `point_of_control/1` (now `{:non_positive_size, :buy_detail | :sell_detail, raw}`). A
+  negative snapshot `volume` (stream and REST) and a negative top-of-book `bid_size`/`ask_size`
+  are `nil` ("not published"), never a negative running total or depth. A zero-size print is
+  still delivered: nothing measured says it is not a real one.
+- **A price, size or rate written in more than 1,024 characters is unreadable** (stream and
+  REST). The exponent bound did not bound the coefficient: `"1"` and two thousand zeros was a
+  finite `Decimal` of exponent 0 and was accepted as a price.
+- **`list_event_series/2` and `list_event_markets/2` returned a non-text `pagination_key`** (an
+  object, a number) typed `String.t() | nil`, and a caller passing it on raised
+  `Protocol.UndefinedError` in `to_string/1` on the next call. It is
+  `{:error, :unexpected_pagination_key}`, as the walks that follow a key themselves already
+  answered.
+- **Rows that are not objects were returned as rows** by `get_accounts/2`, `get_transfers/2`,
+  `get_transactions/2`, `get_fundamental/4`, `list_futures_contracts/2`,
+  `list_futures_product_classes/2`, `list_event_categories/2`, `list_event_events/2`,
+  `list_event_series/2`, `list_event_markets/2` and `get_event_trades/3` against a `[map()]` spec;
+  they are `{:error, :unexpected_response_shape}`. A batch answer holding one is
+  `{:order_unconfirmed, ids, :unexpected_response_shape}` (the batch may be live).
+- **A crypto bars reply with a group that is not an object was shortened silently**
+  (`_other -> []`), so a series with a group missing read as complete; it is
+  `:unexpected_response_shape`, as the stock, option, futures and event bars already answered.
+- **An option contract at a strike of zero or less** was filed in the chain grid; it is
+  `{:unreadable_option_contract, keys}`.
+- **A 417 on subscribe whose JSON body arrived as text** (no JSON content type) matched none of
+  the named clauses and became the opaque `:exchange_error` - the answer that, for
+  `INVALID_SESSION`, makes `Feed` retry a dead session id (dp-exchange-core issue #30). A 417 text
+  body that is a JSON object is decoded first, so `:oversubscribed`, `{:invalid_session, _}` and
+  `{:invalid_symbols, _}` are recognised however the body is typed.
+- **`extended_hours` and `overnight` went through `to_string/1`.** A map or tuple raised
+  `Protocol.UndefinedError` in the caller; text or a number (`"yes"`, `1`) was sent as typed, a
+  value the venue's boolean parameters do not define. On `get_price/3`, `get_top_of_book/3` and
+  `get_order_book/3` anything but `true`, `false` or absent is now
+  `{:error, {:invalid_option, key, value}}` before the request is built
+  (`Rest.validate_hours_flags/1`), and `DpExchange.Webull.Fake` refuses the same on its price,
+  top-of-book and book reads.
+- **`place_order/3` returned an `Order` for a 2xx row naming a DIFFERENT `client_order_id` than
+  the one sent.** The venue echoes the id it is given, and `Order.id` is what `cancel_order/3`
+  and `get_order/3` take, so a caller would cancel or read some other order while ours may be
+  live. It is now `{:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}`, like an
+  acceptance that names nothing. Existing tests whose canned acceptance named `"abc"`/`"c1"`
+  while the request carried a generated or different id pinned the bug; they now send the id
+  they expect back, or echo the one sent.
+- **Query options that a query string cannot hold raised in the caller's process** after the
+  limiter had been asked: a map or tuple for a fundamentals or screener option (`:type`,
+  `:count`, `:sort_by`, `:rank_type`, ...), a list of maps for a futures or event `:symbols`, a
+  non-text `:sessions` on the tape and stock bars, a map for the event tape `:limit` or event
+  book `:depth` (the query was built before the check that refuses it). They are
+  `{:error, {:invalid_option, key, value}}` before anything is built, and
+  `DpExchange.Webull.Fake` answers the same through `validate_screener/2`,
+  `validate_statement_count/2` and `validate_trades_request/1`. A list where one value belongs
+  (`type: ["ANNUAL", "QUARTERLY"]`) was sent concatenated, as `"ANNUALQUARTERLY"`; it is
+  refused too.
+
 ## [0.4.149] - 2026-10-14
 
 - **A fast reconnect queued a second MQTT CONNECT**, a protocol violation the broker answers by

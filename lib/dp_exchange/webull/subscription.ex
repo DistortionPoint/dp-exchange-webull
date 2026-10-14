@@ -199,7 +199,9 @@ defmodule DpExchange.Webull.Subscription do
       |> Auth.headers(credentials)
     end
 
-    case HttpClient.request(:post, url, headers, body, request_opts(opts)) do
+    case :post
+         |> HttpClient.request(url, headers, body, request_opts(opts))
+         |> decoded_417() do
       {:ok, %{status: status}} when status in 200..299 ->
         :ok
 
@@ -257,6 +259,24 @@ defmodule DpExchange.Webull.Subscription do
         {:error, reason}
     end
   end
+
+  # **A 417 whose body arrived as TEXT is read as the JSON object it is.** The three answers
+  # `Feed` acts on (`:oversubscribed`, `{:invalid_session, _}`, `{:invalid_symbols, _}`) are
+  # matched on a DECODED body, and the HTTP client decodes only what the response's
+  # content type says is JSON. A venue, or a gateway in front of it, that answers `text/plain`
+  # (or no type) with the same JSON fell through to the opaque `:exchange_error` below, which
+  # is the answer that put four shards dark for fourteen hours (dp-exchange-core issue #30):
+  # `Feed` retries an opaque error against the same dead session. `Rest` has always decoded a
+  # text body itself (`refusal_body/1`); this is the same rule on the one path that did not.
+  # Only a 417 is touched: the other refusals carry the body as received, as they always did.
+  defp decoded_417({:ok, %{status: 417, body: body} = response}) when is_binary(body) do
+    case Jason.decode(body) do
+      {:ok, %{} = decoded} -> {:ok, %{response | body: decoded}}
+      _not_an_object -> {:ok, response}
+    end
+  end
+
+  defp decoded_417(other), do: other
 
   # How much of a refusing body the error term carries. A refusal's body is the venue's, or a
   # gateway's: a 403 from a CDN is an HTML page, and `{:error, {:refused, 403, page}}` is

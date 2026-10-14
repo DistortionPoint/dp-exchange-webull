@@ -1124,8 +1124,8 @@ defmodule DpExchange.Webull.Socket do
          # that is absent and sized at once. The price was `"null"` or unparseable and the
          # size was a real number, so the pair read as a one-sided book with depth on the
          # empty side. Each size is kept only with the price it belongs to.
-         bid_size: bid && decimal(decoded[:bid_size]),
-         ask_size: ask && decimal(decoded[:ask_size]),
+         bid_size: bid && size_or_nil(decoded[:bid_size]),
+         ask_size: ask && size_or_nil(decoded[:ask_size]),
          venue_time: venue_time_or_nil(decoded),
          observed_at: DateTime.utc_now(),
          provider: :webull
@@ -1146,7 +1146,7 @@ defmodule DpExchange.Webull.Socket do
   defp emit_snapshot(state, {:ok, decoded}) do
     case required_price(decoded[:price], :price) do
       {:ok, price} ->
-        volume = decimal(decoded[:volume])
+        volume = size_or_nil(decoded[:volume])
 
         send(
           state.subscriber,
@@ -1180,7 +1180,7 @@ defmodule DpExchange.Webull.Socket do
   defp emit_trade(state, {:ok, decoded}) do
     with {:ok, timestamp} <- tick_time(decoded),
          {:ok, price} <- required_price(decoded[:price], :price),
-         {:ok, quantity} <- required_decimal(decoded[:volume], :quantity) do
+         {:ok, quantity} <- required_size(decoded[:volume], :quantity) do
       send(
         state.subscriber,
         {:dp_exchange, :webull,
@@ -1327,6 +1327,15 @@ defmodule DpExchange.Webull.Socket do
 
   defp decimal(nil), do: nil
 
+  # **A number written in more than 1,024 characters is no price or size on this venue.** The
+  # exponent bound below does not bound the COEFFICIENT: `"1"` followed by two thousand zeros
+  # has exponent 0 and was accepted as a price, after an integer conversion that grows with the
+  # string - and a frame may carry up to the 1 MiB `MqttPacket` allows, in the socket process.
+  # Refused before the parse. **Chosen, not measured**; see `Rest`'s `decimal/1`.
+  @max_decimal_chars 1_024
+
+  defp decimal(value) when is_binary(value) and byte_size(value) > @max_decimal_chars, do: nil
+
   # `Decimal.new/1` raises on a string that is not a number — a real, previously observed
   # response shape from a delisted Webull crypto pair, which returns "null" for a price
   # field. `Decimal.parse/1`, requiring the whole string be consumed, does not.
@@ -1350,6 +1359,26 @@ defmodule DpExchange.Webull.Socket do
 
   # No clause for a value that is neither `nil` nor text: every caller passes a field read
   # through `QuoteProto`'s `present/2`, which yields a binary or `nil` and nothing else.
+
+  # A size or volume read as a number that can be one: `nil` where it is absent, unreadable or
+  # NEGATIVE. A negative quantity is no quantity, and `-5` delivered as a running volume or a
+  # level's size stays plausible while its meaning is wrong. `nil` is "not published", the
+  # answer an unreadable figure already gets here (`Rest`'s `size_or_nil/1` is the same rule).
+  defp size_or_nil(raw) do
+    case decimal(raw) do
+      nil -> nil
+      size -> if Decimal.negative?(size), do: nil, else: size
+    end
+  end
+
+  # A print's size is not negative: a tick of minus five lots is the venue's garbage, not a
+  # trade, and would be summed by every consumer of the tape. Refused like an unreadable one,
+  # with the tag `Rest` uses for the same figure. Zero is kept (see `Rest`'s `required_size/2`).
+  defp required_size(value, field) do
+    with {:ok, size} <- required_decimal(value, field) do
+      if Decimal.negative?(size), do: {:error, {:non_positive_size, field}}, else: {:ok, size}
+    end
+  end
 
   # `Quote.price`, `Trade.price` and `Trade.quantity` are all required, and a `nil` there
   # is the same substitution a raise would have been, wearing a quieter shape — a struct's

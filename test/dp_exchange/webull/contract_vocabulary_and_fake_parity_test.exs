@@ -74,7 +74,14 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
 
   describe "place_order/3 answers in the contract's vocabulary" do
     test "a side spelled as text and sizes spelled as numbers come back as :buy and Decimals" do
-      request = equity_request(%{side: "buy", quantity: 5, price: "180.5", stop_price: nil})
+      request =
+        equity_request(%{
+          side: "buy",
+          quantity: 5,
+          price: "180.5",
+          stop_price: nil,
+          client_order_id: "abc"
+        })
 
       assert {:ok, %Types.Order{} = order} =
                Rest.place_order(

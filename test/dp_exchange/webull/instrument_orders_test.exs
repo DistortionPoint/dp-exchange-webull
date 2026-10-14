@@ -39,13 +39,34 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
   defp capturing(body, test_pid) do
     fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)
-      send(test_pid, {:sent, Jason.decode!(raw), conn.request_path})
+      decoded = Jason.decode!(raw)
+      send(test_pid, {:sent, decoded, conn.request_path})
 
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.resp(200, Jason.encode!(body))
+      |> Plug.Conn.resp(200, Jason.encode!(echoing(body, conn.request_path, decoded)))
     end
   end
+
+  # The venue echoes the `client_order_id` it was sent, and `place_order/3` refuses an
+  # acceptance naming another (`:order_unconfirmed`). So the canned acceptance on the place
+  # path carries whatever id the request had, generated or not.
+  defp echoing(body, "/trading/orders/place", decoded) do
+    sent = get_in(decoded, ["new_orders", Access.at(0), "client_order_id"])
+
+    case body do
+      rows when is_list(rows) -> Enum.map(rows, &echoing_row(&1, sent))
+      row -> echoing_row(row, sent)
+    end
+  end
+
+  defp echoing(body, _path, _decoded), do: body
+
+  defp echoing_row(%{"client_order_id" => _id} = row, sent) do
+    %{row | "client_order_id" => sent}
+  end
+
+  defp echoing_row(row, _sent), do: row
 
   # The price fields an order type uses; any other is refused by `place_order/3`
   # (`{:unexpected_field, key}`), so the fixture carries only the ones its type sends.

@@ -260,8 +260,8 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert query =~ ~r/(\A|&)count=1(&|\z)/
     end
 
-    test "a group carrying neither rows nor bar fields contributes nothing" do
-      assert {:ok, []} =
+    test "a group that is not an object refuses the reply rather than contributing nothing" do
+      assert {:error, :unexpected_response_shape} =
                Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
                  plug: responding(["not a map"]),
                  retry_attempts: 0

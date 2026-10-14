@@ -40,7 +40,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
   end
 
-  defp accepted, do: [%{"order_id" => "wb-1", "client_order_id" => "abc"}]
+  # The venue echoes the id it was sent (`common-order-place.md`, `OrderCommonWriteResult`), so
+  # an acceptance names the request's own id. `limit_request/1` carries `"abc"` unless a test
+  # deletes it to have one generated; the capturing plugs echo whatever was sent.
+  defp accepted(id \\ "abc"), do: [%{"order_id" => "wb-1", "client_order_id" => id}]
+
+  defp sent_id(decoded), do: get_in(decoded, ["new_orders", Access.at(0), "client_order_id"])
 
   defp place(request, opts) do
     Rest.place_order(@credentials, request, Keyword.merge([retry_attempts: 0], opts))
@@ -49,6 +54,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
   defp limit_request(overrides \\ %{}) do
     Map.merge(
       %{
+        client_order_id: "abc",
         symbol: "BTC-USD",
         side: :buy,
         quantity: Decimal.new("0.5"),
@@ -87,11 +93,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(me, {:sent, Jason.decode!(body)})
+        decoded = Jason.decode!(body)
+        send(me, {:sent, decoded})
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+        |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
       end
 
       assert {:ok, _order} = place(limit_request(), plug: plug, account_id: @account)
@@ -224,11 +231,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(me, {:sent, Jason.decode!(body)})
+        decoded = Jason.decode!(body)
+        send(me, {:sent, decoded})
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+        |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
       end
 
       {:ok, plug: plug}
@@ -297,11 +305,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(me, {:sent, Jason.decode!(body)})
+        decoded = Jason.decode!(body)
+        send(me, {:sent, decoded})
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+        |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
       end
 
       {:ok, plug: plug}
@@ -342,10 +351,13 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     test "a client_order_id is generated when absent, within the venue's 32-char limit", %{
       plug: plug
     } do
-      assert {:ok, _order} = place(limit_request(), plug: plug, account_id: @account)
+      request = Map.delete(limit_request(), :client_order_id)
+
+      assert {:ok, order} = place(request, plug: plug, account_id: @account)
 
       assert_receive {:sent, %{"new_orders" => [leaf]}}
       assert String.length(leaf["client_order_id"]) == 32
+      assert order.id == leaf["client_order_id"]
     end
 
     test "a caller's own client_order_id is used", %{plug: plug} do
@@ -388,11 +400,24 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       # `[]`, `{}` and an empty `data` are all "accepted, names nothing": the order may be
       # live, so a bare shape error (which a caller retries into a duplicate) is wrong.
       for body <- [[], %{}, %{"data" => []}, %{"data" => "x"}] do
+        request = Map.delete(limit_request(), :client_order_id)
+
         assert {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}} =
-                 place(limit_request(), plug: responding(body), account_id: @account)
+                 place(request, plug: responding(body), account_id: @account)
 
         assert is_binary(sent_id) and String.length(sent_id) == 32
       end
+    end
+
+    test "an acceptance naming a DIFFERENT id than the one sent is unconfirmed, with ours" do
+      # Old: `{:ok, %Order{id: "someone-else"}}`. The venue echoes the id it was sent; an answer
+      # naming another is not about our order, which may be live, and handing back that id would
+      # have the caller cancel or read a different one.
+      assert {:error, {:order_unconfirmed, "abc", :unexpected_response_shape}} =
+               place(limit_request(),
+                 plug: responding(accepted("someone-else")),
+                 account_id: @account
+               )
     end
 
     test "a stop order's trigger price is on the order it hands back, not just the wire body" do
@@ -559,11 +584,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
     plug = fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)
-      send(me, {:sent, Jason.decode!(raw)})
+      decoded = Jason.decode!(raw)
+      send(me, {:sent, decoded})
 
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
-      |> Plug.Conn.resp(200, Jason.encode!(accepted()))
+      |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
     end
 
     request =
@@ -605,7 +631,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       # The plug runs in this process, so every attempt has sent its message by the time
       # `place/2` returns; nothing here waits on a timer or a spawned process.
       assert {:error, {:order_unconfirmed, sent_id, _reason}} =
-               place(limit_request(),
+               place(Map.delete(limit_request(), :client_order_id),
                  plug: plug,
                  account_id: @account,
                  retry_attempts: 3,

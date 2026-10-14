@@ -304,7 +304,13 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
 
     test "prices and quantities go out as strings in full notation" do
       request =
-        equity_order(%{quantity: "1e-8", price: 10, order_type: :limit, time_in_force: :gtc})
+        equity_order(%{
+          quantity: "1e-8",
+          price: 10,
+          order_type: :limit,
+          time_in_force: :gtc,
+          client_order_id: "abc"
+        })
 
       assert {:ok, _order} = place(request, plug: capturing(self()))
 
@@ -314,7 +320,12 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
       assert leaf["limit_price"] == "10"
 
       assert {:ok, _order} =
-               place(equity_order(%{price: Decimal.new("1E-8"), time_in_force: :gtc}),
+               place(
+                 equity_order(%{
+                   price: Decimal.new("1E-8"),
+                   time_in_force: :gtc,
+                   client_order_id: "abc"
+                 }),
                  plug: capturing(self())
                )
 

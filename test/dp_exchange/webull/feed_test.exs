@@ -13,6 +13,18 @@ defmodule DpExchange.Webull.FeedTest do
   alias DpExchange.Core.Types.Quote
   alias DpExchange.Webull.Feed
 
+  # Receives subscribe requests until one names `symbol`, or the deadline passes.
+  defp await_subscribe_naming(symbol, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:request, "/market-data/streaming/subscribe", symbols} ->
+        symbol in symbols or await_subscribe_naming(symbol, deadline)
+    after
+      remaining -> false
+    end
+  end
+
   describe "the two transports are joined by one session id" do
     test "the shard's own session id is used for the HTTP subscribe", %{limiter: limiter} do
       # A mismatch fails in the most expensive way available: the HTTP call succeeds, the
@@ -1667,9 +1679,10 @@ defmodule DpExchange.Webull.FeedTest do
 
       send(feed, :resubscribe)
 
-      assert_receive {:request, "/market-data/streaming/subscribe", symbols_a}
-      assert_receive {:request, "/market-data/streaming/subscribe", symbols_b}
-      assert "BADUSD" in (symbols_a ++ symbols_b)
+      # How many subscribes the tick and its resync send before BAD-USD is back depends on
+      # scheduling (asserting exactly two flaked under the full cover gate, 2026-10-14). The
+      # claim is only that it IS sent again, so any subscribe naming it will do.
+      assert await_subscribe_naming("BADUSD", System.monotonic_time(:millisecond) + 10_000)
     end
   end
 

@@ -186,6 +186,7 @@ defmodule DpExchange.Webull.Fake do
       # no snapshot endpoint for is refused by name, not answered with a crypto price. One it
       # does serve, other than crypto, is an endpoint this fake models no symbol on.
       with :ok <- Rest.validate_snapshot_category(category),
+           :ok <- Rest.validate_hours_flags(opts),
            :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         case category == "US_CRYPTO" && Map.fetch(@price, symbol) do
@@ -256,6 +257,7 @@ defmodule DpExchange.Webull.Fake do
       # `US_EVENT` is refused as `Rest.get_top_of_book/3` refuses it (it has two books, not a
       # top of one), then the snapshot category, both before credentials.
       with :ok <- Rest.validate_top_of_book_category(category),
+           :ok <- Rest.validate_hours_flags(opts),
            :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts) do
         case category == "US_CRYPTO" && Map.fetch(@price, symbol) do

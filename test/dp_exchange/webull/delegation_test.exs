@@ -254,6 +254,7 @@ defmodule DpExchange.Webull.DelegationTest do
 
     test "place_order/3" do
       request = %{
+        client_order_id: "c1",
         symbol: "BTC-USD",
         side: :buy,
         quantity: Decimal.new("0.5"),

@@ -537,7 +537,20 @@ DpExchange.Webull.adjusted?("1m")  #=> false
 * **An open, high, low or close of zero or less** is `{:error, {:non_positive_price, field,
   raw}}`; so is a trade or quote price. A book level with no readable price or a price of zero
   or less refuses the whole book (it was dropped), a level of size zero is dropped, and a
-  negative size is `{:error, {:non_positive_size, :size, raw}}`.
+  negative size is `{:error, {:non_positive_size, :size, raw}}`. **A tape row's or a footprint
+  level's negative size is refused the same way** (`:quantity`, `:buy_detail`, `:sell_detail`),
+  and a streamed tick of negative size is dropped with a `:data_quality` notice. A negative
+  snapshot `volume` or top-of-book size (REST or stream) is `nil`, "not published", never a
+  negative number. A figure written in more than 1,024 characters is unreadable. A zero-size
+  print is delivered: nothing measured says it is not a real one.
+* **A query option that is a map, a tuple or a list of non-text** (fundamentals `:type`,
+  `:count`; a screener's `:sort_by`, `:rank_type`; a futures or event `:symbols`; the tape's and
+  stock bars' `:sessions`) **is `{:error, {:invalid_option, key, value}}`** before any request.
+  A list where one value belongs (`type: ["ANNUAL", "QUARTERLY"]`) is refused too.
+* **A row that is not an object** in a `[map()]` answer (`get_accounts/2`, `get_transfers/2`,
+  `get_fundamental/4`, the futures and event lists, the event tape) is
+  `{:error, :unexpected_response_shape}`, and a `pagination_key` that is not text is
+  `{:error, :unexpected_pagination_key}`.
 * **A candle or trade `:limit` over the page's maximum** (1200; 1650 for stock `1m`; 1000 for
   the stock tape) **is `{:error, {:invalid_option, :limit, value}}`**, as is one that is not a
   positive whole number; it was `{:limit_out_of_range, n, max: max}`.

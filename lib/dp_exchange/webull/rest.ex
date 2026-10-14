@@ -216,6 +216,7 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_CRYPTO")
 
     with {:ok, path} <- snapshot_path(category),
+         :ok <- validate_hours_flags(opts),
          :ok <- validate_symbol(symbol) do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
@@ -450,7 +451,21 @@ defmodule DpExchange.Webull.Rest do
   # because `crypto-snapshot.md` documents no volume field — the same unmeasured assumption
   # dp_exchange_webull issue #6 found on the stream. A response that carries none still
   # gives `nil`, never zero, which would claim a flat interval.
-  defp snapshot_volume(row), do: decimal(value(row, ["volume"]))
+  #
+  # A negative volume is no volume: `size_or_nil/1`.
+  defp snapshot_volume(row), do: size_or_nil(value(row, ["volume"]))
+
+  # A size or volume the venue states, read as a number that can be one: `nil` where it is
+  # absent, unreadable, or NEGATIVE. A negative quantity of anything traded or resting is no
+  # quantity, and delivering `-5` as a running volume or a level's size stays plausible while
+  # its meaning is wrong. `nil` is "not published", the answer this package gives for an
+  # unreadable figure everywhere a size is optional (`Core.Types.TopOfBook`, `Quote`).
+  defp size_or_nil(raw) do
+    case decimal(raw) do
+      nil -> nil
+      size -> if Decimal.negative?(size), do: nil, else: size
+    end
+  end
 
   # **The string `"null"` is the venue saying it has no price, so it is refused, not an
   # error** (dp_exchange_webull issue #8). Measured by a consumer on 2026-10-02 against
@@ -769,7 +784,8 @@ defmodule DpExchange.Webull.Rest do
       category ->
         with :ok <- book_category(category),
              {:ok, timespan} <- stock_timespan(timeframe),
-             do: limit_within_max(limit, stock_bar_max(timespan))
+             :ok <- limit_within_max(limit, stock_bar_max(timespan)),
+             do: list_opts(opts, [:sessions])
     end
   end
 
@@ -800,7 +816,28 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_book_request(term(), keyword()) :: :ok | {:error, term()}
   def validate_book_request(category, opts) do
-    with {:ok, _path} <- book_path(category), do: book_depth(category, Keyword.get(opts, :depth))
+    with {:ok, _path} <- book_path(category),
+         :ok <- book_depth(category, Keyword.get(opts, :depth)),
+         do: validate_hours_flags(opts)
+  end
+
+  @doc """
+  Whether `opts[:extended_hours]` and `opts[:overnight]` are each absent or a boolean: the
+  check the snapshot, top-of-book and order-book reads make before the request is built, for
+  `DpExchange.Webull.Fake`. Anything else is `{:error, {:invalid_option, key, value}}`.
+
+  The two are sent to the venue as `"true"` / `"false"` through `to_string/1`, which raised
+  `Protocol.UndefinedError` in the caller for a map or tuple and sent `"yes"` or `"1"` as
+  typed for text and numbers: values the venue's boolean parameters do not define.
+  """
+  @spec validate_hours_flags(keyword()) :: :ok | {:error, {:invalid_option, atom(), term()}}
+  def validate_hours_flags(opts) do
+    Enum.find_value([:extended_hours, :overnight], :ok, fn key ->
+      case Keyword.get(opts, key) do
+        flag when flag in [nil, true, false] -> nil
+        other -> {:error, {:invalid_option, key, other}}
+      end
+    end)
   end
 
   @doc """
@@ -813,18 +850,34 @@ defmodule DpExchange.Webull.Rest do
   def validate_trades_request(opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
+    # `:sessions` is a session name or a list of them, as `get_trades/3` checks it: a map or a
+    # list of maps there raised `Protocol.UndefinedError` in `Enum.join/2` / `to_string/1`.
     with {:ok, _path} <- tick_path(category),
-         do: limit_within_max(Keyword.get(opts, :limit), tick_max(category))
+         :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
+         do: list_opts(opts, [:sessions])
   end
 
   @doc """
   Whether `opts[:count]` is within the 20 the statement endpoints state as their maximum,
   for a statement `kind` (`get_financials/4`'s own vocabulary). The check
   `get_financials/4` makes after the kind and before anything is signed, for
-  `DpExchange.Webull.Fake`.
+  `DpExchange.Webull.Fake`. A query option (`:category`, `:type`, `:count`, ...) that is a map,
+  a tuple or a list is `{:error, {:invalid_option, key, value}}`, checked first.
   """
   @spec validate_statement_count(atom(), keyword()) :: :ok | {:error, term()}
-  def validate_statement_count(kind, opts), do: statement_count(statement_endpoint(kind), opts)
+  def validate_statement_count(kind, opts) do
+    endpoint = statement_endpoint(kind)
+
+    allowed =
+      case fundamental(endpoint) do
+        {:ok, {_path, allowed}} -> allowed
+        :error -> []
+      end
+
+    # The same two checks, in the same order, as `get_fundamental/4` makes before it builds the
+    # query: a query option a query string cannot hold, then the count.
+    with :ok <- scalar_opts(opts, [:category | allowed]), do: statement_count(endpoint, opts)
+  end
 
   defp crypto_count_within_limit(n), do: limit_within_max(n, @crypto_bar_max)
 
@@ -902,6 +955,7 @@ defmodule DpExchange.Webull.Rest do
 
     with :ok <- refuse_event_top_of_book(category),
          {:ok, path} <- snapshot_path(category),
+         :ok <- validate_hours_flags(opts),
          :ok <- validate_symbol(symbol) do
       native = snapshot_symbol(symbol, category)
       params = snapshot_params(native, category, opts)
@@ -946,8 +1000,8 @@ defmodule DpExchange.Webull.Rest do
       # `bid: nil` beside a `bid_size` read as a one-sided book with depth on the empty
       # side. `Socket` already keeps each size only with the price it belongs to; this is
       # the same rule for the same type on the other transport.
-      bid_size: bid && decimal(value(row, ["bidSize", "bid_size"])),
-      ask_size: ask && decimal(value(row, ["askSize", "ask_size"])),
+      bid_size: bid && size_or_nil(value(row, ["bidSize", "bid_size"])),
+      ask_size: ask && size_or_nil(value(row, ["askSize", "ask_size"])),
       venue_time: quote_time(row),
       observed_at: DateTime.utc_now(),
       provider: :webull
@@ -1549,8 +1603,10 @@ defmodule DpExchange.Webull.Rest do
   @spec get_accounts(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_accounts(credentials, opts) do
-    with {:ok, body} <- get("/trading/accounts/list", %{}, credentials, opts) do
-      rows(body)
+    # `{:ok, [map()]}`: a row that is not an object is not an account (`object_rows/1`).
+    with {:ok, body} <- get("/trading/accounts/list", %{}, credentials, opts),
+         {:ok, account_rows} <- rows(body) do
+      object_rows(account_rows)
     end
   end
 
@@ -1921,14 +1977,18 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # Each page's rows are objects or the read is refused: `get_transfers/2` and
+  # `get_transactions/2` promise `[map()]` and hand the venue's rows back unnormalised, so a
+  # string or a number among them was returned as a "transfer".
   defp cash_activities_page(base_params, credentials, opts) do
     fn key ->
       params = put_present(base_params, "pagination_key", key)
 
       with {:ok, body} <-
              get("/trading/activities/cash-activities/list", params, credentials, opts),
-           {:ok, page_rows} <- rows(body) do
-        {:ok, {page_rows, next_pagination_key(body)}}
+           {:ok, page_rows} <- rows(body),
+           {:ok, objects} <- object_rows(page_rows) do
+        {:ok, {objects, next_pagination_key(body)}}
       end
     end
   end
@@ -2371,6 +2431,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, path} <- book_path(category),
          :ok <- book_depth(category, Keyword.get(opts, :depth)),
+         :ok <- validate_hours_flags(opts),
          :ok <- validate_symbol(symbol) do
       params =
         %{
@@ -2673,9 +2734,15 @@ defmodule DpExchange.Webull.Rest do
 
   defp price_map(%{} = detail, field) do
     Enum.reduce_while(detail, {:ok, %{}}, fn {price, size}, {:ok, acc} ->
-      case decimal(size) do
-        nil -> {:halt, {:error, {:invalid_decimal, field, size}}}
-        parsed -> {:cont, {:ok, Map.put(acc, price, parsed)}}
+      case required_size(size, field) do
+        {:ok, parsed} ->
+          {:cont, {:ok, Map.put(acc, price, parsed)}}
+
+        {:error, {:missing_required_field, _field}} ->
+          {:halt, {:error, {:invalid_decimal, field, size}}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
       end
     end)
   end
@@ -2879,6 +2946,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, path} <- tick_path(category),
          :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
+         :ok <- list_opts(opts, [:sessions]),
          :ok <- validate_symbol(symbol) do
       params =
         %{
@@ -2956,7 +3024,7 @@ defmodule DpExchange.Webull.Rest do
   defp to_trade(tick, symbol) do
     with {:ok, timestamp} <- venue_time(tick),
          {:ok, price} <- required_price(value(tick, ["price"]), :price),
-         {:ok, quantity} <- required_decimal(value(tick, ["volume"]), :quantity) do
+         {:ok, quantity} <- required_size(value(tick, ["volume"]), :quantity) do
       {:ok,
        %Trade{
          # The venue publishes no per-tick id on this endpoint. `nil` says so.
@@ -3056,6 +3124,7 @@ defmodule DpExchange.Webull.Rest do
          {:ok, timespan} <- stock_timespan(timeframe),
          # `historical-bars.md`: "maximum limit 1200 (M1 supports up to 1650)".
          :ok <- limit_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)),
+         :ok <- list_opts(opts, [:sessions]),
          :ok <- validate_range(range),
          :ok <- validate_symbol(symbol) do
       count = stock_count(range, opts, timespan)
@@ -4021,6 +4090,10 @@ defmodule DpExchange.Webull.Rest do
   @spec fundamental_kinds() :: [atom()]
   def fundamental_kinds, do: @fundamentals |> Map.keys() |> Enum.sort()
 
+  # Read through a function so code above `@fundamentals` (`validate_statement_count/2`) can
+  # reach it.
+  defp fundamental(kind), do: Map.fetch(@fundamentals, kind)
+
   @doc """
   One fundamentals endpoint, by kind — the venue's own rows, unnormalised.
 
@@ -4047,15 +4120,20 @@ defmodule DpExchange.Webull.Rest do
   def get_fundamental(kind, symbol, credentials, opts) do
     case Map.fetch(@fundamentals, kind) do
       {:ok, {path, allowed}} ->
-        base_params =
-          %{"symbol" => symbol, "category" => fundamental_category(opts)}
-          |> put_allowed(allowed, opts)
-
         # The statement endpoints state "maximum value is 20" for `count`
         # (`financial-balancesheet.md` and kin, `fund-net-value.md`). `capital-flows` states
         # none and is left to the venue.
-        with :ok <- statement_count(kind, opts),
+        #
+        # The options are checked BEFORE the query is built (`scalar_opts/2`): a map or a list
+        # of maps for `:type` raised `Protocol.UndefinedError` out of `put_present/3`'s
+        # `to_string/1`, in the caller's process.
+        with :ok <- scalar_opts(opts, [:category | allowed]),
+             :ok <- statement_count(kind, opts),
              :ok <- validate_symbol(symbol) do
+          base_params =
+            %{"symbol" => symbol, "category" => fundamental_category(opts)}
+            |> put_allowed(allowed, opts)
+
           fundamental_rows(kind, path, base_params, credentials, opts)
         end
 
@@ -4076,19 +4154,61 @@ defmodule DpExchange.Webull.Rest do
       params = put_present(base_params, "pagination_key", key)
 
       with {:ok, body} <- get(path, params, credentials, opts),
-           {:ok, page_rows} <- rows(body) do
-        {:ok, {page_rows, next_pagination_key(body)}}
+           {:ok, page_rows} <- rows(body),
+           {:ok, objects} <- object_rows(page_rows) do
+        {:ok, {objects, next_pagination_key(body)}}
       end
     end
 
     paginate(fetch_page)
   end
 
+  # `[map()]`, as `get_fundamental/4` promises: a row that is not an object is refused rather
+  # than handed back as one.
   defp fundamental_rows(_kind, path, params, credentials, opts) do
-    with {:ok, body} <- get(path, params, credentials, opts), do: rows(body)
+    with {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, listed} <- rows(body) do
+      object_rows(listed)
+    end
   end
 
   defp fundamental_category(opts), do: Config.opt(opts, :category, "US_STOCK")
+
+  # **An option that goes into a query string must be something a query string can hold**:
+  # text, a number, an atom, a `Decimal` or a `Date` (`scalar_opts/2`), or for the options that
+  # name several things (`list_opts/2`) also a list of text, which is comma-joined. Anything
+  # else - a map, a tuple, a list with a non-text member - reached `put_present/3`'s
+  # `to_string/1` and raised `Protocol.UndefinedError` out of the facade call, in the caller's
+  # process, after the rate limiter had been asked; and a list given where ONE value belongs
+  # (`type: ["ANNUAL", "QUARTERLY"]`) was written to the wire as the concatenation
+  # `"ANNUALQUARTERLY"`. Refused `{:invalid_option, key, value}` before anything is built.
+  # `nil` is absent. Shared with `DpExchange.Webull.Fake` through the `validate_*` functions
+  # that call it, so both answer alike.
+  defp scalar_opts(opts, keys), do: checked_opts(opts, keys, &scalar_value?/1)
+  defp list_opts(opts, keys), do: checked_opts(opts, keys, &list_value?/1)
+
+  defp checked_opts(opts, keys, valid?) do
+    Enum.find_value(keys, :ok, fn key ->
+      value = Keyword.get(opts, key)
+      if valid?.(value), do: nil, else: {:error, {:invalid_option, key, value}}
+    end)
+  end
+
+  defp scalar_value?(value)
+       when is_nil(value) or is_binary(value) or is_number(value) or is_atom(value),
+       do: true
+
+  defp scalar_value?(%Date{}), do: true
+  defp scalar_value?(%Decimal{}), do: true
+  defp scalar_value?(_other), do: false
+
+  defp list_value?(list) when is_list(list), do: text_list?(list)
+  defp list_value?(value), do: scalar_value?(value)
+
+  # By hand: an improper list is refused rather than raised on by `Enum.all?/2`.
+  defp text_list?([text | rest]), do: is_binary(text) and text_list?(rest)
+  defp text_list?([]), do: true
+  defp text_list?(_improper), do: false
 
   defp put_allowed(params, allowed, opts) do
     Enum.reduce(allowed, params, fn key, acc ->
@@ -4715,7 +4835,8 @@ defmodule DpExchange.Webull.Rest do
   def get_screener(name, credentials, opts) do
     case Map.fetch(@screeners, name) do
       {:ok, {path, allowed}} ->
-        with :ok <- require_rank_type(name, opts) do
+        with :ok <- require_rank_type(name, opts),
+             :ok <- scalar_opts(opts, [:category | allowed]) do
           base_params =
             name
             |> screener_base_params(opts)
@@ -4744,9 +4865,15 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_screener(term(), keyword()) :: :ok | {:error, term()}
   def validate_screener(name, opts) do
-    if Map.has_key?(@screeners, name),
-      do: require_rank_type(name, opts),
-      else: {:error, {:unknown_screener, name}}
+    case Map.fetch(@screeners, name) do
+      {:ok, {_path, allowed}} ->
+        # A query option that is a map, tuple or list is `{:invalid_option, key, value}`: it
+        # raised `Protocol.UndefinedError` in `put_present/3` once the request was built.
+        with :ok <- require_rank_type(name, opts), do: scalar_opts(opts, [:category | allowed])
+
+      :error ->
+        {:error, {:unknown_screener, name}}
+    end
   end
 
   defp require_rank_type("week52_high_low", opts) do
@@ -4847,7 +4974,9 @@ defmodule DpExchange.Webull.Rest do
   @spec list_futures_contracts(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_contracts(credentials, opts) do
-    with :ok <- symbols_or_code(opts) do
+    with :ok <- list_opts(opts, [:symbols, :code]),
+         :ok <- scalar_opts(opts, [:status]),
+         :ok <- symbols_or_code(opts) do
       params =
         %{"category" => "US_FUTURES"}
         |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
@@ -4855,8 +4984,9 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("status", Keyword.get(opts, :status))
 
       with {:ok, body} <-
-             get("/trading/instruments/futures/contracts/list", params, credentials, opts) do
-        rows(body)
+             get("/trading/instruments/futures/contracts/list", params, credentials, opts),
+           {:ok, contracts} <- rows(body) do
+        object_rows(contracts)
       end
     end
   end
@@ -4891,8 +5021,9 @@ defmodule DpExchange.Webull.Rest do
     params = %{"category" => "US_FUTURES"}
 
     with {:ok, body} <-
-           get("/trading/instruments/futures/product-classes/list", params, credentials, opts) do
-      rows(body)
+           get("/trading/instruments/futures/product-classes/list", params, credentials, opts),
+         {:ok, classes} <- rows(body) do
+      object_rows(classes)
     end
   end
 
@@ -4906,8 +5037,9 @@ defmodule DpExchange.Webull.Rest do
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_event_categories(credentials, opts) do
     with {:ok, body} <-
-           get("/trading/instruments/event-contracts/categories/list", %{}, credentials, opts) do
-      rows(body)
+           get("/trading/instruments/event-contracts/categories/list", %{}, credentials, opts),
+         {:ok, categories} <- rows(body) do
+      object_rows(categories)
     end
   end
 
@@ -4927,15 +5059,17 @@ defmodule DpExchange.Webull.Rest do
           | {:error, term()}
           | {:refused, term()}
   def list_event_series(credentials, opts) do
-    params =
-      %{}
-      |> put_present("category", Keyword.get(opts, :category))
-      |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
-      |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
+    with :ok <- scalar_opts(opts, [:category, :pagination_key]),
+         :ok <- list_opts(opts, [:symbols]) do
+      params =
+        %{}
+        |> put_present("category", Keyword.get(opts, :category))
+        |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+        |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
 
-    with {:ok, body} <-
-           get("/trading/instruments/event-contracts/series/list", params, credentials, opts) do
-      paged(body)
+      path = "/trading/instruments/event-contracts/series/list"
+
+      with {:ok, body} <- get(path, params, credentials, opts), do: paged(body)
     end
   end
 
@@ -4957,15 +5091,24 @@ defmodule DpExchange.Webull.Rest do
         {:error, :series_symbol_required}
 
       series ->
-        params =
-          %{"series_symbol" => series}
-          |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
-          |> put_present("status", Keyword.get(opts, :status))
-
-        with {:ok, body} <-
-               get("/trading/instruments/event-contracts/events/list", params, credentials, opts) do
-          rows(body)
+        with :ok <- scalar_opts(opts, [:series_symbol, :status]),
+             :ok <- list_opts(opts, [:symbols]) do
+          events_for(series, credentials, opts)
         end
+    end
+  end
+
+  defp events_for(series, credentials, opts) do
+    params =
+      %{"series_symbol" => series}
+      |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+      |> put_present("status", Keyword.get(opts, :status))
+
+    path = "/trading/instruments/event-contracts/events/list"
+
+    with {:ok, body} <- get(path, params, credentials, opts),
+         {:ok, events} <- rows(body) do
+      object_rows(events)
     end
   end
 
@@ -4987,17 +5130,21 @@ defmodule DpExchange.Webull.Rest do
           | {:error, term()}
           | {:refused, term()}
   def list_event_markets(credentials, opts) do
-    params =
-      %{}
-      |> put_present("series_symbol", Keyword.get(opts, :series_symbol))
-      |> put_present("event_symbol", Keyword.get(opts, :event_symbol))
-      |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
-      |> put_present("expiration_date_after", date_param(Keyword.get(opts, :expiring_after)))
-      |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
+    scalars = [:series_symbol, :event_symbol, :expiring_after, :pagination_key]
 
-    with {:ok, body} <-
-           get("/trading/instruments/event-contracts/markets/list", params, credentials, opts) do
-      paged(body)
+    with :ok <- scalar_opts(opts, scalars),
+         :ok <- list_opts(opts, [:symbols]) do
+      params =
+        %{}
+        |> put_present("series_symbol", Keyword.get(opts, :series_symbol))
+        |> put_present("event_symbol", Keyword.get(opts, :event_symbol))
+        |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
+        |> put_present("expiration_date_after", date_param(Keyword.get(opts, :expiring_after)))
+        |> put_present("pagination_key", Keyword.get(opts, :pagination_key))
+
+      path = "/trading/instruments/event-contracts/markets/list"
+
+      with {:ok, body} <- get(path, params, credentials, opts), do: paged(body)
     end
   end
 
@@ -5006,18 +5153,32 @@ defmodule DpExchange.Webull.Rest do
 
   # `nil` where the venue sent no key, which is its way of saying this was the last page.
   # A missing key and an empty string are the same thing here and both mean the end.
-  defp paged(%{"data" => data} = body) when is_list(data),
-    do: {:ok, %{rows: data, pagination_key: presence(body["pagination_key"])}}
-
-  defp paged(body) do
-    case rows(body) do
-      {:ok, page_rows} -> {:ok, %{rows: page_rows, pagination_key: nil}}
-      {:error, _reason} = error -> error
+  #
+  # **The key is text or the page is refused, and every row is an object.** A number, list or
+  # object under `pagination_key` was handed back inside `{:ok, %{pagination_key: key}}` typed
+  # `String.t() | nil`, and a caller passing it on as `opts[:pagination_key]` raised
+  # `Protocol.UndefinedError` in `to_string/1` on the NEXT call. The walks that follow a key
+  # themselves (`next_pagination_key/1`) already refuse it as `:unexpected_pagination_key`;
+  # this is the one reader that returned it. A row that is not an object breaks the `[map()]`
+  # the spec promises, as `object_rows/1` refuses it everywhere else.
+  defp paged(%{"data" => data} = body) when is_list(data) do
+    with {:ok, key} <- page_key(body["pagination_key"]),
+         {:ok, objects} <- object_rows(data) do
+      {:ok, %{rows: objects, pagination_key: key}}
     end
   end
 
-  defp presence(""), do: nil
-  defp presence(value), do: value
+  defp paged(body) do
+    with {:ok, page_rows} <- rows(body),
+         {:ok, objects} <- object_rows(page_rows) do
+      {:ok, %{rows: objects, pagination_key: nil}}
+    end
+  end
+
+  defp page_key(nil), do: {:ok, nil}
+  defp page_key(""), do: {:ok, nil}
+  defp page_key(key) when is_binary(key), do: {:ok, key}
+  defp page_key(_not_text), do: {:error, :unexpected_pagination_key}
 
   @doc """
   The tape for one event-contract market —
@@ -5035,19 +5196,24 @@ defmodule DpExchange.Webull.Rest do
   @spec get_event_trades(String.t(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_event_trades(symbol, credentials, opts) do
-    params =
-      %{"symbol" => symbol, "category" => "US_EVENT"}
-      |> put_present("count", Keyword.get(opts, :limit))
-
-    # `event-tick.md`: "maximum limit 1200".
+    # `event-tick.md`: "maximum limit 1200". The query is built AFTER the limit is checked: a
+    # map for `:limit` raised `Protocol.UndefinedError` out of `put_present/3` before the
+    # check that refuses it as `{:invalid_option, :limit, value}` could run.
     with :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200),
          :ok <- validate_symbol(symbol),
+         params = event_params(symbol, "count", Keyword.get(opts, :limit)),
          {:ok, body} <-
            get("/market-data/event-contracts/ticks/list", params, credentials, opts),
-         {:ok, row} <- symbol_row(body, symbol) do
-      list_value(row, ["result"])
+         {:ok, row} <- symbol_row(body, symbol),
+         {:ok, ticks} <- list_value(row, ["result"]) do
+      object_rows(ticks)
     end
   end
+
+  # The query both event-contract market reads start from: the market's symbol, the category,
+  # and one optional count or depth.
+  defp event_params(symbol, key, value),
+    do: put_present(%{"symbol" => symbol, "category" => "US_EVENT"}, key, value)
 
   @doc """
   The order book for one event-contract market —
@@ -5073,10 +5239,6 @@ defmodule DpExchange.Webull.Rest do
   @spec get_event_order_book(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_event_order_book(symbol, credentials, opts) do
-    params =
-      %{"symbol" => symbol, "category" => "US_EVENT"}
-      |> put_present("depth", Keyword.get(opts, :depth))
-
     # **Each side is a list or it is refused.** `List.wrap/1` turned a string into a
     # one-level "book" and an object into a one-row list of the wrong thing, and an unreadable
     # side read as an empty one - the shape `list_value/2` exists to refuse. An absent side is
@@ -5084,8 +5246,12 @@ defmodule DpExchange.Webull.Rest do
     #
     # A `:depth` that is not a whole number of levels is refused before the request, as the
     # stock and futures books refuse theirs: the page states none beyond "default 10 levels".
+    #
+    # The query is built AFTER that check: a map for `:depth` raised out of `put_present/3`
+    # first.
     with :ok <- book_depth("US_EVENT", Keyword.get(opts, :depth)),
          :ok <- validate_symbol(symbol),
+         params = event_params(symbol, "depth", Keyword.get(opts, :depth)),
          {:ok, body} <-
            get("/market-data/event-contracts/depths/list", params, credentials, opts),
          {:ok, row} <- symbol_row(body, symbol),
@@ -5317,10 +5483,13 @@ defmodule DpExchange.Webull.Rest do
 
   defp option_strike(nil), do: :error
 
+  # **A strike is a price above zero.** `"0"` and `"-5"` read as numbers and filed a contract
+  # at a strike no option has, in a grid cell a caller walking strikes would treat as real.
+  # Refused as an unreadable contract, like a strike that is not a number at all.
   defp option_strike(value) do
     case decimal(value) do
+      %Decimal{} = strike -> if Decimal.positive?(strike), do: {:ok, strike}, else: :error
       nil -> :error
-      strike -> {:ok, strike}
     end
   end
 
@@ -5386,12 +5555,15 @@ defmodule DpExchange.Webull.Rest do
   # Groups carry their rows under "result"; a flat bar decodes directly. Mapping a row
   # decoder over the groups yields all-nil bars, which reads as "the venue has no data".
   defp decode_bars(body, symbol, timeframe) do
-    with {:ok, body_rows} <- rows(body) do
+    # A group that is not an object (a string or a number among the groups) refuses the reply,
+    # as `nested_results/1` does for the stock, option, futures and event bars: it used to be
+    # skipped, so a crypto series with a group missing read as a complete one.
+    with {:ok, listed} <- rows(body),
+         {:ok, body_rows} <- object_rows(listed) do
       body_rows
       |> Enum.flat_map(fn
         %{"result" => group_rows} when is_list(group_rows) -> group_rows
-        %{} = flat_bar -> [flat_bar]
-        _other -> []
+        flat_bar -> [flat_bar]
       end)
       |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
         case decode_bar(row, symbol, timeframe, :crypto) do
@@ -5919,6 +6091,17 @@ defmodule DpExchange.Webull.Rest do
   defp decimal(value) when is_integer(value), do: Decimal.new(value)
   defp decimal(value) when is_float(value), do: Decimal.from_float(value)
 
+  # **A number written in more than 1,024 characters is no price, size or rate on this venue.**
+  # `absurd_exponent?/1` bounds the EXPONENT but not the coefficient: `"1"` followed by two
+  # thousand zeros is a finite `Decimal` with exponent 0, which used to be accepted as a price
+  # and parsed by an integer conversion that grows with the string, from a body of any size
+  # the HTTP client allows. Refused before the parse. **Chosen, not measured**: the venue
+  # documents no numeric range, and the longest figure it has been seen to send is a few
+  # dozen characters.
+  @max_decimal_chars 1_024
+
+  defp decimal(value) when is_binary(value) and byte_size(value) > @max_decimal_chars, do: nil
+
   # `Decimal.new/1` raises on a string that is not a number — a real, previously observed
   # response shape from a delisted Webull crypto pair, which returns the literal string
   # "null" for a price field. `Decimal.parse/1`, requiring the whole string be consumed
@@ -5972,6 +6155,19 @@ defmodule DpExchange.Webull.Rest do
       if Decimal.positive?(price),
         do: {:ok, price},
         else: {:error, {:non_positive_price, field, raw}}
+    end
+  end
+
+  # **A print's size is not negative.** `required_decimal/2` reads `"-5"` as a number, and a
+  # tape row of minus five lots is the venue's garbage, not a trade: it would be delivered as a
+  # `Trade.quantity` that every consumer sums. Refused `{:non_positive_size, field, raw}` (the
+  # tag the order book uses for the same figure). Zero is kept: whether a zero-size print is a
+  # real correction is the venue's to say, and this package has no measurement either way.
+  defp required_size(raw, field) do
+    with {:ok, size} <- required_decimal(raw, field) do
+      if Decimal.negative?(size),
+        do: {:error, {:non_positive_size, field, raw}},
+        else: {:ok, size}
     end
   end
 
@@ -6215,8 +6411,14 @@ defmodule DpExchange.Webull.Rest do
   # a batch of N orders always answered with exactly one "row" — the envelope itself,
   # holding `total`/`success`/`failed` — never the N per-order results this function's own
   # moduledoc promises ("Returns the venue's own rows, one per order").
-  defp batch_rows(%{"batch_orders" => rows}) when is_list(rows), do: {:ok, rows}
-  defp batch_rows(other), do: rows(other)
+  #
+  # `{:ok, [map()]}`: a row that is not an object cannot be a per-order result. It is an
+  # unreadable reply, which `batch_result/2` answers `:order_unconfirmed` (the batch may be live).
+  defp batch_rows(%{"batch_orders" => rows}) when is_list(rows), do: object_rows(rows)
+
+  defp batch_rows(other) do
+    with {:ok, listed} <- rows(other), do: object_rows(listed)
+  end
 
   @batch_limit 50
 
@@ -6950,11 +7152,18 @@ defmodule DpExchange.Webull.Rest do
       {:ok, row} when is_map(row) ->
         # Text only: `Order.id` is a string, and a number or object the venue sent there is
         # not an id the cancel and read-back calls could take.
+        #
+        # **And it is the id this package SENT.** The venue echoes the `client_order_id` it was
+        # given (`common-order-place.md`'s `OrderCommonWriteResult`), and `Order.id` is what
+        # `cancel_order/3` and `get_order/3` take. A 2xx row naming a DIFFERENT id is not an
+        # answer about our order, which may be live under the id we sent; it was returned as
+        # the placed order, so a caller would cancel or read another one. It is unconfirmed,
+        # with the id sent, like any acceptance that names nothing.
         case value(row, ["client_order_id", "clientOrderId"]) do
-          id when is_binary(id) ->
-            {:ok, placed_order(id, request, order_type, tif)}
+          ^sent_id ->
+            {:ok, placed_order(sent_id, request, order_type, tif)}
 
-          _absent_or_unreadable ->
+          _absent_unreadable_or_other ->
             {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}}
         end
 
