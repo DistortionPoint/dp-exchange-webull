@@ -445,8 +445,23 @@ defmodule DpExchange.Webull.Socket do
     # The WebSocket is up; MQTT is not. CONNECT goes out immediately and `link_up` waits
     # for the CONNACK — reporting a live link on a socket that has not authenticated
     # would be reporting the transport, not the venue.
-    send(self(), :send_connect)
-    {:ok, state}
+    #
+    # **At most one `:send_connect` is ever queued.** `handle_connect/2` runs on every
+    # reconnect, and `:send_connect` is handled only when the loop reaches it. A close (or a
+    # `tcp_closed`) already sitting in the mailbox when a connection is established is read
+    # AHEAD of it, so the connection dies, `handle_disconnect/2` runs, the reconnect calls
+    # this again, and the mailbox then held TWO `:send_connect`s: the first CONNECT went out
+    # on the new connection and the second followed it on the same one. A second CONNECT is a
+    # protocol violation (MQTT 3.1.1 §3.1.0-2) and the broker closes the connection for it,
+    # so the stale message caused the next drop itself, the same way a stale ping could (see
+    # the "Keep-alive" section). The first message survives the reconnect and is the one
+    # CONNECT the new connection needs, so a second is simply not queued while one is.
+    if Map.get(state, :connect_queued?, false) do
+      {:ok, state}
+    else
+      send(self(), :send_connect)
+      {:ok, Map.put(state, :connect_queued?, true)}
+    end
   end
 
   @impl true
@@ -566,7 +581,8 @@ defmodule DpExchange.Webull.Socket do
     packet = MqttPacket.connect(state.session_id, connect_key(state), "x", @keep_alive_s)
     ping = make_ref()
     schedule_ping(ping)
-    {:reply, {:binary, packet}, %{state | ping: ping, last_heard_at: now_ms()}}
+    sent = Map.merge(state, %{connect_queued?: false, ping: ping, last_heard_at: now_ms()})
+    {:reply, {:binary, packet}, sent}
   end
 
   def handle_info({:ping, ping}, %{ping: ping} = state) when is_reference(ping) do

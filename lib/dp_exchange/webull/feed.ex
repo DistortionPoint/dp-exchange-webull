@@ -1257,13 +1257,18 @@ defmodule DpExchange.Webull.Feed do
     # session that replays its own full list. A request to the old session would be answered
     # INVALID_SESSION and, taken at face value, tear down a healthy replacement.
     case Map.get(state.shards, index) do
-      %{session_id: ^session_id, connected?: true} ->
+      %{session_id: ^session_id, connected?: true} = shard ->
         {:noreply,
          spawn_reconcile(
            state,
            {:background, index},
            fn -> reconcile_by_session(session_id, added, removed, opts) end,
-           %{session_id: session_id, added: added, removed: removed}
+           %{
+             session_id: session_id,
+             added: added,
+             removed: removed,
+             link: Map.get(shard, :link, 0)
+           }
          )}
 
       _replaced_or_not_connected ->
@@ -1374,6 +1379,20 @@ defmodule DpExchange.Webull.Feed do
     {context, settled} = Map.pop(state.settled, tag)
     state = %{state | settled: settled}
 
+    # An answer to a request made on a session, or a CONNECTION of it, that the shard no
+    # longer has says nothing about the shard it has now: it is neither counted as a failure of
+    # this shard's resubscribe nor allowed to tear the shard down. See `on_link_up/2`.
+    if current_attempt?(state, index, context, result) do
+      {:noreply, settle_resubscribe(state, index, context, result)}
+    else
+      {state, rebalanced?} = settle_stale(state, index, result)
+      {:noreply, if(rebalanced?, do: resync(state), else: state)}
+    end
+  end
+
+  def handle_info(_other, state), do: {:noreply, state}
+
+  defp settle_resubscribe(state, index, context, result) do
     state =
       case result do
         {:error, reason} ->
@@ -1401,10 +1420,8 @@ defmodule DpExchange.Webull.Feed do
 
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state
-    {:noreply, unsubscribe_stale(state, index, context, result)}
+    unsubscribe_stale(state, index, context, result)
   end
-
-  def handle_info(_other, state), do: {:noreply, state}
 
   # Runs only for the ordinary shutdown reasons GenServer treats as "normal termination"
   # — see its own `c:terminate/2` docs. `init/1` already traps exits, which is what makes
@@ -1607,6 +1624,13 @@ defmodule DpExchange.Webull.Feed do
           shard.connected?,
           shard.symbols != [],
           not Map.has_key?(state.reconciling, {:resubscribe, index}),
+          # The post-CONNACK replay is the same whole-list subscribe for the same session. A
+          # shard is `connected?` from the moment its `link_up` is handled, and the replay it
+          # started can stay in flight for as long as a throttled request is allowed (up to
+          # `@reconcile_timeout_ms`), so a tick landing in that window launched a SECOND
+          # identical subscribe beside it - the load the in-flight skip above exists to
+          # prevent - and re-asserted a shard that had not yet had time to deliver anything.
+          not Map.has_key?(state.reconciling, {:link_up, index}),
           not shard_delivered_within?(state, index, window),
           do: {index, shard}
 
@@ -1676,7 +1700,7 @@ defmodule DpExchange.Webull.Feed do
       state,
       {:resubscribe, index},
       fn -> Subscription.subscribe(session_id, symbols, opts) end,
-      %{session_id: session_id, sent: symbols}
+      %{session_id: session_id, sent: symbols, link: Map.get(shard, :link, 0)}
     )
   end
 
@@ -1880,7 +1904,12 @@ defmodule DpExchange.Webull.Feed do
             fn -> reconcile_now(shard, added, removed, opts) end,
             # What this attempt changed and which session it was asked of, so a failure can
             # put the symbols back and a late answer from a replaced session is ignored.
-            %{session_id: shard.session_id, added: added, removed: removed}
+            %{
+              session_id: shard.session_id,
+              added: added,
+              removed: removed,
+              link: Map.get(shard, :link, 0)
+            }
           )
 
         # The caller's deadline is armed once, by `reshard/3`; see there.
@@ -1986,9 +2015,20 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # **A session id names the shard's MQTT client id, which survives every reconnect; it does
+  # not name a CONNECTION.** `Socket` reconnects inside one process with the same `session_id`,
+  # so a request sent on connection 1 and answered after connection 2 is up carries a session
+  # id that still matches. The venue answers a subscribe for a session with no live MQTT
+  # connection `INVALID_SESSION` (the comment on `touch_background_shard/5` records exactly
+  # that), so a request in flight when the link dropped came back `INVALID_SESSION` after the
+  # shard had reconnected, and `rebuild_stale_shard/3` tore down a healthy replacement session
+  # for a verdict about the dead connection. `:link` counts this shard's CONNACKs and every
+  # attempt records the count it was sent on (`current_session?/3`), so an answer from an
+  # earlier connection is dropped like one from an earlier session.
   defp on_link_up(state, index) do
     shard = state.shards[index]
-    state = put_in(state.shards[index].connected?, true)
+    link = Map.get(shard, :link, 0) + 1
+    state = update_in(state.shards[index], &Map.merge(&1, %{connected?: true, link: link}))
 
     case shard.symbols do
       [] ->
@@ -2003,7 +2043,7 @@ defmodule DpExchange.Webull.Feed do
           state,
           {:link_up, index},
           fn -> Subscription.subscribe(session_id, symbols, opts) end,
-          %{session_id: session_id, sent: symbols}
+          %{session_id: session_id, sent: symbols, link: link}
         )
     end
   end
@@ -2119,7 +2159,7 @@ defmodule DpExchange.Webull.Feed do
       %{session_id: ^session_id, symbols: current} ->
         case sent -- current do
           [] -> state
-          stale -> spawn_cleanup(state, index, session_id, stale)
+          stale -> spawn_cleanup(state, index, session_id, [], stale)
         end
 
       _replaced_or_gone ->
@@ -2129,11 +2169,54 @@ defmodule DpExchange.Webull.Feed do
 
   defp unsubscribe_stale(state, _index, _no_record_of_what_was_sent, _result), do: state
 
-  defp spawn_cleanup(state, index, session_id, stale) do
+  # **An answer that landed while a caller's own delta was in flight is repaired too.** The
+  # same overtaking `unsubscribe_stale/4` handles for a whole-list subscribe happens between
+  # two callers' DELTAS: caller A's subscribe of X is in flight on its task, caller B then
+  # unsubscribes X on another. Each task is its own HTTP request, so the venue can process B's
+  # unsubscribe first and A's subscribe last, leaving X subscribed venue-side and absent from
+  # `shard.symbols`, where nothing will ever diff it (the same slot leak). The mirror image
+  # leaves a wanted symbol UNSUBSCRIBED: A unsubscribes Y, B re-subscribes it, the venue
+  # processes A last, and the blind resubscribe only re-asserts a shard that is quiet, which
+  # one still streaming its other symbols is not.
+  #
+  # So when a primary or background reconcile answers `:ok`, anything it ADDED that the shard no
+  # longer carries is unsubscribed again, and anything it REMOVED that the shard carries again is
+  # re-subscribed, in one cleanup against the same session. Over-sending is idempotent. In a
+  # sequence with no overlap both lists are empty and nothing is sent.
+  defp repair_overtaken(
+         state,
+         index,
+         %{session_id: session_id, added: added, removed: removed},
+         :ok
+       ) do
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id, symbols: current} ->
+        stale = added -- current
+        lost = Enum.filter(removed, &(&1 in current))
+
+        if stale == [] and lost == [],
+          do: state,
+          else: spawn_cleanup(state, index, session_id, lost, stale)
+
+      _replaced_or_gone ->
+        state
+    end
+  end
+
+  defp repair_overtaken(state, _index, _no_delta_recorded, _result), do: state
+
+  # One cleanup per request, each under a tag of its own. The tag used to be `{:cleanup,
+  # index}`, a slot shared by every cleanup for that shard, and `spawn_reconcile/4` tears down
+  # whatever is already running under the tag it is given. Two cleanups close together (a
+  # blind resubscribe and a link-up replay answering within one HTTP round trip of each other)
+  # therefore killed the first before it had sent, and the symbols it carried stayed
+  # subscribed venue-side with nothing left that would ever unsubscribe them. Nothing waits on
+  # a cleanup's answer, so it needs no slot.
+  defp spawn_cleanup(state, index, session_id, subscribe, unsubscribe) do
     opts = state.resubscribe_opts
 
-    spawn_reconcile(state, {:cleanup, index}, fn ->
-      Subscription.unsubscribe(session_id, stale, opts)
+    spawn_reconcile(state, {:cleanup, index, make_ref()}, fn ->
+      reconcile_by_session(session_id, subscribe, unsubscribe, opts)
     end)
   end
 
@@ -2575,22 +2658,55 @@ defmodule DpExchange.Webull.Feed do
     {context, settled} = Map.pop(state.settled, tag)
     state = %{state | settled: settled}
 
-    if current_session?(state, index, context) do
+    if current_attempt?(state, index, context, result) do
       # `handle_subscribe_result/3` first: `:oversubscribed` measures capacity from the
       # size the shard was ATTEMPTED at, which the revert below shrinks.
       {state, rebalanced?} = handle_subscribe_result(state, index, result)
-      {revert_failed_delta(state, index, context, result), rebalanced?}
+      state = revert_failed_delta(state, index, context, result)
+      {repair_overtaken(state, index, context, result), rebalanced?}
     else
       settle_stale(state, index, result)
     end
   end
 
+  # An attempt's answer is applied only when it was asked of the session and connection the
+  # shard has, AND is not an `INVALID_SESSION` that arrived while the shard is disconnected.
+  #
+  # The second condition is the half `:link` cannot see. A request in flight when the socket
+  # dropped is answered `INVALID_SESSION` by a venue with no MQTT connection for that client id,
+  # and until the reconnect's CONNACK arrives the shard's connection count has not moved, so the
+  # answer still looks current. It is a verdict about the connection that just died: the socket
+  # is already reconnecting and `on_link_up/2` replays the whole list, whereas treating it as
+  # "the session no longer exists" closed a socket that was about to come back and claimed
+  # another session against the five-connection ceiling. A shard that is connected when
+  # `INVALID_SESSION` arrives is unaffected: that is the venue discarding a live session.
+  # (Not applied to the post-CONNACK replay, which is sent after `connected?` is set.)
+  defp current_attempt?(state, index, context, result) do
+    current_session?(state, index, context) and
+      not disconnected_session_refusal?(state, index, result)
+  end
+
+  defp disconnected_session_refusal?(state, index, {:error, {:invalid_session, _sid}}),
+    do: match?(%{connected?: false}, Map.get(state.shards, index))
+
+  defp disconnected_session_refusal?(_state, _index, _result), do: false
+
   # `nil` is "no claim about a session" (a result delivered without a tracked attempt), so
   # it is current. A tracked attempt is current only while the shard still has its session.
   defp current_session?(_state, _index, nil), do: true
 
-  defp current_session?(state, index, %{session_id: session_id}) do
-    match?(%{session_id: ^session_id}, Map.get(state.shards, index))
+  # And on the connection it was sent on: a context that records a `:link` is current only
+  # while the shard has had no CONNACK since (see `on_link_up/2`). A context that records none
+  # (one a test built by hand) makes no claim about a connection.
+  defp current_session?(state, index, %{session_id: session_id} = context) do
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id} = shard ->
+        link = Map.get(shard, :link, 0)
+        Map.get(context, :link, link) == link
+
+      _replaced_or_gone ->
+        false
+    end
   end
 
   # Deliberately defensive: every context this module records names its session, so this is
@@ -2860,8 +2976,23 @@ defmodule DpExchange.Webull.Feed do
   # reopens with its own symbols rather than having them spread over its siblings. What
   # changes is that anything unsubscribed, rejected or newly wanted in the meantime is
   # applied. Empty means there is nothing to open.
+  #
+  # **Never a symbol another shard carries now.** While the slot sat empty (the immediate
+  # reopen is queued behind whatever is already in the mailbox, and a delayed one waits up to
+  # a minute) a caller's re-plan could place this shard's symbols on a sibling with room. The
+  # open then arrived carrying the OLD list, and `derive_shards/4` keeps whatever an existing
+  # slot holds, so the same symbol was planned onto two sessions: two subscriptions, two
+  # deliveries, and a slot spent twice against the venue's per-session ceiling.
   defp symbols_to_open(state, index, carried) do
     effective = MapSet.difference(state.wanted, active_rejections(state))
+
+    held_elsewhere =
+      state.shards
+      |> Map.delete(index)
+      |> Enum.flat_map(fn {_other, shard} -> shard.symbols end)
+      |> MapSet.new()
+
+    carried = Enum.reject(carried, &MapSet.member?(held_elsewhere, &1))
     existing = Map.put(state.shards, index, %{symbols: carried})
 
     {planned, _overflow} =

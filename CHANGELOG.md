@@ -22,6 +22,21 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **A fast reconnect queued a second MQTT CONNECT**, a protocol violation the broker answers by
+  closing; only one is ever queued now.
+- **An `INVALID_SESSION` answering a request made on an earlier connection tore down a healthy
+  shard.** Answers now carry the connection they were sent on and a stale one is dropped.
+- **Two cleanup unsubscribes for one shard killed each other**, leaving the symbol subscribed
+  at the venue; each now runs under its own tag.
+- **The resubscribe tick launched a second identical subscribe** while the post-CONNACK replay
+  was still in flight; a shard is skipped while its replay runs.
+- **A reopened shard could carry a symbol a sibling had picked up meanwhile**, delivering it twice
+  and spending two slots; it no longer does.
+- **Two callers' subscribe and unsubscribe of one symbol, applied out of order by the venue,
+  leaked a slot or left a wanted symbol dark.** The shard now repairs it on the answer.
+- **Docs:** `{:error, :feed_timeout}` is documented as "no answer", not "not applied": the
+  request is still applied when the feed reaches it, and the streaming calls are idempotent.
+
 ## [0.4.148] - 2026-10-13
 
 - **Tests:** every line the suite never executed was read and either tested, proven dead and
