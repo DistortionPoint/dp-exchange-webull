@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.149] - 2026-10-14
+
 - **A fast reconnect queued a second MQTT CONNECT**, a protocol violation the broker answers by
   closing; only one is ever queued now.
 - **An `INVALID_SESSION` answering a request made on an earlier connection tore down a healthy
