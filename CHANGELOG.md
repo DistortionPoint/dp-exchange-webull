@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.150] - 2026-10-14
+
 Decoder robustness against hostile or malformed venue payloads. Each fix has a test in
 `test/dp_exchange/webull/tick_ac_decoder_test.exs` that fails on the old code.
 
