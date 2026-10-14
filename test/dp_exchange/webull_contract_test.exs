@@ -22,6 +22,10 @@ defmodule DpExchange.WebullContractTest do
     fake: DpExchange.Webull.Fake,
     symbol_format: DpExchange.Webull.SymbolFormat,
     sample_pairs: ~w(BTC-USD ETH-USD SOL-USD),
+    # Conformance group 41 (family reasons, 2026-10-14): a well-formed symbol the fake does
+    # not list, and a credentials map whose first value carries a trailing newline.
+    unlisted_symbol: "NOPE-USD",
+    padded_credentials: %{app_key: "test-app-key\n", app_secret: "test-app-secret"},
     credentials: %{app_key: "test-app-key", app_secret: "test-app-secret"},
     package_root: "lib/dp_exchange",
     # The options this venue's own endpoints require before its fake will answer at all.

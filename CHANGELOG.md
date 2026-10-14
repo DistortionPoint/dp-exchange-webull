@@ -22,6 +22,13 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Added
+
+- The conformance suite runs Core's group 41 (family reasons) with `unlisted_symbol:` and
+  `padded_credentials:`, so an unlisted symbol answering anything but `{:refused, :not_listed}`
+  or a padded credential answering anything but `{:error, {:invalid_credentials, venue}}` fails
+  this package's own suite. `dp_exchange_core` 0.3.94.
+
 ## [0.4.151] - 2026-10-14
 
 Hot-path audit (tick AD). Tests in `test/dp_exchange/webull/tick_ad_hotpath_test.exs`.
