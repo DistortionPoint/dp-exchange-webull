@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.154] - 2026-10-15
+
 - **Fake-versus-real validation parity and stale timers (tick AF).** Each refusal below is
   made by one `Rest` validator that the real path and `DpExchange.Webull.Fake` both call, and
   each is decided before credentials and before any request.
