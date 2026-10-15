@@ -560,6 +560,15 @@ DpExchange.Webull.adjusted?("1m")  #=> false
   `:count`; a screener's `:sort_by`, `:rank_type`; a futures or event `:symbols`; the tape's and
   stock bars' `:sessions`) **is `{:error, {:invalid_option, key, value}}`** before any request.
   A list where one value belongs (`type: ["ANNUAL", "QUARTERLY"]`) is refused too.
+  `:sessions` must also name sessions the venue lists (`"PRE"`, `"RTH"`, `"ATH"`, `"OVN"`; one,
+  or a list without repeats), and `:history` (`get_orders/2`, `get_auction_imbalance/2`) must
+  be a boolean: `"false"` is `{:error, {:invalid_option, :history, "false"}}`, not history.
+  `get_prices/2` checks `:extended_hours` / `:overnight` as `get_price/2` does, and a
+  `place_orders/3` batch repeating a `client_order_id` is
+  `{:error, {:batch_order_rejected, index, {:duplicate_client_order_id, id}}}`. The Fake
+  refuses the same way for an entry whose id it already holds (and applies none of the
+  batch), as its `place_order/3` refuses a reused id with
+  `{:refused, {:duplicate_client_order_id, id}}`; the venue's own wording is unmeasured.
 * **A row that is not an object** in a `[map()]` answer (`get_accounts/2`, `get_transfers/2`,
   `get_fundamental/4`, the futures and event lists, the event tape) is
   `{:error, :unexpected_response_shape}`, and a `pagination_key` that is not text is

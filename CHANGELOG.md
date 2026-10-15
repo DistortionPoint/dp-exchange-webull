@@ -22,6 +22,35 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Fake-versus-real validation parity and stale timers (tick AF).** Each refusal below is
+  made by one `Rest` validator that the real path and `DpExchange.Webull.Fake` both call, and
+  each is decided before credentials and before any request.
+  - `:sessions` on the stock tape (`get_trades/2`) and the stock bars (`get_historical_prices/4`)
+    must name sessions from the venue's `PRE`/`RTH`/`ATH`/`OVN` enum (one, or a list without
+    repeats). `"rth"`, `"ALL"`, `""`, `[]` and `["RTH", "RTH"]` went to the wire as typed
+    (`[]` as an empty string); they are now `{:error, {:invalid_option, :sessions, value}}`,
+    as the footprint read has always refused an unlisted session.
+  - `:history` on `get_orders/2` and `get_auction_imbalance/2` must be a boolean or absent.
+    `history: "false"` was truthy and was answered from the history endpoint; it is now
+    `{:error, {:invalid_option, :history, value}}`.
+  - `get_prices/2` now refuses a non-boolean `:extended_hours` / `:overnight` for the whole
+    call, as `get_price/2` does; the fake used to answer a per-symbol error where the real
+    path ignored the flag.
+  - `place_orders/3` refuses a batch that repeats a `client_order_id` as
+    `{:error, {:batch_order_rejected, index_of_the_repeat, {:duplicate_client_order_id, id}}}`
+    before anything is signed. The second entry used to go to the venue, and in the fake it
+    silently overwrote the first order.
+  - The Fake's `place_orders/3` also refuses an entry whose `client_order_id` it already holds
+    (from `place_order/3` or an earlier batch) with the same row-indexed
+    `{:batch_order_rejected, index, {:duplicate_client_order_id, id}}`, and applies none of the
+    batch; it used to overwrite the stored order silently. `place_order/3` already refused a
+    reused id as `{:refused, {:duplicate_client_order_id, id}}`. The venue's own wording for a
+    duplicate is unmeasured.
+  - Timers are cancelled with their subject: a parked caller's CONNACK timeout when the caller
+    is answered, an open-retry chain's pending reopen when the chain ends, a staggered open
+    when the slot is filled another way, and a socket's keep-alive ping when its connection
+    drops. They used to fire later and find nothing.
+
 ## [0.4.153] - 2026-10-15
 
 - **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`

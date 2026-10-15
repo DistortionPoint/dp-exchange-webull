@@ -226,7 +226,8 @@ defmodule DpExchange.Webull.Fake do
         # A non-list or an improper list is `{:invalid_symbols, value}` on both this and
         # `Rest.get_prices/3`; an element that is blank is refused per symbol by
         # `get_price/2`, as it is there.
-        with :ok <- check_symbol_list(symbols) do
+        with :ok <- check_symbol_list(symbols),
+             :ok <- Rest.validate_hours_flags(opts) do
           {:ok, Map.new(Enum.uniq(symbols), &{&1, get_price(&1, opts)})}
         end
 
@@ -503,7 +504,8 @@ defmodule DpExchange.Webull.Fake do
     with_injection(symbol, fn ->
       case Keyword.get(opts, :auction) do
         auction when auction in [:opening, :closing] ->
-          with :ok <- Rest.validate_symbol(symbol),
+          with :ok <- Rest.validate_history_flag(opts),
+               :ok <- Rest.validate_symbol(symbol),
                :ok <- authenticated(opts),
                :ok <- equity_listed(symbol) do
             {:ok, [fake_imbalance(symbol, auction, Keyword.get(opts, :history, false))]}
@@ -2072,11 +2074,33 @@ defmodule DpExchange.Webull.Fake do
     # accepted `STOP_LOSS`, a `:gtc` entry and a price-less `LIMIT` the real path refuses.
     with :ok <- fake_account(opts),
          :ok <- Rest.validate_batch_orders(requests),
-         :ok <- credentialed(credentials) do
+         :ok <- credentialed(credentials),
+         :ok <- unused_batch_ids(requests) do
       {:ok,
        requests
        |> Enum.with_index()
        |> Enum.map(fn {request, index} -> batch_row(request, index) end)}
+    end
+  end
+
+  # **A batch entry naming a `client_order_id` this process already holds refuses the whole
+  # batch, and nothing in it is applied.** `place_orders`' single sibling, `place_order/3`,
+  # refuses a reused id as `{:refused, {:duplicate_client_order_id, id}}`; the batch used to
+  # overwrite the stored order silently. The refusal is row-indexed in the batch's own shape.
+  # The venue's own wording for a duplicate is UNMEASURED (see `unused_client_order_id/1`).
+  # Repeats within the batch are refused earlier, by `Rest.validate_batch_orders/1`.
+  defp unused_batch_ids(requests) do
+    requests
+    |> Enum.with_index()
+    |> Enum.find_value(:ok, fn {request, index} -> held_batch_id(request, index) end)
+  end
+
+  defp held_batch_id(request, index) do
+    with id when is_binary(id) <- Map.get(request, :client_order_id),
+         {:ok, _existing} <- lookup_order(id) do
+      {:error, {:batch_order_rejected, index, {:duplicate_client_order_id, id}}}
+    else
+      _unheld -> nil
     end
   end
 

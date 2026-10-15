@@ -328,7 +328,8 @@ defmodule DpExchange.Webull.Rest do
   def get_prices(symbols, credentials, opts) do
     case Config.opt(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" ->
-        with {:ok, members} <- snapshot_members(symbols) do
+        with {:ok, members} <- snapshot_members(symbols),
+             :ok <- validate_hours_flags(opts) do
           {:ok, path} = snapshot_path("US_CRYPTO")
 
           # An element that is not a usable symbol gets `{:error, {:invalid_symbol, v}}` of
@@ -787,7 +788,7 @@ defmodule DpExchange.Webull.Rest do
         with :ok <- book_category(category),
              {:ok, timespan} <- stock_timespan(timeframe),
              :ok <- limit_within_max(limit, stock_bar_max(timespan)),
-             do: list_opts(opts, [:sessions])
+             do: validate_sessions(opts)
     end
   end
 
@@ -856,7 +857,7 @@ defmodule DpExchange.Webull.Rest do
     # list of maps there raised `Protocol.UndefinedError` in `Enum.join/2` / `to_string/1`.
     with {:ok, _path} <- tick_path(category),
          :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
-         do: list_opts(opts, [:sessions])
+         do: validate_sessions(opts)
   end
 
   @doc """
@@ -2129,7 +2130,26 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_orders_window(keyword()) :: :ok | {:error, term()}
   def validate_orders_window(opts) do
-    if Keyword.get(opts, :history, false), do: window_times(opts, [:since, :until]), else: :ok
+    with :ok <- validate_history_flag(opts) do
+      if Keyword.get(opts, :history, false), do: window_times(opts, [:since, :until]), else: :ok
+    end
+  end
+
+  @doc """
+  Whether `opts[:history]` is absent or a boolean: the check `get_orders/2` and
+  `get_auction_imbalance/3` make before choosing between their open/snapshot and
+  history/bars endpoints, for `DpExchange.Webull.Fake`.
+
+  Any other value (`"false"`, `0`, `:no`) used to be truthy to `if`, so a caller who wrote
+  `history: "false"` was silently answered from the history endpoint. Refused
+  `{:error, {:invalid_option, :history, value}}`.
+  """
+  @spec validate_history_flag(keyword()) :: :ok | {:error, {:invalid_option, :history, term()}}
+  def validate_history_flag(opts) do
+    case Keyword.get(opts, :history) do
+      flag when flag in [nil, true, false] -> :ok
+      other -> {:error, {:invalid_option, :history, other}}
+    end
   end
 
   # **A time bound is a `DateTime`, or the call is refused.** `iso_millis/1` wrote any other
@@ -2866,6 +2886,7 @@ defmodule DpExchange.Webull.Rest do
     observed_at = DateTime.utc_now()
 
     with {:ok, auction, action_type} <- auction_type(Keyword.get(opts, :auction)),
+         :ok <- validate_history_flag(opts),
          :ok <- validate_symbol(symbol) do
       path =
         if Keyword.get(opts, :history, false),
@@ -3015,7 +3036,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, path} <- tick_path(category),
          :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
-         :ok <- list_opts(opts, [:sessions]),
+         :ok <- validate_sessions(opts),
          :ok <- validate_symbol(symbol) do
       params =
         %{
@@ -3193,7 +3214,7 @@ defmodule DpExchange.Webull.Rest do
          {:ok, timespan} <- stock_timespan(timeframe),
          # `historical-bars.md`: "maximum limit 1200 (M1 supports up to 1650)".
          :ok <- limit_within_max(Keyword.get(opts, :limit), stock_bar_max(timespan)),
-         :ok <- list_opts(opts, [:sessions]),
+         :ok <- validate_sessions(opts),
          :ok <- validate_range(range),
          :ok <- validate_symbol(symbol) do
       count = stock_count(range, opts, timespan)
@@ -4256,6 +4277,33 @@ defmodule DpExchange.Webull.Rest do
   # that call it, so both answer alike.
   defp scalar_opts(opts, keys), do: checked_opts(opts, keys, &scalar_value?/1)
   defp list_opts(opts, keys), do: checked_opts(opts, keys, &list_value?/1)
+
+  # **`:sessions` names sessions the venue's enum lists, or the read is refused.** The tape
+  # and stock-bar pages give `trading_sessions` the enum `PRE`, `RTH`, `ATH`, `OVN`
+  # (comma-separated for several). It was only type-checked, so `"rth"`, `"ALL"`, `[]` (sent
+  # as an empty string) or a list repeating a session went to the venue as typed, while the
+  # footprint read (`footprint_session/1`) has always refused an unlisted one. Absent stays
+  # absent. `{:error, {:invalid_option, :sessions, value}}`.
+  @session_names ["PRE", "RTH", "ATH", "OVN"]
+
+  defp validate_sessions(opts) do
+    with :ok <- list_opts(opts, [:sessions]) do
+      case Keyword.get(opts, :sessions) do
+        nil -> :ok
+        value -> if sessions_named?(value), do: :ok, else: invalid_sessions(value)
+      end
+    end
+  end
+
+  defp invalid_sessions(value), do: {:error, {:invalid_option, :sessions, value}}
+
+  defp sessions_named?([_first | _rest] = sessions),
+    do: Enum.all?(sessions, &(&1 in @session_names)) and sessions == Enum.uniq(sessions)
+
+  defp sessions_named?([]), do: false
+  defp sessions_named?(session) when is_binary(session), do: session in @session_names
+  defp sessions_named?(session) when is_atom(session), do: to_string(session) in @session_names
+  defp sessions_named?(_other), do: false
 
   defp checked_opts(opts, keys, valid?) do
     Enum.find_value(keys, :ok, fn key ->
@@ -6527,7 +6575,27 @@ defmodule DpExchange.Webull.Rest do
       end
     end)
     |> case do
-      {:ok, orders} -> {:ok, Enum.reverse(orders)}
+      {:ok, orders} -> orders |> Enum.reverse() |> unique_batch_ids()
+      error -> error
+    end
+  end
+
+  # **A `client_order_id` is unique per account, so two entries of one batch cannot share
+  # one.** The second used to go to the venue as sent (and, in the fake, overwrite the first
+  # order's remembered copy); it is refused here by the index of the repeat, before anything
+  # is signed. Ids the package generated are unique by construction.
+  defp unique_batch_ids(orders) do
+    orders
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn {order, index}, {:ok, seen} ->
+      id = Map.fetch!(order, "client_order_id")
+
+      if MapSet.member?(seen, id),
+        do: {:halt, {:error, {:batch_order_rejected, index, {:duplicate_client_order_id, id}}}},
+        else: {:cont, {:ok, MapSet.put(seen, id)}}
+    end)
+    |> case do
+      {:ok, _seen} -> {:ok, orders}
       error -> error
     end
   end

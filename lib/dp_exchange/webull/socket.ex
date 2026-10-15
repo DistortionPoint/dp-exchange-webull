@@ -526,10 +526,12 @@ defmodule DpExchange.Webull.Socket do
 
     # Blocks THIS socket process only, and only while it has no connection to serve anyway —
     # the same trade `dp_exchange_schwab.Socket` already makes.
+    cancel_ping_timer(state)
     wait_to_reconnect(state, delay)
 
     {:reconnect,
      Map.merge(state, %{
+       ping_timer: nil,
        buffer: <<>>,
        # Acknowledgements owed to a connection that no longer exists are owed to nobody.
        acks: [],
@@ -584,8 +586,17 @@ defmodule DpExchange.Webull.Socket do
     # subscribe, so this is sent to satisfy the protocol flag rather than to authenticate.
     packet = MqttPacket.connect(state.session_id, connect_key(state), "x", @keep_alive_s)
     ping = make_ref()
-    schedule_ping(ping)
-    sent = Map.merge(state, %{connect_queued?: false, ping: ping, last_heard_at: now_ms()})
+    cancel_ping_timer(state)
+    timer = schedule_ping(ping)
+
+    sent =
+      Map.merge(state, %{
+        connect_queued?: false,
+        ping: ping,
+        ping_timer: timer,
+        last_heard_at: now_ms()
+      })
+
     {:reply, {:binary, packet}, sent}
   end
 
@@ -607,10 +618,10 @@ defmodule DpExchange.Webull.Socket do
         )
       )
 
-      {:close, %{state | ping: nil}}
+      {:close, Map.merge(state, %{ping: nil, ping_timer: nil})}
     else
-      schedule_ping(ping)
-      {:reply, {:binary, MqttPacket.pingreq()}, state}
+      timer = schedule_ping(ping)
+      {:reply, {:binary, MqttPacket.pingreq()}, Map.put(state, :ping_timer, timer)}
     end
   end
 
@@ -625,8 +636,18 @@ defmodule DpExchange.Webull.Socket do
   defp connect_key(%{app_key: %Credentials{app_key: app_key}}), do: app_key
   defp connect_key(%{app_key: app_key}), do: app_key
 
+  # The timer's reference is kept in `state.ping_timer` so a dropped connection cancels the
+  # pending ping instead of leaving it to arrive up to half a keep-alive later and be
+  # ignored as stale. A state built by hand holds none, which cancels nothing.
   defp schedule_ping(ping),
     do: Process.send_after(self(), {:ping, ping}, div(@keep_alive_s, 2) * 1_000)
+
+  defp cancel_ping_timer(state) do
+    case Map.get(state, :ping_timer) do
+      timer when is_reference(timer) -> Process.cancel_timer(timer)
+      _none -> :ok
+    end
+  end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
 

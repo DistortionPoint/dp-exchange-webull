@@ -759,9 +759,19 @@ defmodule DpExchange.Webull.Feed do
        # from => timer reference of the `{:caller_due, from}` deadline `reshard/3` armed, held
        # until the caller is answered and cancelled then. See `reply_caller/3`.
        caller_timers: %{},
+       # from => [timer reference] of the `{:connack_timeout, ...}` timers armed for a caller
+       # parked on a connecting shard, cancelled when the caller is released. See
+       # `arm_connack_timer/4`.
+       connack_timers: %{},
        # index => token of the one live open-retry chain for that slot. See the
        # `{:reopen_shard, ...}` clauses.
        open_chains: %{},
+       # index => timer reference of that chain's pending `{:reopen_shard, ...}`, cancelled
+       # when the chain ends. See `end_open_chain/2`.
+       open_timers: %{},
+       # index => [timer reference] of pending `{:open_staggered, ...}` background opens. See
+       # `arm_staggered/4`.
+       staggered_timers: %{},
        # Shard indices whose last primary/background reconcile failed and was reverted, so
        # the next `:resubscribe` tick re-plans them even with no caller and no rejection.
        unsettled: MapSet.new(),
@@ -1240,13 +1250,8 @@ defmodule DpExchange.Webull.Feed do
 
       is_integer(state.last_background_open) and
           now - state.last_background_open < state.shard_spacing_ms ->
-        Process.send_after(
-          self(),
-          message,
-          state.shard_spacing_ms - (now - state.last_background_open)
-        )
-
-        {:noreply, state}
+        delay = state.shard_spacing_ms - (now - state.last_background_open)
+        {:noreply, arm_staggered(state, index, message, delay)}
 
       true ->
         handle_info({:open_shard, index, symbols, opts}, %{state | last_background_open: now})
@@ -1802,6 +1807,8 @@ defmodule DpExchange.Webull.Feed do
   end
 
   defp release_caller(state, from) do
+    state = release_connack_timers(state, from)
+
     case Map.pop(state.caller_timers, from) do
       {nil, _timers} ->
         state
@@ -1809,6 +1816,34 @@ defmodule DpExchange.Webull.Feed do
       {timer, timers} ->
         Process.cancel_timer(timer)
         %{state | caller_timers: timers}
+    end
+  end
+
+  # **A `{:connack_timeout, ...}` timer lives only as long as the caller it was armed for.**
+  # Each caller parked on a connecting shard arms one, and it used to run its full
+  # `connack_timeout_ms` after the caller was answered by the CONNACK, a refusal, a crash or
+  # its own `{:caller_due, _}` deadline: harmless when it fired (the shard no longer matched),
+  # but a stale timer all the same. The references are kept per caller, in a list because one
+  # caller can be re-parked by a retry hop, and cancelled when that caller is released.
+  defp arm_connack_timer(state, index, session_id, from) do
+    timer =
+      Process.send_after(
+        self(),
+        {:connack_timeout, index, session_id},
+        state.connack_timeout_ms
+      )
+
+    %{state | connack_timers: Map.update(state.connack_timers, from, [timer], &[timer | &1])}
+  end
+
+  defp release_connack_timers(state, from) do
+    case Map.pop(state.connack_timers, from) do
+      {nil, _timers} ->
+        state
+
+      {pending, timers} ->
+        Enum.each(pending, &Process.cancel_timer/1)
+        %{state | connack_timers: timers}
     end
   end
 
@@ -1824,6 +1859,7 @@ defmodule DpExchange.Webull.Feed do
 
     # Its deadline has fired, so there is nothing left to cancel; only the record goes.
     state = %{state | shards: shards, caller_timers: Map.delete(state.caller_timers, from)}
+    state = release_connack_timers(state, from)
 
     case parked || primary_overflow(state, from) do
       {:parked, overflow} ->
@@ -1964,12 +2000,7 @@ defmodule DpExchange.Webull.Feed do
         # CONNACK timer of its own. See the moduledoc's "A caller parked on a connecting
         # shard is always answered".
         state = put_in(state.shards[index].symbols, wanted_symbols)
-
-        Process.send_after(
-          self(),
-          {:connack_timeout, index, session_id},
-          state.connack_timeout_ms
-        )
+        state = arm_connack_timer(state, index, session_id, from)
 
         put_in(
           state.shards[index].reply_to,
@@ -1998,11 +2029,7 @@ defmodule DpExchange.Webull.Feed do
         #
         # Keyed by `session_id` as well as `index`, so a timer armed for one attempt cannot
         # answer a caller parked on the shard that replaced it.
-        Process.send_after(
-          self(),
-          {:connack_timeout, index, session_id},
-          state.connack_timeout_ms
-        )
+        state = state |> cancel_staggered(index) |> arm_connack_timer(index, session_id, from)
 
         put_in(state.shards[index], shard)
 
@@ -2020,13 +2047,12 @@ defmodule DpExchange.Webull.Feed do
 
     case Map.get(state.shards, index) do
       nil ->
-        Process.send_after(
-          self(),
+        arm_staggered(
+          state,
+          index,
           {:open_staggered, index, wanted_symbols, opts},
           state.shard_spacing_ms * position
         )
-
-        state
 
       %{connected?: false} ->
         # **Never an HTTP call against a session that is not up.** `touch_primary_shard/7`
@@ -2962,6 +2988,7 @@ defmodule DpExchange.Webull.Feed do
         state
         |> put_in([:shards, index], new_shard(session_id, socket, planned))
         |> end_open_chain(index)
+        |> cancel_staggered(index)
         |> resync()
 
       {:error, reason} ->
@@ -2998,6 +3025,7 @@ defmodule DpExchange.Webull.Feed do
         state
         |> put_in([:shards, index], new_shard(session_id, socket, planned))
         |> end_open_chain(index)
+        |> cancel_staggered(index)
         |> clear_open_failure(index)
         |> resync()
 
@@ -3008,8 +3036,40 @@ defmodule DpExchange.Webull.Feed do
 
   # The chain for `index` is over: its token no longer matches anything, so a message still in
   # flight for it is ignored.
-  defp end_open_chain(state, index),
-    do: %{state | open_chains: Map.delete(state.open_chains, index)}
+  #
+  # The chain's pending timer is cancelled with it rather than left to fire, find the token
+  # gone and be ignored. A timer that has already fired (the message being handled right now)
+  # cancels to `false`, which is harmless.
+  defp end_open_chain(state, index) do
+    {timer, timers} = Map.pop(state.open_timers, index)
+    if timer, do: Process.cancel_timer(timer)
+
+    %{state | open_chains: Map.delete(state.open_chains, index), open_timers: timers}
+  end
+
+  # A background open armed for `index` (`{:open_staggered, ...}`), remembered so the slot
+  # being filled by any other route cancels it instead of leaving it to fire and find the slot
+  # taken. A slot can be re-planned before its first timer fires, so there may be several; the
+  # ones that have already fired are dropped as a new one is added.
+  defp arm_staggered(state, index, message, delay) do
+    live = Enum.filter(Map.get(state.staggered_timers, index, []), &Process.read_timer/1)
+    timer = Process.send_after(self(), message, delay)
+    %{state | staggered_timers: Map.put(state.staggered_timers, index, [timer | live])}
+  end
+
+  defp cancel_staggered(state, index) do
+    {timers, rest} = Map.pop(state.staggered_timers, index, [])
+    Enum.each(timers, &Process.cancel_timer/1)
+    %{state | staggered_timers: rest}
+  end
+
+  # Arms the chain's next link and remembers its timer, so `end_open_chain/2` can cancel it.
+  defp arm_open_retry(state, index, message, delay) do
+    {previous, timers} = Map.pop(state.open_timers, index)
+    if previous, do: Process.cancel_timer(previous)
+    timer = Process.send_after(self(), message, delay)
+    %{state | open_timers: Map.put(timers, index, timer)}
+  end
 
   defp new_shard(session_id, socket, symbols) do
     %{session_id: session_id, socket: socket, connected?: false, symbols: symbols, reply_to: nil}
@@ -3078,15 +3138,14 @@ defmodule DpExchange.Webull.Feed do
       state
     else
       token = make_ref()
-      Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt, token}, delay)
+      message = {:reopen_shard, index, symbols, opts, attempt, token}
+      state = arm_open_retry(state, index, message, delay)
       %{state | open_chains: Map.put(state.open_chains, index, token)}
     end
   end
 
-  defp schedule_open_retry(state, index, symbols, opts, attempt, delay, token) do
-    Process.send_after(self(), {:reopen_shard, index, symbols, opts, attempt, token}, delay)
-    state
-  end
+  defp schedule_open_retry(state, index, symbols, opts, attempt, delay, token),
+    do: arm_open_retry(state, index, {:reopen_shard, index, symbols, opts, attempt, token}, delay)
 
   # Same latch shape as `latch_resubscribe_failure/4`, and deliberately a SEPARATE map: a
   # shard that never opened and a shard whose blind resubscribe is failing are different
