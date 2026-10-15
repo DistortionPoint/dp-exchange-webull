@@ -89,7 +89,13 @@ defmodule DpExchangeWebull.MixProject do
       # `:trailing_stop` (and `:trailing_stop_limit`, `:market_on_close`, `:limit_on_close`),
       # which `Rest.order_type_atom/1` returns for a `TRAILING_STOP_LOSS` order. Against an
       # older Core an `Order` this package returned was one `Order.new/1` refuses.
-      {:dp_exchange_core, "~> 0.3.74"},
+      #
+      # `0.3.95` (tick AE, 2026-10-15): this package marks `wanted/1` `@impl true`, a callback
+      # only from Core 0.3.93 (older Core warns, and CI compiles with --warnings-as-errors); its
+      # contract test opts into group 41 (`unlisted_symbol:`, `padded_credentials:`, Core 0.3.94),
+      # which an older Core ignores - a silent pass; and 0.3.95 makes groups 7, 37 and 39 fail
+      # instead of passing having examined nothing. Resolved and compiled against in this change.
+      {:dp_exchange_core, "~> 0.3.95"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

@@ -1505,7 +1505,7 @@ decision itself, on the one signal it has and you do not.
 answers `:ok`: there is nothing to stop). They return `{:error, :feed_timeout}` when the
 feed is too busy to answer within its call budget, and `{:error, {:feed_exited, reason}}`
 when it dies while answering. `coverage/1` and `coverage_by_kind/1` answer an empty map in
-all three cases, which means "not observed". Treat `:feed_timeout` as transient and retry.
+all three cases, which means "not observed", and `wanted/1` answers `[]`. Treat `:feed_timeout` as transient and retry.
 Treat the other two as a feed your supervision tree has to bring back.
 
 **`:feed_timeout` means "no answer", not "not applied".** The request is already in the

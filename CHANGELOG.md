@@ -22,6 +22,20 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **`dp_exchange_core` floor raised to `~> 0.3.95` (tick AE).** The old floor predated `wanted/1`
+  (0.3.93), the conformance group 41 options this package's contract test passes (0.3.94,
+  ignored by an older Core: a silent pass) and the groups that no longer pass vacuously
+  (0.3.95).
+
+Documentation accuracy audit (tick AE). No behaviour change.
+
+- `usage-rules.md` "Streaming calls answer" now says `wanted/1` answers `[]` in the same three
+  cases (no feed, timeout, feed exit) in which `coverage/1` and `coverage_by_kind/1` answer an
+  empty map; it was silent, and the code already did this.
+- `Supervisor.limits/1`'s comment no longer says every sandbox figure is the venue's own. Only
+  the per-endpoint half is documented; the sandbox global cap (300/60s) is this package's
+  conservative assumption, since the venue publishes no sandbox figure for it.
+
 ## [0.4.152] - 2026-10-14
 
 ### Added

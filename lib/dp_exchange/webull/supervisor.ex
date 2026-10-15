@@ -152,8 +152,10 @@ defmodule DpExchange.Webull.Supervisor do
   # The venue's per-endpoint rate-limit table gives sandbox exactly half of every
   # production limit — `30/60s` against `60/60s`, on every market-data endpoint without
   # exception — so UAT is metered at half here rather than silently inheriting a budget
-  # twice what that environment permits. The halving is the venue's own relationship
-  # between its two columns, not a safety margin invented here.
+  # twice what that environment permits. For the per-endpoint bucket the halving is the
+  # venue's own relationship between its two columns. The GLOBAL 600/60s bucket is halved
+  # too, but that is this package's assumption: the venue's table gives no sandbox figure for
+  # the global cap, so 300/60s is a conservative guess, not a documented number.
   #
   # This matters for the reason the moduledoc above already gives about buckets: UAT and
   # production are separately named limiters precisely so one cannot spend the other's
