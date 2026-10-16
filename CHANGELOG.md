@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.158] - 2026-10-16
+
 ### Changed
 
 - The contract test supplies `ambiguous_place_order:` (Core conformance group 42): the real
