@@ -1647,6 +1647,12 @@ defmodule DpExchange.Webull.Rest do
       :req_adapter,
       :rate_limit_blocking
     ])
+    # Core's default is one attempt for a non-GET. The POSTs that reach here without
+    # `send_once/1` are reads (bars, order preview, token check, news): each attempt is
+    # re-signed and repeating one changes nothing, so they keep three attempts, explicit
+    # and lowerable by the caller. Every write passed `send_once/1`, so its 1 wins. A
+    # forwarded `nil` counts as absent, or it would fall through to Core's 1.
+    |> Keyword.update(:retry_attempts, 3, &(&1 || 3))
     # Per endpoint as well as per venue — see `Supervisor.limits/1`.
     |> Keyword.merge(provider: :webull, raw_status: true, rate_limit_per_endpoint: true)
   end

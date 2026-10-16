@@ -363,6 +363,10 @@ defmodule DpExchange.Webull.Subscription do
       :req_adapter,
       :rate_limit_blocking
     ])
+    # Core's default is one attempt for a POST; a repeated subscribe/unsubscribe of the
+    # same symbols to the same session is harmless, so the three attempts are explicit.
+    # A forwarded `nil` counts as absent, or it would fall through to Core's 1.
+    |> Keyword.update(:retry_attempts, 3, &(&1 || 3))
     # Per endpoint as well as per venue — see `Supervisor.limits/1`.
     |> Keyword.merge(provider: :webull, raw_status: true, rate_limit_per_endpoint: true)
   end

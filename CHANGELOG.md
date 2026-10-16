@@ -22,6 +22,14 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- The read-only POSTs (stock bars, order preview, token check, news) and the streaming
+  subscribe/unsubscribe POST now pass `retry_attempts: 3` explicitly (`put_new`, so a caller
+  can lower it) instead of relying on Core's default, which becomes 1 for non-GET requests.
+  Behaviour is unchanged; every write still sends once. The tick-AG negative
+  `refute_receive` windows are 500 ms.
+
 ## [0.4.156] - 2026-10-16
 
 _No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._

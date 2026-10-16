@@ -117,7 +117,7 @@ defmodule DpExchange.Webull.TickAGTest do
 
       assert Feed.wanted(feed) == ["BTC-USD"]
       assert :sys.get_state(feed).shards[0].symbols == ["BTC-USD"]
-      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 200
+      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 500
     end
 
     test "a registered name keeps the symbols alive, as it is never monitored",
@@ -139,7 +139,7 @@ defmodule DpExchange.Webull.TickAGTest do
 
       assert Feed.wanted(feed) == ["BTC-USD"]
       assert MapSet.member?(:sys.get_state(feed).subscribers, name)
-      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 200
+      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 500
     end
 
     test "a notice-only subscriber's death releases nothing", %{limiter: limiter} do
@@ -154,7 +154,7 @@ defmodule DpExchange.Webull.TickAGTest do
 
       refute MapSet.member?(:sys.get_state(feed).notice_subscribers, watcher)
       assert Feed.wanted(feed) == ["BTC-USD"]
-      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 200
+      refute_receive {:req, "/market-data/streaming/unsubscribe", _symbols}, 500
     end
   end
 
