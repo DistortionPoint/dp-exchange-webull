@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.157] - 2026-10-16
+
 ### Changed
 
 - The read-only POSTs (stock bars, order preview, token check, news) and the streaming
