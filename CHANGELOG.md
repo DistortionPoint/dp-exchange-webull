@@ -22,6 +22,12 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- The contract test supplies `ambiguous_place_order:` (Core conformance group 42): the real
+  `Rest.place_order/3` under a 503 on every attempt must answer `:order_unconfirmed`. The
+  `dp_exchange_core` floor is now `~> 0.3.98`.
+
 ## [0.4.157] - 2026-10-16
 
 ### Changed

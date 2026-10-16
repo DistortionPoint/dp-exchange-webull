@@ -26,6 +26,8 @@ defmodule DpExchange.WebullContractTest do
     # not list, and a credentials map whose first value carries a trailing newline.
     unlisted_symbol: "NOPE-USD",
     padded_credentials: %{app_key: "test-app-key\n", app_secret: "test-app-secret"},
+    # Conformance group 42: the real Rest.place_order/3 under a 503 plug on every attempt.
+    ambiguous_place_order: &DpExchange.Webull.AmbiguousWrite.place/1,
     credentials: %{app_key: "test-app-key", app_secret: "test-app-secret"},
     package_root: "lib/dp_exchange",
     # The options this venue's own endpoints require before its fake will answer at all.
