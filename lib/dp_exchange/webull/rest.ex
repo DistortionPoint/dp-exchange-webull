@@ -6549,7 +6549,17 @@ defmodule DpExchange.Webull.Rest do
   # `Enum.with_index/1` that follows raised out of the caller's process on a money write.
   defp batch_size(requests) when not is_list(requests), do: {:error, :invalid_batch}
 
-  defp batch_size(_requests), do: :ok
+  # An improper list (`[order | :tail]`) is a list to `is_list/1` but `length/1` raises on it,
+  # and in the guard above that only made the clause not match, so the batch was waved through
+  # to `Enum.with_index/1`, which raised in the caller's process on a money write. Refused as
+  # the non-list it is, by the same walk `invalid_symbols/2` uses for symbol lists.
+  defp batch_size(requests) do
+    if proper_list?(requests), do: :ok, else: {:error, :invalid_batch}
+  end
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_head | tail]), do: proper_list?(tail)
+  defp proper_list?(_improper_tail), do: false
 
   @doc """
   Whether `requests` is a batch `place_orders/3` would send: its size and every entry

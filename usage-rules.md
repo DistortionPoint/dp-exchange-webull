@@ -1383,6 +1383,75 @@ runs, and `unsubscribe(nil)` is refused rather than `:ok`. After the symbols, `s
 the shard connects, and your symbols go out with it. `coverage/1` tells you when they
 start arriving.
 
+## Every answer a streaming call can give
+
+`subscribe/2`, `unsubscribe/2` and `update_symbols/2` answer `:ok` or one of these, all
+wrapped as `{:error, reason}`:
+
+| `reason` | Meaning |
+|---|---|
+| `{:invalid_symbols, symbols}` | Your list was malformed (decided in your process), **or** the venue refused those symbols (a list of canonical names). The venue's refusals are excluded and the rest is retried, so you see this only when no retry is left. |
+| `{:invalid_subscriber, to}` | `to:` is not a pid or a registered-name atom. |
+| `{:streaming_unavailable, :uat}` | There is no UAT broker. |
+| `{:missing_required_field, :app_key}` | A shard had to be opened and the call carried no usable `:credentials`. |
+| `{:connection_refused, details}` | The venue refused the shard's MQTT session. `details.connack` is its code and `details.session_id` names the shard; `details.reason: :connection_limit` is code 105 (five connections per App Key), which is not a credentials problem. |
+| `{:shard_crashed, reason}` | The shard's socket died while you waited. It is reopened; retry. |
+| `{:invalid_session, session_id}` | The venue discarded the shard's session. The shard is reopened on a fresh one; retry. |
+| `{:reconcile_pending, ms}` / `{:connack_timeout, ms}` | Still in progress; see above. Your symbols are recorded. |
+| `{:reconcile_timeout, ms, :no_venue_response}` | The HTTP subscribe never answered. |
+| `{:reconcile_task_down, reason}` | The task making the HTTP subscribe died. |
+| `{:capacity_exceeded, symbols}` | Every shard is full (five of 100): these symbols fit nowhere. |
+| `{:partial_failure, failed: reason, capacity_exceeded: symbols}` | Both of the above kinds at once. |
+| `:oversubscribed` | The venue's per-session ceiling; the feed moves the overflow to another shard and retries, so it reaches you only when that retry is spent. |
+
+HTTP and signing failures of the subscribe itself keep their ordinary shapes
+(`{:error, {:refused, status, body}}` for a 400, 401 or 403,
+`{:error, {:exchange_error, :webull, text}}` for the rest, and
+`{:error, {:missing_credentials, :webull}}`).
+
+**Symbols belong to the feed, not to the subscriber that asked for them.** A subscriber that
+dies is dropped (it is monitored, and so is a `subscribe_notices/1` receiver), but the
+symbols it subscribed stay wanted and stay on the stream until `unsubscribe/2` or
+`update_symbols/2` releases them, so a consumer that is restarted by its supervisor calls
+`subscribe/2` again with its new pid. A registered name is never monitored: the holder of the
+name may die and be restarted under it. Subscribing twice from one pid is one subscriber, and
+delivers once.
+
+**A payload for a symbol you just unsubscribed is dropped**, even if the venue sends a few
+more, and it does not count toward `coverage/1`.
+
+### Options of the feed itself
+
+Passed in the options of `{DpExchange.Webull, opts}`. Every one is optional.
+
+| Option | Default | What it does |
+|---|---|---|
+| `:credentials` | none | Kept (wrapped) to replay subscriptions after a reconnect. |
+| `:max_queue_len` | see the slow-subscriber section | Mailbox bound before a subscriber is skipped. |
+| `:priority_symbols` | none | See `priority_symbols:` below. |
+| `:resubscribe_interval_ms` | 60_000, at least 1_000 | Blind re-assert cadence. A smaller value raises `ArgumentError` at start. |
+| `:resubscribe_failure_limit` | 12 | Consecutive failed re-asserts before a silent shard is reopened. |
+| `:stale_delivery_ms` | 300_000 | How long a shard must deliver nothing before a reopen is allowed. |
+| `:connack_timeout_ms` | 10_000 | How long a call waits for a connecting shard. |
+| `:reconcile_timeout_ms` | 60_000 | Deadline of one HTTP subscribe. |
+| `:rejected_symbol_ttl_ms` | 24 hours | How long a venue-refused symbol is excluded. |
+| `:open_retry_base_ms`, `:open_retry_max_ms` | 1_000, 60_000 | Backoff of a shard that failed to open. |
+| `:shard_spacing_ms` | 5_000 | Gap between background socket opens. |
+| `:socket_connect_timeout`, `:socket_recv_timeout` | 3_000, 2_000 | TCP connect and upgrade budget per socket. |
+| `:url` | the venue's endpoint | Socket URL; `ws://` is refused except to a loopback host. |
+
+### Options some reads require
+
+A missing required option is refused before any request, as a bare atom:
+`get_auction_imbalance/2` needs `:auction` (`:opening` or `:closing`; absent is
+`{:error, :auction_required}`, anything else `{:error, {:unsupported_auction, v}}`),
+`list_event_events/1` needs `:series_symbol` (`{:error, :series_symbol_required}`), and
+`sort_watchlist_instruments/2` needs `:sorts`, a non-empty map of symbol to integer position
+(`{:error, :sorts_required}`, or `{:error, {:invalid_sorts, v}}`). `list_event_markets/1`
+takes `:series_symbol`, `:event_symbol`, `:symbols`, `:expiring_after` (a `Date` or text) and
+`:pagination_key`; `list_event_events/1` takes `:status` (`ACTIVE` or `INACTIVE`, never
+defaulted); `get_news/1` requires `:symbols` and passes `:lang` through when given.
+
 ## Every negative here is audited
 
 `docs/reference/webull/negative-claims.md` lists each one with the source and date consulted.

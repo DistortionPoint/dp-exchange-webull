@@ -2058,7 +2058,9 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  One fixture row per request in the batch; the orders are not remembered.
+  One fixture row per request in the batch. An accepted order is remembered under its
+  `client_order_id`, so `get_order/3` and `cancel_order/3` find it; the second row (index 1)
+  is always refused with `INSUFFICIENT_BUYING_POWER` and is not remembered.
 
   Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.place_orders/3`.
   """

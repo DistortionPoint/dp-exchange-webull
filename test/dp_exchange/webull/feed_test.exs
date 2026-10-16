@@ -247,10 +247,13 @@ defmodule DpExchange.Webull.FeedTest do
 
       feed = start_feed(shards: %{0 => connected_shard("s0")})
 
+      # `to: test_pid`: the spawned caller exits at once, and the last data subscriber's death
+      # releases the feed's symbols.
       spawn(fn ->
         send(
           test_pid,
-          {:subscribed, Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))}
+          {:subscribed,
+           Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug, to: test_pid))}
         )
       end)
 
@@ -284,7 +287,8 @@ defmodule DpExchange.Webull.FeedTest do
       spawn(fn ->
         send(
           test_pid,
-          {:subscribed, Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug))}
+          {:subscribed,
+           Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, plug: plug, to: test_pid))}
         )
       end)
 
@@ -1184,9 +1188,17 @@ defmodule DpExchange.Webull.FeedTest do
       feed =
         start_feed(shards: %{0 => shard0, 1 => shard1}, shard_capacity: %{0 => 2})
 
+      # `to: me`: the task exits once it has its answer, and the last data subscriber's death
+      # would release the symbols this test goes on to expect on shard 1.
+      me = self()
+
       task =
         Task.async(fn ->
-          Feed.subscribe(feed, ["AAA-USD", "BBB-USD"], subscribe_opts(limiter, plug: plug))
+          Feed.subscribe(
+            feed,
+            ["AAA-USD", "BBB-USD"],
+            subscribe_opts(limiter, plug: plug, to: me)
+          )
         end)
 
       wait_for_parked(feed, 1)

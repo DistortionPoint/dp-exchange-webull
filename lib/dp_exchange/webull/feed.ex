@@ -2299,7 +2299,16 @@ defmodule DpExchange.Webull.Feed do
   # `Core.Fanout.watch/2` — because a name outlives the process holding it, and pruning on
   # its holder's death would silently unsubscribe a consumer its supervisor is about to
   # restart under the same name.
+  #
+  # **When the LAST data subscriber dies, the feed's wanted symbols are released.** A dead pid
+  # can receive nothing, so keeping the sockets and subscriptions for it held up to five
+  # connections for nobody. A registered name is never monitored and stays in `subscribers`,
+  # so it keeps the set alive; a notice-only subscriber's death releases nothing. The release
+  # narrows the shards through `resync/1`, the caller-less form of the path `unsubscribe/2`
+  # takes.
   defp drop_dead_subscriber(state, pid) do
+    was_data_subscriber? = MapSet.member?(state.subscribers, pid)
+
     state = %{
       state
       | subscribers: MapSet.delete(state.subscribers, pid),
@@ -2307,7 +2316,16 @@ defmodule DpExchange.Webull.Feed do
         monitors: Fanout.forget(pid, state.monitors)
     }
 
-    {:noreply, state}
+    if was_data_subscriber? and MapSet.size(state.subscribers) == 0 and
+         MapSet.size(state.wanted) > 0 do
+      {:noreply, release_wanted(state)}
+    else
+      {:noreply, state}
+    end
+  end
+
+  defp release_wanted(state) do
+    resync(%{state | wanted: MapSet.new(), delivering: %{}, delivering_by_kind: %{}})
   end
 
   # Which in-flight reconcile a monitor ref belongs to, or `nil` for a ref this feed tracks

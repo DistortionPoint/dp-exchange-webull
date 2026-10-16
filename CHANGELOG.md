@@ -22,6 +22,29 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+- **Lifecycle, bounds and hot-path read (tick AG).** The streaming client was read for the
+  sequences below; each held, and each is now pinned by a test that drives it in message
+  order with no sleeps (`test/dp_exchange/webull/tick_ag_test.exs`): subscribe, unsubscribe,
+  subscribe of one symbol (a frame in the gap is dropped and `coverage/1` stays empty until
+  the second subscribe), the same pid subscribing twice (one subscriber, one monitor, one
+  delivery), a dead subscriber (dropped with its monitor; its symbols stay wanted, which
+  `usage-rules.md` now states), and the answered-call timers (`caller_timers` and
+  `connack_timers` empty once the calls are answered).
+  - `place_orders/3` given an improper list (`[order | :tail]`) raised in the caller's process
+    on a money write: the size guard's `length/1` simply failed to match, so the batch reached
+    `Enum.with_index/1`. It is now `{:error, :invalid_batch}`, as any other non-list, on the
+    real path and in `Fake`.
+  - A streamed frame's `timestamp`/`time` text is no longer handed to `Integer.parse/1` when it
+    is longer than 32 bytes (a frame may carry up to 1 MiB in the socket process); it is read as
+    no venue time, as any other unreadable one already was. The chosen bound is not a venue
+    figure.
+  - `usage-rules.md` now lists every answer `subscribe/2`, `unsubscribe/2` and
+    `update_symbols/2` can give (`{:connection_refused, details}`, `{:shard_crashed, reason}`,
+    `{:invalid_session, id}`, `{:reconcile_task_down, reason}`, `{:partial_failure, ...}` and
+    the rest), the feed's start options with their defaults, and the options a few reads
+    require (`:auction`, `:series_symbol`, `:sorts`, `:event_symbol`, `:expiring_after`,
+    `:lang`). `Fake.place_orders/3`'s doc said the orders were not remembered; they are.
+
 ## [0.4.154] - 2026-10-15
 
 - **Fake-versus-real validation parity and stale timers (tick AF).** Each refusal below is

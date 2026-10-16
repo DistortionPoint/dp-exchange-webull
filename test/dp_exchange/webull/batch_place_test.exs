@@ -92,6 +92,23 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       end
     end
 
+    test "an improper list is refused as a non-list in the caller, not raised, on both paths" do
+      exploding = fn _conn -> raise "must not send a malformed batch" end
+      improper = [order() | :tail]
+
+      assert {:error, :invalid_batch} = Rest.validate_batch_orders(improper)
+
+      assert {:error, :invalid_batch} =
+               Rest.place_orders(@credentials, improper,
+                 account_id: "acct-1",
+                 plug: exploding,
+                 retry_attempts: 0
+               )
+
+      assert {:error, :invalid_batch} =
+               Fake.place_orders(@credentials, improper, account_id: "acct-1")
+    end
+
     test "an entry that is not a map is refused by index" do
       assert {:error, {:batch_order_rejected, 1, :not_an_order}} =
                Rest.validate_batch_orders([order(), "AAPL"])

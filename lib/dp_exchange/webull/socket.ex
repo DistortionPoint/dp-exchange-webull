@@ -1316,6 +1316,16 @@ defmodule DpExchange.Webull.Socket do
   # `{:error, :missing_venue_timestamp}` for a frame the venue did not date, or dated with
   # something this package cannot read. What a caller does with that depends entirely on the
   # TYPE being built, and `venue_time_or_nil/1` below is the other answer.
+  # A text longer than any epoch the clauses below accept (thirteen digits at most) is refused
+  # before `Integer.parse/1` is asked to build a bignum from it: a frame may carry up to the
+  # 1 MiB `MqttPacket` allows, in the socket process. 32 is generous for padding or a sign;
+  # chosen, not measured.
+  @max_timestamp_chars 32
+
+  defp venue_time(%{timestamp: raw})
+       when is_binary(raw) and byte_size(raw) > @max_timestamp_chars,
+       do: {:error, :missing_venue_timestamp}
+
   defp venue_time(%{timestamp: raw}) when is_binary(raw) do
     case Integer.parse(raw) do
       # Non-positive is refused before the unit question is asked. `DateTime.from_unix/2`
