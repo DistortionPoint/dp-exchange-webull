@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.155] - 2026-10-16
+
 - **Lifecycle, bounds and hot-path read (tick AG).** The streaming client was read for the
   sequences below; each held, and each is now pinned by a test that drives it in message
   order with no sleeps (`test/dp_exchange/webull/tick_ag_test.exs`): subscribe, unsubscribe,
