@@ -22,6 +22,10 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.156] - 2026-10-16
+
+_No consumer-facing changes. Internal or packaging work only — recorded so every published version has a heading, because an absent one cannot be told apart from one the release pipeline dropped._
+
 ## [0.4.155] - 2026-10-16
 
 - **Lifecycle, bounds and hot-path read (tick AG).** The streaming client was read for the
