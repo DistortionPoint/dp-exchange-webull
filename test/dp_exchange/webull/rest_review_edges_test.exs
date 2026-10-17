@@ -101,12 +101,10 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
   end
 
   describe "news frames the venue sends oddly" do
-    test "an object where an id or a chunk's text belongs raised; it now contributes nothing" do
+    test "an object where an id belongs falls back to the session id" do
       events = [
         %{"type" => "meta", "args" => %{"convId" => %{"x" => 1}, "sessionId" => "s-1"}},
         %{"type" => "text", "message" => "Hello "},
-        %{"type" => "text", "message" => %{"unexpected" => true}},
-        %{"type" => "text", "message" => nil},
         %{"type" => "text", "message" => "world"}
       ]
 
@@ -119,6 +117,25 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
 
       assert item.id == "s-1"
       assert item.summary == "Hello world"
+    end
+
+    # Tick AJ: a text chunk whose text is not text once raised, then contributed nothing —
+    # a summary with a hole in it. It now refuses the read.
+    for bad <- [%{"unexpected" => true}, nil] do
+      test "a text chunk whose message is #{inspect(bad)} refuses the read" do
+        events = [
+          %{"type" => "meta", "args" => %{"sessionId" => "s-1"}},
+          %{"type" => "text", "message" => "Hello "},
+          %{"type" => "text", "message" => unquote(Macro.escape(bad))}
+        ]
+
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_news(@credentials,
+                   symbols: ["AAPL"],
+                   plug: sse_responding(events),
+                   retry_attempts: 0
+                 )
+      end
     end
 
     test "a stream whose only id is not text or a number has no id, and is refused" do

@@ -599,12 +599,22 @@ whole set the venue holds for the request, not a prefix.
 sending one asked the venue a field it does not define, and did not actually bound the
 walk (there was no walk). `history: true` accepts `opts[:since]`/`opts[:until]`
 (`DateTime`s) instead, sent as the documented `start_time`/`end_time`; omitted, the venue
-answers the last 7 days, its own default.
+answers the last 7 days, its own default. `since:`/`until:` on the open listing (no
+`history: true`) are `{:error, {:unsupported_option, key}}`, and `since:` after `until:` is
+`{:error, {:invalid_option, :since, value}}`; likewise `get_order_book/2` with `limit:`
+(use `depth:`) and `get_trades/2` with `since:` are `{:unsupported_option, key}`, and a
+candle range with `:start` after `:end` is `{:invalid_range, range}`.
 
 ## `get_symbols/1` lists everything; `list_instruments/1` says which of it you can trade
 
 `get_symbols/1` is Core's contract, unfiltered: **every** symbol this venue lists, tradable
-or not. Some of what it lists is `"NT"` (Non-Tradable) or `"CO"` (Liquidate only — only a
+or not. A catalogue row that names no readable symbol refuses the whole listing
+(`{:error, :unexpected_response_shape}`); rows are never skipped, because a hole would make a
+listed symbol read as unlisted. The same holds for `list_instruments/1` (a row whose symbol
+does not end in its own `currency`), `get_watchlist/2` (a member with no text symbol),
+`get_screener/2` (a row naming nothing) and `get_news/1` (a non-JSON `data:` line or a
+non-text `text` chunk): each is `{:error, :unexpected_response_shape}`, never a shorter
+answer. Some of what it lists is `"NT"` (Non-Tradable) or `"CO"` (Liquidate only — only a
 CLOSING order matches) on the venue's own instrument catalogue, and `get_symbols/1` has no
 way to say so — this is exactly why a subscribe to one of those symbols can come back
 `INVALID_SYMBOL` even though `get_symbols/1` just handed it to you.

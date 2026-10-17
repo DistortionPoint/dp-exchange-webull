@@ -498,7 +498,7 @@ defmodule DpExchange.Webull.FeedTest do
       # already cannot keep up with, into the same fan-out that is overloaded.
       for _each <- 1..5, do: send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :degraded}}, 100
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :degraded}}, 500
     end
 
     test "a symbol whose frames are dropped for a slow consumer is still covered" do
@@ -1113,7 +1113,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # No unsubscribe of BBB from shard 0: the refused attempt is reverted, so the shard
       # never claimed it, and taking back something never subscribed was a wasted call.
-      refute_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", _symbols}, 100
+      refute_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", _symbols}, 500
     end
 
     test "a link_down for a session this feed no longer tracks is ignored", %{limiter: _limiter} do
@@ -1562,7 +1562,7 @@ defmodule DpExchange.Webull.FeedTest do
       # the shard had been left believing it subscribed the whole refused batch; the failed
       # attempt is now reverted, so there is nothing to take back.
       assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD"]}
-      refute_receive {:request, "/market-data/streaming/unsubscribe", _symbols}, 100
+      refute_receive {:request, "/market-data/streaming/unsubscribe", _symbols}, 500
       assert :sys.get_state(feed).shards[0].symbols == ["GOOD-USD"]
     end
 
@@ -1733,7 +1733,7 @@ defmodule DpExchange.Webull.FeedTest do
       # The call is answered after the message above is handled, so a notice it would send
       # is already in the mailbox before the refute looks.
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 500
     end
 
     test "the shard's next successful resubscribe emits a severity: :info recovery notice",
@@ -1761,7 +1761,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 500
     end
 
     test "two shards' failure and recovery latches stay independent of each other",
@@ -1831,11 +1831,11 @@ defmodule DpExchange.Webull.FeedTest do
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, :oversubscribed}})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 500
 
       send(feed, {:reconcile_done, {:resubscribe, 0}, {:error, {:invalid_symbols, ["AAA-USD"]}}})
       _settled = Feed.coverage(feed)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 200
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 500
     end
   end
 

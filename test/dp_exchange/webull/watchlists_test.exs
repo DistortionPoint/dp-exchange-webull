@@ -116,13 +116,16 @@ defmodule DpExchange.Webull.WatchlistsTest do
                Rest.get_watchlist("wl-1", @credentials, plug: responding(body), retry_attempts: 0)
     end
 
-    test "an instrument row with no symbol is dropped rather than becoming nil" do
-      body = [%{"watchlist_id" => "wl-1", "instruments" => [%{"instrument_id" => "1"}]}]
+    test "an instrument row with no symbol refuses the membership read" do
+      body = [
+        %{
+          "watchlist_id" => "wl-1",
+          "instruments" => [%{"symbol" => "AAPL"}, %{"instrument_id" => "1"}]
+        }
+      ]
 
-      assert {:ok, watchlist} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_watchlist("wl-1", @credentials, plug: responding(body), retry_attempts: 0)
-
-      assert watchlist.symbols == []
     end
   end
 

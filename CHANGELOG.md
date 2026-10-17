@@ -22,6 +22,42 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING for callers that passed an option the venue cannot honour)
+
+- BREAKING: `get_symbols/2` refuses the whole listing, `{:error, :unexpected_response_shape}`,
+  when any catalogue row names no readable symbol (missing, non-text, or a non-object row). It
+  skipped such rows, leaving a hole so that a symbol the venue lists read as unlisted.
+- BREAKING, same rule for every other listing decoder that skipped a row it could not read; each
+  now refuses the read with `{:error, :unexpected_response_shape}`:
+  - `list_instruments/2`: a row whose symbol does not end in its own `currency`, has no
+    `currency`, or is not an object.
+  - `get_watchlist/3`: a member instrument with no text `symbol`.
+  - `get_screener/3`: a row that names nothing (no text `symbol`, `sector_name` or `name`).
+  - `get_news/2`: a `data:` line that is not valid JSON, or a `text` chunk whose `message` is
+    not text. No spec line documents a frame to skip.
+
+- `get_order_book/2` with `limit:` is `{:error, {:unsupported_option, :limit}}` (levels per
+  side are `depth:`); it was dropped and the venue's default ten levels came back.
+- `get_trades/2` with `since:` is `{:error, {:unsupported_option, :since}}`: the tick endpoints
+  take a `count` and no start time, so the option was silently ignored.
+- `get_orders/2` with `since:`/`until:` on the open listing (no `history: true`) is
+  `{:error, {:unsupported_option, key}}`; the open-orders endpoint names no time parameters and
+  the window was ignored. The Fake refuses identically.
+- A range with `:start` after `:end` is refused rather than answered with nothing:
+  `{:error, {:invalid_range, range}}` for candles, `{:error, {:invalid_option, :start, v}}` for
+  the cash-activity reads (`get_transfers/2`, `get_transactions/2`) and
+  `{:error, {:invalid_option, :since, v}}` for an order-history window. `start == end` is still a
+  valid (empty) window.
+
+### Fixed
+
+- An ISO-8601 venue time at or before the epoch (`1970-01-01T00:00:00Z`,
+  `0001-01-01T00:00:00Z`) is `{:error, :invalid_unix_time}`, as an epoch of `0` always was; it
+  parsed as a real instant.
+- `oauth_token/3` and the Fake treat a blank `code` or `refresh_token` as absent
+  (`:code_or_refresh_token_required`) instead of sending an empty grant.
+- Test windows that guard a negative on an asynchronous Feed path are 500 ms.
+
 ## [0.4.159] - 2026-10-17
 
 ### Dependencies

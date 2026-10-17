@@ -258,12 +258,21 @@ defmodule DpExchange.Webull.Rest do
     if valid_range?(range), do: :ok, else: {:error, {:invalid_range, range}}
   end
 
+  # A range whose `:start` is after its `:end` is a mistake, not an empty window: it filtered
+  # every bar out and answered `{:ok, []}`, which reads as "no trading in that period".
+  # `start == end` stays valid (`:end` is exclusive, so it is a genuinely empty window).
   defp valid_range?(range) when is_list(range) do
     Keyword.keyword?(range) and range_bound?(Keyword.get(range, :start)) and
-      range_bound?(Keyword.get(range, :end))
+      range_bound?(Keyword.get(range, :end)) and
+      not inverted?(Keyword.get(range, :start), Keyword.get(range, :end))
   end
 
   defp valid_range?(_other), do: false
+
+  defp inverted?(%DateTime{} = start, %DateTime{} = finish),
+    do: DateTime.compare(start, finish) == :gt
+
+  defp inverted?(_start, _finish), do: false
 
   defp range_bound?(nil), do: true
   defp range_bound?(%DateTime{}), do: true
@@ -819,7 +828,8 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_book_request(term(), keyword()) :: :ok | {:error, term()}
   def validate_book_request(category, opts) do
-    with {:ok, _path} <- book_path(category),
+    with :ok <- refuse_option(opts, :limit),
+         {:ok, _path} <- book_path(category),
          :ok <- book_depth(category, Keyword.get(opts, :depth)),
          do: validate_hours_flags(opts)
   end
@@ -855,9 +865,18 @@ defmodule DpExchange.Webull.Rest do
 
     # `:sessions` is a session name or a list of them, as `get_trades/3` checks it: a map or a
     # list of maps there raised `Protocol.UndefinedError` in `Enum.join/2` / `to_string/1`.
-    with {:ok, _path} <- tick_path(category),
+    with :ok <- refuse_option(opts, :since),
+         {:ok, _path} <- tick_path(category),
          :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
          do: validate_sessions(opts)
+  end
+
+  # A FAMILY option this endpoint has no parameter for is refused, never ignored (family
+  # convention MD4): `get_order_book`'s `limit:` is not a depth option (`depth:` is), and the
+  # tick endpoints take a `count` and no start time, so `since:` has nowhere to go. A `nil` is
+  # an absent option.
+  defp refuse_option(opts, key) do
+    if Keyword.get(opts, key) == nil, do: :ok, else: {:error, {:unsupported_option, key}}
   end
 
   @doc """
@@ -1127,15 +1146,16 @@ defmodule DpExchange.Webull.Rest do
     category = Config.opt(opts, :category, "US_CRYPTO")
 
     with {:ok, rows} <- all_instrument_rows(nil, credentials, opts, [], 0) do
-      {:ok,
-       rows
-       |> Enum.map(&value(&1, ["symbol", "disSymbol", "name"]))
-       # Only a string names an instrument. `is_nil/1` let a map or a list through to
-       # `to_canonical_symbol/1`, which raised (REST mutation fuzz, 2026-09-27).
-       |> Enum.filter(&is_binary/1)
-       |> Enum.map(&listed_symbol(&1, category))
-       |> Enum.sort()
-       |> Enum.uniq()}
+      names = Enum.map(rows, &value(&1, ["symbol", "disSymbol", "name"]))
+
+      # Only a string names an instrument (a map or a list raised in `to_canonical_symbol/1`,
+      # REST mutation fuzz, 2026-09-27). A row that names none REFUSES the listing: skipping
+      # it left a hole in the catalogue, so a symbol the venue lists read as unlisted.
+      if Enum.all?(names, &is_binary/1) do
+        {:ok, names |> Enum.map(&listed_symbol(&1, category)) |> Enum.sort() |> Enum.uniq()}
+      else
+        {:error, :unexpected_response_shape}
+      end
     end
   end
 
@@ -1208,7 +1228,24 @@ defmodule DpExchange.Webull.Rest do
 
     with :ok <- ensure_crypto_category(category),
          {:ok, rows} <- all_instrument_rows(nil, credentials, opts, [], 0) do
-      {:ok, Enum.flat_map(rows, &to_instrument/1)}
+      collect_instruments(rows)
+    end
+  end
+
+  # **A row that cannot be read refuses the listing; it is never skipped.** A row whose symbol
+  # does not end in its own `currency`, has no `currency`, or is not an object used to be
+  # dropped, which left a hole in the catalogue: an instrument the venue lists read as unlisted.
+  defp collect_instruments(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_instrument(row) do
+        [instrument] -> {:cont, {:ok, [instrument | acc]}}
+        [] -> {:halt, {:error, :unexpected_response_shape}}
+      end
+    end)
+    |> case do
+      {:ok, instruments} -> {:ok, Enum.reverse(instruments)}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -2123,6 +2160,7 @@ defmodule DpExchange.Webull.Rest do
   @spec validate_activity_range(keyword()) :: :ok | {:error, term()}
   def validate_activity_range(opts) do
     with :ok <- window_times(opts, [:start, :end]),
+         :ok <- ordered_window(opts, :start, :end),
          :ok <- same_year(Keyword.get(opts, :start), Keyword.get(opts, :end)),
          do: valid_activity_types(Keyword.get(opts, :activity_types))
   end
@@ -2131,13 +2169,41 @@ defmodule DpExchange.Webull.Rest do
   Whether `opts[:since]`/`opts[:until]` are times `get_orders/2` can send: absent, or a
   `DateTime`. For `DpExchange.Webull.Fake`, which refuses exactly as the real path does.
 
-  Only the history listing reads them (the open-orders page names no time parameters), so an
-  open listing is not checked: `{:error, {:invalid_time, key, value}}` is for a history read.
+  Only the history listing reads them (the open-orders page names no time parameters), so a
+  window asked of an open listing is `{:error, {:unsupported_option, key}}` rather than
+  ignored. On a history read a bound that is not a `DateTime` is
+  `{:error, {:invalid_time, key, value}}`, and `:since` after `:until` is
+  `{:error, {:invalid_option, :since, value}}`.
   """
   @spec validate_orders_window(keyword()) :: :ok | {:error, term()}
   def validate_orders_window(opts) do
-    with :ok <- validate_history_flag(opts) do
-      if Keyword.get(opts, :history, false), do: window_times(opts, [:since, :until]), else: :ok
+    with :ok <- validate_history_flag(opts), do: orders_window(opts, Keyword.get(opts, :history))
+  end
+
+  defp orders_window(opts, true) do
+    with :ok <- window_times(opts, [:since, :until]), do: ordered_window(opts, :since, :until)
+  end
+
+  # The open-orders endpoint names no time parameters (`order-open.md`), so a window asked of
+  # it has nowhere to go: refused, not answered with every open order as though the window
+  # had been applied.
+  defp orders_window(opts, _open) do
+    Enum.find_value([:since, :until], :ok, fn key ->
+      if Keyword.get(opts, key) == nil, do: nil, else: {:error, {:unsupported_option, key}}
+    end)
+  end
+
+  # A window whose lower bound is after its upper one is a caller's mistake; sent, it is
+  # answered with nothing, which reads as "no orders / no activity in that period".
+  defp ordered_window(opts, from_key, to_key) do
+    case {Keyword.get(opts, from_key), Keyword.get(opts, to_key)} do
+      {%DateTime{} = from, %DateTime{} = to} ->
+        if DateTime.compare(from, to) == :gt,
+          do: {:error, {:invalid_option, from_key, from}},
+          else: :ok
+
+      _open_ended ->
+        :ok
     end
   end
 
@@ -2524,7 +2590,8 @@ defmodule DpExchange.Webull.Rest do
   def get_order_book(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
-    with {:ok, path} <- book_path(category),
+    with :ok <- refuse_option(opts, :limit),
+         {:ok, path} <- book_path(category),
          :ok <- book_depth(category, Keyword.get(opts, :depth)),
          :ok <- validate_hours_flags(opts),
          :ok <- validate_symbol(symbol) do
@@ -3040,7 +3107,8 @@ defmodule DpExchange.Webull.Rest do
   def get_trades(symbol, credentials, opts) do
     category = Config.opt(opts, :category, "US_STOCK")
 
-    with {:ok, path} <- tick_path(category),
+    with :ok <- refuse_option(opts, :since),
+         {:ok, path} <- tick_path(category),
          :ok <- limit_within_max(Keyword.get(opts, :limit), tick_max(category)),
          :ok <- validate_sessions(opts),
          :ok <- validate_symbol(symbol) do
@@ -3592,7 +3660,9 @@ defmodule DpExchange.Webull.Rest do
   # both would leave the venue to choose, and which it chose is not something the caller
   # could read back from the response.
   defp oauth_grant(opts) do
-    case {Keyword.get(opts, :code), Keyword.get(opts, :refresh_token)} do
+    # An empty (or blank) grant is no grant: it used to be sent, and the venue's refusal of an
+    # empty `code` says nothing a caller could act on. It is "neither", refused by name.
+    case {nonblank(Keyword.get(opts, :code)), nonblank(Keyword.get(opts, :refresh_token))} do
       {code, nil} when is_binary(code) ->
         {:ok, %{"grant_type" => "authorization_code", "code" => code}}
 
@@ -3606,6 +3676,9 @@ defmodule DpExchange.Webull.Rest do
         {:error, :code_or_refresh_token_required}
     end
   end
+
+  defp nonblank(text) when is_binary(text), do: if(String.trim(text) == "", do: nil, else: text)
+  defp nonblank(other), do: other
 
   # `:oauth_url` is a consumer-overridable base URL, and the form it receives carries the
   # `client_secret` plus the authorization code or refresh token in the body. An `http://`
@@ -3710,20 +3783,23 @@ defmodule DpExchange.Webull.Rest do
          # A different watchlist than the one asked for is not this one's membership.
          :ok <- if(id == watchlist_id, do: :ok, else: {:error, :not_in_response}),
          {:ok, instruments} <- list_value(row, ["instruments"]) do
-      symbols =
-        instruments
-        |> Enum.map(&value(&1, ["symbol"]))
-        # `Core.Types.Watchlist.symbols` is `[String.t()]`: only text names an instrument.
-        |> Enum.filter(&is_binary/1)
+      symbols = Enum.map(instruments, &value(&1, ["symbol"]))
 
-      {:ok,
-       %Watchlist{
-         id: id,
-         name: nil,
-         symbols: symbols,
-         venue_time: nil,
-         provider: :webull
-       }}
+      # `Core.Types.Watchlist.symbols` is `[String.t()]`: only text names an instrument. A
+      # member that names none refuses the read; dropping it published a membership with a
+      # hole in it as though it were the whole list.
+      if Enum.all?(symbols, &is_binary/1) do
+        {:ok,
+         %Watchlist{
+           id: id,
+           name: nil,
+           symbols: symbols,
+           venue_time: nil,
+           provider: :webull
+         }}
+      else
+        {:error, :unexpected_response_shape}
+      end
     end
   end
 
@@ -4849,33 +4925,39 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # Every `data:` line is one JSON event (`news-summary.md:195`'s own example frames); a
-  # line the venue did not send as valid JSON is dropped rather than refusing the whole
-  # stream, the same tolerance `HttpClient` gives a body that decoded but was not JSON —
-  # this stream is a live LLM's output and a single malformed frame in the middle of it is
-  # not evidence the rest is unreadable.
+  # Every `data:` line is one JSON event (`news-summary.md:195`'s own example frames). A line
+  # that is not valid JSON REFUSES the read: the spec documents no frame to skip, and a dropped
+  # `text` chunk is a summary with words missing, or a dropped `meta` frame an item with no id.
+  # Lines that are not `data:` lines (`event:` names, blanks) are SSE framing, not events.
   defp decode_sse(body) when is_binary(body) do
-    events =
+    decoded =
       body
       |> String.split("\n")
       |> Enum.map(&String.trim/1)
       |> Enum.filter(&String.starts_with?(&1, "data:"))
       |> Enum.map(&(&1 |> String.trim_leading("data:") |> String.trim()))
       |> Enum.reject(&(&1 == ""))
-      |> Enum.flat_map(fn line ->
-        case Jason.decode(line) do
-          {:ok, event} -> [event]
-          {:error, _reason} -> []
-        end
-      end)
+      |> Enum.map(&Jason.decode/1)
 
-    case events do
-      [] -> {:error, :unexpected_response_shape}
-      _some -> {:ok, events}
+    events = for {:ok, event} <- decoded, do: event
+
+    cond do
+      events == [] -> {:error, :unexpected_response_shape}
+      length(events) != length(decoded) -> {:error, :unexpected_response_shape}
+      Enum.any?(events, &unreadable_text_chunk?/1) -> {:error, :unexpected_response_shape}
+      true -> {:ok, events}
     end
   end
 
   defp decode_sse(_other), do: {:error, :unexpected_response_shape}
+
+  # A `text` chunk is "Markdown text" (`news-summary.md:195`); one whose `message` is not text
+  # would contribute nothing to the summary and leave a gap in it.
+  defp unreadable_text_chunk?(%{"type" => "text", "message" => message}),
+    do: not is_binary(message)
+
+  defp unreadable_text_chunk?(%{"type" => "text"}), do: true
+  defp unreadable_text_chunk?(_other_event), do: false
 
   defp news_item_from_sse(events, asked_for) do
     case sse_conversation_id(events) do
@@ -5021,17 +5103,26 @@ defmodule DpExchange.Webull.Rest do
 
           with {:ok, screener_rows} <-
                  screener_rows(name, path, base_params, credentials, opts) do
-            {:ok,
-             screener_rows
-             |> Enum.with_index(1)
-             |> Enum.map(&to_screener_result(&1, name))
-             |> Enum.reject(&is_nil/1)}
+            screener_results(screener_rows, name)
           end
         end
 
       :error ->
         {:error, {:unknown_screener, name}}
     end
+  end
+
+  # A row that names nothing refuses the read: dropping it published a ranking with a hole
+  # in it (and, positions being the rank, the hole is a rank).
+  defp screener_results(screener_rows, name) do
+    results =
+      screener_rows
+      |> Enum.with_index(1)
+      |> Enum.map(&to_screener_result(&1, name))
+
+    if Enum.any?(results, &is_nil/1),
+      do: {:error, :unexpected_response_shape},
+      else: {:ok, results}
   end
 
   @doc """
@@ -5098,9 +5189,7 @@ defmodule DpExchange.Webull.Rest do
 
   defp screener_defaults(params, _name), do: params
 
-  # Dropped AFTER `Enum.with_index/2`, so a survivor keeps the position the venue returned it
-  # in. Closing the gap would re-rank the list, which is the same thing the `rank` comment
-  # below rules out for a different reason.
+  # `nil` for a row that names nothing, which the caller turns into a refusal of the read.
   defp to_screener_result({row, rank}, name) do
     # Only text names a row. `ScreenerResult.symbol` is `String.t()`, and a number or an object
     # under `symbol` was published as one; it is the same unnamed row as a missing key.
@@ -5882,13 +5971,20 @@ defmodule DpExchange.Webull.Rest do
 
       _not_an_epoch ->
         case DateTime.from_iso8601(value) do
-          {:ok, datetime, _offset} -> {:ok, datetime}
+          # The epoch rule applies to the written form too: `0001-01-01T00:00:00Z` and
+          # `1970-01-01T00:00:00Z` are the same "unknown" sentinel as an epoch of 0 and were
+          # accepted as real times.
+          {:ok, datetime, _offset} -> iso_time(datetime)
           _error -> {:error, {:unparseable_venue_timestamp, value}}
         end
     end
   end
 
   defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+
+  defp iso_time(datetime) do
+    if DateTime.to_unix(datetime) > 0, do: {:ok, datetime}, else: {:error, :invalid_unix_time}
+  end
 
   # Webull sends milliseconds on some endpoints and seconds on others. Ten digits is
   # seconds until roughly the year 2286; thirteen is milliseconds. Guessing the wrong one

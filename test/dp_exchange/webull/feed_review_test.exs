@@ -186,7 +186,7 @@ defmodule DpExchange.Webull.FeedReviewTest do
 
       assert :ok = Feed.unsubscribe(feed, ["BBB-USD"], subscribe_opts(limiter, plug: plug))
       assert_receive {:hit, @unsubscribe_path, ["BBBUSD"], _first_unsubscribe}, 5_000
-      refute_receive {:hit, @unsubscribe_path, _symbols, _task}, 100
+      refute_receive {:hit, @unsubscribe_path, _symbols, _task}, 500
 
       # The older, larger subscribe is the one the venue now finishes last.
       send(held, :release)
@@ -224,7 +224,7 @@ defmodule DpExchange.Webull.FeedReviewTest do
       assert_receive {:hit, @subscribe_path, ["AAAUSD"]}, 5_000
 
       wait_until(fn -> :sys.get_state(feed).reconciling == %{} end)
-      refute_receive {:hit, @unsubscribe_path, _symbols}, 200
+      refute_receive {:hit, @unsubscribe_path, _symbols}, 500
     end
   end
 
@@ -301,7 +301,7 @@ defmodule DpExchange.Webull.FeedReviewTest do
       send(feed, {:caller_due, from})
 
       assert_receive {^ref, {:error, {:connack_timeout, _ms}}}, 5_000
-      refute_receive {^other_ref, _reply}, 50
+      refute_receive {^other_ref, _reply}, 500
       assert [{^other, []}] = :sys.get_state(feed).shards[3].reply_to
 
       send(feed, {:caller_due, other})
@@ -346,7 +346,7 @@ defmodule DpExchange.Webull.FeedReviewTest do
       send(feed, {:caller_due, {self(), ref}})
       _settled = Feed.coverage(feed)
 
-      refute_receive {^ref, _reply}, 50
+      refute_receive {^ref, _reply}, 500
     end
 
     test "a call on a stalled reconcile is answered at the deadline the call armed",

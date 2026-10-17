@@ -467,43 +467,34 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     end
   end
 
-  describe "a row that cannot supply its own identity is dropped, never given an empty one" do
+  describe "a row that cannot supply its own identity refuses the read, never given an empty one" do
     # `|| ""` satisfied the contract's non-nil requirement while saying nothing. It is worse
     # than a `nil`: a `nil` is detectable and an empty string is a value, so a consumer
-    # keying coverage by symbol gets a live entry named "". `dp_exchange_robinhood` states
-    # the rule this follows — "a row missing `symbol` entirely is dropped rather than
-    # published under a fabricated one".
+    # keying coverage by symbol gets a live entry named "". Dropping the row instead left a
+    # hole in the ranking, so the read is refused as a whole.
 
-    test "a screener row with no symbol is dropped" do
+    test "a screener row with no symbol refuses the ranking" do
       rows = [%{"symbol" => "AAPL"}, %{"close" => "1"}, %{"symbol" => "MSFT"}]
 
-      assert {:ok, results} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_screener("gainers_losers", @credentials,
                  plug: responding(rows),
                  retry_attempts: 0
                )
-
-      assert Enum.map(results, & &1.symbol) == ["AAPL", "MSFT"]
-      refute Enum.any?(results, &(&1.symbol == ""))
     end
 
-    test "a screener row whose symbol is not text is dropped, not published as one" do
+    test "a screener row whose symbol is not text refuses the ranking" do
       rows = [%{"symbol" => 123}, %{"symbol" => %{"x" => 1}}, %{"symbol" => "MSFT"}]
 
-      assert {:ok, [only]} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_screener("gainers_losers", @credentials,
                  plug: responding(rows),
                  retry_attempts: 0
                )
-
-      assert only.symbol == "MSFT"
-      assert only.rank == 3
     end
 
-    test "dropping a screener row does not re-rank the ones that survive" do
-      # `rank` is the venue's own returned order — "inventing one from a metric would
-      # re-rank the list", and so would closing the gap left by a dropped row.
-      rows = [%{"symbol" => "AAPL"}, %{"close" => "1"}, %{"symbol" => "MSFT"}]
+    test "a fully named ranking keeps the venue's own positions as ranks" do
+      rows = [%{"symbol" => "AAPL"}, %{"symbol" => "MSFT"}]
 
       assert {:ok, [first, second]} =
                Rest.get_screener("gainers_losers", @credentials,
@@ -511,8 +502,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                  retry_attempts: 0
                )
 
-      assert first.rank == 1
-      assert second.rank == 3, "the survivor keeps the position the venue returned it in"
+      assert {first.rank, second.rank} == {1, 2}
     end
 
     # This news endpoint answers Server-Sent Events, one generated reply per call

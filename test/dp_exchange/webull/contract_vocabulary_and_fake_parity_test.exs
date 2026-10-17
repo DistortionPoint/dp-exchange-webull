@@ -354,7 +354,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                )
     end
 
-    test "membership keeps only text symbols" do
+    test "a member that is not a text symbol refuses the membership read" do
       body = [
         %{
           "watchlist_id" => "w1",
@@ -362,7 +362,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
         }
       ]
 
-      assert {:ok, %Types.Watchlist{symbols: ["AAPL"]}} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_watchlist("w1", @credentials, plug: responding(body), retry_attempts: 0)
     end
 

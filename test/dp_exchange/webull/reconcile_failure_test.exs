@@ -137,7 +137,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       assert state.shards[0].session_id == "new-session", "the healthy shard must survive"
       assert state.shards[0].socket == socket
       assert Process.alive?(socket)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 100
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 500
     end
 
     test ":oversubscribed measured on an old session does not cap the new one" do
@@ -174,7 +174,7 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       send(feed, {:reconcile_done, {:link_up, 0}, {:error, :boom}})
       _settled = Feed.coverage(feed)
 
-      refute_receive {^ref, _reply}, 100
+      refute_receive {^ref, _reply}, 500
       assert [{{^test_pid, ^ref}, []}] = :sys.get_state(feed).shards[0].reply_to
     end
   end

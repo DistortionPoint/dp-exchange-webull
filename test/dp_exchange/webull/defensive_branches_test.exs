@@ -530,10 +530,11 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       ]
     end
 
-    test "a catalogue row whose symbol is not a string is skipped" do
+    test "a catalogue row whose symbol is not a string refuses the listing" do
       body = [%{"symbol" => "BTCUSD"}, %{"symbol" => %{"a" => nil}}, %{"symbol" => [1]}]
 
-      assert {:ok, ["BTC-USD"]} = Rest.get_symbols(@credentials, wrong_type_opts(body))
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_symbols(@credentials, wrong_type_opts(body))
     end
 
     test "an order whose symbol is not a string carries nil; a position refuses it" do

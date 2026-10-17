@@ -580,7 +580,7 @@ defmodule DpExchange.Webull.AccountsTest do
       end
     end
 
-    test "an order history window must be DateTimes, and an open listing ignores it" do
+    test "an order history window must be DateTimes, and an open listing refuses it" do
       exploding = fn _conn -> raise "must not send an unreadable time bound" end
 
       for {key, bad} <- [since: 1_767_225_600_000, until: ~N[2026-01-02 00:00:00]] do
@@ -593,14 +593,39 @@ defmodule DpExchange.Webull.AccountsTest do
                  Fake.get_orders(@credentials, [{key, bad}, history: true, account_id: @account])
       end
 
-      # The open-orders page names no time parameters, so nothing is sent or checked there.
-      assert {:ok, []} =
-               Rest.get_orders(@credentials,
-                 since: 1_767_225_600_000,
-                 plug: responding([]),
-                 account_id: @account,
-                 retry_attempts: 0
-               )
+      # The open-orders page names no time parameters, so a window asked of it is refused
+      # (nothing is sent) rather than answered with every open order as though it applied.
+      for key <- [:since, :until] do
+        opts = [{key, ~U[2026-01-01 00:00:00.000Z]}, account_id: @account]
+
+        assert {:error, {:unsupported_option, ^key}} =
+                 Rest.get_orders(@credentials, [plug: exploding, retry_attempts: 0] ++ opts)
+
+        assert {:error, {:unsupported_option, ^key}} = Fake.get_orders(@credentials, opts)
+      end
+    end
+
+    test "an order history window whose since is after its until is refused" do
+      exploding = fn _conn -> raise "must not send an inverted window" end
+      since = ~U[2026-02-01 00:00:00.000Z]
+      until = ~U[2026-01-01 00:00:00.000Z]
+      opts = [history: true, since: since, until: until, account_id: @account]
+
+      assert {:error, {:invalid_option, :since, ^since}} =
+               Rest.get_orders(@credentials, [plug: exploding, retry_attempts: 0] ++ opts)
+
+      assert {:error, {:invalid_option, :since, ^since}} = Fake.get_orders(@credentials, opts)
+    end
+
+    test "a cash-activity range whose start is after its end is refused" do
+      exploding = fn _conn -> raise "must not send an inverted activity range" end
+      start = ~U[2026-03-01 00:00:00.000Z]
+      opts = [start: start, end: ~U[2026-02-01 00:00:00.000Z], account_id: @account]
+
+      assert {:error, {:invalid_option, :start, ^start}} =
+               Rest.get_transfers(@credentials, [plug: exploding, retry_attempts: 0] ++ opts)
+
+      assert {:error, {:invalid_option, :start, ^start}} = Fake.get_transfers(@credentials, opts)
     end
 
     test "a cross-year range is refused before the request" do

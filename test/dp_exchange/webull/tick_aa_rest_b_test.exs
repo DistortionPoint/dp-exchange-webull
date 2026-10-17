@@ -122,19 +122,18 @@ defmodule DpExchange.Webull.TickAaRestBTest do
                )
     end
 
-    test "an instrument entry that is not an object is skipped when reading a watchlist" do
+    # Tick AJ: skipping the entry published a watchlist with a member missing from it.
+    test "an instrument entry that is not an object refuses the watchlist read" do
       body = %{
         "watchlist_id" => "wl-1",
         "instruments" => ["junk", %{"symbol" => "AAPL"}]
       }
 
-      assert {:ok, watchlist} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_watchlist("wl-1", @credentials,
                  plug: responding(body),
                  retry_attempts: 0
                )
-
-      assert watchlist.symbols == ["AAPL"]
     end
   end
 
@@ -159,8 +158,31 @@ defmodule DpExchange.Webull.TickAaRestBTest do
     @meta ~s(data:{"type":"meta","args":{"sessionId":"s-9"}})
     @text ~s(data:{"type":"text","message":"ok"})
 
-    test "a frame that is not JSON is dropped without refusing the rest of the stream" do
+    test "a frame that is not JSON refuses the stream rather than leaving a gap in it" do
       stream = Enum.join(["event:message", "data:{not json", "", @meta, "", @text, ""], "\n")
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: event_stream(stream),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a text chunk whose message is not text refuses the stream" do
+      bad = ~s(data:{"type":"text","message":{"a":1}})
+      stream = Enum.join([@meta, "", @text, "", bad, ""], "\n")
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: event_stream(stream),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a clean stream still reads" do
+      stream = Enum.join(["event:message", @meta, "", @text, ""], "\n")
 
       assert {:ok, [item]} =
                Rest.get_news(@credentials,

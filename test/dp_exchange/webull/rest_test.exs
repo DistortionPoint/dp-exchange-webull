@@ -676,11 +676,13 @@ defmodule DpExchange.Webull.RestTest do
                Rest.get_symbols(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
-    test "rows with no symbol are skipped rather than becoming nil entries" do
-      body = [%{"symbol" => "BTCUSD"}, %{"instrument_id" => "123"}]
+    test "a row with no symbol refuses the listing rather than leaving a hole in it" do
+      for bad <- [%{"instrument_id" => "123"}, "BTCUSD", nil] do
+        body = [%{"symbol" => "BTCUSD"}, bad]
 
-      assert {:ok, ["BTC-USD"]} =
-               Rest.get_symbols(@credentials, plug: responding(body), retry_attempts: 0)
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_symbols(@credentials, plug: responding(body), retry_attempts: 0)
+      end
     end
 
     test "a stock ticker is listed as the venue names it, not split at a trailing BTC" do
@@ -726,25 +728,30 @@ defmodule DpExchange.Webull.RestTest do
                Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
-    test "a row whose symbol does not end in its own currency is dropped, not guessed" do
-      body = %{
-        "data" => [
-          %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"},
-          # `currency` here does not suffix `symbol` at all — nothing honest to strip.
-          %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "EUR"},
-          # Degenerate: `symbol == currency` would leave an empty `base`.
-          %{"symbol" => "USD", "status" => "OC", "currency" => "USD"}
-        ]
-      }
+    test "a row whose symbol does not end in its own currency refuses the listing" do
+      good = %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "USD"}
 
-      assert {:ok, [%Instrument{symbol: "BTC-USD"}]} =
-               Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
+      # Each unreadable row alone refuses the whole listing: skipping it left a hole, so an
+      # instrument the venue lists read as unlisted.
+      for bad <- [
+            # `currency` here does not suffix `symbol` at all — nothing honest to strip.
+            %{"symbol" => "BTCUSD", "status" => "OC", "currency" => "EUR"},
+            # Degenerate: `symbol == currency` would leave an empty `base`.
+            %{"symbol" => "USD", "status" => "OC", "currency" => "USD"},
+            "BTCUSD"
+          ] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.list_instruments(@credentials,
+                   plug: responding(%{"data" => [good, bad]}),
+                   retry_attempts: 0
+                 )
+      end
     end
 
-    test "a row with no currency at all is dropped rather than left with a nil quote" do
+    test "a row with no currency at all refuses the listing rather than a nil quote" do
       body = %{"data" => [%{"symbol" => "BTCUSD", "status" => "OC"}]}
 
-      assert {:ok, []} =
+      assert {:error, :unexpected_response_shape} =
                Rest.list_instruments(@credentials, plug: responding(body), retry_attempts: 0)
     end
 
