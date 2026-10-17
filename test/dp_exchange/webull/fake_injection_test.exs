@@ -37,6 +37,32 @@ defmodule DpExchange.Webull.FakeInjectionTest do
   # Every function with a real success path that does NOT take a symbol as its
   # meaningfully-injectable argument. One call each, built lazily so nothing runs before
   # a test sets its own override.
+  # Orders the order builder accepts. The facade and the Fake check the positional request
+  # BEFORE the options and before an injected outcome is consulted, so an injection test needs
+  # a request that gets that far.
+  defp equity_request do
+    %{
+      instrument_type: :equity,
+      symbol: "AAPL",
+      side: :buy,
+      quantity: Decimal.new("10"),
+      price: Decimal.new("190"),
+      order_type: :limit,
+      time_in_force: :day
+    }
+  end
+
+  defp crypto_request do
+    %{
+      symbol: "BTC-USD",
+      side: :buy,
+      quantity: Decimal.new("0.5"),
+      price: Decimal.new("40000"),
+      order_type: :limit,
+      time_in_force: :gtc
+    }
+  end
+
   defp whole_call_calls do
     %{
       "get_symbols/1" => fn -> Fake.get_symbols(credentials: @credentials) end,
@@ -47,7 +73,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
       "get_transfers/2" => fn -> Fake.get_transfers(@credentials, account_id: "1") end,
       "get_transactions/2" => fn -> Fake.get_transactions(@credentials, account_id: "1") end,
       "preview_order/3" => fn ->
-        Fake.preview_order(@credentials, %{instrument_type: :equity}, account_id: "1")
+        Fake.preview_order(@credentials, equity_request(), account_id: "1")
       end,
       "replace_order/4" => fn ->
         Fake.replace_order(@credentials, "id", %{price: 1}, account_id: "1")
@@ -60,9 +86,9 @@ defmodule DpExchange.Webull.FakeInjectionTest do
       "delete_watchlist/2" => fn -> Fake.delete_watchlist("wl-1", []) end,
       "get_corporate_events/1" => fn -> Fake.get_corporate_events(symbol: "AAPL") end,
       "get_news/1" => fn -> Fake.get_news(symbols: ["AAPL"]) end,
-      "get_screener/2" => fn -> Fake.get_screener("top-actives", []) end,
+      "get_screener/2" => fn -> Fake.get_screener("top_actives", []) end,
       "place_order/3" => fn ->
-        Fake.place_order(@credentials, %{symbol: "BTC-USD", side: :buy}, account_id: "1")
+        Fake.place_order(@credentials, crypto_request(), account_id: "1")
       end,
       "cancel_order/3" => fn ->
         Fake.cancel_order(@credentials, "5f1e9c0a7b2d4e68a3c4d5e6f7081920", account_id: "1")
@@ -98,7 +124,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
       "quantization/2" => fn symbol -> Fake.quantization(symbol, []) end,
       "get_option_chain/2" => fn symbol -> Fake.get_option_chain(symbol, []) end,
       "get_option_expirations/2" => fn symbol -> Fake.get_option_expirations(symbol, []) end,
-      "get_financials/3" => fn symbol -> Fake.get_financials(symbol, :income_statement, []) end,
+      "get_financials/3" => fn symbol -> Fake.get_financials(symbol, :income, []) end,
       "get_filings/2" => fn symbol -> Fake.get_filings(symbol, []) end
     }
   end

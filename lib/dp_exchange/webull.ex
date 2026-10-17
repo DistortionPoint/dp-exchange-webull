@@ -72,6 +72,18 @@ defmodule DpExchange.Webull do
   `1w`/`1M`/`1y` per-call on a crypto or event-contract category rather than degrading to
   the nearest width it does serve.
 
+  ## Options are checked, not ignored
+
+  A function given an option it does not read answers `{:error, {:unknown_option, key}}`, and
+  a non-keyword `opts` is `{:error, {:invalid_options, opts}}`: a misspelt `limt:` must not
+  return an answer to a question the caller did not ask. The check runs before anything is
+  sent and before the facade adds its own `:limiter`, after the positional arguments (symbol,
+  order id, watchlist id, request) and before the credentials. The keys each function reads
+  are written once, in `DpExchange.Webull.Options`; `coverage/1`, `wanted/1`,
+  `coverage_by_kind/1`, `streaming?/1` and `live?/1`, which have no error channel, raise
+  `ArgumentError` instead. A function that answers `{:error, :not_supported}` does so whatever
+  it is given.
+
   ## Supervision
 
       children = [{DpExchange.Webull, []}]
@@ -82,7 +94,7 @@ defmodule DpExchange.Webull do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, Venue}
-  alias DpExchange.Webull.{Environment, Feed, Rest, SymbolFormat}
+  alias DpExchange.Webull.{Environment, Feed, Options, Rest, SymbolFormat}
 
   # Not implemented in this release. None of them is about authentication — the host
   # supplies credentials and these simply have not been ported yet, which is a different
@@ -579,12 +591,17 @@ defmodule DpExchange.Webull do
   @doc """
   The last price for one symbol, from the venue's signed snapshot endpoint.
 
-  Reads `opts[:credentials]` (required: every Webull call is signed), `opts[:category]` and
-  `opts[:environment]`. See `c:DpExchange.Core.Venue.get_price/2`.
+  Reads `opts[:credentials]` (required: every Webull call is signed), `opts[:category]`,
+  `opts[:extended_hours]`, `opts[:overnight]` and `opts[:environment]`. Any other key is
+  `{:error, {:unknown_option, key}}`, see `DpExchange.Webull.Options`. See
+  `c:DpExchange.Core.Venue.get_price/2`.
   """
   @impl true
-  def get_price(symbol, opts \\ []),
-    do: Rest.get_price(symbol, credentials(opts), with_limiter(opts))
+  def get_price(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_price, symbol, opts) do
+      Rest.get_price(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Last prices for many crypto symbols at once, 20 per request: one result per symbol asked
@@ -601,30 +618,44 @@ defmodule DpExchange.Webull do
                {:ok, DpExchange.Core.Types.Quote.t()} | {:error, term()} | {:refused, term()}
            }}
           | {:error, term()}
-  def get_prices(symbols, opts \\ []),
-    do: Rest.get_prices(symbols, credentials(opts), with_limiter(opts))
+  def get_prices(symbols, opts \\ []) do
+    with :ok <- Rest.validate_symbols(symbols),
+         :ok <- Options.check(:get_prices, opts) do
+      Rest.get_prices(symbols, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The best bid and ask for one symbol, from the signed REST API.
 
-  Reads `opts[:credentials]` (required), `opts[:category]` and `opts[:environment]`.
-  See `c:DpExchange.Core.Venue.get_top_of_book/2`.
+  Reads `opts[:credentials]` (required), `opts[:category]`, `opts[:extended_hours]`,
+  `opts[:overnight]` and `opts[:environment]`; any other key is
+  `{:error, {:unknown_option, key}}`. See `c:DpExchange.Core.Venue.get_top_of_book/2`.
   """
   @impl true
-  def get_top_of_book(symbol, opts \\ []),
-    do: Rest.get_top_of_book(symbol, credentials(opts), with_limiter(opts))
+  def get_top_of_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_top_of_book, symbol, opts) do
+      Rest.get_top_of_book(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Candles for one symbol at one of the eleven declared widths.
 
   A width the symbol's category does not serve (`1w`, `1M`, `1y` on crypto and event
-  contracts) is refused, not rounded to a neighbour. Reads `opts[:credentials]` (required)
-  and `opts[:category]`. See `c:DpExchange.Core.Venue.get_historical_prices/4`.
+  contracts) is refused, not rounded to a neighbour. Reads `opts[:credentials]` (required),
+  `opts[:category]`, `opts[:limit]`, `opts[:include_partial]` and `opts[:sessions]`; any other
+  key is `{:error, {:unknown_option, key}}`. See
+  `c:DpExchange.Core.Venue.get_historical_prices/4`.
   """
   @impl true
-  def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []),
-    do:
+  def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_range(range),
+         :ok <- Options.check(:get_historical_prices, opts) do
       Rest.get_historical_prices(symbol, timeframe, range, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Whether bars of `timeframe`, on the equity/ETF tape, are forward-adjusted.
@@ -645,11 +676,15 @@ defmodule DpExchange.Webull do
   @doc """
   The tradable symbols, read from the venue's paginated instrument catalogue.
 
-  Reads `opts[:credentials]` (required) and `opts[:category]`. See
-  `c:DpExchange.Core.Venue.get_symbols/1`.
+  Reads `opts[:credentials]` (required) and `opts[:category]`; any other key is
+  `{:error, {:unknown_option, key}}`. See `c:DpExchange.Core.Venue.get_symbols/1`.
   """
   @impl true
-  def get_symbols(opts \\ []), do: Rest.get_symbols(credentials(opts), with_limiter(opts))
+  def get_symbols(opts \\ []) do
+    with :ok <- Options.check(:get_symbols, opts) do
+      Rest.get_symbols(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @impl true
   @doc """
@@ -657,39 +692,65 @@ defmodule DpExchange.Webull do
 
   See `DpExchange.Webull.Rest.get_order_book/3` — including why a crypto symbol is refused
   here, and what per-participant attribution this contract has no place for.
+
+  Reads `opts[:category]`, `opts[:depth]`, `opts[:overnight]` and `opts[:extended_hours]`;
+  `opts[:limit]` is `{:error, {:unsupported_option, :limit}}` (levels per side are `:depth`)
+  and any other key is `{:error, {:unknown_option, key}}`.
   """
-  def get_order_book(symbol, opts \\ []),
-    do: Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
+  def get_order_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_order_book, symbol, opts) do
+      Rest.get_order_book(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Tick-by-tick public trades for an equity, ETF, option or future — the tape.
 
   See `DpExchange.Webull.Rest.get_trades/3`, including why every trade's `side` is `nil`
   (the venue's `B`/`S`/`G`/`L`/`N` codes are defined nowhere it publishes).
+
+  Reads `opts[:category]`, `opts[:limit]` and `opts[:sessions]`; `opts[:since]` is
+  `{:error, {:unsupported_option, :since}}` and any other key is
+  `{:error, {:unknown_option, key}}`.
   """
   @impl true
-  def get_trades(symbol, opts \\ []),
-    do: Rest.get_trades(symbol, credentials(opts), with_limiter(opts))
+  def get_trades(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_trades, symbol, opts) do
+      Rest.get_trades(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Traded volume split by price and by side, for an equity.
 
   See `DpExchange.Webull.Rest.get_volume_profile/4` — including the five widths this
   endpoint serves and why `real_time_required` is sent as `false`.
+
+  Reads `opts[:category]`, `opts[:session]` and `opts[:count]`; any other key is
+  `{:error, {:unknown_option, key}}`.
   """
   @impl true
-  def get_volume_profile(symbol, timeframe, opts \\ []),
-    do: Rest.get_volume_profile(symbol, timeframe, credentials(opts), with_limiter(opts))
+  def get_volume_profile(symbol, timeframe, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_volume_profile, symbol, opts) do
+      Rest.get_volume_profile(symbol, timeframe, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The auction order imbalance. `opts[:auction]` is required — `:opening` or `:closing`.
 
   See `DpExchange.Webull.Rest.get_auction_imbalance/3`, including why the venue's own time
   matters as much as the numbers outside an auction window.
+
+  Reads `opts[:auction]` and `opts[:history]`; any other key is
+  `{:error, {:unknown_option, key}}`.
   """
   @impl true
-  def get_auction_imbalance(symbol, opts \\ []),
-    do: Rest.get_auction_imbalance(symbol, credentials(opts), with_limiter(opts))
+  def get_auction_imbalance(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_auction_imbalance, symbol, opts) do
+      Rest.get_auction_imbalance(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
@@ -711,10 +772,15 @@ defmodule DpExchange.Webull do
 
   See `DpExchange.Webull.Rest.list_instruments/2` for the full base/quote/status
   derivation and why each choice is the honest one rather than the flattering one.
+
+  Reads `opts[:category]`; any other key is `{:error, {:unknown_option, key}}`.
   """
   @impl true
-  def list_instruments(opts \\ []),
-    do: Rest.list_instruments(credentials(opts), with_limiter(opts))
+  def list_instruments(opts \\ []) do
+    with :ok <- Options.check(:list_instruments, opts) do
+      Rest.list_instruments(credentials(opts), with_limiter(opts))
+    end
+  end
 
   # --- account and trading -----------------------------------------------
 
@@ -725,7 +791,12 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.get_balances/2` — in particular why `available_balance` is
   `nil` on this venue.
   """
-  def get_balances(credentials, opts), do: Rest.get_balances(credentials, with_limiter(opts))
+  def get_balances(credentials, opts) do
+    with :ok <- Options.check(:get_balances, opts) do
+      Rest.get_balances(credentials, with_limiter(opts))
+    end
+  end
+
   @impl true
   @doc """
   Every account this credential can reach, as the venue records them.
@@ -733,7 +804,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.get_accounts/2`, including what `account_class` reveals about
   this venue's breadth.
   """
-  def get_accounts(credentials, opts), do: Rest.get_accounts(credentials, with_limiter(opts))
+  def get_accounts(credentials, opts) do
+    with :ok <- Options.check(:get_accounts, opts) do
+      Rest.get_accounts(credentials, with_limiter(opts))
+    end
+  end
 
   @doc """
   Webull's crypto fee — see `DpExchange.Webull.Rest.get_fees/2` for the source and why
@@ -741,7 +816,12 @@ defmodule DpExchange.Webull do
   selects among.
   """
   @impl true
-  def get_fees(credentials, opts), do: Rest.get_fees(credentials, with_limiter(opts))
+  def get_fees(credentials, opts) do
+    with :ok <- Options.check(:get_fees, opts) do
+      Rest.get_fees(credentials, with_limiter(opts))
+    end
+  end
+
   @impl true
   @doc """
   Money into and out of one account. Requires `opts[:account_id]`.
@@ -750,7 +830,11 @@ defmodule DpExchange.Webull do
   activity types are excluded unless asked for, and what the venue's 7-day default means
   for an empty answer.
   """
-  def get_transfers(credentials, opts), do: Rest.get_transfers(credentials, with_limiter(opts))
+  def get_transfers(credentials, opts) do
+    with :ok <- Options.check(:get_transfers, opts) do
+      Rest.get_transfers(credentials, with_limiter(opts))
+    end
+  end
 
   @doc """
   Places one order. **This moves funds.**
@@ -760,8 +844,12 @@ defmodule DpExchange.Webull do
   `c:DpExchange.Core.Venue.place_order/3`.
   """
   @impl true
-  def place_order(credentials, request, opts \\ []),
-    do: Rest.place_order(credentials, request, with_limiter(opts))
+  def place_order(credentials, request, opts \\ []) do
+    with :ok <- Rest.validate_order_request(request),
+         :ok <- Options.check(:place_order, opts) do
+      Rest.place_order(credentials, request, with_limiter(opts))
+    end
+  end
 
   @doc """
   Places several orders in one request. **This moves funds.**
@@ -771,8 +859,12 @@ defmodule DpExchange.Webull do
   is not available to every client.
   """
   @impl true
-  def place_orders(credentials, requests, opts),
-    do: Rest.place_orders(credentials, requests, with_limiter(opts))
+  def place_orders(credentials, requests, opts) do
+    with :ok <- Rest.validate_batch_orders(requests),
+         :ok <- Options.check(:place_orders, opts) do
+      Rest.place_orders(credentials, requests, with_limiter(opts))
+    end
+  end
 
   @impl true
   @doc """
@@ -781,8 +873,12 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.preview_order/3` — including why crypto is refused, and what
   `estimated_cost` means on a futures order.
   """
-  def preview_order(credentials, request, opts \\ []),
-    do: Rest.preview_order(credentials, request, with_limiter(opts))
+  def preview_order(credentials, request, opts \\ []) do
+    with :ok <- Rest.validate_preview_request(request),
+         :ok <- Options.check(:preview_order, opts) do
+      Rest.preview_order(credentials, request, with_limiter(opts))
+    end
+  end
 
   @impl true
   @doc """
@@ -791,8 +887,12 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.replace_order/4` — including which fields each order type
   allows, and why the order is read back rather than reported from the request.
   """
-  def replace_order(credentials, client_order_id, changes, opts \\ []),
-    do: Rest.replace_order(credentials, client_order_id, changes, with_limiter(opts))
+  def replace_order(credentials, client_order_id, changes, opts \\ []) do
+    with :ok <- Rest.validate_replace_arguments(client_order_id, changes),
+         :ok <- Options.check(:replace_order, opts) do
+      Rest.replace_order(credentials, client_order_id, changes, with_limiter(opts))
+    end
+  end
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. Use `preview_order/3` and
@@ -821,8 +921,11 @@ defmodule DpExchange.Webull do
   Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.cancel_order/3`.
   """
   @impl true
-  def cancel_order(credentials, client_order_id, opts \\ []),
-    do: Rest.cancel_order(credentials, client_order_id, with_limiter(opts))
+  def cancel_order(credentials, client_order_id, opts \\ []) do
+    with :ok <- Options.check_order_id(:cancel_order, client_order_id, opts) do
+      Rest.cancel_order(credentials, client_order_id, with_limiter(opts))
+    end
+  end
 
   @doc """
   One order by its client order id.
@@ -830,8 +933,11 @@ defmodule DpExchange.Webull do
   Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_order/3`.
   """
   @impl true
-  def get_order(credentials, client_order_id, opts \\ []),
-    do: Rest.get_order(credentials, client_order_id, with_limiter(opts))
+  def get_order(credentials, client_order_id, opts \\ []) do
+    with :ok <- Options.check_order_id(:get_order, client_order_id, opts) do
+      Rest.get_order(credentials, client_order_id, with_limiter(opts))
+    end
+  end
 
   @doc """
   Orders on one account.
@@ -839,7 +945,11 @@ defmodule DpExchange.Webull do
   Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_orders/2`.
   """
   @impl true
-  def get_orders(credentials, opts \\ []), do: Rest.get_orders(credentials, with_limiter(opts))
+  def get_orders(credentials, opts \\ []) do
+    with :ok <- Options.check(:get_orders, opts) do
+      Rest.get_orders(credentials, with_limiter(opts))
+    end
+  end
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.
@@ -875,6 +985,7 @@ defmodule DpExchange.Webull do
   @impl true
   def subscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:subscribe, opts),
          :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       feed_call(
         fn -> Feed.subscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
@@ -891,7 +1002,8 @@ defmodule DpExchange.Webull do
   """
   @impl true
   def unsubscribe(symbols, opts \\ []) do
-    with :ok <- Feed.check_symbols(symbols) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:unsubscribe, opts) do
       feed_call(
         fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         :ok
@@ -908,7 +1020,8 @@ defmodule DpExchange.Webull do
   """
   @impl true
   def update_symbols(symbols, opts \\ []) do
-    with :ok <- Feed.check_symbols(symbols) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:update_symbols, opts) do
       feed_call(
         fn -> Feed.update_symbols(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         {:error, :feed_not_started}
@@ -932,6 +1045,7 @@ defmodule DpExchange.Webull do
   """
   @impl true
   def coverage(opts \\ []) do
+    Options.check!(:coverage, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage(feed) end, %{}), else: %{}
   end
@@ -947,6 +1061,7 @@ defmodule DpExchange.Webull do
   @spec wanted(keyword()) :: [DpExchange.Core.Venue.symbol()]
   @impl true
   def wanted(opts \\ []) do
+    Options.check!(:wanted, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.wanted(feed) end, []), else: []
   end
@@ -991,6 +1106,7 @@ defmodule DpExchange.Webull do
           }
         }
   def coverage_by_kind(opts \\ []) do
+    Options.check!(:coverage_by_kind, opts)
     feed = feed(opts)
     if alive?(feed), do: feed_read(fn -> Feed.coverage_by_kind(feed) end, %{}), else: %{}
   end
@@ -1003,7 +1119,8 @@ defmodule DpExchange.Webull do
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    with :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
+    with :ok <- Options.check(:subscribe_notices, opts),
+         :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       feed_call(
         fn -> Feed.subscribe_notices(feed(opts), opts) end,
         {:error, :feed_not_started}
@@ -1073,8 +1190,11 @@ defmodule DpExchange.Webull do
   refusal that would say this is unbuilt when it is not.
   """
   @impl true
-  def quantization(symbol, opts \\ []),
-    do: Rest.quantization(symbol, credentials(opts), with_limiter(opts))
+  def quantization(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:quantization, symbol, opts) do
+      Rest.quantization(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   # --- internals ---------------------------------------------------------
 
@@ -1147,7 +1267,10 @@ defmodule DpExchange.Webull do
   delivers.
   """
   @spec streaming?(keyword()) :: boolean()
-  def streaming?(opts \\ []), do: opts |> Environment.resolve() |> Environment.streaming?()
+  def streaming?(opts \\ []) do
+    Options.check!(:streaming?, opts)
+    opts |> Environment.resolve() |> Environment.streaming?()
+  end
 
   @doc """
   Whether the environment `opts` resolves to moves real money.
@@ -1165,7 +1288,10 @@ defmodule DpExchange.Webull do
       end
   """
   @spec live?(keyword()) :: boolean()
-  def live?(opts \\ []), do: opts |> Environment.resolve() |> Environment.live?()
+  def live?(opts \\ []) do
+    Options.check!(:live?, opts)
+    opts |> Environment.resolve() |> Environment.live?()
+  end
 
   @doc """
   The quote currencies the symbol mapping recognises when splitting a native symbol.
@@ -1196,7 +1322,11 @@ defmodule DpExchange.Webull do
   contract on the account answers `{:error, {:unsupported_position, symbol, reason}}` rather
   than a `Position` that drops the legs or the yes/no outcome.
   """
-  def get_positions(opts), do: Rest.get_positions(credentials(opts), with_limiter(opts))
+  def get_positions(opts) do
+    with :ok <- Options.check(:get_positions, opts) do
+      Rest.get_positions(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.
@@ -1332,8 +1462,11 @@ defmodule DpExchange.Webull do
   contributions uses `get_transfers/2` and one reconciling a balance uses this.
   """
   @impl true
-  def get_transactions(credentials, opts),
-    do: Rest.get_transactions(credentials, with_limiter(opts))
+  def get_transactions(credentials, opts) do
+    with :ok <- Options.check(:get_transactions, opts) do
+      Rest.get_transactions(credentials, with_limiter(opts))
+    end
+  end
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
@@ -1420,8 +1553,11 @@ defmodule DpExchange.Webull do
   than dropped, so a chain never comes back with a hole in it that looks complete.
   """
   @impl true
-  def get_option_chain(underlying, opts \\ []),
-    do: Rest.get_option_chain(underlying, credentials(opts), with_limiter(opts))
+  def get_option_chain(underlying, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_option_chain, underlying, opts) do
+      Rest.get_option_chain(underlying, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The expiries listed on an underlying.
@@ -1431,8 +1567,11 @@ defmodule DpExchange.Webull do
   response the venue sent, not a substitute for one it did not.
   """
   @impl true
-  def get_option_expirations(underlying, opts \\ []),
-    do: Rest.get_option_expirations(underlying, credentials(opts), with_limiter(opts))
+  def get_option_expirations(underlying, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_option_expirations, underlying, opts) do
+      Rest.get_option_expirations(underlying, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Futures contracts by symbol or by product code.
@@ -1443,8 +1582,11 @@ defmodule DpExchange.Webull do
   """
   @spec list_futures_contracts(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_futures_contracts(opts \\ []),
-    do: Rest.list_futures_contracts(credentials(opts), with_limiter(opts))
+  def list_futures_contracts(opts \\ []) do
+    with :ok <- Options.check(:list_futures_contracts, opts) do
+      Rest.list_futures_contracts(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The futures product classification groups.
@@ -1453,8 +1595,11 @@ defmodule DpExchange.Webull do
   """
   @spec list_futures_product_classes(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_futures_product_classes(opts \\ []),
-    do: Rest.list_futures_product_classes(credentials(opts), with_limiter(opts))
+  def list_futures_product_classes(opts \\ []) do
+    with :ok <- Options.check(:list_futures_product_classes, opts) do
+      Rest.list_futures_product_classes(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Every event-contract category — the root of category → series → event → market.
@@ -1462,8 +1607,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.list_event_categories/2`.
   """
   @spec list_event_categories(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_event_categories(opts \\ []),
-    do: Rest.list_event_categories(credentials(opts), with_limiter(opts))
+  def list_event_categories(opts \\ []) do
+    with :ok <- Options.check(:list_event_categories, opts) do
+      Rest.list_event_categories(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Event-contract series, paged.
@@ -1475,8 +1623,11 @@ defmodule DpExchange.Webull do
           {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
           | {:error, term()}
           | {:refused, term()}
-  def list_event_series(opts \\ []),
-    do: Rest.list_event_series(credentials(opts), with_limiter(opts))
+  def list_event_series(opts \\ []) do
+    with :ok <- Options.check(:list_event_series, opts) do
+      Rest.list_event_series(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The events under one series. `opts[:series_symbol]` is required.
@@ -1484,8 +1635,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.list_event_events/2`.
   """
   @spec list_event_events(keyword()) :: {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def list_event_events(opts \\ []),
-    do: Rest.list_event_events(credentials(opts), with_limiter(opts))
+  def list_event_events(opts \\ []) do
+    with :ok <- Options.check(:list_event_events, opts) do
+      Rest.list_event_events(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The tradable markets under a series or an event, paged.
@@ -1497,8 +1651,11 @@ defmodule DpExchange.Webull do
           {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
           | {:error, term()}
           | {:refused, term()}
-  def list_event_markets(opts \\ []),
-    do: Rest.list_event_markets(credentials(opts), with_limiter(opts))
+  def list_event_markets(opts \\ []) do
+    with :ok <- Options.check(:list_event_markets, opts) do
+      Rest.list_event_markets(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The tape for one event-contract market.
@@ -1509,8 +1666,11 @@ defmodule DpExchange.Webull do
   """
   @spec get_event_trades(String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def get_event_trades(symbol, opts \\ []),
-    do: Rest.get_event_trades(symbol, credentials(opts), with_limiter(opts))
+  def get_event_trades(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_event_trades, symbol, opts) do
+      Rest.get_event_trades(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The order book for one event-contract market — **four books, not two**.
@@ -1520,8 +1680,11 @@ defmodule DpExchange.Webull do
   """
   @spec get_event_order_book(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def get_event_order_book(symbol, opts \\ []),
-    do: Rest.get_event_order_book(symbol, credentials(opts), with_limiter(opts))
+  def get_event_order_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_event_order_book, symbol, opts) do
+      Rest.get_event_order_book(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`. Webull publishes no greeks.
@@ -1538,8 +1701,11 @@ defmodule DpExchange.Webull do
   `[]` would be "empty".
   """
   @impl true
-  def list_watchlists(opts \\ []),
-    do: Rest.list_watchlists(credentials(opts), with_limiter(opts))
+  def list_watchlists(opts \\ []) do
+    with :ok <- Options.check(:list_watchlists, opts) do
+      Rest.list_watchlists(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   One watchlist including its membership.
@@ -1548,8 +1714,11 @@ defmodule DpExchange.Webull do
   endpoint does not return it.
   """
   @impl true
-  def get_watchlist(id, opts \\ []),
-    do: Rest.get_watchlist(id, credentials(opts), with_limiter(opts))
+  def get_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:get_watchlist, id, opts) do
+      Rest.get_watchlist(id, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Creates a watchlist and adds `symbols` to it.
@@ -1558,8 +1727,13 @@ defmodule DpExchange.Webull do
   fails the watchlist exists and is empty — the error carries its id.
   """
   @impl true
-  def create_watchlist(name, symbols, opts \\ []),
-    do: Rest.create_watchlist(name, symbols, credentials(opts), with_limiter(opts))
+  def create_watchlist(name, symbols, opts \\ []) do
+    with :ok <- Rest.validate_watchlist_target(:name, name),
+         {:ok, _members} <- Rest.validate_watchlist_symbols(symbols),
+         :ok <- Options.check(:create_watchlist, opts) do
+      Rest.create_watchlist(name, symbols, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Renames a watchlist or changes its sort order. **Does not change membership.**
@@ -1568,8 +1742,11 @@ defmodule DpExchange.Webull do
   silently skipped, and `add_watchlist_instruments/3` is the membership write.
   """
   @impl true
-  def update_watchlist(id, opts \\ []),
-    do: Rest.update_watchlist(id, credentials(opts), with_limiter(opts))
+  def update_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:update_watchlist, id, opts) do
+      Rest.update_watchlist(id, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Deletes a watchlist and everything in it. **Irreversible.**
@@ -1577,8 +1754,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.delete_watchlist/3`.
   """
   @impl true
-  def delete_watchlist(id, opts \\ []),
-    do: Rest.delete_watchlist(id, credentials(opts), with_limiter(opts))
+  def delete_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:delete_watchlist, id, opts) do
+      Rest.delete_watchlist(id, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Adds instruments to a watchlist.
@@ -1588,8 +1768,12 @@ defmodule DpExchange.Webull do
   """
   @spec add_watchlist_instruments(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def add_watchlist_instruments(id, symbols, opts \\ []),
-    do: Rest.add_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+  def add_watchlist_instruments(id, symbols, opts \\ []) do
+    with {:ok, _members} <- Rest.validate_watchlist_membership(symbols),
+         :ok <- Options.check_watchlist_id(:add_watchlist_instruments, id, opts) do
+      Rest.add_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Removes instruments from a watchlist, by symbol and category.
@@ -1598,8 +1782,12 @@ defmodule DpExchange.Webull do
   """
   @spec remove_watchlist_instruments(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def remove_watchlist_instruments(id, symbols, opts \\ []),
-    do: Rest.remove_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+  def remove_watchlist_instruments(id, symbols, opts \\ []) do
+    with {:ok, _members} <- Rest.validate_watchlist_membership(symbols),
+         :ok <- Options.check_watchlist_id(:remove_watchlist_instruments, id, opts) do
+      Rest.remove_watchlist_instruments(id, symbols, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Reorders instruments within a watchlist. `opts[:sorts]` maps symbol to position.
@@ -1608,8 +1796,11 @@ defmodule DpExchange.Webull do
   """
   @spec sort_watchlist_instruments(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def sort_watchlist_instruments(id, opts \\ []),
-    do: Rest.sort_watchlist_instruments(id, credentials(opts), with_limiter(opts))
+  def sort_watchlist_instruments(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:sort_watchlist_instruments, id, opts) do
+      Rest.sort_watchlist_instruments(id, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Financial statements for an issuer.
@@ -1618,8 +1809,12 @@ defmodule DpExchange.Webull do
   `fiscal_period` keeps its integer code — `0` for the full year, `1`–`4` for quarters.
   """
   @impl true
-  def get_financials(symbol, kind, opts \\ []),
-    do: Rest.get_financials(symbol, kind, credentials(opts), with_limiter(opts))
+  def get_financials(symbol, kind, opts \\ []) do
+    with :ok <- Rest.validate_statement_kind(kind),
+         :ok <- Options.check_symbol(:get_financials, symbol, opts) do
+      Rest.get_financials(symbol, kind, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Dividends and earnings dates for one issuer. `opts[:symbol]` is required.
@@ -1628,8 +1823,11 @@ defmodule DpExchange.Webull do
   are read, which is two requests.
   """
   @impl true
-  def get_corporate_events(opts \\ []),
-    do: Rest.get_corporate_events(credentials(opts), with_limiter(opts))
+  def get_corporate_events(opts \\ []) do
+    with :ok <- Options.check(:get_corporate_events, opts) do
+      Rest.get_corporate_events(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Regulatory filings this venue indexes. **Points at them; never fetches them.**
@@ -1637,8 +1835,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.get_filings/3`.
   """
   @impl true
-  def get_filings(symbol, opts \\ []),
-    do: Rest.get_filings(symbol, credentials(opts), with_limiter(opts))
+  def get_filings(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_filings, symbol, opts) do
+      Rest.get_filings(symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   News summaries. **Generated, not reported** — the venue's own description is "invokes LLM
@@ -1647,7 +1848,11 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.get_news/2`. `opts[:symbols]` is required.
   """
   @impl true
-  def get_news(opts \\ []), do: Rest.get_news(credentials(opts), with_limiter(opts))
+  def get_news(opts \\ []) do
+    with :ok <- Options.check(:get_news, opts) do
+      Rest.get_news(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   A venue screener by the venue's own identifier — `screeners/0` lists them.
@@ -1656,8 +1861,11 @@ defmodule DpExchange.Webull do
   the position the venue returned the row in.
   """
   @impl true
-  def get_screener(name, opts \\ []),
-    do: Rest.get_screener(name, credentials(opts), with_limiter(opts))
+  def get_screener(name, opts \\ []) do
+    with :ok <- Options.check_screener(name, opts) do
+      Rest.get_screener(name, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   One fundamentals endpoint by kind — the venue's own rows, unnormalised.
@@ -1668,8 +1876,11 @@ defmodule DpExchange.Webull do
   """
   @spec get_fundamental(atom(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
-  def get_fundamental(kind, symbol, opts \\ []),
-    do: Rest.get_fundamental(kind, symbol, credentials(opts), with_limiter(opts))
+  def get_fundamental(kind, symbol, opts \\ []) do
+    with :ok <- Options.check_fundamental(kind, symbol, opts) do
+      Rest.get_fundamental(kind, symbol, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc "The fundamentals kinds `get_fundamental/3` reaches."
   @spec fundamental_kinds() :: [atom()]
@@ -1686,8 +1897,11 @@ defmodule DpExchange.Webull do
   an SMS code in the Webull app, which needs a person.
   """
   @spec create_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
-  def create_token(opts \\ []),
-    do: Rest.create_token(credentials(opts), with_limiter(opts))
+  def create_token(opts \\ []) do
+    with :ok <- Options.check(:create_token, opts) do
+      Rest.create_token(credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   Checks a token's status — the call that tells `PENDING` from `EXPIRED` from `INVALID`.
@@ -1697,8 +1911,11 @@ defmodule DpExchange.Webull do
   """
   @spec check_token(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def check_token(token, opts \\ []),
-    do: Rest.check_token(token, credentials(opts), with_limiter(opts))
+  def check_token(token, opts \\ []) do
+    with :ok <- Options.check_token(token, opts) do
+      Rest.check_token(token, credentials(opts), with_limiter(opts))
+    end
+  end
 
   @doc """
   The OAuth code exchange and refresh — one endpoint, two operations.
@@ -1709,8 +1926,11 @@ defmodule DpExchange.Webull do
   """
   @spec oauth_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
-  def oauth_token(client_id, client_secret, opts \\ []),
-    do: Rest.oauth_token(client_id, client_secret, with_limiter(opts))
+  def oauth_token(client_id, client_secret, opts \\ []) do
+    with :ok <- Options.check_oauth(client_id, client_secret, opts) do
+      Rest.oauth_token(client_id, client_secret, with_limiter(opts))
+    end
+  end
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.

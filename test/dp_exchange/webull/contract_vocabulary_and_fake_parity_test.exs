@@ -57,6 +57,9 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
     end
   end
 
+  # A batch entry also names its trading session, which the batch endpoint requires.
+  defp batch_entry, do: equity_request(%{support_trading_session: :core})
+
   defp equity_request(overrides) do
     Map.merge(
       %{
@@ -210,7 +213,13 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                  Fake.get_balances(@credentials, account_id: bad)
 
         assert {:error, {:missing_option, :account_id}} =
-                 Fake.place_orders(@credentials, [equity_request(%{})], account_id: bad)
+                 Fake.place_orders(@credentials, [batch_entry()], account_id: bad)
+
+        assert {:error, {:missing_option, :account_id}} =
+                 Rest.place_orders(@credentials, [batch_entry()],
+                   account_id: bad,
+                   plug: exploding()
+                 )
       end
     end
   end

@@ -24,6 +24,29 @@ acceptable changelog line.
 
 ### Changed (BREAKING for callers that passed an option the venue cannot honour)
 
+- BREAKING: every `DpExchange.Webull` function that takes `opts`, and its `DpExchange.Webull.Fake`
+  twin, refuses a key it does not read: `{:error, {:unknown_option, key}}`, and a non-keyword
+  `opts` is `{:error, {:invalid_options, opts}}`. A stray key was silently ignored, so a
+  misspelt `limt:` answered a question the caller did not ask. The check runs through
+  `DpExchange.Core.Options.check/2` at the facade boundary, before anything is sent and before
+  the facade adds `:limiter`, after the positional arguments and before the credentials. Each
+  function's own keys are written once, in `DpExchange.Webull.Options`, and listed in
+  `usage-rules.md`; the transport keys come from `DpExchange.Core.Options.transport_options/0`.
+  Requires `dp_exchange_core ~> 0.3.101` (conformance group 43). Callers that shared one `opts`
+  list across calls will see it: an `:account_id` on `get_accounts/2`, a `:to` on
+  `update_symbols/2` / `unsubscribe/2`, a `:limit` on `get_orders/2` and the like are errors now.
+  Keys the code reads only to refuse them keep their more specific answers (`:limit` on
+  `get_order_book/2`, `:since` on `get_trades/2`, `:real_time` on the bars,
+  `:since`/`:until` on the open-orders listing, `:symbols` on `update_watchlist/2`).
+  `get_fundamental/3` and `get_screener/2` take the keys their own endpoint documents, so a
+  `count:` on a kind whose page defines none is refused instead of dropped, and `hot_stocks`
+  takes no `category:`. `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1` and
+  `live?/1`, which return a map, a list or a boolean, raise `ArgumentError` instead. A function
+  that answers `{:error, :not_supported}` does so whatever it is given.
+- The Fake checks positional arguments (symbol, order request, order id, watchlist id,
+  fundamentals kind, screener name, statement kind) before it consults an injected outcome,
+  as the facade does, so an injection test needs arguments that pass those checks.
+
 - BREAKING: `get_symbols/2` refuses the whole listing, `{:error, :unexpected_response_shape}`,
   when any catalogue row names no readable symbol (missing, non-text, or a non-object row). It
   skipped such rows, leaving a hole so that a symbol the venue lists read as unlisted.

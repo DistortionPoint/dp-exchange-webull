@@ -45,7 +45,8 @@ defmodule DpExchange.WebullContractTest do
     # contract exists to keep out of Core.
     endpoint_opts: %{
       {:get_balances, 2} => [account_id: "contract-account"],
-      {:get_accounts, 2} => [account_id: "contract-account"],
+      # `get_accounts/2` is absent on purpose: it takes no account (the credential decides what
+      # it sees), and an `:account_id` it does not read is `{:error, {:unknown_option, _}}`.
       {:get_orders, 2} => [account_id: "contract-account"],
       {:place_order, 3} => [account_id: "contract-account"],
       {:cancel_order, 3} => [account_id: "contract-account"],

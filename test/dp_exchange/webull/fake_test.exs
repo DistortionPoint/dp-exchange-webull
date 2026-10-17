@@ -649,11 +649,12 @@ defmodule DpExchange.Webull.FakeTest do
     # The real facade upper-cases symbols on the way in. The fake has to give the same
     # answer, or a consumer's tier-1 tests certify silence where the venue delivers.
     test "is delivered under the canonical symbol, as the real package does" do
-      opts = [to: self(), account_id: "acct", account_number: "acct", account_hash: "acct"]
-
-      assert :ok = DpExchange.Webull.Fake.subscribe(["btc-usd"], opts)
+      # `to:` only: the account keys this used to carry (`account_id`, `account_number`,
+      # `account_hash`) are not options of `subscribe/2` or `coverage/1` on this venue, and a
+      # stray key is `{:error, {:unknown_option, key}}` now.
+      assert :ok = DpExchange.Webull.Fake.subscribe(["btc-usd"], to: self())
       assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
-      assert Map.has_key?(DpExchange.Webull.Fake.coverage(opts), "BTC-USD")
+      assert Map.has_key?(DpExchange.Webull.Fake.coverage(), "BTC-USD")
     end
   end
 end

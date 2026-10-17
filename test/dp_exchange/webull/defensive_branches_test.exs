@@ -503,9 +503,14 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
         to: self()
       ]
 
+      # `:to` names the subscriber, which only `subscribe/2` and `subscribe_notices/1` take:
+      # an update or an unsubscribe changes the set for the subscribers the feed already has,
+      # and a stray `:to` there is `{:error, {:unknown_option, :to}}`.
+      set_opts = Keyword.delete(opts, :to)
+
       assert :ok = DpExchange.Webull.subscribe(["BTC-USD"], opts)
-      assert :ok = DpExchange.Webull.update_symbols(["BTC-USD"], opts)
-      assert :ok = DpExchange.Webull.unsubscribe(["BTC-USD"], opts)
+      assert :ok = DpExchange.Webull.update_symbols(["BTC-USD"], set_opts)
+      assert :ok = DpExchange.Webull.unsubscribe(["BTC-USD"], set_opts)
       assert :ok = DpExchange.Webull.subscribe_notices(opts)
     end
   end

@@ -246,6 +246,19 @@ defmodule DpExchange.Webull.Rest do
   def validate_symbol(symbol), do: {:error, {:invalid_symbol, symbol}}
 
   @doc """
+  Whether `symbols` is a proper list: anything else (a bare string, `nil`, an improper list)
+  is `{:error, {:invalid_symbols, symbols}}`. Its members are not judged here - `get_prices/3`
+  answers a member that is not a usable symbol under its own key.
+
+  The positional check `get_prices/3` makes first, for `DpExchange.Webull.Options` to run
+  before it looks at the options.
+  """
+  @spec validate_symbols(term()) :: :ok | {:error, {:invalid_symbols, term()}}
+  def validate_symbols(symbols) do
+    with {:ok, _members} <- snapshot_members(symbols), do: :ok
+  end
+
+  @doc """
   Whether `range` is a keyword list whose `:start` and `:end`, where present, are
   `DateTime`s: the check `get_historical_prices/5` makes before anything is signed, for
   `DpExchange.Webull.Fake`. Anything else is `{:error, {:invalid_range, range}}`.
@@ -2466,14 +2479,24 @@ defmodule DpExchange.Webull.Rest do
   """
   @spec validate_replace(term(), term(), keyword()) :: :ok | {:error, term()}
   def validate_replace(client_order_id, changes, opts) do
-    with :ok <- validate_order_id(client_order_id),
-         :ok <- replace_changes(changes),
+    with :ok <- validate_replace_arguments(client_order_id, changes),
          {:ok, instrument} <- replace_option(opts, :instrument_type),
          {:ok, order_type} <- replace_option(opts, :order_type),
          :ok <- previewable(instrument),
          {:ok, _allowed} <- allowed_combinations(instrument) do
       amendable(order_type, changes)
     end
+  end
+
+  @doc """
+  The two positional checks `replace_order/4` makes first: the order id
+  (`{:error, {:invalid_order_id, id}}`), then `changes` being a map
+  (`{:error, {:invalid_order_request, changes}}`). For `DpExchange.Webull.Options`, which runs
+  them before it looks at the options.
+  """
+  @spec validate_replace_arguments(term(), term()) :: :ok | {:error, term()}
+  def validate_replace_arguments(client_order_id, changes) do
+    with :ok <- validate_order_id(client_order_id), do: replace_changes(changes)
   end
 
   defp replace_changes(changes) when is_map(changes), do: :ok
@@ -4367,6 +4390,23 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  @doc """
+  The options a `get_fundamental/4` of `kind` reads: `:category`, and the query keys that
+  kind's own page documents. An endpoint's page names no `count` or `type` unless it does, so
+  those are not options of a kind that does not take them.
+
+  A kind this venue does not publish is `{:error, {:unknown_fundamental, kind}}`, the same
+  answer `get_fundamental/4` gives. For `DpExchange.Webull.Options`.
+  """
+  @spec fundamental_option_keys(term()) ::
+          {:ok, [atom()]} | {:error, {:unknown_fundamental, term()}}
+  def fundamental_option_keys(kind) do
+    case Map.fetch(@fundamentals, kind) do
+      {:ok, {_path, allowed}} -> {:ok, [:category | allowed]}
+      :error -> {:error, {:unknown_fundamental, kind}}
+    end
+  end
+
   @counted_to_20 [:balance_sheet, :cash_flow, :income_statement, :indicators, :fund_net_values]
 
   defp statement_count(kind, opts) when kind in @counted_to_20,
@@ -5061,6 +5101,22 @@ defmodule DpExchange.Webull.Rest do
   @doc "The screeners this venue publishes, by the identifier `get_screener/3` takes."
   @spec screeners() :: [String.t()]
   def screeners, do: @screeners |> Map.keys() |> Enum.sort()
+
+  @doc """
+  The options a `get_screener/3` of `name` reads: the query keys that screener's own page
+  documents, and `:category` unless the page documents none (`hot_stocks`).
+
+  An identifier this venue does not publish is `{:error, {:unknown_screener, name}}`, the same
+  answer `get_screener/3` gives. For `DpExchange.Webull.Options`.
+  """
+  @spec screener_option_keys(term()) :: {:ok, [atom()]} | {:error, {:unknown_screener, term()}}
+  def screener_option_keys(name) do
+    case Map.fetch(@screeners, name) do
+      {:ok, {_path, allowed}} when name in @uncategorised_screeners -> {:ok, allowed}
+      {:ok, {_path, allowed}} -> {:ok, [:category | allowed]}
+      :error -> {:error, {:unknown_screener, name}}
+    end
+  end
 
   @doc """
   A venue screener, by the venue's own identifier for it — `Types.ScreenerResult`.

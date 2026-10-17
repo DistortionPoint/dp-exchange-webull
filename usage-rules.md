@@ -7,7 +7,85 @@ Everything general is in
 [`dp_exchange_core`'s usage rules](https://hexdocs.pm/dp_exchange_core/usage-rules.html).
 This file is only what is **specific to Webull**.
 
+## BREAKING — an option a function does not read is refused, not ignored
 
+Requires `dp_exchange_core ~> 0.3.101`. A misspelt `limt:` used to return an answer to a
+question you did not ask. Every function that takes `opts` — on `DpExchange.Webull` and on
+`DpExchange.Webull.Fake` alike — now answers
+
+```elixir
+{:error, {:unknown_option, :limt}}      # the first key (in your order) the function does not read
+{:error, {:invalid_options, opts}}       # opts is not a keyword list
+```
+
+before anything is sent, before the credentials are looked at, and after the positional
+arguments (`{:invalid_symbol, _}`, `{:invalid_order_id, _}`, ... are answered first). A key
+that holds `nil` is still a key. The transport keys are accepted by every function:
+`:credentials`, `:environment`, `:base_url`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`,
+`:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`, `:retry_delay`,
+`:max_retry_after_s`, `:max_body_bytes`, `:log_requests`. A function that answers
+`{:error, :not_supported}` does so whatever it is given.
+
+`coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1` and `live?/1` have no error
+channel (a map, a list, a boolean), so they **raise `ArgumentError`** on a stray key or a
+non-keyword `opts` rather than answer `%{}` for a misspelt `feed:`.
+
+**What changed for a caller that shared one `opts` list across calls:** an `:account_id` on
+`get_accounts/2`, a `:to` on `update_symbols/2` or `unsubscribe/2`, a `:limit` on
+`get_orders/2` (never sent to the venue) and the like were silently dropped before and are
+errors now. `:limit` on `get_order_book/2`, `:since` on `get_trades/2`, `:real_time` on the
+bars and `:since`/`:until` on the open-orders listing keep their own, more specific
+`{:error, {:unsupported_option, key}}`; `:symbols` on `update_watchlist/2` keeps
+`{:error, :membership_not_updatable_here}`.
+
+### The keys each function reads (beyond the transport keys above)
+
+The table is written once, in `DpExchange.Webull.Options` (`own_keys/1`); `Fake` uses the
+same one.
+
+| Function | Keys |
+|---|---|
+| `get_price/2`, `get_prices/2`, `get_top_of_book/2` | `:category`, `:extended_hours`, `:overnight` |
+| `get_historical_prices/4` | `:category`, `:limit`, `:include_partial`, `:sessions` (`:real_time` is refused) |
+| `get_symbols/1`, `list_instruments/1` | `:category` |
+| `get_order_book/2` | `:category`, `:depth`, `:overnight`, `:extended_hours` (`:limit` is refused) |
+| `get_trades/2` | `:category`, `:limit`, `:sessions` (`:since` is refused) |
+| `get_volume_profile/3` | `:category`, `:session`, `:count` |
+| `get_auction_imbalance/2` | `:auction`, `:history` |
+| `quantization/2`, `get_accounts/2`, `get_fees/2` | none |
+| `get_balances/2`, `get_positions/1`, `get_order/3`, `cancel_order/3`, `place_order/3`, `place_orders/3`, `preview_order/3` | `:account_id` |
+| `replace_order/4` | `:account_id`, `:instrument_type`, `:order_type` |
+| `get_orders/2` | `:account_id`, `:history`, `:since`, `:until` |
+| `get_transfers/2`, `get_transactions/2` | `:account_id`, `:activity_types`, `:start`, `:end` |
+| `subscribe/2` | `:to`, `:feed`, `:sub_types` |
+| `unsubscribe/2`, `update_symbols/2` | `:feed`, `:sub_types` |
+| `subscribe_notices/1` | `:to`, `:feed` |
+| `coverage/1`, `wanted/1`, `coverage_by_kind/1` | `:feed` |
+| `streaming?/1`, `live?/1` | none (`:environment` is a transport key) |
+| `get_option_chain/2`, `get_option_expirations/2` | `:expiry`, `:strike` |
+| `list_futures_contracts/1` | `:symbols`, `:code`, `:status` |
+| `list_futures_product_classes/1`, `list_event_categories/1` | none |
+| `list_event_series/1` | `:category`, `:symbols`, `:pagination_key` |
+| `list_event_events/1` | `:series_symbol`, `:symbols`, `:status` |
+| `list_event_markets/1` | `:series_symbol`, `:event_symbol`, `:symbols`, `:expiring_after`, `:pagination_key` |
+| `get_event_trades/2` | `:limit` |
+| `get_event_order_book/2` | `:depth` |
+| `list_watchlists/1`, `get_watchlist/2`, `delete_watchlist/2` | none |
+| `create_watchlist/3` | `:sort`, `:category` |
+| `update_watchlist/2` | `:name`, `:sort` (`:symbols` is refused) |
+| `add_watchlist_instruments/3`, `remove_watchlist_instruments/3` | `:category` |
+| `sort_watchlist_instruments/2` | `:sorts`, `:category` |
+| `get_financials/3` | `:category`, `:type`, `:count` |
+| `get_corporate_events/1` | `:symbol`, `:kind`, `:category` |
+| `get_filings/2` | `:category` |
+| `get_news/1` | `:symbols`, `:lang`, `:category` |
+| `get_fundamental/3` | `:category`, plus the query keys that kind's own page documents (`:type`, `:count`, `:last_date`, `:sort_by`; see `Rest.fundamental_option_keys/1`) |
+| `get_screener/2` | the screener's own keys (`:rank_type`, `:sort_by`, `:direction`, `:agg_type`, `:period`, `:sector_id`) and `:category` except on `hot_stocks`, which takes none |
+| `create_token/1`, `check_token/2` | none |
+| `oauth_token/3` | `:code`, `:refresh_token`, `:oauth_url` |
+
+A kind or screener the venue does not publish is `{:error, {:unknown_fundamental, kind}}` /
+`{:error, {:unknown_screener, name}}`, answered before the options.
 
 ## BREAKING — a refusal now carries the venue's status as well as its words
 

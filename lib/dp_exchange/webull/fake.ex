@@ -18,6 +18,14 @@ defmodule DpExchange.Webull.Fake do
   stamps it with when it asked (`Rest.get_balances/2`'s `asked_at`: a balance has no venue
   event time), so a fixed past instant there would be the fake being differently capable.
 
+  **It refuses an option it does not read, as the facade does.** Each function checks `opts`
+  through the same `DpExchange.Webull.Options` table the facade uses - positional arguments
+  first, then the options, then the credentials - and answers `{:error, {:unknown_option,
+  key}}` or `{:error, {:invalid_options, opts}}` **before** it consults an injected outcome
+  (`DpExchange.Core.FakeInjection`), so a misspelt key is never masked by an injection. The
+  reads with no error channel (`coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1`,
+  `live?/1`) raise `ArgumentError`.
+
   ## It models the three things that make this venue different
 
   - **Credentials are required everywhere a real call reaches the venue — not for
@@ -86,7 +94,7 @@ defmodule DpExchange.Webull.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Config, FakeInjection, Instrument, Timeframe, Types, Venue}
-  alias DpExchange.Webull.{Auth, Environment, Feed, Rest}
+  alias DpExchange.Webull.{Auth, Environment, Feed, Options, Rest}
 
   # `XRP-USD` is a real member of `@symbols` (so `get_symbols/1` lists it — this fake
   # would be lying about the venue if it silently dropped a non-tradable row, and the
@@ -182,6 +190,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_price(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_price, symbol, opts) do
+      do_get_price(symbol, opts)
+    end
+  end
+
+  defp do_get_price(symbol, opts) do
     with_injection(symbol, fn ->
       category = Config.opt(opts, :category, "US_CRYPTO")
 
@@ -224,6 +238,13 @@ defmodule DpExchange.Webull.Fake do
   """
   @spec get_prices([String.t()], keyword()) :: {:ok, map()} | {:error, term()}
   def get_prices(symbols, opts \\ []) do
+    with :ok <- Rest.validate_symbols(symbols),
+         :ok <- Options.check(:get_prices, opts) do
+      do_get_prices(symbols, opts)
+    end
+  end
+
+  defp do_get_prices(symbols, opts) do
     case Config.opt(opts, :category, "US_CRYPTO") do
       "US_CRYPTO" ->
         # A non-list or an improper list is `{:invalid_symbols, value}` on both this and
@@ -255,6 +276,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_top_of_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_top_of_book, symbol, opts) do
+      do_get_top_of_book(symbol, opts)
+    end
+  end
+
+  defp do_get_top_of_book(symbol, opts) do
     with_injection(symbol, fn ->
       category = Config.opt(opts, :category, "US_CRYPTO")
 
@@ -295,6 +322,14 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_historical_prices(symbol, timeframe, range \\ [], opts \\ []) do
+    with :ok <- Rest.validate_symbol(symbol),
+         :ok <- Rest.validate_range(range),
+         :ok <- Options.check(:get_historical_prices, opts) do
+      do_get_historical_prices(symbol, timeframe, range, opts)
+    end
+  end
+
+  defp do_get_historical_prices(symbol, timeframe, range, opts) do
     with_injection(symbol, fn ->
       # The category, width, range and `:limit` are checked BEFORE credentials, as `Rest`'s
       # paths do (the width and count checks run before `get/4` reaches `Auth.headers/2`),
@@ -323,6 +358,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_symbols(opts \\ []) do
+    with :ok <- Options.check(:get_symbols, opts) do
+      do_get_symbols(opts)
+    end
+  end
+
+  defp do_get_symbols(opts) do
     with_injection(fn ->
       # The category first, credentials second — `Rest.get_symbols/2` builds its request
       # path from the category before `get/4` signs anything. This fake lists only the
@@ -342,6 +383,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_order_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_order_book, symbol, opts) do
+      do_get_order_book(symbol, opts)
+    end
+  end
+
+  defp do_get_order_book(symbol, opts) do
     with_injection(symbol, fn ->
       category = Config.opt(opts, :category, "US_STOCK")
 
@@ -403,6 +450,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_trades(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_trades, symbol, opts) do
+      do_get_trades(symbol, opts)
+    end
+  end
+
+  defp do_get_trades(symbol, opts) do
     with_injection(symbol, fn ->
       # The category (a tape endpoint exists for stocks, ETFs, options and futures) and the
       # `:limit` against that endpoint's stated maximum, from `Rest`'s validator, before
@@ -463,6 +516,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_volume_profile(symbol, timeframe, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_volume_profile, symbol, opts) do
+      do_get_volume_profile(symbol, timeframe, opts)
+    end
+  end
+
+  defp do_get_volume_profile(symbol, timeframe, opts) do
     with_injection(symbol, fn ->
       # Category, width (five, narrower than the bars endpoint - an unserved one is an error,
       # not the nearest) and session, in `Rest.get_volume_profile/4`'s own order and from its
@@ -504,6 +563,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_auction_imbalance(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_auction_imbalance, symbol, opts) do
+      do_get_auction_imbalance(symbol, opts)
+    end
+  end
+
+  defp do_get_auction_imbalance(symbol, opts) do
     with_injection(symbol, fn ->
       case Keyword.get(opts, :auction) do
         auction when auction in [:opening, :closing] ->
@@ -560,6 +625,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def list_instruments(opts \\ []) do
+    with :ok <- Options.check(:list_instruments, opts) do
+      do_list_instruments(opts)
+    end
+  end
+
+  defp do_list_instruments(opts) do
     with_injection(fn ->
       category = Config.opt(opts, :category, "US_CRYPTO")
 
@@ -606,6 +677,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_balances(credentials, opts) do
+    with :ok <- Options.check(:get_balances, opts) do
+      do_get_balances(credentials, opts)
+    end
+  end
+
+  defp do_get_balances(credentials, opts) do
     with_injection(fn ->
       # Account first, credentials second — the same order `Rest.get_balances/2` checks
       # them in (`account_id(opts)` then `Auth.headers/2`), so a caller missing both sees
@@ -634,7 +711,13 @@ defmodule DpExchange.Webull.Fake do
   See `DpExchange.Webull.get_accounts/2`.
   """
   @impl true
-  def get_accounts(credentials, _opts) do
+  def get_accounts(credentials, opts) do
+    with :ok <- Options.check(:get_accounts, opts) do
+      do_get_accounts(credentials)
+    end
+  end
+
+  defp do_get_accounts(credentials) do
     with_injection(fn ->
       with :ok <- credentialed(credentials) do
         # Two accounts of different classes, because that is the fact about this venue a
@@ -666,7 +749,13 @@ defmodule DpExchange.Webull.Fake do
   Needs no credentials: it builds no request. See `c:DpExchange.Core.Venue.get_fees/2`.
   """
   @impl true
-  def get_fees(_credentials, _opts) do
+  def get_fees(_credentials, opts) do
+    with :ok <- Options.check(:get_fees, opts) do
+      do_get_fees()
+    end
+  end
+
+  defp do_get_fees do
     with_injection(fn ->
       # `Rest.get_fees/2` answers from a captured published rate and builds no request
       # at all, so unlike every other credentialed callback there is nothing here for a
@@ -692,6 +781,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_transfers(credentials, opts) do
+    with :ok <- Options.check(:get_transfers, opts) do
+      do_get_transfers(credentials, opts)
+    end
+  end
+
+  defp do_get_transfers(credentials, opts) do
     with_injection(fn ->
       # Account, then the date range, credentials last — matching `Rest.get_transfers/2`'s
       # own order. A range across two calendar years is refused as it is there; it used to
@@ -739,6 +834,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_transactions(credentials, opts) do
+    with :ok <- Options.check(:get_transactions, opts) do
+      do_get_transactions(credentials, opts)
+    end
+  end
+
+  defp do_get_transactions(credentials, opts) do
     with_injection(fn ->
       # Account, then the date range, credentials last — matching
       # `Rest.get_transactions/2`'s own order.
@@ -871,6 +972,13 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def preview_order(credentials, request, opts \\ []) do
+    with :ok <- Rest.validate_preview_request(request),
+         :ok <- Options.check(:preview_order, opts) do
+      do_preview_order(credentials, request, opts)
+    end
+  end
+
+  defp do_preview_order(credentials, request, opts) do
     with_injection(fn ->
       # `Rest.preview_order/3`'s own order, from the same function: the request is a map,
       # crypto is refused (a fake that priced a crypto order would let a consumer's suite go
@@ -897,7 +1005,10 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def replace_order(credentials, client_order_id, changes, opts \\ []) do
-    with_injection(fn -> do_replace_order(credentials, client_order_id, changes, opts) end)
+    with :ok <- Rest.validate_replace_arguments(client_order_id, changes),
+         :ok <- Options.check(:replace_order, opts) do
+      with_injection(fn -> do_replace_order(credentials, client_order_id, changes, opts) end)
+    end
   end
 
   defp do_replace_order(credentials, client_order_id, changes, opts) do
@@ -1001,6 +1112,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def quantization(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:quantization, symbol, opts) do
+      do_quantization(symbol, opts)
+    end
+  end
+
+  defp do_quantization(symbol, opts) do
     with_injection(symbol, fn ->
       # `Rest.quantization/3` reads the same `instruments/.../profiles/list` endpoint
       # every other market-data call does, so it needs the same `authenticated(opts)`
@@ -1065,8 +1182,9 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
-    # Refused in the real `Feed`'s order: the symbol list, then the subscriber.
+    # Refused in the real facade's order: the symbol list, the options, then the subscriber.
     with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:subscribe, opts),
          :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       symbols |> canonical_case() |> subscribe_checked(opts)
     end
@@ -1144,8 +1262,9 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
-  def unsubscribe(symbols, _opts \\ []) do
-    with :ok <- Feed.check_symbols(symbols) do
+  def unsubscribe(symbols, opts \\ []) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:unsubscribe, opts) do
       gone = symbols |> canonical_case() |> MapSet.new()
       Process.put(__MODULE__, MapSet.difference(subscribed(), gone))
       Process.put(@top_key, MapSet.difference(top(), gone))
@@ -1162,8 +1281,9 @@ defmodule DpExchange.Webull.Fake do
   newly added ones. See `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
-  def update_symbols(symbols, _opts \\ []) do
-    with :ok <- Feed.check_symbols(symbols) do
+  def update_symbols(symbols, opts \\ []) do
+    with :ok <- Feed.check_symbols(symbols),
+         :ok <- Options.check(:update_symbols, opts) do
       wanted =
         symbols |> canonical_case() |> Enum.filter(&(&1 in @symbols)) |> MapSet.new()
 
@@ -1180,8 +1300,10 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.coverage/1`.
   """
   @impl true
-  def coverage(_opts \\ []),
-    do: Map.new(MapSet.union(subscribed(), top()), &{&1, :stream})
+  def coverage(opts \\ []) do
+    Options.check!(:coverage, opts)
+    Map.new(MapSet.union(subscribed(), top()), &{&1, :stream})
+  end
 
   @doc """
   The symbols this process's fake was asked to stream, sorted. The fake delivers at once, so
@@ -1189,8 +1311,10 @@ defmodule DpExchange.Webull.Fake do
   """
   @spec wanted(keyword()) :: [DpExchange.Core.Venue.symbol()]
   @impl true
-  def wanted(_opts \\ []),
-    do: subscribed() |> MapSet.union(top()) |> MapSet.to_list() |> Enum.sort()
+  def wanted(opts \\ []) do
+    Options.check!(:wanted, opts)
+    subscribed() |> MapSet.union(top()) |> MapSet.to_list() |> Enum.sort()
+  end
 
   # Both kinds the real feed streams (`capabilities/0`'s `streamable`), each reported only
   # while it has covered symbols - the real feed's per-kind map likewise has no entry for a
@@ -1200,7 +1324,9 @@ defmodule DpExchange.Webull.Fake do
   is omitted. See `c:DpExchange.Core.Venue.coverage_by_kind/1`.
   """
   @impl true
-  def coverage_by_kind(_opts \\ []) do
+  def coverage_by_kind(opts \\ []) do
+    Options.check!(:coverage_by_kind, opts)
+
     for {kind, symbols} <- [quotes: subscribed(), top_of_book: top()],
         MapSet.size(symbols) > 0,
         into: %{},
@@ -1215,7 +1341,9 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def subscribe_notices(opts \\ []) do
-    Feed.check_subscriber(Config.opt(opts, :to, self()))
+    with :ok <- Options.check(:subscribe_notices, opts) do
+      Feed.check_subscriber(Config.opt(opts, :to, self()))
+    end
   end
 
   defp subscribed, do: Process.get(__MODULE__, MapSet.new())
@@ -1299,6 +1427,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_positions(opts \\ []) do
+    with :ok <- Options.check(:get_positions, opts) do
+      do_get_positions(opts)
+    end
+  end
+
+  defp do_get_positions(opts) do
     with_injection(fn ->
       # Account first, credentials second — matching `Rest.get_positions/2`'s own order
       # (`account_id(opts)` then `Auth.headers/2`). Credentials arrive in
@@ -1466,6 +1600,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_option_chain(underlying, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_option_chain, underlying, opts) do
+      do_get_option_chain(underlying, opts)
+    end
+  end
+
+  defp do_get_option_chain(underlying, opts) do
     with_injection(underlying, fn ->
       with :ok <- Rest.validate_symbol(underlying),
            :ok <- authenticated(opts) do
@@ -1489,6 +1629,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_option_expirations(underlying, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_option_expirations, underlying, opts) do
+      do_get_option_expirations(underlying, opts)
+    end
+  end
+
+  defp do_get_option_expirations(underlying, opts) do
     with_injection(underlying, fn ->
       with :ok <- Rest.validate_symbol(underlying),
            :ok <- authenticated(opts) do
@@ -1574,6 +1720,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def list_watchlists(opts \\ []) do
+    with :ok <- Options.check(:list_watchlists, opts) do
+      do_list_watchlists(opts)
+    end
+  end
+
+  defp do_list_watchlists(opts) do
     with_injection(fn ->
       with :ok <- authenticated(opts) do
         # `symbols: nil`, as in the package: this endpoint names watchlists and does not list
@@ -1617,6 +1769,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:get_watchlist, id, opts) do
+      do_get_watchlist(id, opts)
+    end
+  end
+
+  defp do_get_watchlist(id, opts) do
     with_injection(fn ->
       # The id first, as `Rest.get_watchlist/3` refuses a non-text one before anything else.
       with :ok <- Rest.validate_watchlist_target(:id, id),
@@ -1651,6 +1809,14 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def create_watchlist(name, symbols, opts \\ []) do
+    with :ok <- Rest.validate_watchlist_target(:name, name),
+         {:ok, _members} <- Rest.validate_watchlist_symbols(symbols),
+         :ok <- Options.check(:create_watchlist, opts) do
+      do_create_watchlist(name, symbols, opts)
+    end
+  end
+
+  defp do_create_watchlist(name, symbols, opts) do
     with_injection(fn ->
       # The members and the sort first, from `Rest`'s own validators and before credentials, as
       # `Rest.create_watchlist/4` checks them before it creates anything: a member that is
@@ -1684,6 +1850,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def update_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:update_watchlist, id, opts) do
+      do_update_watchlist(id, opts)
+    end
+  end
+
+  defp do_update_watchlist(id, opts) do
     with_injection(fn ->
       # Same order as `Rest.update_watchlist/3`: the id, then `:symbols` (refused rather than
       # silently skipped: this venue's update endpoint does not touch membership), then the
@@ -1718,6 +1890,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def delete_watchlist(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:delete_watchlist, id, opts) do
+      do_delete_watchlist(id, opts)
+    end
+  end
+
+  defp do_delete_watchlist(id, opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_watchlist_target(:id, id),
            :ok <- authenticated(opts) do
@@ -1748,6 +1926,13 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_financials(symbol, kind, opts \\ []) do
+    with :ok <- Rest.validate_statement_kind(kind),
+         :ok <- Options.check_symbol(:get_financials, symbol, opts) do
+      do_get_financials(symbol, kind, opts)
+    end
+  end
+
+  defp do_get_financials(symbol, kind, opts) do
     with_injection(symbol, fn ->
       # The kind first, credentials second — `Rest.get_financials/4` refuses a kind that is
       # not a statement (`:company_profile`, a typo) before it builds a request. This
@@ -1809,6 +1994,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_corporate_events(opts \\ []) do
+    with :ok <- Options.check(:get_corporate_events, opts) do
+      do_get_corporate_events(opts)
+    end
+  end
+
+  defp do_get_corporate_events(opts) do
     with_injection(fn ->
       # Symbol first, credentials second — `Rest.get_corporate_events/2`'s own
       # `required_symbol/1` runs before anything reaches `Auth.headers/2`, so a caller
@@ -1877,6 +2068,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_filings(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_filings, symbol, opts) do
+      do_get_filings(symbol, opts)
+    end
+  end
+
+  defp do_get_filings(symbol, opts) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_symbol(symbol),
            :ok <- authenticated(opts),
@@ -1903,6 +2100,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_news(opts \\ []) do
+    with :ok <- Options.check(:get_news, opts) do
+      do_get_news(opts)
+    end
+  end
+
+  defp do_get_news(opts) do
     with_injection(fn ->
       # Symbols first, credentials second — see `get_corporate_events/1`'s own comment;
       # `Rest.get_news/2`'s `required_symbols/1` runs before anything reaches
@@ -1943,6 +2146,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_screener(name, opts \\ []) do
+    with :ok <- Options.check_screener(name, opts) do
+      do_get_screener(name, opts)
+    end
+  end
+
+  defp do_get_screener(name, opts) do
     with_injection(fn ->
       # The identifier (and `week52_high_low`'s required `rank_type`) first, credentials
       # second — `Rest.get_screener/3` checks both before it builds a request. This checked
@@ -1984,6 +2193,12 @@ defmodule DpExchange.Webull.Fake do
   @spec list_futures_contracts(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_contracts(opts \\ []) do
+    with :ok <- Options.check(:list_futures_contracts, opts) do
+      do_list_futures_contracts(opts)
+    end
+  end
+
+  defp do_list_futures_contracts(opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_futures_contracts_request(opts),
            :ok <- authenticated(opts) do
@@ -2025,6 +2240,12 @@ defmodule DpExchange.Webull.Fake do
   @spec list_futures_product_classes(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_product_classes(opts \\ []) do
+    with :ok <- Options.check(:list_futures_product_classes, opts) do
+      do_list_futures_product_classes(opts)
+    end
+  end
+
+  defp do_list_futures_product_classes(opts) do
     with_injection(fn ->
       with :ok <- authenticated(opts) do
         {:ok, [%{"product_class_id" => "pc-1", "product_class_name" => "Equity Index"}]}
@@ -2039,6 +2260,12 @@ defmodule DpExchange.Webull.Fake do
   @spec list_event_categories(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_event_categories(opts \\ []) do
+    with :ok <- Options.check(:list_event_categories, opts) do
+      do_list_event_categories(opts)
+    end
+  end
+
+  defp do_list_event_categories(opts) do
     with_injection(fn ->
       with :ok <- authenticated(opts) do
         {:ok,
@@ -2063,6 +2290,12 @@ defmodule DpExchange.Webull.Fake do
           | {:error, term()}
           | {:refused, term()}
   def list_event_series(opts \\ []) do
+    with :ok <- Options.check(:list_event_series, opts) do
+      do_list_event_series(opts)
+    end
+  end
+
+  defp do_list_event_series(opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_event_series_request(opts),
            :ok <- authenticated(opts) do
@@ -2098,6 +2331,12 @@ defmodule DpExchange.Webull.Fake do
   @spec list_event_events(keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_event_events(opts \\ []) do
+    with :ok <- Options.check(:list_event_events, opts) do
+      do_list_event_events(opts)
+    end
+  end
+
+  defp do_list_event_events(opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_event_events_request(opts),
            :ok <- authenticated(opts) do
@@ -2140,6 +2379,12 @@ defmodule DpExchange.Webull.Fake do
           | {:error, term()}
           | {:refused, term()}
   def list_event_markets(opts \\ []) do
+    with :ok <- Options.check(:list_event_markets, opts) do
+      do_list_event_markets(opts)
+    end
+  end
+
+  defp do_list_event_markets(opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_event_markets_request(opts),
            :ok <- authenticated(opts) do
@@ -2184,6 +2429,12 @@ defmodule DpExchange.Webull.Fake do
   @spec get_event_trades(String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_event_trades(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_event_trades, symbol, opts) do
+      do_get_event_trades(symbol, opts)
+    end
+  end
+
+  defp do_get_event_trades(symbol, opts) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_event_trades_request(symbol, opts),
            :ok <- authenticated(opts) do
@@ -2216,6 +2467,12 @@ defmodule DpExchange.Webull.Fake do
   @spec get_event_order_book(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def get_event_order_book(symbol, opts \\ []) do
+    with :ok <- Options.check_symbol(:get_event_order_book, symbol, opts) do
+      do_get_event_order_book(symbol, opts)
+    end
+  end
+
+  defp do_get_event_order_book(symbol, opts) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_event_book_request(symbol, opts),
            :ok <- authenticated(opts) do
@@ -2240,9 +2497,12 @@ defmodule DpExchange.Webull.Fake do
   @spec add_watchlist_instruments(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def add_watchlist_instruments(id, symbols, opts \\ []) do
-    watchlist_membership_write(id, symbols, opts, fn held, members ->
-      Enum.uniq(held ++ members)
-    end)
+    with {:ok, _members} <- Rest.validate_watchlist_membership(symbols),
+         :ok <- Options.check_watchlist_id(:add_watchlist_instruments, id, opts) do
+      watchlist_membership_write(id, symbols, opts, fn held, members ->
+        Enum.uniq(held ++ members)
+      end)
+    end
   end
 
   @doc """
@@ -2253,7 +2513,10 @@ defmodule DpExchange.Webull.Fake do
   @spec remove_watchlist_instruments(String.t(), [String.t()], keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def remove_watchlist_instruments(id, symbols, opts \\ []) do
-    watchlist_membership_write(id, symbols, opts, fn held, members -> held -- members end)
+    with {:ok, _members} <- Rest.validate_watchlist_membership(symbols),
+         :ok <- Options.check_watchlist_id(:remove_watchlist_instruments, id, opts) do
+      watchlist_membership_write(id, symbols, opts, fn held, members -> held -- members end)
+    end
   end
 
   # The symbols first (`Rest.watchlist_membership/5`), then the id, then credentials.
@@ -2292,6 +2555,12 @@ defmodule DpExchange.Webull.Fake do
   @spec sort_watchlist_instruments(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def sort_watchlist_instruments(id, opts \\ []) do
+    with :ok <- Options.check_watchlist_id(:sort_watchlist_instruments, id, opts) do
+      do_sort_watchlist_instruments(id, opts)
+    end
+  end
+
+  defp do_sort_watchlist_instruments(id, opts) do
     with_injection(fn ->
       with {:ok, _sorts} <- Rest.validate_watchlist_sorts(opts),
            :ok <- Rest.validate_watchlist_target(:id, id),
@@ -2309,6 +2578,12 @@ defmodule DpExchange.Webull.Fake do
   @spec get_fundamental(atom(), String.t(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def get_fundamental(kind, symbol, opts \\ []) do
+    with :ok <- Options.check_fundamental(kind, symbol, opts) do
+      do_get_fundamental(kind, symbol, opts)
+    end
+  end
+
+  defp do_get_fundamental(kind, symbol, opts) do
     with_injection(symbol, fn ->
       with :ok <- Rest.validate_fundamental_request(kind, symbol, opts),
            :ok <- authenticated(opts),
@@ -2332,6 +2607,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @spec create_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
   def create_token(opts \\ []) do
+    with :ok <- Options.check(:create_token, opts) do
+      do_create_token(opts)
+    end
+  end
+
+  defp do_create_token(opts) do
     with_injection(fn ->
       with :ok <- authenticated(opts), do: {:ok, token_row(@fake_token, "PENDING")}
     end)
@@ -2345,6 +2626,12 @@ defmodule DpExchange.Webull.Fake do
   @spec check_token(String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def check_token(token, opts \\ []) do
+    with :ok <- Options.check_token(token, opts) do
+      do_check_token(token, opts)
+    end
+  end
+
+  defp do_check_token(token, opts) do
     with_injection(fn ->
       if is_binary(token) do
         with :ok <- authenticated(opts) do
@@ -2372,6 +2659,12 @@ defmodule DpExchange.Webull.Fake do
   @spec oauth_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def oauth_token(client_id, client_secret, opts \\ []) do
+    with :ok <- Options.check_oauth(client_id, client_secret, opts) do
+      do_oauth_token(client_id, client_secret, opts)
+    end
+  end
+
+  defp do_oauth_token(client_id, client_secret, opts) do
     with_injection(fn ->
       with :ok <- Rest.validate_oauth_request(client_id, client_secret, opts) do
         {:ok,
@@ -2443,6 +2736,13 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def place_order(credentials, request, opts \\ []) do
+    with :ok <- Rest.validate_order_request(request),
+         :ok <- Options.check(:place_order, opts) do
+      do_place_order(credentials, request, opts)
+    end
+  end
+
+  defp do_place_order(credentials, request, opts) do
     with_injection(fn ->
       # The request checks are `Rest.place_order/3`'s own, from the same function and in
       # the same order (map, keys, symbol, side, type, duration and combination, sizing,
@@ -2517,6 +2817,13 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def place_orders(credentials, requests, opts) do
+    with :ok <- Rest.validate_batch_orders(requests),
+         :ok <- Options.check(:place_orders, opts) do
+      do_place_orders(credentials, requests, opts)
+    end
+  end
+
+  defp do_place_orders(credentials, requests, opts) do
     # The venue's two limits, and a per-order result. A fake that answered ok-or-error would
     # let a consumer ship code that believes "the batch failed" when most of it was placed.
     #
@@ -2594,6 +2901,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def cancel_order(credentials, client_order_id, opts \\ []) do
+    with :ok <- Options.check_order_id(:cancel_order, client_order_id, opts) do
+      do_cancel_order(credentials, client_order_id, opts)
+    end
+  end
+
+  defp do_cancel_order(credentials, client_order_id, opts) do
     with_injection(fn ->
       # The order id first, then the account, then credentials — `Rest.cancel_order/3`'s
       # own order.
@@ -2619,6 +2932,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_order(credentials, client_order_id, opts \\ []) do
+    with :ok <- Options.check_order_id(:get_order, client_order_id, opts) do
+      do_get_order(credentials, client_order_id, opts)
+    end
+  end
+
+  defp do_get_order(credentials, client_order_id, opts) do
     with_injection(fn ->
       # The order id first, then the account, then credentials — `Rest.get_order/3`'s own
       # order.
@@ -2661,6 +2980,12 @@ defmodule DpExchange.Webull.Fake do
   """
   @impl true
   def get_orders(credentials, opts \\ []) do
+    with :ok <- Options.check(:get_orders, opts) do
+      do_get_orders(credentials, opts)
+    end
+  end
+
+  defp do_get_orders(credentials, opts) do
     with_injection(fn ->
       # Account, then the history window, credentials last — matching `Rest.get_orders/2`'s
       # own order.
