@@ -856,7 +856,7 @@ before this version and saw nothing, that was not your venue being quiet:
 `:telemetry.attach/4` against a name nobody emits succeeds, so an empty panel was
 indistinguishable from no traffic. Every one of them fires now.
 
-Five things to know before you build on them:
+Six things to know before you build on them:
 
 - **Telemetry is the metrics channel; `Core.Notice` is the action channel.** Telemetry is
   aggregate and lossy by design. Alarm on notices. Graph telemetry. Alarming on a gauge
@@ -878,6 +878,12 @@ Five things to know before you build on them:
   shards the venue dropped together do not redial together. Only shortened, never lengthened:
   30 s stays the ceiling. A session that lived under 30 s counts as another failed attempt, not
   a reset. The wait ends at once if the socket's parent stops it.
+- **`[:dp_exchange, :link, :down]` is emitted once per lost link, and only for a link that
+  came up** (`:link, :up` fires at CONNACK 0). A failed reconnect that never got a session
+  emits `:reconnect_attempt`, not `:down`, and a refused CONNACK (any non-zero code) emits
+  only its `:link_down` notice. A socket process that crashed, and a shard rebuilt on
+  INVALID_SESSION, each emit one `:down` if their link was up, with `reason` as bounded text.
+  `:down` is emitted only to close a `:up`.
 
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
@@ -1409,13 +1415,14 @@ HTTP and signing failures of the subscribe itself keep their ordinary shapes
 `{:error, {:exchange_error, :webull, text}}` for the rest, and
 `{:error, {:missing_credentials, :webull}}`).
 
-**Symbols belong to the feed, not to the subscriber that asked for them.** A subscriber that
-dies is dropped (it is monitored, and so is a `subscribe_notices/1` receiver), but the
-symbols it subscribed stay wanted and stay on the stream until `unsubscribe/2` or
-`update_symbols/2` releases them, so a consumer that is restarted by its supervisor calls
-`subscribe/2` again with its new pid. A registered name is never monitored: the holder of the
-name may die and be restarted under it. Subscribing twice from one pid is one subscriber, and
-delivers once.
+**Symbols are released when the last data subscriber dies.** A subscriber that dies is
+dropped (it is monitored, and so is a `subscribe_notices/1` receiver). When the death empties
+the set of data subscribers, the feed releases every wanted symbol through the same path
+`unsubscribe/2` takes: the venue subscription is removed and no socket is held for nobody
+(`wanted/1` and `coverage/1` become empty). A restarted consumer calls `subscribe/2` again
+with its new pid. A notice-only receiver's death releases nothing. A registered name is never
+monitored and stays in the set, so it keeps the symbols: the holder of the name may die and
+be restarted under it. Subscribing twice from one pid is one subscriber, and delivers once.
 
 **A payload for a symbol you just unsubscribed is dropped**, even if the venue sends a few
 more, and it does not count toward `coverage/1`.

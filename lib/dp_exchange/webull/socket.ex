@@ -479,7 +479,13 @@ defmodule DpExchange.Webull.Socket do
       )
     )
 
-    Telemetry.link_down(:webull, inspect(reason))
+    # Only for a link that WAS up. `connected?` is set at CONNACK 0 (where `link_up` is
+    # emitted) and cleared below, so a failed reconnect that never reached CONNACK 0 emits no
+    # `link_down` for a `link_up` that never fired: a consumer's up/down gauge would otherwise
+    # count down transitions that have no matching up, once per retry. A drop of a live link
+    # is reported exactly once.
+    if Map.get(state, :connected?, false),
+      do: Telemetry.link_down(:webull, inspect(reason))
 
     # `attempt_number` comes from the transport itself. It is a documented key of the
     # `connection_status_map` this function already pattern-matches on
@@ -777,6 +783,9 @@ defmodule DpExchange.Webull.Socket do
       Notice.new(:link_down, :webull, details: %{connack: code, session_id: state.session_id})
     )
 
+    # No `Telemetry.link_down` here, deliberately: a CONNACK arrives before any `link_up`, so
+    # a down would have no up to close. `link_down` telemetry is emitted only to close a
+    # `link_up`; the Notice above is the action channel for this refusal.
     state
   end
 

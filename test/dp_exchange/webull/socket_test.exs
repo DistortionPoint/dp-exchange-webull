@@ -1083,12 +1083,44 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
     end
 
-    test "disconnecting emits link down with an already-inspected reason" do
-      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, state())
+    test "disconnecting a live link emits link down with an already-inspected reason" do
+      assert {:reconnect, _state} =
+               Socket.handle_disconnect(%{reason: :closed}, stable_since(state()))
 
-      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, metadata}
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, metadata}, 5_000
       assert is_binary(metadata.reason)
       assert metadata.reason =~ "closed"
+    end
+
+    test "a failed reconnect that never reached CONNACK 0 emits no link down" do
+      # `link_up` never fired for this attempt, so a `link_down` would be a down with no up.
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :econnrefused}, state())
+
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+    end
+
+    test "one live drop is one link down, however many failed reconnects follow" do
+      assert {:reconnect, dropped} =
+               Socket.handle_disconnect(%{reason: :closed}, stable_since(state()))
+
+      assert_receive {:telemetry, [:dp_exchange, :link, :down], %{count: 1}, _metadata}, 5_000
+
+      assert {:reconnect, _again} =
+               Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 2}, dropped)
+
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+    end
+
+    test "an unknown CONNACK code is a Notice and no link down telemetry" do
+      # A CONNACK arrives before any `link_up`, so a `link_down` would close nothing.
+      assert {:ok, after_connack} = Socket.handle_frame({:binary, connack(9)}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+
+      # Nor does the transport drop that may follow: the link never came up.
+      assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, after_connack)
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
     end
 
     test "every WEBSOCKET frame is a link event, whatever it reassembles into" do

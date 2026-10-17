@@ -3570,6 +3570,24 @@ defmodule DpExchange.Webull.Rest do
   def oauth_token(_client_id, _client_secret, _opts),
     do: {:error, {:invalid_field, :client_secret}}
 
+  @doc """
+  The checks `oauth_token/3` makes before it sends anything, in its order: `client_id` is
+  text, `client_secret` is text, exactly one of `opts[:code]` / `opts[:refresh_token]` is
+  given, and the OAuth host is `https` (or loopback `http`). For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_oauth_request(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_oauth_request(client_id, _client_secret, _opts) when not is_binary(client_id),
+    do: {:error, {:invalid_field, :client_id}}
+
+  def validate_oauth_request(_client_id, client_secret, _opts) when not is_binary(client_secret),
+    do: {:error, {:invalid_field, :client_secret}}
+
+  def validate_oauth_request(_client_id, _client_secret, opts) do
+    with {:ok, _grant} <- oauth_grant(opts),
+         {:ok, _url} <- secure_oauth_url(opts),
+         do: :ok
+  end
+
   # `code` and `refresh_token` are the venue's two grants and it takes exactly one. Sending
   # both would leave the venue to choose, and which it chose is not something the caller
   # could read back from the response.
@@ -4023,26 +4041,37 @@ defmodule DpExchange.Webull.Rest do
   @spec sort_watchlist_instruments(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def sort_watchlist_instruments(watchlist_id, credentials, opts) do
+    with {:ok, sorts} <- validate_watchlist_sorts(opts) do
+      instruments =
+        Enum.map(sorts, fn {symbol, position} ->
+          %{
+            "symbol" => symbol,
+            "category" => fundamental_category(opts),
+            "sort" => position
+          }
+        end)
+
+      watchlist_write("update", watchlist_id, instruments, credentials, opts)
+    end
+  end
+
+  @doc """
+  The `opts[:sorts]` check `sort_watchlist_instruments/3` makes first: a non-empty map of
+  symbol (non-empty text) to position (a whole number). Missing or empty is
+  `{:error, :sorts_required}`; anything else wrong is `{:error, {:invalid_sorts, sorts}}`.
+  For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_watchlist_sorts(keyword()) :: {:ok, map()} | {:error, term()}
+  def validate_watchlist_sorts(opts) do
     case Keyword.get(opts, :sorts) do
       %{} = sorts when map_size(sorts) > 0 ->
         # A symbol is text and a position is a whole number (`update-watchlist-instruments.md`
         # types `sort` as an integer): anything else was sent as it stood.
         if Enum.all?(sorts, fn {symbol, position} ->
              is_binary(symbol) and symbol != "" and is_integer(position)
-           end) do
-          instruments =
-            Enum.map(sorts, fn {symbol, position} ->
-              %{
-                "symbol" => symbol,
-                "category" => fundamental_category(opts),
-                "sort" => position
-              }
-            end)
-
-          watchlist_write("update", watchlist_id, instruments, credentials, opts)
-        else
-          {:error, {:invalid_sorts, sorts}}
-        end
+           end),
+           do: {:ok, sorts},
+           else: {:error, {:invalid_sorts, sorts}}
 
       _missing ->
         {:error, :sorts_required}
@@ -4050,17 +4079,24 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp watchlist_membership(action, watchlist_id, symbols, credentials, opts) do
-    with {:ok, members} <- validate_watchlist_symbols(symbols) do
-      case members do
-        [] ->
-          {:error, :symbols_required}
+    with {:ok, members} <- validate_watchlist_membership(symbols) do
+      instruments =
+        Enum.map(members, &%{"symbol" => &1, "category" => fundamental_category(opts)})
 
-        list ->
-          instruments =
-            Enum.map(list, &%{"symbol" => &1, "category" => fundamental_category(opts)})
+      watchlist_write(action, watchlist_id, instruments, credentials, opts)
+    end
+  end
 
-          watchlist_write(action, watchlist_id, instruments, credentials, opts)
-      end
+  @doc """
+  The symbols check `add_watchlist_instruments/4` and `remove_watchlist_instruments/4` make
+  first: `validate_watchlist_symbols/1`, and then at least one symbol
+  (`{:error, :symbols_required}`). For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_watchlist_membership(term()) :: {:ok, [String.t()]} | {:error, term()}
+  def validate_watchlist_membership(symbols) do
+    case validate_watchlist_symbols(symbols) do
+      {:ok, []} -> {:error, :symbols_required}
+      other -> other
     end
   end
 
@@ -4224,15 +4260,31 @@ defmodule DpExchange.Webull.Rest do
         # The options are checked BEFORE the query is built (`scalar_opts/2`): a map or a list
         # of maps for `:type` raised `Protocol.UndefinedError` out of `put_present/3`'s
         # `to_string/1`, in the caller's process.
-        with :ok <- scalar_opts(opts, [:category | allowed]),
-             :ok <- statement_count(kind, opts),
-             :ok <- validate_symbol(symbol) do
+        with :ok <- validate_fundamental_request(kind, symbol, opts) do
           base_params =
             %{"symbol" => symbol, "category" => fundamental_category(opts)}
             |> put_allowed(allowed, opts)
 
           fundamental_rows(kind, path, base_params, credentials, opts)
         end
+
+      :error ->
+        {:error, {:unknown_fundamental, kind}}
+    end
+  end
+
+  @doc """
+  The checks `get_fundamental/4` makes before it builds a request, in its order: the kind
+  (`{:error, {:unknown_fundamental, kind}}`), the option types, the statement count, the
+  symbol. For `DpExchange.Webull.Fake`, which refuses exactly what the real path refuses.
+  """
+  @spec validate_fundamental_request(term(), term(), keyword()) :: :ok | {:error, term()}
+  def validate_fundamental_request(kind, symbol, opts) do
+    case Map.fetch(@fundamentals, kind) do
+      {:ok, {_path, allowed}} ->
+        with :ok <- scalar_opts(opts, [:category | allowed]),
+             :ok <- statement_count(kind, opts),
+             do: validate_symbol(symbol)
 
       :error ->
         {:error, {:unknown_fundamental, kind}}
@@ -5098,9 +5150,7 @@ defmodule DpExchange.Webull.Rest do
   @spec list_futures_contracts(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_futures_contracts(credentials, opts) do
-    with :ok <- list_opts(opts, [:symbols, :code]),
-         :ok <- scalar_opts(opts, [:status]),
-         :ok <- symbols_or_code(opts) do
+    with :ok <- validate_futures_contracts_request(opts) do
       params =
         %{"category" => "US_FUTURES"}
         |> put_present("symbols", symbols_param(Keyword.get(opts, :symbols)))
@@ -5113,6 +5163,18 @@ defmodule DpExchange.Webull.Rest do
         object_rows(contracts)
       end
     end
+  end
+
+  @doc """
+  The checks `list_futures_contracts/2` makes before it builds a request, in its order:
+  the option types, then that `:symbols` or `:code` names something. For
+  `DpExchange.Webull.Fake`, which refuses exactly what the real path refuses.
+  """
+  @spec validate_futures_contracts_request(keyword()) :: :ok | {:error, term()}
+  def validate_futures_contracts_request(opts) do
+    with :ok <- list_opts(opts, [:symbols, :code]),
+         :ok <- scalar_opts(opts, [:status]),
+         do: symbols_or_code(opts)
   end
 
   defp symbols_or_code(opts) do
@@ -5183,8 +5245,7 @@ defmodule DpExchange.Webull.Rest do
           | {:error, term()}
           | {:refused, term()}
   def list_event_series(credentials, opts) do
-    with :ok <- scalar_opts(opts, [:category, :pagination_key]),
-         :ok <- list_opts(opts, [:symbols]) do
+    with :ok <- validate_event_series_request(opts) do
       params =
         %{}
         |> put_present("category", Keyword.get(opts, :category))
@@ -5210,16 +5271,66 @@ defmodule DpExchange.Webull.Rest do
   @spec list_event_events(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
   def list_event_events(credentials, opts) do
+    with :ok <- validate_event_events_request(opts),
+         do: events_for(Keyword.fetch!(opts, :series_symbol), credentials, opts)
+  end
+
+  @doc """
+  The checks `list_event_series/2` makes before it builds a request: the scalar options,
+  then `:symbols`. For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_event_series_request(keyword()) :: :ok | {:error, term()}
+  def validate_event_series_request(opts) do
+    with :ok <- scalar_opts(opts, [:category, :pagination_key]),
+         do: list_opts(opts, [:symbols])
+  end
+
+  @doc """
+  The checks `list_event_events/2` makes before it builds a request: `:series_symbol` is
+  present (`{:error, :series_symbol_required}`), then the option types. For
+  `DpExchange.Webull.Fake`.
+  """
+  @spec validate_event_events_request(keyword()) :: :ok | {:error, term()}
+  def validate_event_events_request(opts) do
     case Keyword.get(opts, :series_symbol) do
       nil ->
         {:error, :series_symbol_required}
 
-      series ->
+      _series ->
         with :ok <- scalar_opts(opts, [:series_symbol, :status]),
-             :ok <- list_opts(opts, [:symbols]) do
-          events_for(series, credentials, opts)
-        end
+             do: list_opts(opts, [:symbols])
     end
+  end
+
+  @doc """
+  The checks `list_event_markets/2` makes before it builds a request: the scalar options,
+  then `:symbols`. For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_event_markets_request(keyword()) :: :ok | {:error, term()}
+  def validate_event_markets_request(opts) do
+    scalars = [:series_symbol, :event_symbol, :expiring_after, :pagination_key]
+
+    with :ok <- scalar_opts(opts, scalars), do: list_opts(opts, [:symbols])
+  end
+
+  @doc """
+  The checks `get_event_trades/3` makes before it builds a request: the `:limit` (at most
+  1200), then the symbol. For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_event_trades_request(term(), keyword()) :: :ok | {:error, term()}
+  def validate_event_trades_request(symbol, opts) do
+    with :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200),
+         do: validate_symbol(symbol)
+  end
+
+  @doc """
+  The checks `get_event_order_book/3` makes before it builds a request: the `:depth`, then
+  the symbol. For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_event_book_request(term(), keyword()) :: :ok | {:error, term()}
+  def validate_event_book_request(symbol, opts) do
+    with :ok <- book_depth("US_EVENT", Keyword.get(opts, :depth)),
+         do: validate_symbol(symbol)
   end
 
   defp events_for(series, credentials, opts) do
@@ -5254,10 +5365,7 @@ defmodule DpExchange.Webull.Rest do
           | {:error, term()}
           | {:refused, term()}
   def list_event_markets(credentials, opts) do
-    scalars = [:series_symbol, :event_symbol, :expiring_after, :pagination_key]
-
-    with :ok <- scalar_opts(opts, scalars),
-         :ok <- list_opts(opts, [:symbols]) do
+    with :ok <- validate_event_markets_request(opts) do
       params =
         %{}
         |> put_present("series_symbol", Keyword.get(opts, :series_symbol))
@@ -5323,8 +5431,7 @@ defmodule DpExchange.Webull.Rest do
     # `event-tick.md`: "maximum limit 1200". The query is built AFTER the limit is checked: a
     # map for `:limit` raised `Protocol.UndefinedError` out of `put_present/3` before the
     # check that refuses it as `{:invalid_option, :limit, value}` could run.
-    with :ok <- limit_within_max(Keyword.get(opts, :limit), 1_200),
-         :ok <- validate_symbol(symbol),
+    with :ok <- validate_event_trades_request(symbol, opts),
          params = event_params(symbol, "count", Keyword.get(opts, :limit)),
          {:ok, body} <-
            get_symbol("/market-data/event-contracts/ticks/list", params, credentials, opts),
@@ -5373,8 +5480,7 @@ defmodule DpExchange.Webull.Rest do
     #
     # The query is built AFTER that check: a map for `:depth` raised out of `put_present/3`
     # first.
-    with :ok <- book_depth("US_EVENT", Keyword.get(opts, :depth)),
-         :ok <- validate_symbol(symbol),
+    with :ok <- validate_event_book_request(symbol, opts),
          params = event_params(symbol, "depth", Keyword.get(opts, :depth)),
          {:ok, body} <-
            get_symbol("/market-data/event-contracts/depths/list", params, credentials, opts),

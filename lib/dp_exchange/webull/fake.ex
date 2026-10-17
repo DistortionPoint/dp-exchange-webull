@@ -126,6 +126,9 @@ defmodule DpExchange.Webull.Fake do
   @targets_key {__MODULE__, :targets}
   @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
 
+  # The one token `create_token/1` mints; `check_token/2` knows only this one.
+  @fake_token "fake-webull-token-1"
+
   @doc """
   A child spec that starts nothing: `start_link/1` answers `:ignore`.
 
@@ -1962,6 +1965,454 @@ defmodule DpExchange.Webull.Fake do
       end
     end)
   end
+
+  # --- venue-specific surface the contract has no callback for -------------------------
+  #
+  # Everything below exists on `DpExchange.Webull` and was missing here, so a consumer's suite
+  # calling it against the Fake died with `UndefinedFunctionError`. Each validates with the
+  # SAME `Rest.validate_*` function the real path calls, in the same order, and before
+  # credentials; the answers are fixed fixtures of the real shape (the venue's own string-keyed
+  # maps). `test/dp_exchange/webull/fake_parity_test.exs` pins that no public facade function
+  # is missing from this module again.
+
+  @doc """
+  The two fixture futures contracts, narrowed by `opts[:symbols]`, `opts[:code]` and
+  `opts[:status]`. One of `:symbols` / `:code` is required
+  (`{:error, :symbols_or_code_required}`). Requires `opts[:credentials]`.
+  See `DpExchange.Webull.list_futures_contracts/1`.
+  """
+  @spec list_futures_contracts(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_contracts(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Rest.validate_futures_contracts_request(opts),
+           :ok <- authenticated(opts) do
+        symbols = csv(Keyword.get(opts, :symbols))
+        codes = csv(Keyword.get(opts, :code))
+        status = Keyword.get(opts, :status)
+
+        {:ok,
+         Enum.filter(fake_futures_contracts(), fn row ->
+           matches?(symbols, row["symbol"]) and matches?(codes, row["code"]) and
+             (is_nil(status) or to_string(status) == row["status"])
+         end)}
+      end
+    end)
+  end
+
+  defp fake_futures_contracts do
+    for {symbol, month} <- [{"ESZ5", "202512"}, {"ESH6", "202603"}] do
+      %{
+        "symbol" => symbol,
+        "instrument_id" => "fut-" <> symbol,
+        "exchange_code" => "CME",
+        "code" => "ES",
+        "name" => "E-mini S&P 500",
+        "product_class_id" => "pc-1",
+        "product_class_name" => "Equity Index",
+        "status" => "OC",
+        "currency" => "USD",
+        "contract_month" => month,
+        "contract_type" => "MONTHLY"
+      }
+    end
+  end
+
+  @doc """
+  The one fixture futures product class. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.list_futures_product_classes/1`.
+  """
+  @spec list_futures_product_classes(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_futures_product_classes(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts) do
+        {:ok, [%{"product_class_id" => "pc-1", "product_class_name" => "Equity Index"}]}
+      end
+    end)
+  end
+
+  @doc """
+  The one fixture event-contract category. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.list_event_categories/1`.
+  """
+  @spec list_event_categories(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_categories(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %{
+             "category_id" => "cat-1",
+             "category_code" => "ECONOMICS",
+             "category_name" => "Economics"
+           }
+         ]}
+      end
+    end)
+  end
+
+  @doc """
+  The fixture event series as ONE page (`pagination_key: nil`), narrowed by `opts[:category]`
+  and `opts[:symbols]`. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.list_event_series/1`.
+  """
+  @spec list_event_series(keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_series(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Rest.validate_event_series_request(opts),
+           :ok <- authenticated(opts) do
+        category = Keyword.get(opts, :category)
+        symbols = csv(Keyword.get(opts, :symbols))
+
+        rows =
+          Enum.filter([fake_event_series()], fn row ->
+            (is_nil(category) or to_string(category) == row["category"]) and
+              matches?(symbols, row["symbol"])
+          end)
+
+        {:ok, %{rows: rows, pagination_key: nil}}
+      end
+    end)
+  end
+
+  defp fake_event_series do
+    %{
+      "category" => "ECONOMICS",
+      "series_id" => "ser-1",
+      "symbol" => "KXGDP",
+      "name" => "US GDP growth",
+      "frequency" => "ANNUAL"
+    }
+  end
+
+  @doc """
+  The fixture events of series `KXGDP`; any other `opts[:series_symbol]` lists none.
+  `:series_symbol` is required (`{:error, :series_symbol_required}`). Requires
+  `opts[:credentials]`. See `DpExchange.Webull.list_event_events/1`.
+  """
+  @spec list_event_events(keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def list_event_events(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Rest.validate_event_events_request(opts),
+           :ok <- authenticated(opts) do
+        status = Keyword.get(opts, :status)
+        symbols = csv(Keyword.get(opts, :symbols))
+        series = opts |> Keyword.fetch!(:series_symbol) |> to_string()
+
+        rows =
+          Enum.filter([fake_event()], fn row ->
+            series == "KXGDP" and (is_nil(status) or to_string(status) == row["status"]) and
+              matches?(symbols, row["symbol"])
+          end)
+
+        {:ok, rows}
+      end
+    end)
+  end
+
+  defp fake_event do
+    %{
+      "series_id" => "ser-1",
+      "symbol" => "KXGDP-26",
+      "name" => "US GDP growth in 2026?",
+      "status" => "ACTIVE",
+      "short_name" => "GDP 2026",
+      "strike_date" => "2026-12-31",
+      "strike_period" => "ANNUAL",
+      "mutually_exclusive" => false
+    }
+  end
+
+  @doc """
+  The fixture event-contract market as ONE page (`pagination_key: nil`), narrowed by
+  `opts[:series_symbol]`, `opts[:event_symbol]` and `opts[:symbols]`. `status` and
+  `tradable_status` are two fields, as on the real row. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.list_event_markets/1`.
+  """
+  @spec list_event_markets(keyword()) ::
+          {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
+          | {:error, term()}
+          | {:refused, term()}
+  def list_event_markets(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Rest.validate_event_markets_request(opts),
+           :ok <- authenticated(opts) do
+        series = Keyword.get(opts, :series_symbol)
+        event = Keyword.get(opts, :event_symbol)
+        symbols = csv(Keyword.get(opts, :symbols))
+        market = fake_event_market()
+
+        rows =
+          if (is_nil(series) or to_string(series) == market["series_symbol"]) and
+               (is_nil(event) or to_string(event) == market["event_symbol"]) and
+               matches?(symbols, market["symbol"]),
+             do: [market],
+             else: []
+
+        {:ok, %{rows: rows, pagination_key: nil}}
+      end
+    end)
+  end
+
+  defp fake_event_market do
+    %{
+      "series_id" => "ser-1",
+      "series_symbol" => "KXGDP",
+      "series_name" => "US GDP growth",
+      "event_symbol" => "KXGDP-26",
+      "event_name" => "US GDP growth in 2026?",
+      "instrument_id" => "evt-1",
+      "symbol" => "KXGDP-26-T3",
+      "name" => "Above 3%",
+      "status" => "LISTING",
+      "tradable_status" => "OC",
+      "can_close_early" => false
+    }
+  end
+
+  @doc """
+  Three fixture ticks (fewer when `opts[:limit]` is smaller) for one event-contract market,
+  in the venue's own shape (a yes price, a no price, a `yes`/`no` side). Requires
+  `opts[:credentials]`. See `DpExchange.Webull.get_event_trades/2`.
+  """
+  @spec get_event_trades(String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_event_trades(symbol, opts \\ []) do
+    with_injection(symbol, fn ->
+      with :ok <- Rest.validate_event_trades_request(symbol, opts),
+           :ok <- authenticated(opts) do
+        ticks =
+          for {side, yes, no, n} <- [
+                {"yes", "0.13", "0.87", 1},
+                {"no", "0.12", "0.88", 2},
+                {"yes", "0.13", "0.87", 3}
+              ] do
+            %{
+              "time" => Integer.to_string(DateTime.to_unix(@at, :millisecond) - n * 1_000),
+              "yes_price" => yes,
+              "no_price" => no,
+              "volume" => "1.0",
+              "side" => side,
+              "trade_id" => "evt-trade-#{n}"
+            }
+          end
+
+        {:ok, Enum.take(ticks, Keyword.get(opts, :limit) || 3)}
+      end
+    end)
+  end
+
+  @doc """
+  The fixture event-contract book: four sides (`yes_bids`, `yes_asks`, `no_bids`,
+  `no_asks`), the venue's own level maps, and `quote_time` in milliseconds. Requires
+  `opts[:credentials]`. See `DpExchange.Webull.get_event_order_book/2`.
+  """
+  @spec get_event_order_book(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def get_event_order_book(symbol, opts \\ []) do
+    with_injection(symbol, fn ->
+      with :ok <- Rest.validate_event_book_request(symbol, opts),
+           :ok <- authenticated(opts) do
+        {:ok,
+         %{
+           symbol: symbol,
+           yes_bids: [%{"price" => "0.13", "size" => "543"}],
+           yes_asks: [%{"price" => "0.14", "size" => "210"}],
+           no_bids: [%{"price" => "0.86", "size" => "210"}],
+           no_asks: [%{"price" => "0.87", "size" => "543"}],
+           quote_time: DateTime.to_unix(@at, :millisecond)
+         }}
+      end
+    end)
+  end
+
+  @doc """
+  Adds instruments to a watchlist this fake holds (`wl-1` or one created in this process).
+  Another id is `{:refused, :not_found}`. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.add_watchlist_instruments/3`.
+  """
+  @spec add_watchlist_instruments(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def add_watchlist_instruments(id, symbols, opts \\ []) do
+    watchlist_membership_write(id, symbols, opts, fn held, members ->
+      Enum.uniq(held ++ members)
+    end)
+  end
+
+  @doc """
+  Removes instruments from a watchlist this fake holds. Another id is
+  `{:refused, :not_found}`. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.remove_watchlist_instruments/3`.
+  """
+  @spec remove_watchlist_instruments(String.t(), [String.t()], keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def remove_watchlist_instruments(id, symbols, opts \\ []) do
+    watchlist_membership_write(id, symbols, opts, fn held, members -> held -- members end)
+  end
+
+  # The symbols first (`Rest.watchlist_membership/5`), then the id, then credentials.
+  defp watchlist_membership_write(id, symbols, opts, change) do
+    with_injection(fn ->
+      with {:ok, members} <- Rest.validate_watchlist_membership(symbols),
+           :ok <- Rest.validate_watchlist_target(:id, id),
+           :ok <- authenticated(opts) do
+        update_watchlist_members(id, &change.(&1, members))
+      end
+    end)
+  end
+
+  defp update_watchlist_members(id, change) do
+    case Map.fetch(watchlists(), id) do
+      {:ok, %{symbols: held} = created} ->
+        put_watchlist(id, %{created | symbols: change.(held)})
+        {:ok, %{"success" => true}}
+
+      # The fixture's own canned watchlist: becomes a remembered one on first write.
+      :error when id == @canned_watchlist_id ->
+        put_watchlist(id, %{name: "My Tech Stocks", symbols: change.(["AAPL", "GOOG"])})
+        {:ok, %{"success" => true}}
+
+      _unknown_or_deleted ->
+        {:refused, :not_found}
+    end
+  end
+
+  @doc """
+  Reorders instruments of a watchlist this fake holds. `opts[:sorts]` is required
+  (`{:error, :sorts_required}`). Another id is `{:refused, :not_found}`; order is not
+  modelled. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.sort_watchlist_instruments/2`.
+  """
+  @spec sort_watchlist_instruments(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def sort_watchlist_instruments(id, opts \\ []) do
+    with_injection(fn ->
+      with {:ok, _sorts} <- Rest.validate_watchlist_sorts(opts),
+           :ok <- Rest.validate_watchlist_target(:id, id),
+           :ok <- authenticated(opts) do
+        if watchlist_exists?(id), do: {:ok, %{"success" => true}}, else: {:refused, :not_found}
+      end
+    end)
+  end
+
+  @doc """
+  One fixture row of the named fundamentals kind. An unknown kind is
+  `{:error, {:unknown_fundamental, kind}}`. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.get_fundamental/3`.
+  """
+  @spec get_fundamental(atom(), String.t(), keyword()) ::
+          {:ok, [map()]} | {:error, term()} | {:refused, term()}
+  def get_fundamental(kind, symbol, opts \\ []) do
+    with_injection(symbol, fn ->
+      with :ok <- Rest.validate_fundamental_request(kind, symbol, opts),
+           :ok <- authenticated(opts),
+           :ok <- equity_listed(symbol) do
+        {:ok, [%{"symbol" => symbol, "category" => "US_STOCK", "kind" => to_string(kind)}]}
+      end
+    end)
+  end
+
+  @doc "The fundamentals kinds `get_fundamental/3` reaches."
+  @spec fundamental_kinds() :: [atom()]
+  defdelegate fundamental_kinds(), to: Rest
+
+  @doc "The screener identifiers `get_screener/2` takes."
+  @spec screeners() :: [String.t()]
+  defdelegate screeners(), to: Rest
+
+  @doc """
+  Mints a `PENDING` fixture token, as the real endpoint does. Requires `opts[:credentials]`.
+  See `DpExchange.Webull.create_token/1`.
+  """
+  @spec create_token(keyword()) :: {:ok, map()} | {:error, term()} | {:refused, term()}
+  def create_token(opts \\ []) do
+    with_injection(fn ->
+      with :ok <- authenticated(opts), do: {:ok, token_row(@fake_token, "PENDING")}
+    end)
+  end
+
+  @doc """
+  The status of a token: the one `create_token/1` mints is `PENDING`, any other is
+  `INVALID`. A token that is not text is `{:error, {:invalid_field, :token}}`. Requires
+  `opts[:credentials]`. See `DpExchange.Webull.check_token/2`.
+  """
+  @spec check_token(String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def check_token(token, opts \\ []) do
+    with_injection(fn ->
+      if is_binary(token) do
+        with :ok <- authenticated(opts) do
+          {:ok, token_row(token, if(token == @fake_token, do: "PENDING", else: "INVALID"))}
+        end
+      else
+        {:error, {:invalid_field, :token}}
+      end
+    end)
+  end
+
+  defp token_row(token, status) do
+    %{
+      "token" => token,
+      "expires_at" => DateTime.to_unix(DateTime.add(@at, 15 * 86_400), :millisecond),
+      "status" => status
+    }
+  end
+
+  @doc """
+  A fixture OAuth exchange (`opts[:code]`) or refresh (`opts[:refresh_token]`), exactly one
+  of them required. Needs no venue credentials: the client id and secret are the arguments.
+  See `DpExchange.Webull.oauth_token/3`.
+  """
+  @spec oauth_token(String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:refused, term()}
+  def oauth_token(client_id, client_secret, opts \\ []) do
+    with_injection(fn ->
+      with :ok <- Rest.validate_oauth_request(client_id, client_secret, opts) do
+        {:ok,
+         %{
+           "access_token" => "fake-access-token",
+           "refresh_token" => "fake-refresh-token",
+           "token_type" => "Bearer",
+           "expires_in" => 1_800,
+           "rt_expires_in" => 2_592_000
+         }}
+      end
+    end)
+  end
+
+  @doc "Whether bars of `timeframe` are forward-adjusted. See `DpExchange.Webull.adjusted?/1`."
+  @spec adjusted?(String.t()) :: boolean() | nil
+  defdelegate adjusted?(timeframe), to: Rest
+
+  @doc "Calls the venue does not serve. See `DpExchange.Webull.venue_does_not_serve/0`."
+  @spec venue_does_not_serve() :: [{atom(), arity()}]
+  defdelegate venue_does_not_serve(), to: DpExchange.Webull
+
+  @doc "Whether the environment carries a live stream. See `DpExchange.Webull.streaming?/1`."
+  @spec streaming?(keyword()) :: boolean()
+  def streaming?(opts \\ []), do: DpExchange.Webull.streaming?(opts)
+
+  @doc "Whether the environment moves real money. See `DpExchange.Webull.live?/1`."
+  @spec live?(keyword()) :: boolean()
+  def live?(opts \\ []), do: DpExchange.Webull.live?(opts)
+
+  @doc "The quote currencies the symbol mapping recognises. See `DpExchange.Webull.quotes/0`."
+  @spec quotes() :: [String.t()]
+  defdelegate quotes(), to: DpExchange.Webull
+
+  # A comma-joined or list option as a list of text; `nil` is absent (matches everything).
+  defp csv(nil), do: nil
+  defp csv(list) when is_list(list), do: Enum.map(list, &to_string/1)
+  defp csv(value), do: value |> to_string() |> String.split(",", trim: true)
+
+  defp matches?(nil, _field), do: true
+  defp matches?(wanted, field), do: field in wanted
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.

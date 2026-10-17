@@ -22,6 +22,36 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Dependencies
+
+- Requires `dp_exchange_core ~> 0.3.99`: its tightened conformance groups 12 and 38 run
+  against this package's fake and pass.
+
+### Fixed
+
+- **`Fake` lacked 22 public facade functions** (`list_futures_contracts/1`,
+  `list_futures_product_classes/1`, `list_event_categories/1`, `list_event_series/1`,
+  `list_event_events/1`, `list_event_markets/1`, `get_event_trades/2`,
+  `get_event_order_book/2`, `add_watchlist_instruments/3`, `remove_watchlist_instruments/3`,
+  `sort_watchlist_instruments/2`, `get_fundamental/3`, `fundamental_kinds/0`, `screeners/0`,
+  `create_token/1`, `check_token/2`, `oauth_token/3`, `adjusted?/1`, `venue_does_not_serve/0`,
+  `streaming?/1`, `live?/1`, `quotes/0`): a consumer's suite got `UndefinedFunctionError`
+  where production answers. Each now validates with the same `Rest.validate_*` function the
+  real path calls (new public helpers, which the real functions now use too), in the same
+  order and before credentials, and answers a fixed fixture of the real shape. A test asserts
+  the facade's exports minus the Fake's exports is empty.
+- **Telemetry `link_down` was unpaired.** The rule: `[:dp_exchange, :link, :down]` is emitted
+  only to close a `link_up` (CONNACK 0), once per lost link. A failed reconnect that never
+  reached CONNACK 0 emitted `link_down` for a `link_up` that never fired, once per retry; it
+  no longer does. An unknown CONNACK code (before any `link_up`) sends its Notice and no
+  telemetry `link_down`. A shard socket that crashed (an `:EXIT`, so `handle_disconnect/2`
+  never ran) and a shard rebuilt on INVALID_SESSION (its socket is stopped, not disconnected)
+  emitted none, leaving a link gauge at "up"; the Feed now emits one `link_down` (bounded
+  reason text) for each such shard whose link was up, and never twice for one loss.
+- `usage-rules.md` said a dead subscriber's symbols "stay wanted" until `unsubscribe/2`; the
+  feed (and the family rule) releases them when the last data subscriber dies. The text now
+  states the real behaviour, which `tick_ag_test.exs` already pins.
+
 ## [0.4.158] - 2026-10-16
 
 ### Changed

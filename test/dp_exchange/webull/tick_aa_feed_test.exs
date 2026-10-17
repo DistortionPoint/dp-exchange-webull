@@ -413,7 +413,8 @@ defmodule DpExchange.Webull.TickAaFeedTest do
           app_key: "test-key-not-real"
         )
 
-      assert Socket.disconnect(socket) == :ok
+      # 5000 ms, not the 500 ms default: under the full --cover gate the call can queue past it.
+      assert Socket.disconnect(socket, 5_000) == :ok
 
       shards = %{0 => %{connected_shard("tick-aa-live") | socket: socket}}
       assert Feed.terminate(:normal, %{shards: shards}) == :ok

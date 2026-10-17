@@ -412,7 +412,7 @@ defmodule DpExchange.Webull.Feed do
 
   use GenServer
 
-  alias DpExchange.Core.{Config, Fanout, Notice}
+  alias DpExchange.Core.{Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
   alias DpExchange.Webull.{Credentials, Environment, Socket, Subscription}
 
@@ -2513,6 +2513,15 @@ defmodule DpExchange.Webull.Feed do
        )}
     )
 
+    # The crashed socket never ran `handle_disconnect/2`, so it emitted no `link_down`
+    # telemetry and a consumer's link gauge would stay "up". Emitted here, once, and only for
+    # a shard whose link WAS up: `connected?` is cleared when the socket's own `:link_down`
+    # notice is handled, so a socket that already reported this loss (and then crashed while
+    # waiting to reconnect) is not counted twice, and a shard that never reached CONNACK 0
+    # never reported `link_up` to be paired with.
+    if shard.connected?,
+      do: Telemetry.link_down(:webull, inspect(reason, limit: 50, printable_limit: 1_024))
+
     state = answer_parked_caller(state, shard, {:error, {:shard_crashed, reason}})
 
     # A crash tears this index's shard identity down wholesale and rebuilds it as a fresh
@@ -2919,6 +2928,13 @@ defmodule DpExchange.Webull.Feed do
              }
            )}
         )
+
+        # The socket is stopped below, not disconnected, so it emits no `link_down` of its
+        # own. One is emitted here to close the `link_up` of a shard that was up; a shard
+        # whose `connected?` was already cleared (its socket reported the loss) or that never
+        # came up emits none. Same rule as `isolate_crashed_shard/3`.
+        if shard.connected?,
+          do: Telemetry.link_down(:webull, "invalid_session #{inspect(named)}")
 
         # Answered BEFORE the delete, for the reason `answer_parked_caller/2` carries: after
         # this the shard is gone, and `complete_link_up/3` reads a missing shard as one whose
