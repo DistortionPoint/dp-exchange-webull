@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.160] - 2026-10-17
+
 ### Changed (BREAKING for callers that passed an option the venue cannot honour)
 
 - BREAKING: every `DpExchange.Webull` function that takes `opts`, and its `DpExchange.Webull.Fake`
