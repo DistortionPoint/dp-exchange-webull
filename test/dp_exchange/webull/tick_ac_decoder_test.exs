@@ -87,7 +87,7 @@ defmodule DpExchange.Webull.TickACDecoderTest do
       # Old: `required_decimal/2` read "-5" as a number and a `%Trade{quantity: -5}` went out.
       deliver("tick", basic() <> field(2, "1787936147000") <> field(3, "10") <> field(4, "-5"))
 
-      refute_receive {:dp_exchange, :webull, %Trade{}}, 100
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 500
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality} = notice}, 5_000
       assert notice.details.dropped == {:tick, {:non_positive_size, :quantity}}
@@ -117,7 +117,7 @@ defmodule DpExchange.Webull.TickACDecoderTest do
       # Old: exponent 0, so `abs(exp) > 1_000` did not catch it and a 10^2000 price went out.
       deliver("snapshot", basic() <> field(3, @huge))
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 100
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality} = notice}, 5_000
       assert notice.details.dropped == {:snapshot, {:invalid_decimal, :price}}

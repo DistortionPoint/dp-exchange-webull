@@ -164,7 +164,7 @@ defmodule DpExchange.Webull.RestTest do
                Rest.get_prices(symbols, @credentials, plug: plug, retry_attempts: 1)
 
       for symbol <- pairs(19), do: assert({:ok, %Types.Quote{}} = results[symbol])
-      assert {:error, {:exchange_error, :webull, "HTTP 417" <> _rest}} = results["BAD-USD"]
+      assert {:refused, {:venue_error, 417, "INVALID_SYMBOL"}} = results["BAD-USD"]
 
       requests =
         Enum.count(1..20, fn _n -> receive do: (:request -> true), after: (0 -> false) end)

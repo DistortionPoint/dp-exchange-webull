@@ -445,21 +445,13 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp content_rejection?({:refused, {:venue_error, 400, _detail}}), do: true
-  defp content_rejection?({:refused, {:venue_error, 400}}), do: true
+  # Any refusal that is not about the credential: 400 and the documented 417 business response
+  # (`INVALID_SYMBOL`), 409, 422, ... A 401/403 would fail every half the same way, and a 404
+  # is `{:refused, :not_found}`, which does not match here.
+  defp content_rejection?({:refused, {:venue_error, status, _detail}}),
+    do: status not in [401, 403]
 
-  # `get/4` reports any other non-2xx as `"HTTP <status>: …"`, its own wording.
-  defp content_rejection?({:error, {:exchange_error, :webull, "HTTP " <> rest}}) do
-    case Integer.parse(rest) do
-      {status, _rest} when status in 400..499 and status not in [401, 403, 429] -> true
-      # Deliberately defensive, and unreachable today: `get/4` only words a status "HTTP ..."
-      # when `HttpClient` (`raw_status: true`) handed it back, which is a 4xx; 400, 401, 403
-      # and 404 are refused before that clause and a 429 never arrives as a response. Kept so
-      # a change in `get/4`'s wording fails closed (no split) rather than raising.
-      _other -> false
-    end
-  end
-
+  defp content_rejection?({:refused, {:venue_error, status}}), do: status not in [401, 403]
   defp content_rejection?(_failure), do: false
 
   # Only crypto pairs go through the canonical mapper — an equity ticker is already the
@@ -927,7 +919,7 @@ defmodule DpExchange.Webull.Rest do
   # A bar or tick count over a maximum the endpoint's own page states is refused before the
   # request, in the shape the crypto check above has always used. Only endpoints whose page
   # STATES a maximum are checked (1200 for the bars and futures/option/event ticks, 1000
-  # for the stock tape, 20 for the statement endpoints); `capital-flows` and the depth
+  # for the stock tape, 20 for the statement endpoints, 5 for `capital-flows`); the depth
   # endpoints state none and are left to the venue.
   defp count_within_max(nil, _max), do: :ok
 
@@ -1517,6 +1509,7 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp symbol_verdict(response, :resource), do: response
+  defp symbol_verdict(response, :write), do: response
 
   defp not_listed_response?({:ok, %{status: 404}}), do: true
 
@@ -1538,6 +1531,19 @@ defmodule DpExchange.Webull.Rest do
 
   defp invalid_symbol_body?(_other), do: false
 
+  # **A 4xx is a refusal - any 4xx but 408 and 429, reads and writes alike.** The venue read
+  # the request and declined it, so nothing was placed, changed or created and a retry of the
+  # same request gets the same answer. Core's DV6 says so for every venue ("including 409,
+  # 415, 422 and any other 4xx the venue does not document"), and this venue DOCUMENTS one:
+  # `417`, its business response, `{"error_code": ..., "message": ...}` (every endpoint page).
+  # That 417 used to fall into the generic `{:error, {:exchange_error, ...}}`, which Core calls
+  # retryable and which `place_order/3` wrapped as `{:order_unconfirmed, id, ...}`: an order
+  # the venue had refused, reported as possibly live. `408` stays an error (a request timeout
+  # does not say whether the server acted) and `429` never arrives as a response:
+  # `Core.HttpClient` answers it as its own error, which `unsent?/1` knows. 404 is
+  # `{:refused, :not_found}`, matched before this guard.
+  defguardp declined?(status) when status in 400..499 and status not in [408, 429]
+
   defp get_result(result) do
     case result do
       {:refused, _reason} = verdict ->
@@ -1546,21 +1552,21 @@ defmodule DpExchange.Webull.Rest do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         decoded_body(body)
 
-      # Permanent for the request as sent. A caller whose token expired refreshes and
-      # calls again, which is a different request rather than a retry of this one.
-      {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
-        {:refused, refusal(status, body)}
-
       # Nothing at that id: permanent for the request as sent, and the answer the Fake gives
       # for an order it never issued. It was `{:exchange_error, :webull, "HTTP 404 ..."}`,
       # which Core calls retryable.
       {:ok, %{status: 404}} ->
         {:refused, :not_found}
 
+      # Permanent for the request as sent: the venue read it and declined it (400, 401, 403,
+      # the documented 417 business response, 409, 422, ...). A caller whose token expired
+      # refreshes and calls again, which is a different request rather than a retry of this
+      # one. 408 and 429 are not a considered answer and stay errors (`declined?/1`).
+      {:ok, %{status: status, body: body}} when declined?(status) ->
+        {:refused, refusal(status, body)}
+
       {:ok, %{status: status, body: body}} ->
-        {:error,
-         {:exchange_error, :webull,
-          "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
+        unexpected_status(status, body)
 
       {:error, reason} ->
         {:error, reason}
@@ -1595,6 +1601,10 @@ defmodule DpExchange.Webull.Rest do
     |> post_result()
   end
 
+  # A write sent exactly once (`send_once/1`): an order, a token, a watchlist.
+  defp post_write(path, body, credentials, opts),
+    do: post(path, body, credentials, send_once(opts), :write)
+
   defp post_result(result) do
     case result do
       {:refused, _reason} = verdict ->
@@ -1603,20 +1613,24 @@ defmodule DpExchange.Webull.Rest do
       {:ok, %{status: status, body: response}} when status in 200..299 ->
         decoded_body(response)
 
-      {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-        {:refused, refusal(status, response)}
-
       {:ok, %{status: 404}} ->
         {:refused, :not_found}
 
+      {:ok, %{status: status, body: response}} when declined?(status) ->
+        {:refused, refusal(status, response)}
+
       {:ok, %{status: status, body: response}} ->
-        {:error,
-         {:exchange_error, :webull,
-          "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
+        unexpected_status(status, response)
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp unexpected_status(status, response) do
+    {:error,
+     {:exchange_error, :webull,
+      "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
   end
 
   # Signed per attempt, not once per call. `Core.HttpClient` retries a timeout or a 5xx,
@@ -1640,8 +1654,10 @@ defmodule DpExchange.Webull.Rest do
   # names the order, and nothing in the reference says a repeated place is deduplicated
   # rather than refused or placed again — so a 5xx whose request in fact landed, retried,
   # would at best tell the caller a success failed and at worst act twice. `put`, not
-  # `put_new`: "sent once" is a guarantee, so a caller's own `retry_attempts: 3` does not
-  # turn a cancel or a placement into three requests.
+  # `put_new`: "sent once" is a guarantee, so a `retry_attempts: 3` reaching this module
+  # does not turn a cancel or a placement into three requests. The facade and the Fake
+  # never let one reach it: these calls are absent from `Options`' retry-key set, so
+  # `:retry_attempts` and `:retry_delay` are `{:unknown_option, key}` at the boundary.
   defp send_once(opts), do: Keyword.put(opts, :retry_attempts, 1)
 
   # `:rate_limit_blocking` was absent from this allowlist entirely — the same
@@ -1983,8 +1999,8 @@ defmodule DpExchange.Webull.Rest do
   ## This endpoint is much wider than transfers, and that matters
 
   It lists **every** cash activity: `TRADE`, `FEES`, `DIVIDENDS`, `TAX`, `INTERESTS`,
-  `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and `OTHER` alongside
-  `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks `get_transfers/2` for deposit and
+  `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL` and `EC_SETTLEMENT` (the page's twelve-value
+  enum; `OTHER` is not one) alongside `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks `get_transfers/2` for deposit and
   withdrawal history, because that is what a cost basis for transferred-in assets needs.
 
   **Returning all of it under that name would be wrong in a way that costs money.** A
@@ -2042,8 +2058,8 @@ defmodule DpExchange.Webull.Rest do
   `get_transfers/2` asks the venue for `DEPOSIT,WITHDRAW,TRANSFER` because the contract
   documents it as deposit and withdrawal history. This asks for none of that filtering and
   returns what the endpoint actually carries: `TRADE`, `FEES`, `DIVIDENDS`, `TAX`,
-  `INTERESTS`, `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL`, `EC_SETTLEMENT` and `OTHER`
-  alongside the three.
+  `INTERESTS`, `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL` and `EC_SETTLEMENT` alongside the
+  three.
 
   **The two are not interchangeable in either direction.** A dividend and a deposit both
   credit cash and neither is the other: a caller computing what it put in must use
@@ -2395,12 +2411,12 @@ defmodule DpExchange.Webull.Rest do
 
       body = %{"account_id" => account_id, "modify_orders" => [modification]}
 
-      # Sent once (`put_new`, so a caller can still ask for retries), as `create_watchlist/4`
-      # is. `Core.HttpClient` retries a timeout or a 5xx, and a replace that already took
-      # effect, sent again, is at best refused, telling the caller a success failed. The
-      # `client_order_id` names the order being changed, not this change, so the venue cannot
-      # tell a repeat from a second replace.
-      case post("/trading/orders/replace", body, credentials, send_once(opts)) do
+      # Sent exactly once (`post_write/4`), as `create_watchlist/4` is, and the facade refuses
+      # `:retry_attempts`. `Core.HttpClient` retries a timeout or a 5xx, and a replace that
+      # already took effect, sent again, is at best refused, telling the caller a success
+      # failed. The `client_order_id` names the order being changed, not this change, so the
+      # venue cannot tell a repeat from a second replace.
+      case post_write("/trading/orders/replace", body, credentials, opts) do
         {:ok, _response} ->
           read_back_replaced(get_order(credentials, client_order_id, opts), client_order_id)
 
@@ -2453,9 +2469,32 @@ defmodule DpExchange.Webull.Rest do
          {:ok, instrument} <- replace_option(opts, :instrument_type),
          {:ok, order_type} <- replace_option(opts, :order_type),
          :ok <- previewable(instrument),
-         {:ok, _allowed} <- allowed_combinations(instrument) do
-      amendable(order_type, changes)
+         {:ok, _allowed} <- allowed_combinations(instrument),
+         :ok <- amendable(order_type, changes) do
+      futures_type_change(instrument, order_type, changes)
     end
+  end
+
+  # **A futures order changes type in one direction only** (`common-order-replace.md`, "Futures
+  # order modification rules"): a limit or stop order "can only be changed to `market`", a
+  # stop-limit order "can only be changed to `limit`". Anything else was sent for the venue to
+  # refuse; it is `{:unsupported_order_type_change, from, to}` before the request, in the Fake
+  # too. The page states no such rule for equities or options, so none is made up for them.
+  @futures_type_changes %{limit: :market, stop: :market, stop_limit: :limit}
+
+  defp futures_type_change(:futures, order_type, changes) do
+    case Map.get(changes, :order_type) do
+      nil -> :ok
+      target -> check_futures_target(order_type, target)
+    end
+  end
+
+  defp futures_type_change(_instrument, _order_type, _changes), do: :ok
+
+  defp check_futures_target(order_type, target) do
+    if Map.get(@futures_type_changes, order_type) == target,
+      do: :ok,
+      else: {:error, {:unsupported_order_type_change, order_type, target}}
   end
 
   @doc """
@@ -3493,7 +3532,7 @@ defmodule DpExchange.Webull.Rest do
   def create_token(credentials, opts) do
     with {:ok, response} <-
            write_outcome(
-             post("/auth/tokens/create", %{}, credentials, send_once(opts)),
+             post_write("/auth/tokens/create", %{}, credentials, opts),
              send_once(opts)
            ),
          {:ok, row} <- write_outcome(first_row(response)),
@@ -3609,13 +3648,13 @@ defmodule DpExchange.Webull.Rest do
                {:ok, _access_token} <- required_string(tokens, "access_token", :access_token),
                do: {:ok, tokens}
 
-        {:ok, %{status: status, body: body}} when status in [400, 401, 403] ->
+        # Any 4xx but 408 and 429 is the venue declining the grant (`write_refusal?/2`): the
+        # code or refresh token was read and refused, not lost in transit.
+        {:ok, %{status: status, body: body}} when declined?(status) ->
           {:refused, refusal(status, body)}
 
         {:ok, %{status: status, body: body}} ->
-          {:error,
-           {:exchange_error, :webull,
-            "HTTP #{status}: #{inspect(body, limit: 50, printable_limit: 2_048)}"}}
+          unexpected_status(status, body)
 
         {:error, reason} ->
           {:error, reason}
@@ -3835,8 +3874,8 @@ defmodule DpExchange.Webull.Rest do
   def create_watchlist(name, symbols, credentials, opts) do
     body = put_present(%{"name" => name}, "sort", Keyword.get(opts, :sort))
 
-    # Sent ONCE (`put_new`, so a caller can still ask for retries). `Core.HttpClient` retries
-    # a timeout or a 5xx three times by default, and nothing in this body — a name and an
+    # Sent ONCE (`post_write/4`; the facade refuses `:retry_attempts`). `Core.HttpClient`
+    # retries a timeout or a 5xx three times by default, and nothing in this body — a name and an
     # optional sort — lets the venue tell a second create from the first. The comment just
     # below names the outcome that produces: "the list now exists at the venue and the caller
     # has no handle to add to, read or delete it". A retried create makes precisely that
@@ -3848,14 +3887,10 @@ defmodule DpExchange.Webull.Rest do
     # `sort` of text went out as a JSON string where the page types an integer.
     with {:ok, members} <- validate_watchlist_symbols(symbols),
          :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
+         :ok <- validate_watchlist_category(opts),
          {:ok, response} <-
            write_outcome(
-             post(
-               "/market-data/watchlists/create",
-               body,
-               credentials,
-               send_once(opts)
-             ),
+             post_write("/market-data/watchlists/create", body, credentials, opts),
              send_once(opts)
            ),
          {:ok, row} <- write_outcome(first_row(response)),
@@ -3913,6 +3948,22 @@ defmodule DpExchange.Webull.Rest do
   def validate_watchlist_sort(nil), do: :ok
   def validate_watchlist_sort(sort) when is_integer(sort), do: :ok
   def validate_watchlist_sort(sort), do: {:error, {:invalid_sort, sort}}
+
+  @doc """
+  Whether `opts[:category]` (absent means `US_STOCK`) is the one value the watchlist
+  instrument endpoints document: their `category` enum is `US_STOCK` alone
+  (`add-watchlist-instruments.md` and the remove and update pages). Anything else is
+  `{:error, {:invalid_category, category}}` before a request, rather than a 417 from the venue
+  that `DpExchange.Webull.Fake` could not model. The check `create_watchlist/4` and the three
+  instrument writes make after their members, for `Fake`.
+  """
+  @spec validate_watchlist_category(keyword()) :: :ok | {:error, {:invalid_category, term()}}
+  def validate_watchlist_category(opts) do
+    case Keyword.get(opts, :category) do
+      category when category in [nil, "US_STOCK"] -> :ok
+      other -> {:error, {:invalid_category, other}}
+    end
+  end
 
   defp venue_watchlist_id(row) do
     case value(row, ["watchlist_id"]) do
@@ -3981,7 +4032,7 @@ defmodule DpExchange.Webull.Rest do
       with :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
            {:ok, response} <-
              write_outcome(
-               post("/market-data/watchlists/update", body, credentials, send_once(opts)),
+               post_write("/market-data/watchlists/update", body, credentials, opts),
                send_once(opts)
              ),
            # `update-watchlist.md:168-186` documents the same `SuccessResponseVo`
@@ -4025,7 +4076,7 @@ defmodule DpExchange.Webull.Rest do
 
     with {:ok, response} <-
            write_outcome(
-             post("/market-data/watchlists/delete", body, credentials, send_once(opts)),
+             post_write("/market-data/watchlists/delete", body, credentials, opts),
              send_once(opts)
            ),
          :ok <- write_outcome(watchlist_success(response)) do
@@ -4110,7 +4161,8 @@ defmodule DpExchange.Webull.Rest do
   @spec sort_watchlist_instruments(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
   def sort_watchlist_instruments(watchlist_id, credentials, opts) do
-    with {:ok, sorts} <- validate_watchlist_sorts(opts) do
+    with {:ok, sorts} <- validate_watchlist_sorts(opts),
+         :ok <- validate_watchlist_category(opts) do
       instruments =
         Enum.map(sorts, fn {symbol, position} ->
           %{
@@ -4148,7 +4200,8 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp watchlist_membership(action, watchlist_id, symbols, credentials, opts) do
-    with {:ok, members} <- validate_watchlist_membership(symbols) do
+    with {:ok, members} <- validate_watchlist_membership(symbols),
+         :ok <- validate_watchlist_category(opts) do
       instruments =
         Enum.map(members, &%{"symbol" => &1, "category" => fundamental_category(opts)})
 
@@ -4175,7 +4228,7 @@ defmodule DpExchange.Webull.Rest do
 
     with :ok <- validate_watchlist_target(:id, watchlist_id),
          {:ok, response} <-
-           write_outcome(post(path, body, credentials, send_once(opts)), send_once(opts)),
+           write_outcome(post_write(path, body, credentials, opts), send_once(opts)),
          :ok <- write_outcome(watchlist_success(response)) do
       {:ok, %{"success" => true}}
     end
@@ -4326,8 +4379,8 @@ defmodule DpExchange.Webull.Rest do
     case Map.fetch(@fundamentals, kind) do
       {:ok, {path, allowed}} ->
         # The statement endpoints state "maximum value is 20" for `count`
-        # (`financial-balancesheet.md` and kin, `fund-net-value.md`). `capital-flows` states
-        # none and is left to the venue.
+        # (`financial-balancesheet.md` and kin, `fund-net-value.md`); `capital-flows` states
+        # "range 1~5" (`capital-flow.md`).
         #
         # The options are checked BEFORE the query is built (`scalar_opts/2`): a map or a list
         # of maps for `:type` raised `Protocol.UndefinedError` out of `put_present/3`'s
@@ -4384,6 +4437,10 @@ defmodule DpExchange.Webull.Rest do
 
   defp statement_count(kind, opts) when kind in @counted_to_20,
     do: count_within_max(Keyword.get(opts, :count), 20)
+
+  # `capital-flow.md`: "Number of records to return, range 1~5, default 5". This used to be
+  # left to the venue on the strength of the page stating no maximum; it states one.
+  defp statement_count(:capital_flows, opts), do: count_within_max(Keyword.get(opts, :count), 5)
 
   defp statement_count(_kind, _opts), do: :ok
 
@@ -4949,7 +5006,7 @@ defmodule DpExchange.Webull.Rest do
     |> Enum.reduce_while({:ok, []}, fn symbol, {:ok, acc} ->
       fetch_page = fn key -> news_page(symbol, filters, key, credentials, opts) end
 
-      case news_walk(fetch_page, limit, nil, [], 0) do
+      case news_walk(fetch_page, limit, nil, [], 0, 0) do
         {:ok, items} -> {:cont, {:ok, [items | acc]}}
         failure -> {:halt, failure}
       end
@@ -4963,22 +5020,37 @@ defmodule DpExchange.Webull.Rest do
   # Reads pages until `limit` items have arrived (cut to exactly `limit`) or the venue sends
   # no cursor. See `get_news/2` for the refusals; `paginate/4` is the same walk without a
   # count.
-  defp news_walk(_fetch_page, _limit, _key, _acc, page) when page >= @max_pages,
+  #
+  # Pages are collected AS PAGES with a running count and flattened once: `acc ++ items` per
+  # page copied the whole accumulator each time, and `length/1` of it walked it again.
+  defp news_walk(_fetch_page, _limit, _key, _pages, _count, page) when page >= @max_pages,
     do: {:error, :history_truncated}
 
-  defp news_walk(fetch_page, limit, key, acc, page) do
+  defp news_walk(fetch_page, limit, key, pages, count, page) do
     with {:ok, {items, next_key}} <- fetch_page.(key) do
-      collected = acc ++ items
+      collected = [items | pages]
+      total = count + length(items)
 
       cond do
-        limit != nil and length(collected) >= limit -> {:ok, Enum.take(collected, limit)}
-        next_key == nil -> {:ok, collected}
-        match?({:invalid_key, _other}, next_key) -> {:error, :unexpected_pagination_key}
-        next_key == key -> {:error, :pagination_key_did_not_advance}
-        true -> news_walk(fetch_page, limit, next_key, collected, page + 1)
+        limit != nil and total >= limit ->
+          {:ok, collected |> flatten_pages() |> Enum.take(limit)}
+
+        next_key == nil ->
+          {:ok, flatten_pages(collected)}
+
+        match?({:invalid_key, _other}, next_key) ->
+          {:error, :unexpected_pagination_key}
+
+        next_key == key ->
+          {:error, :pagination_key_did_not_advance}
+
+        true ->
+          news_walk(fetch_page, limit, next_key, collected, total, page + 1)
       end
     end
   end
+
+  defp flatten_pages(pages), do: pages |> Enum.reverse() |> Enum.concat()
 
   defp news_page(symbol, filters, key, credentials, opts) do
     params =
@@ -6326,27 +6398,34 @@ defmodule DpExchange.Webull.Rest do
   # An unrecognised body keeps the status rather than collapsing to a bare `:refused`. A
   # status alone is thin, but it is the difference between "the venue rejected this and here
   # is which kind" and "something went wrong".
-  defp refusal(status, body) do
-    case refusal_body(body) do
-      %{"msg" => message} when is_binary(message) ->
-        {:venue_error, status, bound_reason(message)}
+  defp refusal(status, body), do: refusal_reason(status, refusal_body(body))
 
-      %{"message" => message} when is_binary(message) ->
-        {:venue_error, status, bound_reason(message)}
+  # The venue's documented error shape (`{"error_code": "UNAUTHORIZED", "message": ...}` on its
+  # 401 and 417 responses): the code is the part a caller matches on, and the message alone
+  # dropped it.
+  defp refusal_reason(status, %{"error_code" => code, "message" => message})
+       when is_binary(code) and is_binary(message),
+       do: {:venue_error, status, bound_reason(code <> ": " <> message)}
 
-      %{"error_description" => detail} when is_binary(detail) ->
-        {:venue_error, status, bound_reason(detail)}
+  defp refusal_reason(status, %{"msg" => message}) when is_binary(message),
+    do: {:venue_error, status, bound_reason(message)}
 
-      %{"code" => code} when is_binary(code) ->
-        {:venue_error, status, bound_reason(code)}
+  defp refusal_reason(status, %{"message" => message}) when is_binary(message),
+    do: {:venue_error, status, bound_reason(message)}
 
-      %{"code" => code} when is_integer(code) ->
-        {:venue_error, status, code}
+  defp refusal_reason(status, %{"error_description" => detail}) when is_binary(detail),
+    do: {:venue_error, status, bound_reason(detail)}
 
-      _other ->
-        {:venue_error, status}
-    end
-  end
+  defp refusal_reason(status, %{"code" => code}) when is_binary(code),
+    do: {:venue_error, status, bound_reason(code)}
+
+  defp refusal_reason(status, %{"code" => code}) when is_integer(code),
+    do: {:venue_error, status, code}
+
+  defp refusal_reason(status, %{"error_code" => code}) when is_binary(code),
+    do: {:venue_error, status, bound_reason(code)}
+
+  defp refusal_reason(status, _other), do: {:venue_error, status}
 
   # A refusal's words come from the venue, or from a gateway in front of it, and ride in an
   # error tuple a caller logs and keeps. Text over 2 KiB is cut and copied (a view would pin
@@ -6692,7 +6771,7 @@ defmodule DpExchange.Webull.Rest do
         "new_orders" => [Map.put(leaf, "client_order_id", client_order_id)]
       }
 
-      case post("/trading/orders/place", body, credentials, send_once(opts)) do
+      case post_write("/trading/orders/place", body, credentials, opts) do
         {:ok, response} ->
           to_placed_order(response, request, order_type, tif, client_order_id)
 
@@ -6717,10 +6796,13 @@ defmodule DpExchange.Webull.Rest do
 
   @doc """
   Whether an `{:error, reason}` from a signed request was decided before anything was sent:
-  missing or unusable credentials (`Auth.headers/2`), or `Core.HttpClient`'s own limiter
+  missing or unusable credentials (`Auth.headers/2`), `Core.HttpClient`'s own limiter
   refusing (`"Throttled by our own rate limiter ..."` / `"Rate limiter unavailable"` /
   `:rate_limit_timeout` from a blocking limiter, bare or inside
-  `{:exchange_error, provider, message}`).
+  `{:exchange_error, provider, message}`), or the venue's own 429
+  (`"Rate limited by the venue - retry after Ns"`): the venue documents it as "request
+  rejected with no partial processing" (`rest-rate-limits.md`), and Core's `place_order/3`
+  contract makes it the one 4xx that is a plain `{:error, reason}`.
 
   Such an outcome cannot have placed or changed anything, so `place_order/3` does not wrap
   it as `:order_unconfirmed`. Anything else (a transport error, a timeout, a 5xx, an
@@ -6733,6 +6815,7 @@ defmodule DpExchange.Webull.Rest do
   def unsent?(:rate_limit_timeout), do: true
   def unsent?("Throttled by our own rate limiter" <> _rest), do: true
   def unsent?("Rate limiter unavailable" <> _rest), do: true
+  def unsent?("Rate limited by the venue" <> _rest), do: true
   def unsent?(_possibly_sent), do: false
 
   @doc """
@@ -6742,9 +6825,9 @@ defmodule DpExchange.Webull.Rest do
   `Core.HttpClient` asks the limiter again before every retry. With `retry_attempts: 3` a
   limiter refusal on the second attempt follows a first attempt that was sent and may have
   landed, so reporting it as the plain `{:error, reason}` would send the caller to place the
-  order again. `Rest` sends every write once (`retry_attempts: 1`) unless the caller asked
-  otherwise, so the common case is unchanged. Missing or unusable credentials are decided
-  before the first attempt whatever `retry_attempts` is. A `:retry_attempts` that is not an
+  order again. `Rest` sends every write once (`retry_attempts: 1`, always), so a limiter
+  refusal is always a refusal before the first attempt. Missing or unusable credentials are
+  decided before the first attempt whatever `retry_attempts` is. A `:retry_attempts` that is not an
   integer is treated as retrying (the conservative answer).
   """
   @spec unsent?(term(), keyword()) :: boolean()
@@ -6756,6 +6839,7 @@ defmodule DpExchange.Webull.Rest do
   defp limiter_refusal?(:rate_limit_timeout), do: true
   defp limiter_refusal?("Throttled by our own rate limiter" <> _rest), do: true
   defp limiter_refusal?("Rate limiter unavailable" <> _rest), do: true
+  defp limiter_refusal?("Rate limited by the venue" <> _rest), do: true
   defp limiter_refusal?(_other), do: false
 
   defp single_attempt?(opts) do
@@ -6812,7 +6896,7 @@ defmodule DpExchange.Webull.Rest do
 
       ids = Enum.map(orders, &Map.fetch!(&1, "client_order_id"))
 
-      case post("/trading/orders/batch-place", body, credentials, send_once(opts)) do
+      case post_write("/trading/orders/batch-place", body, credentials, opts) do
         {:ok, response} ->
           batch_result(batch_rows(response), ids)
 
@@ -6961,6 +7045,7 @@ defmodule DpExchange.Webull.Rest do
     :price,
     :stop_price,
     :trailing_stop_step,
+    :trailing_type,
     :client_order_id,
     :instrument_type,
     :expire_date,
@@ -7291,7 +7376,7 @@ defmodule DpExchange.Webull.Rest do
          :ok <- event_amount_rules(entrust, instrument, request),
          :ok <- unexpected_price_fields(request, order_type),
          :ok <- required_order_prices(request, order_type),
-         :ok <- positive_numbers(request, sent_price_fields(order_type)),
+         {:ok, trailing} <- checked_prices(request, order_type),
          :ok <- valid_client_order_id(Map.get(request, :client_order_id)),
          {:ok, outcome} <- event_outcome(request),
          {:ok, session} <- support_trading_session(request) do
@@ -7310,6 +7395,7 @@ defmodule DpExchange.Webull.Rest do
         |> put_number("limit_price", price_for(request, order_type))
         |> put_number("stop_price", stop_for(request, order_type))
         |> put_number("trailing_stop_step", trailing_stop_step_for(request, order_type))
+        |> put_present("trailing_type", trailing)
         |> put_present("expire_date", expire)
         |> put_present("event_outcome", outcome)
         |> put_present("support_trading_session", session)
@@ -7571,6 +7657,65 @@ defmodule DpExchange.Webull.Rest do
   defp sent_price_fields("TRAILING_STOP_LOSS"), do: [:trailing_stop_step]
   defp sent_price_fields(_other), do: []
 
+  # The numbers an order carries must be positive, and a trailing stop must say what its step
+  # is a step OF (`checked_trailing_type/2`). `{:ok, wire_trailing_type | nil}`.
+  defp checked_prices(request, order_type) do
+    with :ok <- positive_numbers(request, sent_price_fields(order_type)),
+         {:ok, trailing} <- trailing_type(request, order_type),
+         do: percentage_cap(request, trailing)
+  end
+
+  # **A trailing stop names what its step measures.** `common-order-place.md` documents
+  # `trailing_type` (`AMOUNT` or `PERCENTAGE`) beside `trailing_stop_step`, and its trailing
+  # example sends both: `"trailing_type": "AMOUNT", "trailing_stop_step": "1"`. The step alone
+  # is `1` dollar or `100%`, and this package used to send the step alone, leaving the venue
+  # to choose, with the same number meaning two very different protective stops. It is
+  # required here, never defaulted, and refused on any other order type rather than dropped.
+  @trailing_types %{
+    :amount => "AMOUNT",
+    :percentage => "PERCENTAGE",
+    "AMOUNT" => "AMOUNT",
+    "PERCENTAGE" => "PERCENTAGE"
+  }
+
+  defp trailing_type(request, "TRAILING_STOP_LOSS") do
+    case Map.get(request, :trailing_type) do
+      nil -> {:error, {:missing_field, :trailing_type}}
+      type -> named_trailing_type(type)
+    end
+  end
+
+  defp trailing_type(request, _order_type) do
+    case Map.get(request, :trailing_type) do
+      nil -> {:ok, nil}
+      _given -> {:error, {:unexpected_field, :trailing_type}}
+    end
+  end
+
+  defp named_trailing_type(type) do
+    case Map.fetch(@trailing_types, type) do
+      {:ok, wire} -> {:ok, wire}
+      :error -> {:error, {:invalid_trailing_type, type}}
+    end
+  end
+
+  # "If the tracking type is percentage, the tracking spread can not exceed 1, 0.01 means 1%."
+  defp percentage_cap(request, "PERCENTAGE") do
+    step = Map.get(request, :trailing_stop_step)
+
+    case decimal(step) do
+      %Decimal{} = parsed ->
+        if Decimal.compare(parsed, 1) == :gt,
+          do: {:error, {:invalid_trailing_stop_step, step}},
+          else: {:ok, "PERCENTAGE"}
+
+      nil ->
+        {:ok, "PERCENTAGE"}
+    end
+  end
+
+  defp percentage_cap(_request, trailing), do: {:ok, trailing}
+
   defp price_for(request, "LIMIT"), do: Map.get(request, :price)
   defp price_for(request, "STOP_LOSS_LIMIT"), do: Map.get(request, :price)
   defp price_for(_request, _order_type), do: nil
@@ -7746,7 +7891,7 @@ defmodule DpExchange.Webull.Rest do
          {:ok, account_id} <- account_id(opts) do
       body = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
-      with {:ok, _response} <- post("/trading/orders/cancel", body, credentials, send_once(opts)) do
+      with {:ok, _response} <- post_write("/trading/orders/cancel", body, credentials, opts) do
         {:ok, :cancelled}
       end
     end

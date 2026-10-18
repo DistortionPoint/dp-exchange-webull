@@ -44,6 +44,9 @@ defmodule DpExchange.Webull.DelegationTest do
     Keyword.merge([credentials: @credentials, retry_attempts: 0], extra)
   end
 
+  # A write is sent exactly once and reads no `:retry_attempts`: passing it is refused.
+  defp once(extra), do: Keyword.merge([credentials: @credentials], extra)
+
   defp json(body) do
     fn conn ->
       conn
@@ -269,7 +272,7 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.place_order(
                  @credentials,
                  request,
-                 base(account_id: @account, plug: json(body))
+                 once(account_id: @account, plug: json(body))
                )
 
       assert order.id == "c1"
@@ -313,7 +316,7 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.cancel_order(
                  @credentials,
                  "abc",
-                 base(account_id: @account, plug: json(%{}))
+                 once(account_id: @account, plug: json(%{}))
                )
 
       assert {:ok, read} =
@@ -356,8 +359,7 @@ defmodule DpExchange.Webull.DelegationTest do
                  account_id: @account,
                  instrument_type: :equity,
                  order_type: :limit,
-                 plug: plug,
-                 retry_attempts: 0
+                 plug: plug
                )
 
       assert order.id == "abc"

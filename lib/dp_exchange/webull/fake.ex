@@ -1824,6 +1824,7 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- Rest.validate_watchlist_target(:name, name),
            {:ok, members} <- Rest.validate_watchlist_symbols(symbols),
            :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
+           :ok <- Rest.validate_watchlist_category(opts),
            :ok <- authenticated(opts) do
         # A new id per create, and the members it was created with, which `get_watchlist/2`
         # reads back.
@@ -2514,6 +2515,7 @@ defmodule DpExchange.Webull.Fake do
   defp watchlist_membership_write(id, symbols, opts, change) do
     with_injection(fn ->
       with {:ok, members} <- Rest.validate_watchlist_membership(symbols),
+           :ok <- Rest.validate_watchlist_category(opts),
            :ok <- Rest.validate_watchlist_target(:id, id),
            :ok <- authenticated(opts) do
         update_watchlist_members(id, &change.(&1, members))
@@ -2554,6 +2556,7 @@ defmodule DpExchange.Webull.Fake do
   defp do_sort_watchlist_instruments(id, opts) do
     with_injection(fn ->
       with {:ok, _sorts} <- Rest.validate_watchlist_sorts(opts),
+           :ok <- Rest.validate_watchlist_category(opts),
            :ok <- Rest.validate_watchlist_target(:id, id),
            :ok <- authenticated(opts) do
         if watchlist_exists?(id), do: {:ok, %{"success" => true}}, else: {:refused, :not_found}

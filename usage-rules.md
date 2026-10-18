@@ -27,7 +27,9 @@ is forwarded.** A call that sends a request (every REST call, and `subscribe/2`,
 `unsubscribe/2`, `update_symbols/2`, whose subscription call is one) takes `:credentials`,
 `:environment`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`, `:rate_limit_blocking`,
 `:weight`, `:timeout`, `:retry_attempts`, `:retry_delay`, `:max_retry_after_s`,
-`:max_body_bytes` and `:log_requests`; each reaches `Core.HttpClient`. `:adapter`, `:weight`,
+`:max_body_bytes` and `:log_requests`; each reaches `Core.HttpClient`. (The writes that are
+always sent once take neither `:retry_attempts` nor `:retry_delay`; see "A write is sent
+once".) `:adapter`, `:weight`,
 `:retry_delay`, `:max_retry_after_s` and `:max_body_bytes` were accepted and dropped before:
 `max_body_bytes: 1_024` bounded nothing. They are forwarded now.
 
@@ -93,6 +95,14 @@ same one.
 | `update_watchlist/2` | `:name`, `:sort` (`:symbols` is refused) |
 | `add_watchlist_instruments/3`, `remove_watchlist_instruments/3` | `:category` |
 | `sort_watchlist_instruments/2` | `:sorts`, `:category` |
+
+The watchlist `:category` is `"US_STOCK"` (the default), the one value the instrument endpoints'
+enum lists; any other is `{:error, {:invalid_category, v}}` before a request, in `Fake` too.
+A futures `replace_order/4` changes `:order_type` one way only (limit or stop to `:market`,
+stop-limit to `:limit`), else `{:error, {:unsupported_order_type_change, from, to}}`.
+Every 4xx but 408 and 429, on a read as on a write, is `{:refused, {:venue_error, status, reason}}`
+(404 is `{:refused, :not_found}`) and is never retried.
+
 | `get_financials/3` | `:category`, `:type`, `:count` |
 | `get_corporate_events/1` | `:symbol`, `:kind`, `:category` |
 | `get_filings/2` | `:category` |
@@ -1174,7 +1184,7 @@ deal with it. Where the add is itself unproven (it may have landed) the answer i
 `{:error, {:watchlist_created_members_unconfirmed, id, reason}}`: the watchlist exists and its
 membership is unknown, so read it with `get_watchlist/2` before adding again.
 
-## A stop order needs `:stop_price`; a trailing stop needs `:trailing_stop_step`
+## A stop order needs `:stop_price`; a trailing stop needs `:trailing_stop_step` and `:trailing_type`
 
 `place_order/3`'s `request` map takes the same field names for every instrument type, and
 which ones matter depends on `:order_type`:
@@ -1185,7 +1195,15 @@ which ones matter depends on `:order_type`:
 | `:limit` | the above, plus `:price` |
 | `:stop` | the sizing field, plus `:stop_price` — **no `:price`**, this order type has no limit leg |
 | `:stop_limit` | the sizing field, plus `:price` and `:stop_price` |
-| `:trailing_stop` | the sizing field, plus `:trailing_stop_step` |
+| `:trailing_stop` | the sizing field, plus `:trailing_stop_step` and `:trailing_type` |
+
+**`:trailing_type` is `:amount` or `:percentage` (or `"AMOUNT"` / `"PERCENTAGE"`) and has no
+default.** The step alone is a dollar distance or a fraction of the price, and the venue
+documents the type beside it (`common-order-place.md`: `"trailing_type": "AMOUNT",
+"trailing_stop_step": "1"`). A trailing stop without it is `{:error, {:missing_field,
+:trailing_type}}`, any other value `{:error, {:invalid_trailing_type, v}}`, and on any other
+order type it is `{:error, {:unexpected_field, :trailing_type}}`. A `:percentage` step is a
+fraction (`0.01` is 1%) and one above `1` is `{:error, {:invalid_trailing_stop_step, v}}`.
 
 A field a given order type does not use is **refused, not dropped**
 (`{:error, {:unexpected_field, key}}`) — a `:stop` request built from a `:limit` template
@@ -1367,7 +1385,9 @@ repeated order. So `place_order`, `place_orders`, `replace_order`, `cancel_order
 `create_token`, `oauth_token` (an authorization code is single-use and a refresh token may
 rotate) and every watchlist write are **sent once**. A timeout on one of them means
 "unknown": read the order or watchlist back before sending it again. This is a guarantee:
-a `:retry_attempts` you pass on one of these calls is overridden with 1.
+these calls read neither `:retry_attempts` nor `:retry_delay`, so passing either (any value,
+including 0 or 1) is `{:error, {:unknown_option, key}}` before anything is sent, in `Fake`
+too. Before, a `:retry_attempts` was accepted and silently overridden with 1.
 
 **Event contract orders sized by `:amount` are BUY-only and FOK-only** (the vendor page
 states both): a sell is `{:invalid_side, side}` and any other duration

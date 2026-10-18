@@ -191,11 +191,19 @@ defmodule DpExchange.Webull.TickAaRestATest do
     end
   end
 
-  describe "an unexpected status on a write" do
-    test "a POST answered with a 4xx the package has no name for keeps the status and body" do
-      assert {:error, {:exchange_error, :webull, "HTTP 418: " <> _body}} =
+  describe "an unexpected 4xx on a POST read" do
+    test "a 4xx the package has no name for is a refusal keeping the status and words" do
+      assert {:refused, {:venue_error, 418, "teapot"}} =
                Rest.check_token("token-test", @credentials,
                  plug: responding(%{"msg" => "teapot"}, 418),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a 408 stays a retryable error" do
+      assert {:error, {:exchange_error, :webull, "HTTP 408: " <> _body}} =
+               Rest.check_token("token-test", @credentials,
+                 plug: responding(%{"msg" => "slow"}, 408),
                  retry_attempts: 0
                )
     end
@@ -214,8 +222,8 @@ defmodule DpExchange.Webull.TickAaRestATest do
       assert {:refused, :not_listed} = news(responding(%{}, 404))
     end
 
-    test "a status between success and refusal keeps the status and body" do
-      assert {:error, {:exchange_error, :webull, "HTTP 418: " <> _body}} =
+    test "a 4xx the package has no name for is a refusal keeping the status and words" do
+      assert {:refused, {:venue_error, 418, "teapot"}} =
                news(responding(%{"msg" => "teapot"}, 418))
     end
 
@@ -369,8 +377,8 @@ defmodule DpExchange.Webull.TickAaRestATest do
   end
 
   describe "oauth_token/3" do
-    test "a status the package has no name for keeps the status and body" do
-      assert {:error, {:exchange_error, :webull, "HTTP 404: " <> _body}} =
+    test "any 4xx the venue answers a grant with is a refusal keeping status and words" do
+      assert {:refused, {:venue_error, 404, "gone"}} =
                Rest.oauth_token("CLIENT", "test-secret-not-real",
                  code: "c",
                  plug: responding(%{"msg" => "gone"}, 404),

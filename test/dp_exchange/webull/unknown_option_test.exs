@@ -154,6 +154,13 @@ defmodule DpExchange.Webull.UnknownOptionTest do
   # The calls that send no request read no HTTP key: they take `:credentials` and their own.
   @no_request ~w(get_fees coverage wanted coverage_by_kind subscribe_notices)a
 
+  # The writes that are always sent exactly once: they read neither `:retry_attempts` nor
+  # `:retry_delay`, so a caller passing either is refused.
+  @sent_once ~w(place_order place_orders cancel_order replace_order create_watchlist
+                update_watchlist delete_watchlist add_watchlist_instruments
+                remove_watchlist_instruments sort_watchlist_instruments create_token
+                oauth_token)a
+
   # Every key here is one `name` accepts, so the stray one is the only thing wrong. The plug
   # reports a request instead of answering it: a test that sees one has found a call that
   # went to the wire before its options were checked. A call that sends no request is given
@@ -162,13 +169,12 @@ defmodule DpExchange.Webull.UnknownOptionTest do
   defp transport_opts(name) do
     me = self()
 
-    http = [
-      plug: fn conn ->
-        send(me, {:request, conn.request_path})
-        conn
-      end,
-      retry_attempts: 0
-    ]
+    plug = fn conn ->
+      send(me, {:request, conn.request_path})
+      conn
+    end
+
+    http = if name in @sent_once, do: [plug: plug], else: [plug: plug, retry_attempts: 0]
 
     cond do
       name in @no_request -> [credentials: @credentials]
@@ -322,8 +328,31 @@ defmodule DpExchange.Webull.UnknownOptionTest do
       assert {:error, {:unknown_option, :credentials}} =
                Options.check(:oauth_token, credentials: @credentials)
 
-      for name <- @names -- (@no_environment ++ [:oauth_token]), key <- @http_keys do
+      for name <- @names -- (@no_environment ++ [:oauth_token]),
+          key <- @http_keys,
+          not (name in @sent_once and key in [:retry_attempts, :retry_delay]) do
         assert :ok == Options.check(name, [{key, nil}]), "#{name} refused #{key}"
+      end
+    end
+
+    test "a write that is always sent once refuses retry_attempts and retry_delay, any value" do
+      for module <- [Webull, Fake], name <- @sent_once, key <- [:retry_attempts, :retry_delay] do
+        for value <- [0, 1, 3, nil] do
+          result = call(name, module, transport_opts(name) ++ [{key, value}])
+
+          assert result == {:error, {:unknown_option, key}},
+                 "#{inspect(module)}.#{name} answered #{inspect(result)} for #{key}: #{value}"
+        end
+      end
+
+      refute_receive {:request, _path}, 500
+    end
+
+    test "a retried read still takes both keys" do
+      for name <- [:get_symbols, :preview_order, :check_token, :get_orders, :subscribe] do
+        for key <- [:retry_attempts, :retry_delay] do
+          assert :ok == Options.check(name, [{key, 1}]), "#{name} refused #{key}"
+        end
       end
     end
   end

@@ -47,6 +47,8 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
     end
   end
 
+  defp exploding, do: fn _conn -> raise "a refused option must not reach the wire" end
+
   defp capturing(body, test_pid) do
     fn conn ->
       {:ok, raw, conn} = Plug.Conn.read_body(conn)
@@ -245,10 +247,26 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
   describe "the facade" do
     test "all three delegate" do
       base = [credentials: @credentials, retry_attempts: 0]
+      # `create_token/1` and `oauth_token/3` are sent exactly once: neither reads
+      # `:retry_attempts`, so a caller passing it is refused (pinned below).
+      once = [credentials: @credentials]
 
       assert {:ok, _token} =
                DpExchange.Webull.create_token(
-                 base ++ [plug: responding(%{"token" => "t", "status" => "PENDING"})]
+                 once ++ [plug: responding(%{"token" => "t", "status" => "PENDING"})]
+               )
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               DpExchange.Webull.create_token(base ++ [plug: exploding()])
+
+      assert {:error, {:unknown_option, :retry_delay}} =
+               DpExchange.Webull.create_token(once ++ [retry_delay: 1, plug: exploding()])
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               DpExchange.Webull.oauth_token("CLIENT", "secret",
+                 code: "c",
+                 retry_attempts: 1,
+                 plug: exploding()
                )
 
       assert {:ok, _checked} =
@@ -262,7 +280,6 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
                  "CLIENT",
                  "secret",
                  code: "c",
-                 retry_attempts: 0,
                  plug: responding(%{"access_token" => "a"})
                )
 

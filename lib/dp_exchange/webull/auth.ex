@@ -32,6 +32,14 @@ defmodule DpExchange.Webull.Auth do
   not one of the six signed header pairs below, so adding it cannot desync a request from
   what was actually signed.
 
+  **`x-version` is pinned to `v2`, and that is unmeasured against the vendor's default.**
+  Every reference page under `docs/reference/webull/openapi` lists `x-version` as "Supported
+  values: `v2`, `v3`", default `v3`. This package sends `v2` and decodes the response shapes
+  those pages document; nothing in this repository records that the pages describe `v2` rather
+  than `v3`, or what `v3` changes, and this repository holds no credential to compare the two.
+  Switching would be a substitution of an unmeasured response version, so the pin stays until a
+  credentialed run shows both.
+
   ## The signature, step by step
 
   1. Collect the signing inputs: every query parameter, plus exactly six header pairs —

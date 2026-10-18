@@ -535,6 +535,11 @@ defmodule DpExchange.Webull.WatchlistsTest do
 
     test "the facade delegates all eight" do
       base = [credentials: @credentials, retry_attempts: 0]
+      # The six writes are sent exactly once and read no `:retry_attempts`.
+      once = [credentials: @credentials]
+
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               DpExchange.Webull.delete_watchlist("wl-1", base ++ [plug: ok()])
 
       assert {:ok, [_watchlist]} =
                DpExchange.Webull.list_watchlists(
@@ -551,28 +556,28 @@ defmodule DpExchange.Webull.WatchlistsTest do
                DpExchange.Webull.create_watchlist(
                  "Tech",
                  [],
-                 base ++ [plug: responding([%{"watchlist_id" => "wl-new"}])]
+                 once ++ [plug: responding([%{"watchlist_id" => "wl-new"}])]
                )
 
       assert {:ok, _updated} =
-               DpExchange.Webull.update_watchlist("wl-1", base ++ [name: "X", plug: ok()])
+               DpExchange.Webull.update_watchlist("wl-1", once ++ [name: "X", plug: ok()])
 
-      assert {:ok, :ok} = DpExchange.Webull.delete_watchlist("wl-1", base ++ [plug: ok()])
+      assert {:ok, :ok} = DpExchange.Webull.delete_watchlist("wl-1", once ++ [plug: ok()])
 
       assert {:ok, _added} =
-               DpExchange.Webull.add_watchlist_instruments("wl-1", ["AAPL"], base ++ [plug: ok()])
+               DpExchange.Webull.add_watchlist_instruments("wl-1", ["AAPL"], once ++ [plug: ok()])
 
       assert {:ok, _removed} =
                DpExchange.Webull.remove_watchlist_instruments(
                  "wl-1",
                  ["AAPL"],
-                 base ++ [plug: ok()]
+                 once ++ [plug: ok()]
                )
 
       assert {:ok, _sorted} =
                DpExchange.Webull.sort_watchlist_instruments(
                  "wl-1",
-                 base ++ [sorts: %{"AAPL" => 1}, plug: ok()]
+                 once ++ [sorts: %{"AAPL" => 1}, plug: ok()]
                )
     end
   end

@@ -132,18 +132,29 @@ defmodule DpExchange.Webull.CountLimitsTest do
                Rest.get_fundamental(:fund_net_values, "VTI", @credentials, opts(count: 21))
     end
 
-    test "capital flows state no maximum and are not checked locally" do
-      refute match?(
-               {:error, {:limit_out_of_range, _n, _max}},
+    # `capital-flow.md`: "Number of records to return, range 1~5, default 5".
+    test "capital flows state a range of 1 to 5: more is refused, 5 is sent" do
+      for count <- [6, 5_000, 0] do
+        assert {:error, {:limit_out_of_range, ^count, max: 5}} =
+                 Rest.get_fundamental(
+                   :capital_flows,
+                   "AAPL",
+                   @credentials,
+                   plug: empty_ok(),
+                   retry_attempts: 0,
+                   count: count
+                 )
+      end
+
+      assert {:ok, []} =
                Rest.get_fundamental(
                  :capital_flows,
                  "AAPL",
                  @credentials,
                  plug: empty_ok(),
                  retry_attempts: 0,
-                 count: 5_000
+                 count: 5
                )
-             )
     end
   end
 end

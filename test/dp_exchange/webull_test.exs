@@ -434,7 +434,7 @@ defmodule DpExchange.WebullTest do
 
       # The fake has no link, and the real feed sends a notice only when a link comes up.
       :ok = Fake.subscribe_notices(to: self())
-      refute_receive {:dp_exchange, :webull, %DpExchange.Core.Notice{}}, 100
+      refute_receive {:dp_exchange, :webull, %DpExchange.Core.Notice{}}, 500
     end
 
     test "update_symbols covers a symbol only once it was delivered to a subscriber" do
@@ -546,7 +546,7 @@ defmodule DpExchange.WebullTest do
       assert :ok = Fake.subscribe(["NOPE-USD"], to: self())
 
       assert Fake.coverage() == %{}
-      refute_receive {:dp_exchange, :webull, _anything}, 50
+      refute_receive {:dp_exchange, :webull, _anything}, 500
     end
 
     test "a bar before the range end is kept" do

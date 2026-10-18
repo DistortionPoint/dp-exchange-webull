@@ -55,8 +55,8 @@ defmodule DpExchange.Webull.TickAD2FacadeTest do
                Rest.get_top_of_book("NOPE-USD", @credentials, request_opts(responding(%{}, 404)))
     end
 
-    test "a 4xx that does not name the symbol stays the generic error, and 401 stays a refusal" do
-      assert {:error, {:exchange_error, :webull, "HTTP 417" <> _rest}} =
+    test "a 4xx that does not name the symbol is a refusal keeping its code, as 401 is" do
+      assert {:refused, {:venue_error, 417, "OTHER"}} =
                Rest.get_price(
                  "BTC-USD",
                  @credentials,

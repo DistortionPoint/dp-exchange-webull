@@ -539,7 +539,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
     @changes %{price: Decimal.new("11")}
 
     test "both options are required, and their absence is named" do
-      base = [account_id: @account, plug: exploding(), retry_attempts: 0]
+      base = [account_id: @account, plug: exploding()]
 
       for call <- [&Rest.replace_order/4, &Fake.replace_order/4] do
         assert {:error, {:missing_option, :instrument_type}} =
@@ -558,8 +558,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
         instrument_type: :equity,
         order_type: :market,
         account_id: @account,
-        plug: exploding(),
-        retry_attempts: 0
+        plug: exploding()
       ]
 
       assert {:error, {:unsupported_order_edit, :market, [:price]}} =
@@ -574,8 +573,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
         instrument_type: :equity,
         order_type: :limit,
         account_id: @account,
-        plug: exploding(),
-        retry_attempts: 0
+        plug: exploding()
       ]
 
       for bad <- [nil, [price: 1], "x", 7] do
@@ -590,8 +588,7 @@ defmodule DpExchange.Webull.TradingConventionsTest do
         instrument_type: :bond,
         order_type: :limit,
         account_id: @account,
-        plug: exploding(),
-        retry_attempts: 0
+        plug: exploding()
       ]
 
       expected = {:error, {:unsupported_instrument_type, :bond}}

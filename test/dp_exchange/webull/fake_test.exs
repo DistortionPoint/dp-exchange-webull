@@ -195,7 +195,7 @@ defmodule DpExchange.Webull.FakeTest do
       limit: [:price],
       stop: [:stop_price],
       stop_limit: [:price, :stop_price],
-      trailing_stop: [:trailing_stop_step],
+      trailing_stop: [:trailing_stop_step, :trailing_type],
       market: []
     }
 
@@ -212,6 +212,7 @@ defmodule DpExchange.Webull.FakeTest do
             price: Decimal.new("40000"),
             stop_price: Decimal.new("39000"),
             trailing_stop_step: Decimal.new("1"),
+            trailing_type: :amount,
             order_type: :limit,
             time_in_force: :gtc
           },
@@ -219,7 +220,7 @@ defmodule DpExchange.Webull.FakeTest do
         )
 
       used = Map.fetch!(@used_prices, merged.order_type)
-      Map.drop(merged, [:price, :stop_price, :trailing_stop_step] -- used)
+      Map.drop(merged, [:price, :stop_price, :trailing_stop_step, :trailing_type] -- used)
     end
 
     for {type, tif} <- [

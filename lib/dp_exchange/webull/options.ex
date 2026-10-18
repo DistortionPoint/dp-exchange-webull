@@ -17,6 +17,10 @@ defmodule DpExchange.Webull.Options do
     * A call that sends a request allows every shared key **but `:base_url`** (no call reads
       it; the hosts come from `:environment`), plus the keys in `own_keys/1`.
       `oauth_token/3` also refuses `:credentials`: the client id and secret are arguments.
+    * A write that is always sent exactly once (`place_order/3`, `place_orders/3`,
+      `cancel_order/3`, `replace_order/4`, the watchlist writes, `create_token/1` and
+      `oauth_token/3`) reads neither `:retry_attempts` nor `:retry_delay`: both are
+      `{:error, {:unknown_option, key}}`, whatever the value, before anything is sent.
     * `get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `subscribe_notices/1`
       send no request and open no socket: they allow `:credentials` (exempt, a consumer hands
       one set to every call) and their own keys, so `timeout: 5_000` is refused.
@@ -190,11 +194,36 @@ defmodule DpExchange.Webull.Options do
   @no_request [:get_fees, :coverage, :wanted, :coverage_by_kind, :subscribe_notices]
   @environment_only [:streaming?, :live?]
 
+  # **A call that is always sent exactly once reads neither `:retry_attempts` nor
+  # `:retry_delay`**, so both are refused (`{:unknown_option, key}`, before anything is
+  # sent) rather than accepted and overwritten. The venue documents no idempotency key for
+  # any of these writes, so `Rest` sends each with `retry_attempts: 1` whatever the caller
+  # passes; a table that still allowed the key let `retry_attempts: 3` read as "retry this
+  # order" and do nothing. `oauth_token/3` is a single-use token refresh: a retried
+  # refresh token is a spent one.
+  @sent_once [
+    :place_order,
+    :place_orders,
+    :cancel_order,
+    :replace_order,
+    :create_watchlist,
+    :update_watchlist,
+    :delete_watchlist,
+    :add_watchlist_instruments,
+    :remove_watchlist_instruments,
+    :sort_watchlist_instruments,
+    :create_token
+  ]
+  @no_retry_keys [:retry_attempts, :retry_delay]
+
   defp transport(function) when function in @no_request, do: [:credentials]
   defp transport(function) when function in @environment_only, do: [:credentials, :environment]
 
+  defp transport(function) when function in @sent_once,
+    do: CoreOptions.transport_options() -- [:base_url | @no_retry_keys]
+
   defp transport(:oauth_token),
-    do: CoreOptions.transport_options() -- [:base_url, :credentials]
+    do: CoreOptions.transport_options() -- [:base_url, :credentials | @no_retry_keys]
 
   defp transport(_function), do: CoreOptions.transport_options() -- [:base_url]
 

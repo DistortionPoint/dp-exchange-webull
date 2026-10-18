@@ -135,7 +135,8 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  equity_request(%{
                    order_type: :trailing_stop,
                    time_in_force: :gtc,
-                   trailing_stop_step: Decimal.new("1.50")
+                   trailing_stop_step: Decimal.new("1.50"),
+                   trailing_type: :amount
                  }),
                  plug: capturing([%{"client_order_id" => "c1"}], me),
                  account_id: @account,
@@ -160,6 +161,10 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       # package placed reached the venue with no trail distance configured at all. See the
       # comment on `trailing_stop_step_for/2`.
       assert leaf["trailing_stop_step"] == "1.50"
+
+      # `common-order-place.md` documents `trailing_type` beside the step; the step alone is
+      # a dollar distance or a fraction of the price.
+      assert leaf["trailing_type"] == "AMOUNT"
 
       exploding = fn _conn -> raise "must not send a trailing stop on an option" end
 

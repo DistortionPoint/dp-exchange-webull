@@ -440,8 +440,16 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, _results} =
                DpExchange.Webull.place_orders(@credentials, [order()],
                  account_id: "acct-1",
-                 plug: responding([%{"order_id" => "1"}]),
-                 retry_attempts: 0
+                 plug: responding([%{"order_id" => "1"}])
+               )
+    end
+
+    test "the facade refuses retry_attempts: a batch is sent exactly once" do
+      assert {:error, {:unknown_option, :retry_attempts}} =
+               DpExchange.Webull.place_orders(@credentials, [order()],
+                 account_id: "acct-1",
+                 plug: fn _conn -> raise "must not be sent" end,
+                 retry_attempts: 1
                )
     end
   end

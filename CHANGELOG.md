@@ -22,6 +22,60 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING: tick AL)
+
+- Reads too: a 4xx other than 408 and 429 (417, 409, 422, 400, 418, ...) is
+  `{:refused, {:venue_error, status, reason}}`, not a retryable
+  `{:error, {:exchange_error, :webull, "HTTP 4xx: ..."}}`, and is not retried (404 stays
+  `{:refused, :not_found}`, a single-symbol `INVALID_SYMBOL` stays `{:refused, :not_listed}`).
+  `get_prices/3` still halves a chunk down to the rejected symbol on any non-credential
+  refusal; that symbol now carries the refusal. `Subscription` is unchanged.
+- A watchlist write's `:category` is validated against the documented enum (`US_STOCK`):
+  `{:error, {:invalid_category, v}}` before a request, on the real path and the Fake.
+- A futures `replace_order/4` changes `:order_type` one way only, per the vendor page: limit or
+  stop to `:market`, stop-limit to `:limit`; else
+  `{:error, {:unsupported_order_type_change, from, to}}` before a request, in the Fake too.
+- Docs: `Auth` records that `x-version` is pinned to `v2` while the vendor default is `v3`,
+  unmeasured; the cash-activity moduledocs no longer list `OTHER`, which is not in the enum.
+- A write that is always sent exactly once no longer reads `:retry_attempts` or `:retry_delay`:
+  `place_order/3`, `place_orders/3`, `cancel_order/3`, `replace_order/4`, `create_watchlist/3`,
+  `update_watchlist/2`, `delete_watchlist/2`, `add_watchlist_instruments/3`,
+  `remove_watchlist_instruments/3`, `sort_watchlist_instruments/2`, `create_token/1` and
+  `oauth_token/3` answer `{:error, {:unknown_option, key}}` for either, whatever the value,
+  before anything is sent, on the facade and the Fake. `Rest` used to accept the key and
+  overwrite it with 1. Reads and the subscribe family keep both keys.
+- A trailing stop (`order_type: :trailing_stop`) now requires `:trailing_type` (`:amount` or
+  `:percentage`, or `"AMOUNT"` / `"PERCENTAGE"`) and sends it as `trailing_type`:
+  `common-order-place.md` documents it beside `trailing_stop_step` and its trailing example
+  sends both, and this package sent the step alone, leaving the venue to choose between a
+  dollar distance and a fraction of the price. Missing is `{:missing_field, :trailing_type}`,
+  another value `{:invalid_trailing_type, v}`, on any other order type
+  `{:unexpected_field, :trailing_type}`, and a `:percentage` step above 1 (the page: "can not
+  exceed 1, 0.01 means 1%") is `{:invalid_trailing_stop_step, v}`.
+- A refusal that carries the venue's `error_code` keeps it: `{:venue_error, 417,
+  "OPENAPI_NO_NIGHT_TRADING_TIME: The current period does not support..."}` (the reason was the
+  message alone). A body with an `error_code` and no message is that code.
+- `get_fundamental(:capital_flows, ...)` refuses a `:count` outside 1..5
+  (`{:limit_out_of_range, n, max: 5}`); `capital-flow.md` states "range 1~5" and the check was
+  left to the venue.
+
+### Fixed
+
+- A 4xx answered to a write is a refusal, not an unconfirmed write. The venue documents `417`
+  (its business response, `{"error_code", "message"}`) on the order, watchlist and token writes,
+  and a 417, 409, 422 or any other 4xx but 408 and 429 came back as
+  `{:error, {:exchange_error, ...}}`, which `place_order/3`, `place_orders/3`, `replace_order/4`
+  and `cancel_order/3` wrapped as `{:order_unconfirmed, id, ...}` and the watchlist writes as
+  `{:write_unconfirmed, nil, ...}`: an order the venue had declined was reported as possibly
+  live. They are `{:refused, {:venue_error, status, reason}}` now (Core's DV6). 408 and 5xx stay
+  unconfirmed. `oauth_token/3` reads a 4xx the same way.
+- The venue's own 429 ("Rate limited by the venue - retry after Ns") on a write is a plain
+  `{:error, reason}`, not `:order_unconfirmed` / `:write_unconfirmed`: the page says the request
+  is "rejected with no partial processing" and Core's `place_order/3` contract makes it the one
+  4xx that stays a plain error. `Rest.unsent?/1,2` knows it.
+- `get_news/2` collected pages with `acc ++ items` and `length/1` per page; it keeps a running
+  count and flattens once.
+
 ## [0.4.162] - 2026-10-18
 
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
