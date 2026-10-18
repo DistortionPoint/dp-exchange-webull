@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.163] - 2026-10-18
+
 ### Changed (BREAKING: tick AL)
 
 - Reads too: a 4xx other than 408 and 429 (417, 409, 422, 400, 418, ...) is
