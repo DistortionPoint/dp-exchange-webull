@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.162] - 2026-10-18
+
 Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
 
 ### Changed (BREAKING: shared transport keys are accepted only where read)
