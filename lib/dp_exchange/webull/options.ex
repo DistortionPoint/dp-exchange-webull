@@ -11,11 +11,18 @@ defmodule DpExchange.Webull.Options do
 
   ## What a function may be given
 
-  Its allowed list is `DpExchange.Core.Options.transport_options/0` (credentials,
-  environment, the `Req` test seams, the limiter, timeout and retry knobs) plus the keys in
-  `own_keys/1`, **minus `:base_url` everywhere** (no call reads it; the hosts come from
-  `:environment`) **and minus `:environment` on `get_fees/2`, `coverage/1`, `wanted/1`,
-  `coverage_by_kind/1` and `subscribe_notices/1`**, which make no request and open no socket.
+  A shared transport key (`DpExchange.Core.Options.transport_options/0`) is accepted only
+  where the call reads it, and every one accepted is forwarded to `Core.HttpClient`.
+
+    * A call that sends a request allows every shared key **but `:base_url`** (no call reads
+      it; the hosts come from `:environment`), plus the keys in `own_keys/1`.
+      `oauth_token/3` also refuses `:credentials`: the client id and secret are arguments.
+    * `get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1` and `subscribe_notices/1`
+      send no request and open no socket: they allow `:credentials` (exempt, a consumer hands
+      one set to every call) and their own keys, so `timeout: 5_000` is refused.
+    * `streaming?/1` and `live?/1` allow `:credentials` and `:environment`, which they
+      resolve, and nothing else.
+
   A refused key is `{:error, {:unknown_option, key}}`. The table below is the second half,
   and the only place it is written down:
   `check/3` reads it, `DpExchange.Webull` and `DpExchange.Webull.Fake` both call `check/3`
@@ -160,18 +167,36 @@ defmodule DpExchange.Webull.Options do
     CoreOptions.check(opts, transport(function) ++ own_keys(function) ++ extra)
   end
 
-  # `DpExchange.Core.Options.transport_options/0` minus what this package never reads.
-  # `:base_url` is read by no call: the hosts come from `Environment`, and the one other URL,
-  # `oauth_token/3`'s, is `:oauth_url`. Accepting a `base_url:` that does nothing would let a
-  # caller believe a signed request had been redirected when it went to the venue's own host.
-  # `:environment` is read by every REST call, `subscribe/2` and the two environment
-  # questions, and by no call in `@no_environment`: they make no request and open no socket.
-  @no_environment [:get_fees, :coverage, :wanted, :coverage_by_kind, :subscribe_notices]
+  # The transport keys `function` reads, from `DpExchange.Core.Options.transport_options/0`.
+  #
+  # A call that sends a request (everything not listed below) reads every shared key but
+  # `:base_url`: `Rest.request_opts/1` (and `Subscription`'s copy for the subscribe family)
+  # forwards `:limiter`, `:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`,
+  # `:retry_delay`, `:max_retry_after_s`, `:max_body_bytes`, `:log_requests`, `:plug`,
+  # `:adapter` and `:req_adapter` to `Core.HttpClient`; `:credentials` and `:environment`
+  # are read by the call itself.
+  #
+  #   * `:base_url` - read by no call: the hosts come from `Environment`, and the one other
+  #     URL, `oauth_token/3`'s, is `:oauth_url`. Accepting a `base_url:` that does nothing
+  #     would let a caller believe a signed request had been redirected when it went to the
+  #     venue's own host.
+  #   * `:credentials` on `oauth_token/3` - the client id and secret are arguments; a
+  #     credential map there changes nothing.
+  #
+  # A call that sends no request reads no HTTP key at all. `:credentials` stays allowed on
+  # them (core's design exemption: a consumer hands one credential set to every call, and
+  # one a call does not need changes no answer). `:environment` is kept where it really
+  # selects something: `streaming?/1` and `live?/1` resolve it, and nothing else here does.
+  @no_request [:get_fees, :coverage, :wanted, :coverage_by_kind, :subscribe_notices]
+  @environment_only [:streaming?, :live?]
 
-  defp transport(function) do
-    dropped = if function in @no_environment, do: [:base_url, :environment], else: [:base_url]
-    CoreOptions.transport_options() -- dropped
-  end
+  defp transport(function) when function in @no_request, do: [:credentials]
+  defp transport(function) when function in @environment_only, do: [:credentials, :environment]
+
+  defp transport(:oauth_token),
+    do: CoreOptions.transport_options() -- [:base_url, :credentials]
+
+  defp transport(_function), do: CoreOptions.transport_options() -- [:base_url]
 
   @doc """
   `check/3` for a call with no error channel: raises `ArgumentError` instead of answering.

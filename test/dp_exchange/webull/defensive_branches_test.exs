@@ -511,7 +511,8 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       assert :ok = DpExchange.Webull.subscribe(["BTC-USD"], opts)
       assert :ok = DpExchange.Webull.update_symbols(["BTC-USD"], set_opts)
       assert :ok = DpExchange.Webull.unsubscribe(["BTC-USD"], set_opts)
-      assert :ok = DpExchange.Webull.subscribe_notices(opts)
+      # Registering for notices sends no request, so it reads no transport key (tick AK).
+      assert :ok = DpExchange.Webull.subscribe_notices(Keyword.take(opts, [:feed, :to]))
     end
   end
 

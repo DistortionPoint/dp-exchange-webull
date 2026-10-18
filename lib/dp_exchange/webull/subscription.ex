@@ -360,8 +360,14 @@ defmodule DpExchange.Webull.Subscription do
       :retry_attempts,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
-      :rate_limit_blocking
+      :rate_limit_blocking,
+      # Forwarded since tick AK, as in `Rest.request_opts/1`.
+      :weight,
+      :retry_delay,
+      :max_retry_after_s,
+      :max_body_bytes
     ])
     # Core's default is one attempt for a POST; a repeated subscribe/unsubscribe of the
     # same symbols to the same session is harmless, so the three attempts are explicit.

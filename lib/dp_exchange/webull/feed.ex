@@ -3565,8 +3565,19 @@ defmodule DpExchange.Webull.Feed do
         :environment,
         :limiter,
         :plug,
+        :adapter,
         :req_adapter,
-        :rate_limit_blocking
+        :rate_limit_blocking,
+        # Every other key `Subscription.request_opts/1` forwards: a subscribe the caller made
+        # before the shard connected is sent later, by the replay, and must carry the
+        # caller's values rather than Core's defaults (tick AK).
+        :timeout,
+        :retry_attempts,
+        :log_requests,
+        :weight,
+        :retry_delay,
+        :max_retry_after_s,
+        :max_body_bytes
       ])
       # Wrapped only if THIS call actually supplied fresh credentials — see
       # `Credentials.wrap_opt/1`'s moduledoc. A caller with no opinion here must leave

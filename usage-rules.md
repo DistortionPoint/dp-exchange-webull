@@ -20,17 +20,29 @@ question you did not ask. Every function that takes `opts` — on `DpExchange.We
 
 before anything is sent, before the credentials are looked at, and after the positional
 arguments (`{:invalid_symbol, _}`, `{:invalid_order_id, _}`, ... are answered first). A key
-that holds `nil` is still a key. The transport keys are accepted by every function:
-`:credentials`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`,
-`:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`, `:retry_delay`,
-`:max_retry_after_s`, `:max_body_bytes`, `:log_requests`. **`:base_url` is refused on every
-function** (`{:error, {:unknown_option, :base_url}}`): no call reads it, the hosts come from
-`:environment`, and a `base_url:` that did nothing would let a caller believe a request had
-been redirected. **`:environment` is accepted wherever it is read** — every REST call,
-`subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `streaming?/1`, `live?/1`, `oauth_token/3`
-— and refused on `get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1` and
-`subscribe_notices/1`, which make no request. A function that answers
-`{:error, :not_supported}` does so whatever it is given.
+that holds `nil` is still a key.
+
+**A shared transport key is accepted only where the call reads it, and every one accepted
+is forwarded.** A call that sends a request (every REST call, and `subscribe/2`,
+`unsubscribe/2`, `update_symbols/2`, whose subscription call is one) takes `:credentials`,
+`:environment`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`, `:rate_limit_blocking`,
+`:weight`, `:timeout`, `:retry_attempts`, `:retry_delay`, `:max_retry_after_s`,
+`:max_body_bytes` and `:log_requests`; each reaches `Core.HttpClient`. `:adapter`, `:weight`,
+`:retry_delay`, `:max_retry_after_s` and `:max_body_bytes` were accepted and dropped before:
+`max_body_bytes: 1_024` bounded nothing. They are forwarded now.
+
+  * **`:base_url` is refused on every function** (`{:error, {:unknown_option, :base_url}}`):
+    no call reads it, the hosts come from `:environment`, and a `base_url:` that did nothing
+    would let a caller believe a request had been redirected.
+  * **`oauth_token/3` refuses `:credentials`**: the client id and secret are its arguments.
+  * **A call that sends no request takes no HTTP key.** `get_fees/2`, `coverage/1`,
+    `wanted/1`, `coverage_by_kind/1` and `subscribe_notices/1` take `:credentials` (one set
+    is handed to every call; it changes no answer) and their own keys, so `timeout: 5_000`
+    is `{:error, {:unknown_option, :timeout}}` (a raise on the plain reads), and so is
+    `environment:`. `streaming?/1` and `live?/1` take `:credentials` and `:environment`
+    (which they resolve) and nothing else.
+
+A function that answers `{:error, :not_supported}` does so whatever it is given.
 
 `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1` and `live?/1` have no error
 channel (a map, a list, a boolean), so they **raise `ArgumentError`** on a stray key or a
@@ -67,7 +79,7 @@ same one.
 | `unsubscribe/2`, `update_symbols/2` | `:feed`, `:sub_types` |
 | `subscribe_notices/1` | `:to`, `:feed` |
 | `coverage/1`, `wanted/1`, `coverage_by_kind/1` | `:feed` |
-| `streaming?/1`, `live?/1` | none (they read the transport key `:environment`) |
+| `streaming?/1`, `live?/1` | none (they take only `:credentials` and `:environment`) |
 | `get_option_chain/2`, `get_option_expirations/2` | `:expiry`, `:strike` |
 | `list_futures_contracts/1` | `:symbols`, `:code`, `:status` |
 | `list_futures_product_classes/1`, `list_event_categories/1` | none |

@@ -254,6 +254,35 @@ defmodule DpExchange.WebullTest do
       assert resubscribe_opts[:limiter] == Supervisor.limiter_name(opts)
     end
 
+    test "a subscribe made before the shard connects stores every transport key for the replay" do
+      unique = System.unique_integer([:positive])
+      opts = [name: :"sup_rep_#{unique}", feed: :"feed_rep_#{unique}"]
+      assert {:ok, pid} = Webull.start_link(opts)
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
+
+      sent = [
+        timeout: 4_321,
+        retry_attempts: 2,
+        log_requests: false,
+        weight: 7,
+        retry_delay: 11,
+        max_retry_after_s: 9,
+        max_body_bytes: 1_024
+      ]
+
+      _answer =
+        Webull.subscribe(
+          ["BTC-USD"],
+          [feed: opts[:feed], credentials: %{app_key: "k", app_secret: "s"}] ++ sent
+        )
+
+      stored = :sys.get_state(opts[:feed]).resubscribe_opts
+
+      for {key, value} <- sent do
+        assert stored[key] == value, "the replay lost #{key}"
+      end
+    end
+
     test "subscribe/2 reaches the venue with the default limiter, without the caller naming one" do
       # The other half of the same gap: `Feed.touch_primary_shard/7` reconciles an
       # already-connected shard synchronously using the CALLER's own opts, not

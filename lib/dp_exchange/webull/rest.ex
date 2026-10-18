@@ -1657,8 +1657,15 @@ defmodule DpExchange.Webull.Rest do
       :retry_attempts,
       :log_requests,
       :plug,
+      :adapter,
       :req_adapter,
-      :rate_limit_blocking
+      :rate_limit_blocking,
+      # Forwarded since tick AK: the table accepted these and this list dropped them, so
+      # `max_body_bytes: 1_024` bounded nothing. A forwarded `nil` is the default.
+      :weight,
+      :retry_delay,
+      :max_retry_after_s,
+      :max_body_bytes
     ])
     # Core's default is one attempt for a non-GET. The POSTs that reach here without
     # `send_once/1` are reads (bars, order preview, token check): each attempt is

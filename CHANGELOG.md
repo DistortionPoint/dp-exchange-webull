@@ -22,6 +22,28 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+Depends on dp_exchange_core 0.3.105 (conformance group 46: a call that sends no request takes no transport key).
+
+### Changed (BREAKING: shared transport keys are accepted only where read)
+
+- A call that sends no request (`get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1`,
+  `subscribe_notices/1`) now refuses every HTTP key: `timeout: 5_000` is
+  `{:error, {:unknown_option, :timeout}}` (a raise on the plain reads), on the facade and the
+  Fake. `:credentials` stays allowed. `streaming?/1` and `live?/1` take only `:credentials` and
+  `:environment`.
+- `oauth_token/3` refuses `:credentials`: the client id and secret are arguments.
+- Fixed: `:adapter`, `:weight`, `:retry_delay`, `:max_retry_after_s` and `:max_body_bytes` were
+  accepted by the key table and dropped by `Rest` and `Subscription`'s forwarding lists, so
+  `max_body_bytes: 1_024` bounded nothing and `weight: 7` metered 1. They reach
+  `Core.HttpClient` now (and `:adapter` is carried into a feed replay with `:plug`).
+- Fixed: a `subscribe/2` or `update_symbols/2` made before the shard connected accepted
+  `timeout`, `retry_attempts`, `log_requests`, `weight`, `retry_delay`, `max_retry_after_s` and
+  `max_body_bytes` and then dropped them from the stored replay options, so the deferred
+  subscription request ran on Core's defaults. The replay now carries every key
+  `Subscription` forwards.
+- Tests prove `weight: 7` reaches the limiter and `max_body_bytes:` refuses an oversized body.
+
+
 ## [0.4.161] - 2026-10-18
 
 ### Changed (BREAKING for callers of `get_news/1`)

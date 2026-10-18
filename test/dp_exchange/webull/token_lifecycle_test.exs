@@ -261,8 +261,14 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
                DpExchange.Webull.oauth_token(
                  "CLIENT",
                  "secret",
-                 base ++ [code: "c", plug: responding(%{"access_token" => "a"})]
+                 code: "c",
+                 retry_attempts: 0,
+                 plug: responding(%{"access_token" => "a"})
                )
+
+      # The client id and secret are arguments: a credential map would change nothing.
+      assert {:error, {:unknown_option, :credentials}} =
+               DpExchange.Webull.oauth_token("CLIENT", "secret", base)
 
       assert {:error, :code_or_refresh_token_required} =
                DpExchange.Webull.oauth_token("CLIENT", "secret")

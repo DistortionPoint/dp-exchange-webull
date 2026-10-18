@@ -11,7 +11,7 @@ defmodule DpExchange.Webull.UnknownOptionTest do
 
   use ExUnit.Case, async: true
 
-  alias DpExchange.Core.{FakeInjection, Venue}
+  alias DpExchange.Core.{Config, FakeInjection, Venue}
   alias DpExchange.Webull
   alias DpExchange.Webull.{Fake, Options}
 
@@ -36,6 +36,29 @@ defmodule DpExchange.Webull.UnknownOptionTest do
     get_financials get_corporate_events get_filings get_news get_screener get_fundamental
     create_token check_token oauth_token
   )a
+
+  defmodule CountingLimiter do
+    @moduledoc false
+    @behaviour DpExchange.Core.RateLimitBehaviour
+
+    @impl true
+    def acquire(_provider, weight, opts), do: report(weight, opts)
+    @impl true
+    def check(_provider, weight, opts), do: report(weight, opts)
+    @impl true
+    def record(_provider, _weight, _opts), do: :ok
+
+    # The limiter is handed the `:limiter` the caller named; a test registers its own pid
+    # under that name to see the weight. A name nothing is registered under is ignored.
+    defp report(weight, opts) do
+      with name when is_atom(name) <- Keyword.get(opts, :limiter),
+           pid when is_pid(pid) <- Process.whereis(name) do
+        send(pid, {:limiter_weight, weight})
+      end
+
+      :ok
+    end
+  end
 
   defp equity_request do
     %{
@@ -128,20 +151,30 @@ defmodule DpExchange.Webull.UnknownOptionTest do
   defp call(:check_token, m, o), do: m.check_token("t", o)
   defp call(:oauth_token, m, o), do: m.oauth_token("id", "secret", o)
 
-  # Every key here is one the facade accepts for any function, so the stray one is the only
-  # thing wrong. The plug reports a request instead of answering it: a test that sees one has
-  # found a call that went to the wire before its options were checked.
-  defp transport_opts do
+  # The calls that send no request read no HTTP key: they take `:credentials` and their own.
+  @no_request ~w(get_fees coverage wanted coverage_by_kind subscribe_notices)a
+
+  # Every key here is one `name` accepts, so the stray one is the only thing wrong. The plug
+  # reports a request instead of answering it: a test that sees one has found a call that
+  # went to the wire before its options were checked. A call that sends no request is given
+  # no plug (it would be refused, correctly), and `oauth_token/3` takes no credentials (the
+  # client id and secret are its arguments).
+  defp transport_opts(name) do
     me = self()
 
-    [
-      credentials: @credentials,
+    http = [
       plug: fn conn ->
         send(me, {:request, conn.request_path})
         conn
       end,
       retry_attempts: 0
     ]
+
+    cond do
+      name in @no_request -> [credentials: @credentials]
+      name == :oauth_token -> http
+      true -> [credentials: @credentials] ++ http
+    end
   end
 
   describe "the table" do
@@ -169,7 +202,7 @@ defmodule DpExchange.Webull.UnknownOptionTest do
   describe "the facade" do
     test "every function refuses a stray key, and nothing is sent" do
       for name <- @names do
-        result = call(name, Webull, transport_opts() ++ [{@stray, true}])
+        result = call(name, Webull, transport_opts(name) ++ [{@stray, true}])
 
         assert result == {:error, {:unknown_option, @stray}},
                "#{name} answered #{inspect(result)} for a stray key"
@@ -194,7 +227,7 @@ defmodule DpExchange.Webull.UnknownOptionTest do
       FakeInjection.fail_always(:webull, @injected)
 
       for name <- @names do
-        result = call(name, Fake, transport_opts() ++ [{@stray, true}])
+        result = call(name, Fake, transport_opts(name) ++ [{@stray, true}])
 
         assert result == {:error, {:unknown_option, @stray}},
                "#{name} answered #{inspect(result)} for a stray key"
@@ -218,10 +251,12 @@ defmodule DpExchange.Webull.UnknownOptionTest do
 
   describe "shared transport keys that no call reads" do
     @no_environment ~w(get_fees coverage wanted coverage_by_kind subscribe_notices)a
+    @http_keys ~w(plug adapter req_adapter limiter rate_limit_blocking weight timeout
+                  retry_attempts retry_delay max_retry_after_s max_body_bytes log_requests)a
 
     test "base_url is refused by every function, on the facade and the Fake" do
       for module <- [Webull, Fake], name <- @names do
-        result = call(name, module, transport_opts() ++ [base_url: "http://localhost:1"])
+        result = call(name, module, transport_opts(name) ++ [base_url: "http://localhost:1"])
 
         assert result == {:error, {:unknown_option, :base_url}},
                "#{inspect(module)}.#{name} answered #{inspect(result)} for base_url"
@@ -246,6 +281,97 @@ defmodule DpExchange.Webull.UnknownOptionTest do
       for name <- [:get_symbols, :subscribe, :streaming?, :live?, :oauth_token, :create_token] do
         assert :ok == Options.check(name, environment: :uat), "#{name} refused environment"
       end
+    end
+
+    test "a call that sends no request refuses every HTTP key, timeout: 5_000 first" do
+      for module <- [Webull, Fake] do
+        assert {:error, {:unknown_option, :timeout}} =
+                 module.get_fees(@credentials, timeout: 5_000)
+
+        assert {:error, {:unknown_option, :timeout}} =
+                 module.subscribe_notices(to: self(), timeout: 5_000)
+      end
+
+      for name <- @no_environment, key <- @http_keys do
+        assert {:error, {:unknown_option, ^key}} = Options.check(name, [{key, 1}]),
+               "#{name} accepted #{key}"
+      end
+
+      refute_receive {:request, _path}, 500
+    end
+
+    test "the plain reads raise on an HTTP key, facade and fake" do
+      for module <- [Webull, Fake], name <- @plain_reads, key <- @http_keys do
+        assert_raise ArgumentError, fn -> apply(module, name, [[{key, 1}]]) end
+      end
+    end
+
+    test "credentials stays allowed on a call that sends no request" do
+      assert :ok == Options.check(:get_fees, credentials: @credentials)
+      assert :ok == Options.check(:subscribe_notices, credentials: @credentials)
+      assert :ok == Options.check(:streaming?, credentials: @credentials)
+    end
+
+    test "streaming? and live? take credentials and environment, and nothing else" do
+      for name <- [:streaming?, :live?], key <- @http_keys do
+        assert {:error, {:unknown_option, ^key}} = Options.check(name, [{key, 1}])
+      end
+    end
+
+    test "oauth_token refuses credentials, and every other request call reads every HTTP key" do
+      assert {:error, {:unknown_option, :credentials}} =
+               Options.check(:oauth_token, credentials: @credentials)
+
+      for name <- @names -- (@no_environment ++ [:oauth_token]), key <- @http_keys do
+        assert :ok == Options.check(name, [{key, nil}]), "#{name} refused #{key}"
+      end
+    end
+  end
+
+  describe "the HTTP keys a request call accepts are forwarded" do
+    setup do
+      Config.put_override(:rate_limit_module, __MODULE__.CountingLimiter)
+      :ok
+    end
+
+    test "weight: 7 reaches the limiter on a read" do
+      name = :"weight_probe_#{System.unique_integer([:positive])}"
+      Process.register(self(), name)
+
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => []}))
+      end
+
+      _result =
+        Webull.get_symbols(
+          credentials: @credentials,
+          plug: plug,
+          weight: 7,
+          retry_attempts: 0,
+          limiter: name
+        )
+
+      assert_receive {:limiter_weight, 7}, 5_000
+    end
+
+    test "max_body_bytes: a body larger than the cap is refused" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(%{"data" => [String.duplicate("x", 4_096)]}))
+      end
+
+      assert {:error, reason} =
+               Webull.get_symbols(
+                 credentials: @credentials,
+                 plug: plug,
+                 max_body_bytes: 1_024,
+                 retry_attempts: 0
+               )
+
+      assert inspect(reason) =~ "response_too_large"
     end
   end
 
