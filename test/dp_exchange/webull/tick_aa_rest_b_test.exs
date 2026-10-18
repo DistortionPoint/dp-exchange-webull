@@ -52,14 +52,6 @@ defmodule DpExchange.Webull.TickAaRestBTest do
     end
   end
 
-  defp event_stream(text) do
-    fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(200, text)
-    end
-  end
-
   defp contract(overrides \\ %{}) do
     Map.merge(
       %{
@@ -154,61 +146,32 @@ defmodule DpExchange.Webull.TickAaRestBTest do
     end
   end
 
-  describe "get_news/2 — the event stream" do
-    @meta ~s(data:{"type":"meta","args":{"sessionId":"s-9"}})
-    @text ~s(data:{"type":"text","message":"ok"})
+  describe "get_news/2 — a reply that is not a news page" do
+    test "a body that is not JSON is undecodable, not an empty list of news" do
+      plug = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("text/event-stream")
+        |> Plug.Conn.resp(200, "event:message\ndata:{\"type\":\"meta\"}\n\n")
+      end
 
-    test "a frame that is not JSON refuses the stream rather than leaving a gap in it" do
-      stream = Enum.join(["event:message", "data:{not json", "", @meta, "", @text, ""], "\n")
-
-      assert {:error, :unexpected_response_shape} =
-               Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: event_stream(stream),
-                 retry_attempts: 0
-               )
+      assert {:error, {:undecodable_response, :webull}} =
+               Rest.get_news(@credentials, symbols: ["AAPL"], plug: plug, retry_attempts: 0)
     end
 
-    test "a text chunk whose message is not text refuses the stream" do
-      bad = ~s(data:{"type":"text","message":{"a":1}})
-      stream = Enum.join([@meta, "", @text, "", bad, ""], "\n")
-
-      assert {:error, :unexpected_response_shape} =
-               Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: event_stream(stream),
-                 retry_attempts: 0
-               )
-    end
-
-    test "a clean stream still reads" do
-      stream = Enum.join(["event:message", @meta, "", @text, ""], "\n")
-
-      assert {:ok, [item]} =
-               Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: event_stream(stream),
-                 retry_attempts: 0
-               )
-
-      assert item.id == "s-9"
-      assert item.summary == "ok"
-    end
-
-    test "a stream with no readable frame is refused" do
-      assert {:error, :unexpected_response_shape} =
-               Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: event_stream("data:{not json\n\n"),
-                 retry_attempts: 0
-               )
-    end
-
-    test "a reply that arrives as a decoded JSON object is not a stream" do
+    test "a reply that is a bare object without the data array is not a news page" do
       assert {:error, :unexpected_response_shape} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
                  plug: responding(%{"a" => 1}),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a page with no items is an empty list" do
+      assert {:ok, []} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL"],
+                 plug: responding(%{"symbol" => "AAPL", "data" => []}),
                  retry_attempts: 0
                )
     end

@@ -1,0 +1,16 @@
+{
+  "symbol": "TSLA",
+  "data": [
+    {
+      "news_id": "20261008-001",
+      "title": "NVIDIA Announces New AI Chip",
+      "summary": "NVIDIA unveiled its next-generation AI chip at GTC.",
+      "source": "Reuters",
+      "url": "https://www.example.com/news/nvidia-ai-chip",
+      "publish_time": "2026-10-08T09:30:00.000-04:00",
+      "sentiment": "POSITIVE",
+      "related_symbols": ["NVDA", "AMD"]
+    }
+  ],
+  "pagination_key": "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
+}

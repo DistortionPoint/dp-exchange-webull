@@ -125,7 +125,8 @@ these pages carries a single full worked response.
 | `fund_report_dividend_calendar.json` | `docs/reference/webull/openapi/dividend-calendar.md:168-225` | assembled |
 | `fund_report_earnings_calendar.json` | `docs/reference/webull/openapi/earnings-calendar.md:168-212` | assembled |
 | `fund_report_filings.json` | `docs/reference/webull/openapi/filings.md:164-205` | real worked example — Apple 8-K, `{symbol, category, filings: [...]}` envelope |
-| `fund_report_news_sse.json` | `docs/reference/webull/openapi/news-summary.md:195` | the vendor's own worked SSE stream, verbatim: a `meta` event then three `text` chunks |
+| `fund_report_news_sse.json` | `docs/reference/webull/openapi/news-summary.md:195` | **no test reads this any more** — `get_news/1` stopped calling the LLM summaries endpoint on 2026-10-18; kept as the record of that endpoint's SSE shape |
+| `stock_news_list.json` | `docs/reference/webull/openapi/list-stock-news.md` | assembled from the page's field examples (`StockNewsResultVo`): one `NewsItemVo`, `pagination_key` present |
 
 ## Screeners and futures reference data
 

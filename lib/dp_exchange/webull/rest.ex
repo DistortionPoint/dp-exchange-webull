@@ -1619,43 +1619,6 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  # A POST whose response is **not JSON** — the one shape `post/4` above cannot serve.
-  # `post/4`'s `decoded_body/1` runs every 2xx body through `Jason.decode/1` and refuses
-  # with `{:error, {:undecodable_response, :webull}}` on anything that fails to parse, so
-  # calling it against an endpoint whose response is Server-Sent Events (`news-summary.md:195`
-  # — `event:message\ndata:{...}` frames, `Content-Type: text/event-stream`) always refused,
-  # not just sometimes: the body is never valid JSON on that endpoint. This is the same
-  # signing and status handling `post/4` gives every other write, minus the JSON decode,
-  # so `get_news/2` can read the frames itself.
-  defp post_sse(path, body, credentials, opts) do
-    environment = Environment.resolve(opts)
-    host = Environment.host(environment)
-    encoded = Jason.encode!(body)
-
-    request = %{path: path, query_params: %{}, body: encoded, host: host}
-    url = Environment.rest_url(environment) <> path
-    headers = signer(request, credentials)
-
-    case HttpClient.request(:post, url, headers, encoded, request_opts(opts)) do
-      {:ok, %{status: status, body: response}} when status in 200..299 ->
-        {:ok, response}
-
-      {:ok, %{status: status, body: response}} when status in [400, 401, 403] ->
-        {:refused, refusal(status, response)}
-
-      {:ok, %{status: 404}} ->
-        {:refused, :not_found}
-
-      {:ok, %{status: status, body: response}} ->
-        {:error,
-         {:exchange_error, :webull,
-          "HTTP #{status}: #{inspect(response, limit: 50, printable_limit: 2_048)}"}}
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
   # Signed per attempt, not once per call. `Core.HttpClient` retries a timeout or a 5xx,
   # and a retry carrying the first attempt's `x-signature-nonce` is a replay the venue is
   # built to refuse — so before this, every retry of a signed request was a wasted call
@@ -1698,7 +1661,7 @@ defmodule DpExchange.Webull.Rest do
       :rate_limit_blocking
     ])
     # Core's default is one attempt for a non-GET. The POSTs that reach here without
-    # `send_once/1` are reads (bars, order preview, token check, news): each attempt is
+    # `send_once/1` are reads (bars, order preview, token check): each attempt is
     # re-signed and repeating one changes nothing, so they keep three attempts, explicit
     # and lowerable by the caller. Every write passed `send_once/1`, so its 1 wins. A
     # forwarded `nil` counts as absent, or it would fall through to Core's 1.
@@ -4313,7 +4276,10 @@ defmodule DpExchange.Webull.Rest do
   }
 
   @doc """
-  The fundamentals kinds this venue publishes, as atoms.
+  The fundamentals kinds this package reaches, as atoms. Not every fundamentals endpoint the
+  venue publishes: as of 2026-10-18 its index also lists insider holdings and transactions,
+  institutions and their 13F holdings and changes, and the economic calendar, none of which
+  is reached here (`docs/reference/webull/endpoint-pages.txt`).
 
   Twenty-three endpoints under one shape. `get_fundamental/4` reaches any of them; the
   contract's own callbacks — `get_financials/3`, `get_corporate_events/1`, `get_filings/2` —
@@ -4867,8 +4833,8 @@ defmodule DpExchange.Webull.Rest do
     }
   end
 
-  # A filing's id is text, or a whole number the venue numbered it with (`sse_id/1` reads a
-  # conversation id the same way); an object or a list there names no filing.
+  # A filing's id is text, or a whole number the venue numbered it with; an object or a list
+  # there names no filing.
   defp filing_id(id) when is_integer(id), do: Integer.to_string(id)
   defp filing_id(id), do: text_or_nil(id)
 
@@ -4884,54 +4850,221 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  @news_path "/market-data/news/stock-news/list"
+  @news_categories ["US_STOCK", "HK_STOCK"]
+  @news_sentiments ["POSITIVE", "NEGATIVE", "NEUTRAL"]
+
   @doc """
-  News summaries — `POST /market-data/news/summaries/get`.
+  News about the symbols asked for — `GET /market-data/news/stock-news/list`, one request
+  per symbol.
 
-  **This one is generated, not reported.** The vendor's own description is "Invokes LLM to
-  generate news summaries", so the `summary` on the item this returns is a model's
-  paraphrase and not any publisher's text. That is recorded here because a caller quoting
-  it is quoting a summary, and `source` names the venue rather than a wire.
+  **These are the venue's own news items, not a generated summary.** Until 2026-10-18 this
+  read `POST /market-data/news/summaries/get`, whose vendor description is "Invokes LLM to
+  generate news summaries": one Server-Sent-Events reply, a model's paraphrase with no
+  headline, no link, no publisher and no time. The vendor's reference now publishes
+  `list-stock-news` (`openapi/list-stock-news.md`), which returns itemised articles with
+  `news_id`, `title`, `summary`, `source`, `url`, `publish_time`, `sentiment` and
+  `related_symbols`, so the summaries endpoint is no longer called. The two are different
+  products: a caller who relied on the old single paraphrase gets articles now.
 
-  `opts[:symbols]` is required — the endpoint summarises a watchlist, not the market —
-  and takes a list. `opts[:lang]` is the venue's own enum and is sent only when given.
+  `opts[:symbols]` is required, a list or one symbol as a string. `opts[:category]` is
+  `US_STOCK` (the default) or `HK_STOCK`, the page's enum; `opts[:sentiment]` is
+  `POSITIVE`, `NEGATIVE` or `NEUTRAL` and filters on the venue's classification. A value
+  outside those is `{:error, {:invalid_option, key, value}}` before anything is sent.
+  `sentiment` is a filter only: `Core.Types.NewsItem` has no field for the venue's label.
 
-  ## The response is Server-Sent Events, not JSON — and one generated reply, not a list
+  **The cursor is followed, never dropped.** `Core.Venue.get_news/1` names no count or
+  window, and the page documents a `pagination_key` and no page size. `opts[:limit]` (a
+  positive integer, this package's option) is how many items **per symbol** the caller
+  wants: pages are read until that many have arrived and the list is cut to exactly that
+  number. Without `:limit` the feed is read to its end (an absent or empty cursor). A cursor
+  that repeats the one just sent is `{:error, :pagination_key_did_not_advance}`, one that is
+  not text is `{:error, :unexpected_pagination_key}`, and `@max_pages` pages without either
+  the limit or the end is `{:error, :history_truncated}` (family convention) rather than the
+  items so far, so a busy symbol read without `:limit` may be refused: pass one. An item the
+  venue returned for two of the symbols appears once, with both symbols in `:symbols`.
 
-  `news-summary.md:195` documents `200` as `"Server-Sent Events stream. Each message
-  contains JSON data"`, with example frames `event:message
-  data:{"type":"meta","args":{"sessionId":"1","convId":451107711450219}}` followed by a
-  run of `event:message data:{"type":"text","message":"..."}` chunks — Wally, the venue's
-  own assistant, streaming one answer a token or a sentence at a time. That is not a JSON
-  object with a `data` array of news items, which is what this read before: `post/4`'s
-  `decoded_body/1` calls `Jason.decode/1` on every response and refuses anything that is
-  not valid JSON, so every call this package made to this endpoint before returned
-  `{:error, {:undecodable_response, :webull}}` — the endpoint never worked at all.
+  `:symbols` is the symbol the item was returned for plus the venue's own
+  `related_symbols`: the venue's tagging, not a judgement made here. `:published_at` is the
+  venue's `publish_time`, converted to UTC. An item with no `news_id`, an unreadable
+  `publish_time` or an unreadable `related_symbols` refuses the whole read, as every
+  unreadable row in this package does, rather than being dropped from the list.
 
-  There is also no itemised "news list" in this shape to normalise into several
-  `NewsItem`s — there is one generated reply, addressed to the symbols asked for. This
-  returns it as a single-element list holding that one item, concatenating every `"text"`
-  chunk into `:summary` in the order the venue sent them, with `:id` taken from the
-  stream's own `meta` event (`sessionId`/`convId`) — the venue's own identifier for that
-  conversation, not one this package invented, and required because
-  `Core.Types.NewsItem.id` is non-nil.
+  The page states no rate limit of its own; the per-endpoint and global buckets that govern
+  every market-data read apply.
   """
   @spec get_news(map(), keyword()) ::
           {:ok, [NewsItem.t()]} | {:error, term()} | {:refused, term()}
   def get_news(credentials, opts) do
-    with {:ok, symbols} <- required_symbols(opts) do
-      body =
-        %{
-          "category_symbols" => [
-            %{"category" => fundamental_category(opts), "symbols" => symbols}
-          ]
-        }
-        |> put_present("lang", Keyword.get(opts, :lang))
+    with {:ok, symbols} <- required_symbols(opts),
+         {:ok, {filters, limit}} <- news_filters(opts) do
+      news_for_symbols(Enum.uniq(symbols), filters, limit, credentials, opts)
+    end
+  end
 
-      with {:ok, raw} <- post_sse("/market-data/news/summaries/get", body, credentials, opts),
-           {:ok, events} <- decode_sse(raw) do
-        news_item_from_sse(events, symbols)
+  @doc """
+  What `get_news/2` asks for beside `symbol`: `{filters, limit}`. `filters` is the query
+  `category` (default `US_STOCK`) and `sentiment` when given, each checked against the
+  page's enum; `limit` is `opts[:limit]`, a positive integer, or `nil`. The second check
+  `get_news/2` makes, after the symbols, for `DpExchange.Webull.Fake` to refuse exactly what
+  the real path refuses.
+  """
+  @spec news_filters(keyword()) ::
+          {:ok, {%{String.t() => String.t()}, pos_integer() | nil}} | {:error, term()}
+  def news_filters(opts) do
+    with {:ok, category} <- news_enum(opts, :category, @news_categories, "US_STOCK"),
+         {:ok, sentiment} <- news_enum(opts, :sentiment, @news_sentiments, nil),
+         {:ok, limit} <- news_limit(Keyword.get(opts, :limit)) do
+      {:ok, {put_present(%{"category" => category}, "sentiment", sentiment), limit}}
+    end
+  end
+
+  defp news_limit(nil), do: {:ok, nil}
+  defp news_limit(limit) when is_integer(limit) and limit >= 1, do: {:ok, limit}
+  defp news_limit(other), do: {:error, {:invalid_option, :limit, other}}
+
+  defp news_enum(opts, key, allowed, default) do
+    case Keyword.get(opts, key) do
+      nil -> {:ok, default}
+      value when is_binary(value) or is_atom(value) -> news_enum_value(key, value, allowed)
+      value -> {:error, {:invalid_option, key, value}}
+    end
+  end
+
+  defp news_enum_value(key, value, allowed) do
+    if to_string(value) in allowed,
+      do: {:ok, to_string(value)},
+      else: {:error, {:invalid_option, key, value}}
+  end
+
+  defp news_for_symbols(symbols, filters, limit, credentials, opts) do
+    symbols
+    |> Enum.reduce_while({:ok, []}, fn symbol, {:ok, acc} ->
+      fetch_page = fn key -> news_page(symbol, filters, key, credentials, opts) end
+
+      case news_walk(fetch_page, limit, nil, [], 0) do
+        {:ok, items} -> {:cont, {:ok, [items | acc]}}
+        failure -> {:halt, failure}
+      end
+    end)
+    |> case do
+      {:ok, pages} -> {:ok, pages |> Enum.reverse() |> Enum.concat() |> merge_news()}
+      failure -> failure
+    end
+  end
+
+  # Reads pages until `limit` items have arrived (cut to exactly `limit`) or the venue sends
+  # no cursor. See `get_news/2` for the refusals; `paginate/4` is the same walk without a
+  # count.
+  defp news_walk(_fetch_page, _limit, _key, _acc, page) when page >= @max_pages,
+    do: {:error, :history_truncated}
+
+  defp news_walk(fetch_page, limit, key, acc, page) do
+    with {:ok, {items, next_key}} <- fetch_page.(key) do
+      collected = acc ++ items
+
+      cond do
+        limit != nil and length(collected) >= limit -> {:ok, Enum.take(collected, limit)}
+        next_key == nil -> {:ok, collected}
+        match?({:invalid_key, _other}, next_key) -> {:error, :unexpected_pagination_key}
+        next_key == key -> {:error, :pagination_key_did_not_advance}
+        true -> news_walk(fetch_page, limit, next_key, collected, page + 1)
       end
     end
+  end
+
+  defp news_page(symbol, filters, key, credentials, opts) do
+    params =
+      filters
+      |> Map.put("symbol", symbol)
+      |> put_present("pagination_key", key)
+
+    with {:ok, body} <- get_symbol(@news_path, params, credentials, opts),
+         {:ok, rows} <- news_rows(body),
+         {:ok, items} <- news_items(rows, symbol) do
+      {:ok, {items, next_pagination_key(body)}}
+    end
+  end
+
+  # `data` is the page's required array (`StockNewsResultVo`); a body without it is not a
+  # news page, and `rows/1`'s fall-back of treating a bare object as one row would read the
+  # envelope as an article.
+  defp news_rows(%{"data" => rows}) when is_list(rows), do: object_rows(rows)
+  defp news_rows(_other), do: {:error, :unexpected_response_shape}
+
+  defp news_items(rows, symbol) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_news_item(row, symbol) do
+        {:ok, item} -> {:cont, {:ok, [item | acc]}}
+        failure -> {:halt, failure}
+      end
+    end)
+    |> case do
+      {:ok, items} -> {:ok, Enum.reverse(items)}
+      failure -> failure
+    end
+  end
+
+  defp to_news_item(row, symbol) do
+    with {:ok, id} <- news_id(value(row, ["news_id"])),
+         {:ok, published_at} <- news_time(value(row, ["publish_time"])),
+         {:ok, related} <- news_related(value(row, ["related_symbols"])) do
+      {:ok,
+       %NewsItem{
+         id: id,
+         headline: text_or_nil(value(row, ["title"])),
+         summary: text_or_nil(value(row, ["summary"])),
+         url: text_or_nil(value(row, ["url"])),
+         source: text_or_nil(value(row, ["source"])),
+         symbols: Enum.uniq([symbol | related]),
+         published_at: published_at,
+         provider: :webull
+       }}
+    end
+  end
+
+  defp news_id(id) when is_binary(id), do: {:ok, id}
+  defp news_id(_absent_or_unreadable), do: {:error, {:missing_required_field, :id}}
+
+  # `publish_time` is ISO 8601 with an offset (`2026-10-08T09:30:00.000-04:00`); absent is
+  # `nil`, not this package's clock.
+  defp news_time(nil), do: {:ok, nil}
+
+  defp news_time(text) when is_binary(text) do
+    case DateTime.from_iso8601(text) do
+      {:ok, datetime, _offset} -> {:ok, datetime}
+      {:error, _reason} -> {:error, {:unparseable_venue_timestamp, text}}
+    end
+  end
+
+  defp news_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+
+  # The page's own example for an item is a JSON-encoded array in a string (`"[\"NVDA\"]"`),
+  # which is not a symbol; anything that is not ticker-shaped text refuses the read.
+  defp news_related(nil), do: {:ok, []}
+
+  defp news_related(list) when is_list(list) do
+    if Enum.all?(list, &ticker_text?/1),
+      do: {:ok, list},
+      else: {:error, :unexpected_response_shape}
+  end
+
+  defp news_related(_not_a_list), do: {:error, :unexpected_response_shape}
+
+  defp ticker_text?(text), do: is_binary(text) and text =~ ~r/\A[A-Za-z0-9._\/-]+\z/
+
+  # An article returned for two of the symbols asked about is one article.
+  defp merge_news(items) do
+    groups = Enum.group_by(items, & &1.id)
+
+    items
+    |> Enum.map(& &1.id)
+    |> Enum.uniq()
+    |> Enum.map(fn id ->
+      [first | rest] = Map.fetch!(groups, id)
+      %{first | symbols: Enum.uniq(first.symbols ++ Enum.flat_map(rest, & &1.symbols))}
+    end)
   end
 
   @doc """
@@ -4963,96 +5096,6 @@ defmodule DpExchange.Webull.Rest do
       symbol when is_binary(symbol) -> {:ok, symbol}
       _missing -> {:error, :symbol_required}
     end
-  end
-
-  # Every `data:` line is one JSON event (`news-summary.md:195`'s own example frames). A line
-  # that is not valid JSON REFUSES the read: the spec documents no frame to skip, and a dropped
-  # `text` chunk is a summary with words missing, or a dropped `meta` frame an item with no id.
-  # Lines that are not `data:` lines (`event:` names, blanks) are SSE framing, not events.
-  defp decode_sse(body) when is_binary(body) do
-    decoded =
-      body
-      |> String.split("\n")
-      |> Enum.map(&String.trim/1)
-      |> Enum.filter(&String.starts_with?(&1, "data:"))
-      |> Enum.map(&(&1 |> String.trim_leading("data:") |> String.trim()))
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.map(&Jason.decode/1)
-
-    events = for {:ok, event} <- decoded, do: event
-
-    cond do
-      events == [] -> {:error, :unexpected_response_shape}
-      length(events) != length(decoded) -> {:error, :unexpected_response_shape}
-      Enum.any?(events, &unreadable_text_chunk?/1) -> {:error, :unexpected_response_shape}
-      true -> {:ok, events}
-    end
-  end
-
-  defp decode_sse(_other), do: {:error, :unexpected_response_shape}
-
-  # A `text` chunk is "Markdown text" (`news-summary.md:195`); one whose `message` is not text
-  # would contribute nothing to the summary and leave a gap in it.
-  defp unreadable_text_chunk?(%{"type" => "text", "message" => message}),
-    do: not is_binary(message)
-
-  defp unreadable_text_chunk?(%{"type" => "text"}), do: true
-  defp unreadable_text_chunk?(_other_event), do: false
-
-  defp news_item_from_sse(events, asked_for) do
-    case sse_conversation_id(events) do
-      nil ->
-        {:error, {:missing_required_field, :id}}
-
-      id ->
-        {:ok,
-         [
-           %NewsItem{
-             id: id,
-             headline: nil,
-             summary: sse_summary_text(events),
-             url: nil,
-             # The venue generated this; naming a publisher would attribute a paraphrase
-             # to them.
-             source: "webull",
-             symbols: asked_for,
-             # The stream carries no timestamp of its own (`news-summary.md:195`'s frames
-             # are `meta`/`text` only) — `nil` rather than the moment this package
-             # happened to receive the last chunk, which would be this package's clock,
-             # not the venue's.
-             published_at: nil,
-             provider: :webull
-           }
-         ]}
-    end
-  end
-
-  # An id is text or a number. `to_string/1` over a map or a list raised
-  # `Protocol.UndefinedError` out of `get_news/2` on a `meta` frame the venue sent with an
-  # object where the id belongs; such a frame names no id, and the next one may.
-  defp sse_conversation_id(events) do
-    Enum.find_value(events, fn
-      %{"type" => "meta", "args" => %{} = args} ->
-        sse_id(Map.get(args, "convId")) || sse_id(Map.get(args, "sessionId"))
-
-      _other ->
-        nil
-    end)
-  end
-
-  defp sse_id(id) when is_binary(id) and id != "", do: id
-  defp sse_id(id) when is_integer(id), do: Integer.to_string(id)
-  defp sse_id(_not_an_id), do: nil
-
-  # Only a text chunk's text is the summary. `Enum.map_join/3` over a `message` that was a map
-  # or a list raised out of `get_news/2`; one that is not text contributes nothing.
-  defp sse_summary_text(events) do
-    events
-    |> Enum.flat_map(fn
-      %{"type" => "text", "message" => message} when is_binary(message) -> [message]
-      _other -> []
-    end)
-    |> Enum.join()
   end
 
   # The five screeners, each with its own required parameters. `gainers_losers` needs a
@@ -5098,7 +5141,11 @@ defmodule DpExchange.Webull.Rest do
   # Screeners whose page documents no `category` parameter.
   @uncategorised_screeners ["hot_stocks"]
 
-  @doc "The screeners this venue publishes, by the identifier `get_screener/3` takes."
+  @doc """
+  The screeners this package reaches, by the identifier `get_screener/3` takes. The venue
+  also lists a fear-and-greed index and a per-stock unusual-activity feed, which are not
+  rankings and are not reached here (`docs/reference/webull/endpoint-pages.txt`, 2026-10-18).
+  """
   @spec screeners() :: [String.t()]
   def screeners, do: @screeners |> Map.keys() |> Enum.sort()
 

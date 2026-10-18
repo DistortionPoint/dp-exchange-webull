@@ -216,6 +216,39 @@ defmodule DpExchange.Webull.UnknownOptionTest do
     end
   end
 
+  describe "shared transport keys that no call reads" do
+    @no_environment ~w(get_fees coverage wanted coverage_by_kind subscribe_notices)a
+
+    test "base_url is refused by every function, on the facade and the Fake" do
+      for module <- [Webull, Fake], name <- @names do
+        result = call(name, module, transport_opts() ++ [base_url: "http://localhost:1"])
+
+        assert result == {:error, {:unknown_option, :base_url}},
+               "#{inspect(module)}.#{name} answered #{inspect(result)} for base_url"
+      end
+
+      refute_receive {:request, _path}, 500
+    end
+
+    test "base_url is refused by the plain reads, which raise" do
+      for name <- @plain_reads do
+        assert_raise ArgumentError, fn -> Options.check!(name, base_url: "http://x") end
+      end
+    end
+
+    test "environment is refused where nothing reads it and accepted where something does" do
+      for name <- @no_environment do
+        assert {:error, {:unknown_option, :environment}} =
+                 Options.check(name, environment: :uat),
+               "#{name} accepted environment"
+      end
+
+      for name <- [:get_symbols, :subscribe, :streaming?, :live?, :oauth_token, :create_token] do
+        assert :ok == Options.check(name, environment: :uat), "#{name} refused environment"
+      end
+    end
+  end
+
   describe "a misspelt key, as a caller would type it" do
     test "limt: on a book and sinse: on a tape are not read as limit: or since:" do
       for module <- [Webull, Fake] do

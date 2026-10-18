@@ -13,7 +13,11 @@ defmodule DpExchange.Webull.Options do
 
   Its allowed list is `DpExchange.Core.Options.transport_options/0` (credentials,
   environment, the `Req` test seams, the limiter, timeout and retry knobs) plus the keys in
-  `own_keys/1`. The table below is that second half, and the only place it is written down:
+  `own_keys/1`, **minus `:base_url` everywhere** (no call reads it; the hosts come from
+  `:environment`) **and minus `:environment` on `get_fees/2`, `coverage/1`, `wanted/1`,
+  `coverage_by_kind/1` and `subscribe_notices/1`**, which make no request and open no socket.
+  A refused key is `{:error, {:unknown_option, key}}`. The table below is the second half,
+  and the only place it is written down:
   `check/3` reads it, `DpExchange.Webull` and `DpExchange.Webull.Fake` both call `check/3`
   (or one of the positional helpers), so the two cannot disagree.
 
@@ -126,7 +130,7 @@ defmodule DpExchange.Webull.Options do
     get_financials: @statement,
     get_corporate_events: [:symbol, :kind, :category],
     get_filings: [:category],
-    get_news: [:symbols, :lang, :category],
+    get_news: [:symbols, :category, :sentiment, :limit],
     get_screener: [],
     get_fundamental: [],
     # tokens
@@ -153,7 +157,20 @@ defmodule DpExchange.Webull.Options do
   @spec check(atom(), term(), [atom()]) ::
           :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
   def check(function, opts, extra \\ []) do
-    CoreOptions.check(opts, CoreOptions.transport_options() ++ own_keys(function) ++ extra)
+    CoreOptions.check(opts, transport(function) ++ own_keys(function) ++ extra)
+  end
+
+  # `DpExchange.Core.Options.transport_options/0` minus what this package never reads.
+  # `:base_url` is read by no call: the hosts come from `Environment`, and the one other URL,
+  # `oauth_token/3`'s, is `:oauth_url`. Accepting a `base_url:` that does nothing would let a
+  # caller believe a signed request had been redirected when it went to the venue's own host.
+  # `:environment` is read by every REST call, `subscribe/2` and the two environment
+  # questions, and by no call in `@no_environment`: they make no request and open no socket.
+  @no_environment [:get_fees, :coverage, :wanted, :coverage_by_kind, :subscribe_notices]
+
+  defp transport(function) do
+    dropped = if function in @no_environment, do: [:base_url, :environment], else: [:base_url]
+    CoreOptions.transport_options() -- dropped
   end
 
   @doc """

@@ -60,31 +60,26 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     end
   end
 
-  # Server-Sent Events — the real shape `news-summary.md:195` documents for
-  # `POST /market-data/news/summaries/get`, and the only endpoint in this file that
-  # answers this way rather than with JSON. `events` is a list of maps, each becoming one
-  # `event:message\ndata:{...}` frame.
-  defp sse_body(events),
-    do: Enum.map_join(events, "\n\n", &"event:message\ndata:#{Jason.encode!(&1)}")
-
-  defp sse_responding(events) do
-    fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(200, sse_body(events))
-    end
+  # `GET /market-data/news/stock-news/list` (`openapi/list-stock-news.md`, `StockNewsResultVo`):
+  # `{symbol, data: [NewsItemVo], pagination_key}`. A row carries the page's own example
+  # values unless a test overrides one.
+  defp news_row(overrides) do
+    Map.merge(
+      %{
+        "news_id" => "20261008-001",
+        "title" => "NVIDIA Announces New AI Chip",
+        "summary" => "NVIDIA unveiled its next-generation AI chip at GTC.",
+        "source" => "Reuters",
+        "url" => "https://www.example.com/news/nvidia-ai-chip",
+        "publish_time" => "2026-10-08T09:30:00.000-04:00",
+        "sentiment" => "POSITIVE",
+        "related_symbols" => ["NVDA", "AMD"]
+      },
+      overrides
+    )
   end
 
-  defp sse_capturing(events, test_pid) do
-    fn conn ->
-      {:ok, raw, conn} = Plug.Conn.read_body(conn)
-      send(test_pid, {:request, conn.method, conn.request_path, conn.query_string, raw})
-
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(200, sse_body(events))
-    end
-  end
+  defp news_body(rows), do: %{"symbol" => "TSLA", "data" => rows}
 
   describe "the fundamentals table" do
     test "every kind names a path, and there are twenty-three of them" do
@@ -382,88 +377,257 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert %Types.Filing{form_type: "10-Q", url: "https://example.invalid/f-1"} = filing
     end
 
-    test "news requires symbols and sends them under the venue's nested shape" do
+    test "news is a GET of the stock-news list, one request per symbol, with the filters" do
       me = self()
 
       assert {:ok, _news} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL", "GOOG"],
-                 lang: "en",
-                 plug:
-                   sse_capturing(
-                     [%{"type" => "meta", "args" => %{"convId" => 1}}],
-                     me
-                   ),
+                 symbols: ["TSLA"],
+                 sentiment: "POSITIVE",
+                 plug: capturing(news_body([news_row(%{})]), me),
                  retry_attempts: 0
                )
 
-      assert_receive {:request, "POST", path, _query, raw}
-      assert path == "/market-data/news/summaries/get"
-      body = Jason.decode!(raw)
+      assert_receive {:request, "GET", "/market-data/news/stock-news/list", query, ""}
+      params = URI.decode_query(query)
 
-      assert body["category_symbols"] == [
-               %{"category" => "US_STOCK", "symbols" => ["AAPL", "GOOG"]}
-             ]
-
-      assert body["lang"] == "en"
+      assert params == %{"symbol" => "TSLA", "category" => "US_STOCK", "sentiment" => "POSITIVE"}
     end
 
     test "news without symbols is refused" do
       assert {:error, :symbols_required} = Rest.get_news(@credentials, [])
     end
 
-    # `news-summary.md:195` documents this endpoint's `200` as a Server-Sent Events
-    # stream — `event:message\ndata:{"type":"text","message":...}` chunks concatenated
-    # into one generated reply, not a JSON list of independently-published items. The
-    # vendor's own description is "invokes LLM to generate news summaries"; naming a
-    # publisher would attribute a paraphrase to them.
-    test "the source is the venue, because the summary is generated" do
-      events = [
-        %{"type" => "meta", "args" => %{"convId" => "n-1"}},
-        %{"type" => "text", "message" => "y"}
-      ]
-
+    test "the venue's fields land on the item, and publish_time is converted to UTC" do
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: sse_responding(events),
+                 symbols: ["TSLA"],
+                 plug: responding(news_body([news_row(%{})])),
                  retry_attempts: 0
                )
 
-      assert item.id == "n-1"
-      assert item.source == "webull"
-      assert item.symbols == ["AAPL"]
-      assert item.summary == "y"
+      assert item.id == "20261008-001"
+      assert item.headline == "NVIDIA Announces New AI Chip"
+      assert item.summary == "NVIDIA unveiled its next-generation AI chip at GTC."
+      assert item.source == "Reuters"
+      assert item.url == "https://www.example.com/news/nvidia-ai-chip"
+      assert item.published_at == ~U[2026-10-08 13:30:00.000Z]
+      assert item.symbols == ["TSLA", "NVDA", "AMD"]
+      assert item.provider == :webull
     end
 
-    test "text chunks are concatenated in the order the venue sent them" do
-      events = [
-        %{"type" => "meta", "args" => %{"sessionId" => "s-1"}},
-        %{"type" => "text", "message" => "Hi"},
-        %{"type" => "text", "message" => ", I'm Wally an"},
-        %{"type" => "text", "message" => "d I'll help you with this question"}
-      ]
+    test "a field the venue leaves out is nil, not filled in" do
+      row = %{"news_id" => "n-2"}
 
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: sse_responding(events),
+                 symbols: ["TSLA"],
+                 plug: responding(news_body([row])),
                  retry_attempts: 0
                )
 
-      assert item.id == "s-1"
-      assert item.summary == "Hi, I'm Wally and I'll help you with this question"
+      assert %{headline: nil, summary: nil, url: nil, source: nil, published_at: nil} = item
+      assert item.symbols == ["TSLA"]
     end
 
-    test "a stream with no meta event has no conversation id, so it is refused" do
-      events = [%{"type" => "text", "message" => "orphaned text"}]
+    test "an item returned for two of the symbols asked about appears once, with both" do
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        shared = news_row(%{"news_id" => "shared", "related_symbols" => []})
+        own = news_row(%{"news_id" => "own-" <> conn.params["symbol"], "related_symbols" => []})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(news_body([shared, own])))
+      end
+
+      assert {:ok, items} =
+               Rest.get_news(@credentials,
+                 symbols: ["AAPL", "GOOG"],
+                 plug: plug,
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(items, & &1.id) == ["shared", "own-AAPL", "own-GOOG"]
+      assert Enum.find(items, &(&1.id == "shared")).symbols == ["AAPL", "GOOG"]
+    end
+
+    test "an item with no news_id refuses the whole read" do
+      rows = [news_row(%{}), Map.delete(news_row(%{}), "news_id")]
 
       assert {:error, {:missing_required_field, :id}} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: sse_responding(events),
+                 symbols: ["TSLA"],
+                 plug: responding(news_body(rows)),
                  retry_attempts: 0
                )
+    end
+
+    test "a publish_time that is not a timestamp refuses the whole read" do
+      assert {:error, {:unparseable_venue_timestamp, "yesterday"}} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 plug: responding(news_body([news_row(%{"publish_time" => "yesterday"})])),
+                 retry_attempts: 0
+               )
+    end
+
+    test "related_symbols that are not tickers refuse the read" do
+      for bad <- ["NVDA", ["[\"NVDA\",\"AMD\"]"], [%{}], [""]] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_news(@credentials,
+                   symbols: ["TSLA"],
+                   plug: responding(news_body([news_row(%{"related_symbols" => bad})])),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a body without the data array is not a news page" do
+      for body <- [%{"symbol" => "TSLA"}, [], %{"data" => "x"}, %{"data" => [1]}] do
+        assert {:error, :unexpected_response_shape} =
+                 Rest.get_news(@credentials,
+                   symbols: ["TSLA"],
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+    end
+
+    test "a category or sentiment outside the page's enum is refused before a request" do
+      exploding = fn _conn -> raise "must not reach the venue" end
+
+      for opts <- [[category: "EU"], [sentiment: "BULL"], [sentiment: 5], [category: %{}]] do
+        assert {:error, {:invalid_option, _key, _value}} =
+                 Rest.get_news(@credentials, [symbols: ["TSLA"], plug: exploding] ++ opts)
+      end
+    end
+
+    test "HK_STOCK is the other category the page lists" do
+      me = self()
+
+      assert {:ok, []} =
+               Rest.get_news(@credentials,
+                 symbols: ["00700"],
+                 category: :HK_STOCK,
+                 plug: capturing(news_body([]), me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", _path, query, ""}
+      assert URI.decode_query(query)["category"] == "HK_STOCK"
+    end
+  end
+
+  describe "get_news/2 follows the venue's cursor" do
+    # `pages` maps the cursor a request carries (`nil` for the first) to `{ids, next}`;
+    # `next` is the cursor the page hands back, or `:none` for a last page.
+    defp paged(pages, test_pid) do
+      fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        send(test_pid, {:cursor, conn.params["pagination_key"]})
+        {ids, next} = Map.fetch!(pages, conn.params["pagination_key"])
+        rows = Enum.map(ids, &news_row(%{"news_id" => &1, "related_symbols" => []}))
+        page = news_body(rows)
+        body = if next == :none, do: page, else: Map.put(page, "pagination_key", next)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+    end
+
+    @three_pages %{
+      nil => {["a", "b"], "p2"},
+      "p2" => {["c", "d"], "p3"},
+      "p3" => {["e"], :none}
+    }
+
+    test "without a limit the feed is read to its end, in the venue's order" do
+      assert {:ok, items} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 plug: paged(@three_pages, self()),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(items, & &1.id) == ["a", "b", "c", "d", "e"]
+      assert_receive {:cursor, nil}
+      assert_receive {:cursor, "p2"}
+      assert_receive {:cursor, "p3"}
+    end
+
+    test "a limit is honoured exactly and stops reading once met" do
+      assert {:ok, items} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 limit: 3,
+                 plug: paged(@three_pages, self()),
+                 retry_attempts: 0
+               )
+
+      assert Enum.map(items, & &1.id) == ["a", "b", "c"]
+      assert_receive {:cursor, nil}
+      assert_receive {:cursor, "p2"}
+      refute_receive {:cursor, "p3"}, 500
+    end
+
+    test "a limit larger than the feed returns what the feed has" do
+      assert {:ok, items} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 limit: 50,
+                 plug: paged(@three_pages, self()),
+                 retry_attempts: 0
+               )
+
+      assert length(items) == 5
+    end
+
+    test "an empty cursor is the end of the feed" do
+      pages = %{nil => {["a"], ""}}
+
+      assert {:ok, [%{id: "a"}]} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 plug: paged(pages, self()),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a feed with a cursor at every page hits the cap and is refused, not truncated" do
+      plug = fn conn ->
+        conn = Plug.Conn.fetch_query_params(conn)
+        next = (conn.params["pagination_key"] || "") <> "x"
+        body = Map.put(news_body([news_row(%{"news_id" => next})]), "pagination_key", next)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(body))
+      end
+
+      assert {:error, :history_truncated} =
+               Rest.get_news(@credentials, symbols: ["TSLA"], plug: plug, retry_attempts: 0)
+    end
+
+    test "a cursor that is not text is refused" do
+      body = Map.put(news_body([news_row(%{})]), "pagination_key", %{"a" => 1})
+
+      assert {:error, :unexpected_pagination_key} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a limit that is not a positive integer is refused before a request" do
+      exploding = fn _conn -> raise "must not reach the venue" end
+
+      for bad <- [0, -1, "5", 1.5, :all] do
+        assert {:error, {:invalid_option, :limit, ^bad}} =
+                 Rest.get_news(@credentials, symbols: ["TSLA"], limit: bad, plug: exploding)
+      end
     end
   end
 
@@ -505,28 +669,21 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {first.rank, second.rank} == {1, 2}
     end
 
-    # This news endpoint answers Server-Sent Events, one generated reply per call
-    # (`news-summary.md:195`) rather than a JSON list of independently-published rows each
-    # naming their own id — see `get_filings/3 and get_news/2`'s own describe block for
-    # the full coverage of that shape. `:id` here is the venue's own conversation id
-    # (`convId`, falling back to `sessionId`), never a symbol used as a stand-in: the old
+    # `:id` is the venue's own `news_id`, never a symbol used as a stand-in: the old
     # fallback on a JSON row was `value(row, ["id", "news_id"]) || value(row, ["symbol"])
     # || ""`, and a ticker as an item id is the worst of the three — it looks like an id
     # and collides for every item about the same symbol.
-    test "the news item's id prefers convId over sessionId, never a symbol" do
-      events = [
-        %{"type" => "meta", "args" => %{"sessionId" => "s-1", "convId" => 42}},
-        %{"type" => "text", "message" => "x"}
-      ]
+    test "the news item's id is the venue's news_id, never a symbol" do
+      row = news_row(%{"news_id" => "n-42", "symbol" => "AAPL", "id" => "other"})
 
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
-                 plug: sse_responding(events),
+                 plug: responding(news_body([row])),
                  retry_attempts: 0
                )
 
-      assert item.id == "42"
+      assert item.id == "n-42"
     end
 
     test "a watchlist row with no id refuses the whole listing, it is not dropped" do
@@ -774,9 +931,14 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert statement.fiscal_period == "FY"
     end
 
-    test "the fake's news names the venue as the source" do
+    # Tick AK: news is the venue's itemised article list, so `source` is the publisher an
+    # article came from and `provider` names the venue; the old LLM summary had no publisher.
+    test "the fake's news names the venue as provider and carries a publisher, link and time" do
       assert {:ok, [item]} = Fake.get_news(credentials: @credentials, symbols: ["AAPL"])
-      assert item.source == "webull"
+      assert item.provider == :webull
+      assert is_binary(item.source) and item.source != ""
+      assert is_binary(item.headline) and is_binary(item.url)
+      assert %DateTime{} = item.published_at
     end
 
     # Every reference-data endpoint here is signed, so the fake refuses without
@@ -822,11 +984,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
       assert {:ok, [_item]} =
                DpExchange.Webull.get_news(
-                 base ++
-                   [
-                     symbols: ["AAPL"],
-                     plug: sse_responding([%{"type" => "meta", "args" => %{"convId" => "n-1"}}])
-                   ]
+                 base ++ [symbols: ["AAPL"], plug: responding(news_body([news_row(%{})]))]
                )
 
       assert {:ok, [_row]} =
@@ -929,19 +1087,13 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {:ok, [_item]} =
                Rest.get_news(@credentials,
                  symbols: "AAPL",
-                 plug:
-                   sse_capturing(
-                     [%{"type" => "meta", "args" => %{"convId" => 1}}],
-                     me
-                   ),
+                 plug: capturing(news_body([news_row(%{})]), me),
                  retry_attempts: 0
                )
 
-      assert_receive {:request, "POST", _path, _query, raw}
-
-      assert Jason.decode!(raw)["category_symbols"] == [
-               %{"category" => "US_STOCK", "symbols" => ["AAPL"]}
-             ]
+      assert_receive {:request, "GET", _path, query, ""}
+      assert URI.decode_query(query)["symbol"] == "AAPL"
+      refute_receive {:request, _method, _path, _query, _raw}, 500
     end
 
     test "a corporate-event calendar that errors halts rather than returning half" do

@@ -129,31 +129,6 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     end
   end
 
-  # Server-Sent Events — the shape `news-summary.md:195` documents for
-  # `POST /market-data/news/summaries/get`, the only endpoint in this file that answers
-  # this way rather than with JSON.
-  defp sse_body(events),
-    do: Enum.map_join(events, "\n\n", &"event:message\ndata:#{Jason.encode!(&1)}")
-
-  defp sse_responding(events) do
-    fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(200, sse_body(events))
-    end
-  end
-
-  defp sse_capturing(events, test_pid) do
-    fn conn ->
-      {:ok, raw, conn} = Plug.Conn.read_body(conn)
-      send(test_pid, {:request, conn.method, conn.request_path, conn.query_string, raw})
-
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(200, sse_body(events))
-    end
-  end
-
   # --- protobuf streaming wire encoding (QuoteProto half) --------------------------------
   #
   # `streaming-api.md` documents field NAMES, TYPES and NUMBERS, never wire bytes —
@@ -3226,44 +3201,59 @@ defmodule DpExchange.Webull.SpecExamplesTest do
   end
 
   describe "get_news/2" do
-    # news-summary.md:195 — the vendor's own worked SSE example stream, verbatim.
-    test "concatenates the text chunks and takes the id from the meta event's convId" do
-      events = fixture!("fund_report_news_sse.json")
+    # list-stock-news.md — `StockNewsResultVo`, with the page's own example values.
+    test "reads the venue's itemised news and stops once the limit is met" do
+      me = self()
 
       assert {:ok, [item]} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL", "GOOG"],
-                 plug: sse_responding(events),
+                 symbols: ["TSLA"],
+                 limit: 1,
+                 plug: capturing(fixture!("stock_news_list.json"), me),
                  retry_attempts: 0
                )
 
-      assert item.id == "451107711450219"
-      assert item.summary == "Hi, I'm Wally and I'll help you with this question"
-      assert item.source == "webull"
-      assert item.symbols == ["AAPL", "GOOG"]
+      assert item.id == "20261008-001"
+      assert item.headline == "NVIDIA Announces New AI Chip"
+      assert item.source == "Reuters"
+      assert item.published_at == ~U[2026-10-08 13:30:00.000Z]
+      assert item.symbols == ["TSLA", "NVDA", "AMD"]
+
+      assert_receive {:request, "GET", "/market-data/news/stock-news/list", _query, _raw}
+      refute_receive {:request, _method, _path, _query, _raw}, 500
     end
 
-    test "sends symbols under the venue's nested category_symbols shape" do
+    test "sends symbol and category as query parameters" do
       me = self()
-      events = fixture!("fund_report_news_sse.json")
 
       assert {:ok, _news} =
                Rest.get_news(@credentials,
-                 symbols: ["AAPL", "GOOG"],
-                 lang: "en",
-                 plug: sse_capturing(events, me),
+                 symbols: ["TSLA"],
+                 limit: 1,
+                 plug: capturing(fixture!("stock_news_list.json"), me),
                  retry_attempts: 0
                )
 
-      assert_receive {:request, "POST", path, _query, raw}
-      assert path == "/market-data/news/summaries/get"
-      body = Jason.decode!(raw)
+      assert_receive {:request, "GET", _path, query, _raw}
+      assert URI.decode_query(query) == %{"symbol" => "TSLA", "category" => "US_STOCK"}
+    end
 
-      assert body["category_symbols"] == [
-               %{"category" => "US_STOCK", "symbols" => ["AAPL", "GOOG"]}
-             ]
+    test "a feed that answers the same cursor again is refused, not read as complete" do
+      me = self()
 
-      assert body["lang"] == "en"
+      assert {:error, :pagination_key_did_not_advance} =
+               Rest.get_news(@credentials,
+                 symbols: ["TSLA"],
+                 plug: capturing(fixture!("stock_news_list.json"), me),
+                 retry_attempts: 0
+               )
+
+      assert_receive {:request, "GET", _path, first, _raw}
+      assert_receive {:request, "GET", _path, second, _raw}
+      refute Map.has_key?(URI.decode_query(first), "pagination_key")
+
+      assert URI.decode_query(second)["pagination_key"] ==
+               "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
     end
   end
 

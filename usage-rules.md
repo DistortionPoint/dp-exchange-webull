@@ -21,9 +21,15 @@ question you did not ask. Every function that takes `opts` — on `DpExchange.We
 before anything is sent, before the credentials are looked at, and after the positional
 arguments (`{:invalid_symbol, _}`, `{:invalid_order_id, _}`, ... are answered first). A key
 that holds `nil` is still a key. The transport keys are accepted by every function:
-`:credentials`, `:environment`, `:base_url`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`,
+`:credentials`, `:plug`, `:adapter`, `:req_adapter`, `:limiter`,
 `:rate_limit_blocking`, `:weight`, `:timeout`, `:retry_attempts`, `:retry_delay`,
-`:max_retry_after_s`, `:max_body_bytes`, `:log_requests`. A function that answers
+`:max_retry_after_s`, `:max_body_bytes`, `:log_requests`. **`:base_url` is refused on every
+function** (`{:error, {:unknown_option, :base_url}}`): no call reads it, the hosts come from
+`:environment`, and a `base_url:` that did nothing would let a caller believe a request had
+been redirected. **`:environment` is accepted wherever it is read** — every REST call,
+`subscribe/2`, `unsubscribe/2`, `update_symbols/2`, `streaming?/1`, `live?/1`, `oauth_token/3`
+— and refused on `get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1` and
+`subscribe_notices/1`, which make no request. A function that answers
 `{:error, :not_supported}` does so whatever it is given.
 
 `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1` and `live?/1` have no error
@@ -61,7 +67,7 @@ same one.
 | `unsubscribe/2`, `update_symbols/2` | `:feed`, `:sub_types` |
 | `subscribe_notices/1` | `:to`, `:feed` |
 | `coverage/1`, `wanted/1`, `coverage_by_kind/1` | `:feed` |
-| `streaming?/1`, `live?/1` | none (`:environment` is a transport key) |
+| `streaming?/1`, `live?/1` | none (they read the transport key `:environment`) |
 | `get_option_chain/2`, `get_option_expirations/2` | `:expiry`, `:strike` |
 | `list_futures_contracts/1` | `:symbols`, `:code`, `:status` |
 | `list_futures_product_classes/1`, `list_event_categories/1` | none |
@@ -78,7 +84,7 @@ same one.
 | `get_financials/3` | `:category`, `:type`, `:count` |
 | `get_corporate_events/1` | `:symbol`, `:kind`, `:category` |
 | `get_filings/2` | `:category` |
-| `get_news/1` | `:symbols`, `:lang`, `:category` |
+| `get_news/1` | `:symbols`, `:category`, `:sentiment`, `:limit` (items per symbol) |
 | `get_fundamental/3` | `:category`, plus the query keys that kind's own page documents (`:type`, `:count`, `:last_date`, `:sort_by`; see `Rest.fundamental_option_keys/1`) |
 | `get_screener/2` | the screener's own keys (`:rank_type`, `:sort_by`, `:direction`, `:agg_type`, `:period`, `:sector_id`) and `:category` except on `hot_stocks`, which takes none |
 | `create_token/1`, `check_token/2` | none |
@@ -690,9 +696,9 @@ or not. A catalogue row that names no readable symbol refuses the whole listing
 (`{:error, :unexpected_response_shape}`); rows are never skipped, because a hole would make a
 listed symbol read as unlisted. The same holds for `list_instruments/1` (a row whose symbol
 does not end in its own `currency`), `get_watchlist/2` (a member with no text symbol),
-`get_screener/2` (a row naming nothing) and `get_news/1` (a non-JSON `data:` line or a
-non-text `text` chunk): each is `{:error, :unexpected_response_shape}`, never a shorter
-answer. Some of what it lists is `"NT"` (Non-Tradable) or `"CO"` (Liquidate only — only a
+`get_screener/2` (a row naming nothing) and `get_news/1` (a page without its `data` array,
+or an item whose `related_symbols` is not a list of tickers): each is
+`{:error, :unexpected_response_shape}`, never a shorter answer. Some of what it lists is `"NT"` (Non-Tradable) or `"CO"` (Liquidate only — only a
 CLOSING order matches) on the venue's own instrument catalogue, and `get_symbols/1` has no
 way to say so — this is exactly why a subscribe to one of those symbols can come back
 `INVALID_SYMBOL` even though `get_symbols/1` just handed it to you.
@@ -819,14 +825,12 @@ with no text `watchlist_id` refuses the whole reply as `{:error, {:missing_requi
 An empty string is worse than the `nil` it replaced: a `nil` is detectable and `""` is a
 value, so a consumer keying coverage by symbol used to get a live entry named `""`.
 
-**`get_news/1` no longer has "rows" to drop.** It reads Server-Sent Events, one generated
-reply per call, not a JSON list of independently-published stories each naming their own
-id — see the news paragraph above. The old fallback on that JSON shape, before the endpoint
-was corrected, was an absent id falling back to the **ticker symbol**, which looks like an
-id and collides for every story about that symbol; that whole failure mode is gone with
-the JSON-list assumption it depended on. What replaces it: a stream with no conversation id
-in its `meta` event is `{:error, {:missing_required_field, :id}}` rather than a fabricated
-one, since `Types.NewsItem.id` is required.
+**`get_news/1` refuses rather than drops.** An item with no text `news_id` is
+`{:error, {:missing_required_field, :id}}`, an unparseable `publish_time` is
+`{:error, {:unparseable_venue_timestamp, text}}`, and a `related_symbols` that is not a list
+of tickers is `{:error, :unexpected_response_shape}` — each for the whole read. The id is the
+venue's `news_id`, never a ticker stand-in: an old JSON-row fallback once used the symbol,
+which looks like an id and collides for every story about that symbol.
 
 **So a shorter list is not an error, and the venue's own ranking is preserved.** A dropped
 screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
@@ -1071,7 +1075,13 @@ volatility surface it does not publish either.
 
 ## Fundamentals: twenty-three endpoints, one shape
 
-`get_fundamental/3` reaches any of them; `fundamental_kinds/0` lists them. Every one takes
+`get_fundamental/3` reaches any of them; `fundamental_kinds/0` lists them. These are the
+fundamentals endpoints this package serves, **not all the venue publishes**: the vendor's
+index also lists `get-insider-holdings`, `list-insider-transactions`, `list-institutions`,
+`list-institution-holdings`, `list-institution-holding-changes` and `list-economic-calendars`
+(noticed 2026-10-18, not reached), and the screeners `get-fear-and-greed-index` and
+`list-stock-unusual-activities`. A kind or screener absent from the lists here is therefore
+"not served by this package", not "the venue has none". Every one takes
 `symbol` and `category`; **`:type` and `:count` reach only the endpoints that document them**
 and are dropped elsewhere.
 
@@ -1097,16 +1107,19 @@ is `nil` for them — the venue publishes no end date for an indicator.
 **`get_corporate_events/1` needs `:symbol`** — these calendars are per issuer, not
 market-wide — and without `:kind` reads *both* calendars, which is two requests.
 
-**`get_news/1` is generated, not reported — and answers one item, not a list of stories.**
-The vendor's own description is "invokes LLM to generate news summaries", and the endpoint
-itself answers Server-Sent Events (`event:message\ndata:{"type":"text","message":...}`
-chunks), not a JSON list — this package concatenates the chunks into one `summary` and
-returns it as a single-element list, `:id` taken from the stream's own conversation id
-(`convId`, falling back to `sessionId`). `source` names the venue rather than a wire; if
-you quote `summary`, you are quoting a paraphrase, not the publisher's text. Before this
-was corrected, every call returned `{:error, {:undecodable_response, :webull}}` — the
-generic JSON decoder this package's other POST calls share cannot parse an SSE body, so the
-endpoint never actually worked.
+**`get_news/1` returns the venue's own news items, one page per symbol.** Since 2026-10-18 it
+reads `GET /market-data/news/stock-news/list` (the vendor's `list-stock-news` page): each item
+has the venue's `news_id`, headline, summary, link, publisher (`source`), `publish_time` (as
+UTC `published_at`) and `related_symbols`. `:symbols` on an item is the symbol it was returned
+for plus the venue's tags, and an item returned for two requested symbols appears once. The
+cursor is followed: `:limit` is the number of items wanted per symbol (positive integer; the
+list is cut to exactly that), and without it the feed is read to its end. A repeated cursor is
+`{:error, :pagination_key_did_not_advance}`, and the page cap reached first is
+`{:error, :history_truncated}` rather than a short list, so pass `:limit` for a busy symbol.
+The venue's `sentiment` label is a filter (`:sentiment`) only —
+`Types.NewsItem` has no field for it. **Before 2026-10-18 this was the venue's LLM-generated
+summary endpoint** (`POST /market-data/news/summaries/get`): one paraphrase per call, no
+headline, link or time. That endpoint is no longer called, and its `:lang` option is gone.
 
 **A screener's rank is the position the venue returned the row in.** Nothing is re-ranked:
 two venues' "top movers" answer different questions, and so do one venue's under two sorts.
@@ -1403,8 +1416,8 @@ whole list: the venue's page lists it as required and `Position` has no `nil` qu
 (`{:unsupported_snapshot_category, c}`) and `Fake.get_top_of_book/2` refuses `US_EVENT`;
 `Fake.get_historical_prices/4` checks the category, width, range and `:limit` of whichever of
 the five bars endpoints the category names; `Fake.get_trades/2` checks the category and
-`:limit`; `Fake.get_financials/3` refuses a `:count` over 20; and `Fake.get_news/1` has no
-`headline`, as the real stream names none. A request those endpoints would accept for a symbol
+`:limit`; `Fake.get_financials/3` refuses a `:count` over 20; and `Fake.get_news/1` refuses an
+unlisted `:category` or `:sentiment` as the real path does. A request those endpoints would accept for a symbol
 the fake does not model is `{:refused, :not_listed}`.
 
 **A single-symbol read refuses a symbol it cannot send, locally.** `get_price/2`,
@@ -1545,7 +1558,9 @@ A missing required option is refused before any request, as a bare atom:
 (`{:error, :sorts_required}`, or `{:error, {:invalid_sorts, v}}`). `list_event_markets/1`
 takes `:series_symbol`, `:event_symbol`, `:symbols`, `:expiring_after` (a `Date` or text) and
 `:pagination_key`; `list_event_events/1` takes `:status` (`ACTIVE` or `INACTIVE`, never
-defaulted); `get_news/1` requires `:symbols` and passes `:lang` through when given.
+defaulted); `get_news/1` requires `:symbols`, takes `:category` (`US_STOCK` default, or `HK_STOCK`) and
+`:sentiment` (`POSITIVE`, `NEGATIVE`, `NEUTRAL`), and refuses a value outside those as
+`{:error, {:invalid_option, key, value}}`.
 
 ## Every negative here is audited
 

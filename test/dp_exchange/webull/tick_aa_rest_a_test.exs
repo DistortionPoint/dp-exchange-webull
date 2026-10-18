@@ -201,7 +201,7 @@ defmodule DpExchange.Webull.TickAaRestATest do
     end
   end
 
-  describe "get_news/2 over the event-stream POST" do
+  describe "get_news/2 over the stock-news GET" do
     defp news(plug),
       do: Rest.get_news(@credentials, symbols: ["AAPL"], plug: plug, retry_attempts: 0)
 
@@ -210,8 +210,8 @@ defmodule DpExchange.Webull.TickAaRestATest do
                news(responding(%{"message" => "bad lang"}, 400))
     end
 
-    test "a 404 is a refusal, not an error to retry" do
-      assert {:refused, :not_found} = news(responding(%{}, 404))
+    test "a 404 on a single-symbol read is a symbol the venue does not list" do
+      assert {:refused, :not_listed} = news(responding(%{}, 404))
     end
 
     test "a status between success and refusal keeps the status and body" do

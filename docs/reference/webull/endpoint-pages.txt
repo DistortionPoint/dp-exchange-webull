@@ -60,6 +60,68 @@
 # Monday — see the release note for why fifteen never-executed weekly jobs were worth
 # exercising early.
 #
+# ## Re-diffed 2026-10-18 — eleven pages appeared; one claim was wrong and is fixed
+#
+# `get-fear-and-greed-index`, `get-insider-holdings`, `get-news-detail`,
+# `list-economic-calendars`, `list-insider-transactions`, `list-institution-holding-changes`,
+# `list-institution-holdings`, `list-institutions`, `list-news`, `list-stock-news` and
+# `list-stock-unusual-activities`. Each was fetched and read before this file was touched
+# (the rendered page has no parameter table; appending `.md` to the URL returns the OpenAPI
+# definition's tables, which is what was read). All are Market Data API, Non-Display
+# Solution, `GET`, sandbox host in the definition, and none states a rate limit of its own.
+# The three news pages are captured under `openapi/` (as the tables the fetch returned, not
+# the raw OpenAPI JSON the older captures hold); the other eight are summarised here.
+#
+# **News (3 pages) — the claim that moved.** `get_news/1` was reading
+# `POST /market-data/news/summaries/get`, "Invokes LLM to generate news summaries": one
+# Server-Sent-Events reply, a model's paraphrase, no headline, link, publisher or time. The
+# new `GET /market-data/news/stock-news/list` (`symbol` required; `category` `US_STOCK` |
+# `HK_STOCK`; `sentiment` `POSITIVE` | `NEGATIVE` | `NEUTRAL`; `pagination_key`) returns
+# itemised articles — `news_id`, `title`, `summary`, `source`, `url`, `publish_time`,
+# `sentiment`, `related_symbols` — which is exactly what `Core.Types.NewsItem` ("as the
+# venue published it") describes and the old endpoint could not fill. So `get_news/1` now
+# reads that: one page per symbol, `:lang` removed (the new page has no such parameter),
+# `:sentiment` added, the SSE reader deleted. Claims that moved: "generated, not reported",
+# "answers one item, not a list" and "no headline" (in `usage-rules.md`, the moduledocs and
+# the Fake). `list-news` (`/market-data/news/search/list`, keyword search, `start_date` /
+# `end_date`, keyword up to 100 characters) is a keyword search, not a per-symbol read, and
+# `get-news-detail` (`/market-data/news/detail/get?news_id=`) returns the full `content` of
+# one article; the contract has no callback for either, so neither is reached. Neither
+# falsifies a declaration. The summaries endpoint is still published and still in the
+# vendor's rate-limit table; this package simply stopped calling it.
+#
+# **Fundamentals (6 pages) — no `:unsupported` claim is falsified; one doc claim reworded.**
+# `get-insider-holdings` (`symbol`, `category`, `compare_months` 1|3), `list-insider-
+# transactions` (`symbol`, `side` BUY|SELL, cursor), `list-institutions` (`keyword`,
+# cursor), `list-institution-holdings` (`cik`, cursor; the page title is "List Institution
+# 13F Holdings"), `list-institution-holding-changes` (`cik`, `position` OPEN|CLOSE|CHANGE,
+# `count` max 50, cursor) and `list-economic-calendars` (`region` US|CN|EU|JP|GB, dates,
+# cursor, 30 per page). The contract has no callback for insider or institutional
+# ownership, and `get_corporate_events/1` is the per-issuer dividend/earnings calendar, not
+# a macro calendar. `get_fundamental/3`'s documentation said the kinds were the ones "this
+# venue publishes" and `usage-rules.md` heads a section "twenty-three endpoints": both now
+# say "this package reaches" and name the unreached pages. `market_status/1` stays
+# `:unsupported` — `list-economic-calendars` lists macro releases (CPI, payrolls, Fed
+# events), not trading hours or holidays.
+#
+# **Screeners (2 pages) — not rankings, not reached.** `get-fear-and-greed-index`
+# (`category` US_STOCK only; current value 0-100 plus previous day / week / month) is one
+# sentiment gauge, and `list-stock-unusual-activities` (`symbol`, `category`, `count` max
+# 30, `alert_types` VOLUME_SURGE|PRICE_SPIKE, `extended_hours_required`; a bare array of
+# `{alert_type, symbol, time, volume}`) is an event feed over the last 90 days.
+# `get_screener/2` serves "a venue screener, mover list or ranking" with a per-row rank;
+# neither shape is one, so adding them as screeners would invent a rank. The
+# `screeners/0` doc now says the list is this package's, not the venue's.
+#
+# **Rate limits.** None of the eleven pages states one, and the vendor's `rate-limits`
+# table (re-read the same day) has no row for any of them, so the 60/60s per-endpoint and
+# 600/60s global buckets apply to the new news path as to every market-data read. That
+# re-read found a second drift, in `rest-rate-limits.md`, recorded there: the live table
+# now splits "Display" (60/60s production) from "Non-Display" (300/60s production for most
+# endpoints), where this package's file said every market-data endpoint is 60/60s. The
+# package's ceiling is left at 60/60s, deliberately — the endpoint pages still say "1
+# request per second per App Key" and the penalty is an IP block.
+#
 # ## Re-diffed 2026-10-12 — a "Community" section appeared; one page is now served
 #
 # Seven pages appeared: `community` (a section index), `create-comment`, `create-post`,
@@ -287,10 +349,13 @@ futures-tick
 get-analyst-rating
 get-analyst-target-price
 get-company-profile
+get-fear-and-greed-index
 get-gainers-losers
 get-high-dividend
+get-insider-holdings
 get-market-sectors
 get-market-sectors-detail
+get-news-detail
 get-noii-bars
 get-noii-snapshot
 get-post
@@ -303,9 +368,17 @@ historical-bars
 industry-comparison
 instrument-list
 instruments
+list-economic-calendars
 list-hot-tickers
+list-insider-transactions
+list-institution-holding-changes
+list-institution-holdings
+list-institutions
 list-my-posts
+list-news
 list-posts-by-symbol
+list-stock-news
+list-stock-unusual-activities
 list-transfer-activities
 market-data-streaming
 news

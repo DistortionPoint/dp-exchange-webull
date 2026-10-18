@@ -1156,7 +1156,10 @@ defmodule DpExchange.Webull do
 
   That question is moot here anyway: **the venue publishes nothing this package can
   reach.** Webull's OpenAPI (`docs/reference/webull/endpoint-inventory.md`) documents 85
-  endpoints and none of them is a market-status or trading-calendar call. The one
+  endpoints and none of them is a market-status or trading-calendar call. (The
+  `list-economic-calendars` page that appeared 2026-10-18 is a calendar of macroeconomic
+  releases — CPI, payrolls, Fed events — not of trading hours or holidays, so it answers a
+  different question.) The one
   trading-calendar endpoint Webull publishes anywhere,
   `GET /broker/master-data/trading-calendars/list`, belongs to a different product
   entirely — the **Broker API**, served from `broker-api.webull.com` rather than this
@@ -1842,10 +1845,17 @@ defmodule DpExchange.Webull do
   end
 
   @doc """
-  News summaries. **Generated, not reported** — the venue's own description is "invokes LLM
-  to generate news summaries", so each `summary` is a model's paraphrase.
+  News about the symbols asked for: the venue's own items (`GET
+  /market-data/news/stock-news/list`), each with a headline, summary, link, publisher, time
+  and the venue's related symbols. Until 2026-10-18 this was the venue's LLM-generated
+  summary endpoint, which returned one paraphrase and no headline, link or time; the vendor
+  now publishes itemised news, and that is what this reads.
 
-  See `DpExchange.Webull.Rest.get_news/2`. `opts[:symbols]` is required.
+  `opts[:symbols]` is required; `opts[:category]` is `US_STOCK` (default) or `HK_STOCK`;
+  `opts[:sentiment]` filters on the venue's `POSITIVE`/`NEGATIVE`/`NEUTRAL` label.
+  `opts[:limit]` is items wanted per symbol; the venue's cursor is followed until that many
+  arrive or the feed ends, and a cap reached first is `{:error, :history_truncated}`, not a
+  short list. See `DpExchange.Webull.Rest.get_news/2`.
   """
   @impl true
   def get_news(opts \\ []) do

@@ -22,6 +22,65 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING for callers of `get_news/1`)
+
+- Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).
+- `get_news/1` follows the venue's `pagination_key` instead of stopping at the first page
+  (which would have been a silent truncation). New `:limit` option: items wanted per symbol,
+  honoured exactly (pages are read until it is met, then the list is cut to it); without it
+  the feed is read to its end. A cursor that repeats the one just sent is
+  `{:error, :pagination_key_did_not_advance}`, a cursor that is not text is
+  `{:error, :unexpected_pagination_key}`, an empty cursor ends the feed, and `@max_pages` (50)
+  reached first is `{:error, :history_truncated}` rather than a short list, so a busy symbol
+  read without `:limit` can be refused: pass one. A `:limit` that is not a positive integer is
+  `{:error, {:invalid_option, :limit, value}}`, before a request, on the Fake as well.
+  `Core.Venue.get_news/1` names no count or window, so `:limit` is this package's option.
+- BREAKING: `:base_url` is refused on every function (`{:error, {:unknown_option, :base_url}}`)
+  and `:environment` on `get_fees/2`, `coverage/1`, `wanted/1`, `coverage_by_kind/1` and
+  `subscribe_notices/1`. Core lists both as shared transport keys, but no call read
+  `:base_url` (the hosts come from `:environment`; `oauth_token/3` has `:oauth_url`), and
+  those five read no `:environment` — a `base_url:` that did nothing let a caller believe a
+  request had been redirected. Same pattern as Schwab and Robinhood.
+- Every `:data_quality` notice from the socket now carries an atom `details.reason`, with its
+  text in `details.message`. `report_drop/3` (an unrecognised topic, an unhandled packet type,
+  a QoS 2 window overflow, an undecodable or unreadable snapshot, tick or quote) emitted
+  `details.dropped` only, so a consumer matching on `reason` saw nothing. The reasons are
+  `:unrecognised_topic`, `:unhandled_packet`, `:qos2_window_full`, `:undecodable`,
+  `:no_readable_level`, and the decode error's own tag (for example `:invalid_decimal`).
+  `details.dropped` keeps the full key. The other `Notice.new` sites were checked: no other
+  `:data_quality` lacks a reason and the one `:refusal` carries its symbols.
+- BREAKING: `get_news/1` reads the venue's itemised news, `GET
+  /market-data/news/stock-news/list`, instead of the
+  LLM-generated `POST /market-data/news/summaries/get`. The vendor's reference gained
+  `list-stock-news` (found by the weekly index diff on 2026-10-18; page captured as
+  `docs/reference/webull/openapi/list-stock-news.md`). Each `NewsItem` now has the venue's
+  `news_id` as `:id`, and a `:headline`, `:summary`, `:url`, `:source` (the publisher),
+  `:published_at` (the venue's `publish_time` in UTC) and `:symbols` (the symbol asked for
+  plus the venue's `related_symbols`) where the old single paraphrase had `nil` for all but
+  the summary and `source: "webull"`. An item returned for two requested symbols appears
+  once. An item with no text `news_id`, an unparseable `publish_time` or a `related_symbols`
+  that is not a list of tickers refuses the whole read (`{:missing_required_field, :id}`,
+  `{:unparseable_venue_timestamp, text}`, `:unexpected_response_shape`); a body without the
+  page's `data` array is `:unexpected_response_shape`; an unlisted symbol (404) is
+  `{:refused, :not_listed}`.
+- BREAKING: `get_news/1` option table is now `:symbols`, `:category`, `:sentiment`. `:lang`
+  is gone (the new page has no such parameter, so it was a key the function never read).
+  `:category` is `US_STOCK` (default) or `HK_STOCK` and `:sentiment` is `POSITIVE`,
+  `NEGATIVE` or `NEUTRAL`; anything else is `{:error, {:invalid_option, key, value}}` before
+  a request, on the facade and the Fake alike (`Rest.news_filters/1`).
+- Removed the Server-Sent-Events reader that only the summaries call used (`post_sse/4` and
+  its decoder); `Fake.get_news/1` now returns an item with a headline, link and time.
+- Docs: `usage-rules.md`, `Rest.fundamental_kinds/0`, `Rest.screeners/0` and the facade no
+  longer call this package's fundamentals and screeners lists "the ones the venue
+  publishes": the index also lists insider holdings and transactions, institutions and their
+  13F holdings and changes, the economic calendar, a fear-and-greed index and a
+  stock unusual-activities feed, none of which is reached here and none of which falsifies a
+  `capabilities/0` declaration (reasoning per page in `endpoint-pages.txt`). The economic
+  calendar is macro releases, not trading hours, so `market_status/1` stays `:unsupported`.
+- `rest-rate-limits.md` records drift: the vendor's live table now splits Display (60/60s
+  production) from Non-Display (300/60s production); the file's "every market-data endpoint
+  is 60/60s" no longer holds. The package's 60/60s meter is unchanged, deliberately.
+
 ## [0.4.160] - 2026-10-17
 
 ### Changed (BREAKING for callers that passed an option the venue cannot honour)

@@ -1293,17 +1293,37 @@ defmodule DpExchange.Webull.Socket do
     if MapSet.member?(reported, key) or MapSet.size(reported) >= @max_reported_drops do
       state
     else
+      text = "dropped #{inspect(key)} (first on this connection)"
+
+      # `details.reason` is an atom a consumer matches on (Core.Notice: "an atom or a tagged
+      # tuple, never free text"); the wording is `details.message`. `details.dropped` keeps
+      # the full key, which a reason atom alone would flatten.
       notify(
         state,
         Notice.new(:data_quality, :webull,
-          message: "dropped #{inspect(key)} (first on this connection)",
-          details: details |> own_binaries() |> Map.put(:dropped, key)
+          message: text,
+          details:
+            details
+            |> own_binaries()
+            |> Map.merge(%{dropped: key, reason: drop_atom(key), message: text})
         )
       )
 
       Map.put(state, :drops_reported, MapSet.put(reported, key))
     end
   end
+
+  # The atom `details.reason` carries for a `report_drop/3` key.
+  defp drop_atom({:unrecognised_topic, _topic}), do: :unrecognised_topic
+  defp drop_atom({:unhandled_packet, _type}), do: :unhandled_packet
+  defp drop_atom({:qos2, :window_full}), do: :qos2_window_full
+  defp drop_atom({_kind, reason}) when is_atom(reason), do: reason
+
+  defp drop_atom({_kind, reason})
+       when is_tuple(reason) and tuple_size(reason) > 0 and is_atom(elem(reason, 0)),
+       do: elem(reason, 0)
+
+  defp drop_atom(_other), do: :dropped
 
   # The raw fields a drop reports are views into the frame they came from (`QuoteProto` walks
   # the frame without copying), and a `Notice` is the one thing a consumer may keep for a long

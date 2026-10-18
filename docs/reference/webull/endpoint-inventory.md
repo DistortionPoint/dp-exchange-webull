@@ -40,6 +40,17 @@ venue publishing no account volume *report*, not on the absence of an executions
 so a broker-tier page does not touch it. The count in the table below is left at its capture
 date, as the 2026-09-03 correction established.
 
+**Re-checked 2026-10-18.** Eleven pages appeared on the Trading + Market Data API (all
+`GET`, Non-Display Solution): three news (`list-stock-news`, `list-news`, `get-news-detail`),
+six fundamentals (`get-insider-holdings`, `list-insider-transactions`, `list-institutions`,
+`list-institution-holdings`, `list-institution-holding-changes`, `list-economic-calendars`)
+and two screeners (`get-fear-and-greed-index`, `list-stock-unusual-activities`). That takes
+the surface from 85 to 96 (the 2026-10-12 `list-hot-tickers` page, served as the `hot_stocks`
+screener, was also not counted in the 85). **One claim changed**: `get_news/1` now reads
+`list-stock-news` instead of the LLM-generated `news/summaries/get`, and says so. The other
+ten falsify no `capabilities/0` declaration; the reasoning per page is in
+`endpoint-pages.txt`'s header. The table below stays at its capture date.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
@@ -194,7 +205,7 @@ GET    /trading/orders/historical-orders/list       order-history
 GET    /trading/orders/open-orders/list             order-open
 POST   /auth/tokens/check                           check-token
 POST   /auth/tokens/create                          create-token
-POST   /market-data/news/summaries/get              news-summary
+POST   /market-data/news/summaries/get              news-summary (not called since 2026-10-18)
 POST   /market-data/stocks/bars/list                historical-bars
 POST   /market-data/streaming/subscribe             subscribe
 POST   /market-data/streaming/unsubscribe           unsubscribe
@@ -209,6 +220,24 @@ POST   /trading/orders/cancel                       common-order-cancel
 POST   /trading/orders/place                        common-order-place
 POST   /trading/orders/preview                      common-order-preview
 POST   /trading/orders/replace                      common-order-replace
+```
+
+### Added since the capture above — 2026-10-18
+
+Not part of the 85 counted above. `GET`, Non-Display Solution. Only the first is called.
+
+```
+GET    /market-data/news/stock-news/list            list-stock-news   (get_news/1)
+GET    /market-data/news/search/list                list-news
+GET    /market-data/news/detail/get                 get-news-detail
+GET    /market-data/fundamentals/insider-holdings/get get-insider-holdings
+GET    /market-data/fundamentals/insider-transactions/list list-insider-transactions
+GET    /market-data/fundamentals/institutions/list  list-institutions
+GET    /market-data/fundamentals/institutions/holdings/list list-institution-holdings
+GET    /market-data/fundamentals/institutions/holding-changes/list list-institution-holding-changes
+GET    /market-data/fundamentals/economic-calendars/list list-economic-calendars
+GET    /market-data/screeners/fear-greed-indexes/get get-fear-and-greed-index
+GET    /market-data/screeners/unusual-activities/list list-stock-unusual-activities
 ```
 
 ### Category index pages (not endpoints)

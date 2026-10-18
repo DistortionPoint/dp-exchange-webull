@@ -43,17 +43,6 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
     end
   end
 
-  defp sse_responding(events) do
-    fn conn ->
-      conn
-      |> Plug.Conn.put_resp_content_type("text/event-stream")
-      |> Plug.Conn.resp(
-        200,
-        Enum.map_join(events, "\n\n", &"event:message\ndata:#{Jason.encode!(&1)}")
-      )
-    end
-  end
-
   defp equity_order(overrides) do
     Map.merge(
       %{
@@ -100,56 +89,31 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
     end
   end
 
-  describe "news frames the venue sends oddly" do
-    test "an object where an id belongs falls back to the session id" do
-      events = [
-        %{"type" => "meta", "args" => %{"convId" => %{"x" => 1}, "sessionId" => "s-1"}},
-        %{"type" => "text", "message" => "Hello "},
-        %{"type" => "text", "message" => "world"}
-      ]
+  describe "news the venue sends oddly" do
+    test "an id that is not text names no item, and the read is refused" do
+      for bad <- [[1, 2], %{}, 7, nil] do
+        body = %{"data" => [%{"news_id" => bad, "title" => "x"}]}
 
-      assert {:ok, [item]} =
-               Rest.get_news(@credentials,
-                 symbols: ["AAPL"],
-                 plug: sse_responding(events),
-                 retry_attempts: 0
-               )
-
-      assert item.id == "s-1"
-      assert item.summary == "Hello world"
-    end
-
-    # Tick AJ: a text chunk whose text is not text once raised, then contributed nothing —
-    # a summary with a hole in it. It now refuses the read.
-    for bad <- [%{"unexpected" => true}, nil] do
-      test "a text chunk whose message is #{inspect(bad)} refuses the read" do
-        events = [
-          %{"type" => "meta", "args" => %{"sessionId" => "s-1"}},
-          %{"type" => "text", "message" => "Hello "},
-          %{"type" => "text", "message" => unquote(Macro.escape(bad))}
-        ]
-
-        assert {:error, :unexpected_response_shape} =
+        assert {:error, {:missing_required_field, :id}} =
                  Rest.get_news(@credentials,
                    symbols: ["AAPL"],
-                   plug: sse_responding(events),
+                   plug: responding(body),
                    retry_attempts: 0
                  )
       end
     end
 
-    test "a stream whose only id is not text or a number has no id, and is refused" do
-      events = [
-        %{"type" => "meta", "args" => %{"convId" => [1, 2], "sessionId" => %{}}},
-        %{"type" => "text", "message" => "x"}
-      ]
+    test "text fields that are not text are nil, not stringified" do
+      body = %{"data" => [%{"news_id" => "n-1", "title" => %{"a" => 1}, "url" => 5}]}
 
-      assert {:error, {:missing_required_field, :id}} =
+      assert {:ok, [item]} =
                Rest.get_news(@credentials,
                  symbols: ["AAPL"],
-                 plug: sse_responding(events),
+                 plug: responding(body),
                  retry_attempts: 0
                )
+
+      assert %{headline: nil, url: nil} = item
     end
 
     test "symbols that are not all text are refused before anything is encoded or sent" do

@@ -593,9 +593,17 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
       assert {:ok, []} = Fake.get_option_expirations("AAPL", [strike: 999] ++ @opts)
     end
 
-    test "news carries no headline, as the real stream names none" do
-      assert {:ok, [%Types.NewsItem{headline: nil}]} =
+    test "news names a headline and a time, as the venue's itemised news does" do
+      assert {:ok, [%Types.NewsItem{headline: "Fixture headline", published_at: %DateTime{}}]} =
                Fake.get_news([symbols: ["AAPL"]] ++ @opts)
+    end
+
+    test "news refuses a category or sentiment the real path refuses, before credentials" do
+      assert {:error, {:invalid_option, :sentiment, "BULLISH"}} =
+               Fake.get_news(symbols: ["AAPL"], sentiment: "BULLISH")
+
+      assert {:error, {:invalid_option, :category, "EU_STOCK"}} =
+               Fake.get_news(symbols: ["AAPL"], category: "EU_STOCK")
     end
   end
 end

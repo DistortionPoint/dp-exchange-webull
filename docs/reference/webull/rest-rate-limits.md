@@ -17,10 +17,28 @@ makes.
 
 > **60/60s** in Production, **30/60s** in Sandbox — for every market-data endpoint.
 
-The venue states its limits as `N/Ts`: *N* requests per *T*-second window. Every
-market-data endpoint in the table carries the same pair, without exception — crypto,
-stock, option, future and event contract, display and non-display alike, including the
-streaming `subscribe`/`unsubscribe` calls.
+**Drift found 2026-10-18 — this sentence is no longer what the vendor's table says.** The
+live `rate-limits` page now has two market-data tables. **Display Solution**: 30/60s sandbox,
+60/60s production. **Non-Display Solution** (the tier the vendor's newer reference pages are
+filed under, and the one a retail or buy-side integration appears to be): 30/60s sandbox,
+**300/60s production** for the stock, option, future, crypto and event-contract reads, the
+streaming subscribe calls, news summary, the screeners, watchlists and the fundamentals
+(read through a page fetch, which summarises; the table was not saved verbatim). Auth stays
+10/10s. The table has no row for `news/stock-news/list` or for the other pages that appeared
+the same day.
+
+**This package's figure is deliberately not raised.** Which tier a given `app_key` is on is
+not something this package can read, the endpoint reference pages still say "1 request per
+second per App Key" beside "Market Data Global Limit: 600 requests per minute", and the
+stated penalty is an IP block — so 60/60s per endpoint with a burst of 1 stays the
+conservative reading, as the section below argues. What changed is that "without exception"
+and "display and non-display alike" below were true of the 2026-09-09 reading and are not
+true of the page today. `Supervisor.limits/1` takes no override, so a consumer on the
+Non-Display tier is metered at the Display figure until someone measures which tier applies.
+
+The venue states its limits as `N/Ts`: *N* requests per *T*-second window. As read on
+2026-09-09, every market-data endpoint in the table carried the same pair — crypto, stock,
+option, future and event contract, including the streaming `subscribe`/`unsubscribe` calls.
 
 Three dimensions, in the venue's own words:
 

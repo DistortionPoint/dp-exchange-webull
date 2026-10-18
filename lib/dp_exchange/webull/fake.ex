@@ -2107,35 +2107,26 @@ defmodule DpExchange.Webull.Fake do
 
   defp do_get_news(opts) do
     with_injection(fn ->
-      # Symbols first, credentials second — see `get_corporate_events/1`'s own comment;
-      # `Rest.get_news/2`'s `required_symbols/1` runs before anything reaches
-      # `Auth.headers/2`.
-      # Through `Rest.news_symbols/1`, which also takes one symbol as a bare string - the
-      # real path accepts `symbols: "AAPL"`, and the fake refused it as `:symbols_required`.
-      case Rest.news_symbols(opts) do
-        {:ok, symbols} ->
-          with :ok <- authenticated(opts) do
-            {:ok,
-             [
-               %Types.NewsItem{
-                 id: "n-1",
-                 # `nil`, as `Rest.get_news/2` has it: the venue's stream names no headline,
-                 # and a fake that supplied one would teach a consumer to read a field that
-                 # is empty in production.
-                 headline: nil,
-                 summary: "A model's paraphrase, not the publisher's text.",
-                 url: nil,
-                 # The venue generated it; naming a publisher would attribute a paraphrase.
-                 source: "webull",
-                 symbols: symbols,
-                 published_at: nil,
-                 provider: :webull
-               }
-             ]}
-          end
-
-        {:error, _reason} = missing ->
-          missing
+      # Symbols first, the filters second, credentials last — the order `Rest.get_news/2`
+      # makes its checks in, before anything reaches `Auth.headers/2`; see
+      # `get_corporate_events/1`'s own comment. `Rest.news_symbols/1` also takes one symbol
+      # as a bare string, as the real path does.
+      with {:ok, symbols} <- Rest.news_symbols(opts),
+           {:ok, _filters} <- Rest.news_filters(opts),
+           :ok <- authenticated(opts) do
+        {:ok,
+         [
+           %Types.NewsItem{
+             id: "n-1",
+             headline: "Fixture headline",
+             summary: "Fixture summary.",
+             url: "https://example.invalid/news/n-1",
+             source: "fixture",
+             symbols: symbols,
+             published_at: ~U[2026-10-08 13:30:00Z],
+             provider: :webull
+           }
+         ]}
       end
     end)
   end

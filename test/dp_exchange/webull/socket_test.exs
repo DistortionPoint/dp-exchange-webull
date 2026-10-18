@@ -1364,8 +1364,9 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reply, {:binary, <<4::4, 0::4, 2, 3::16>>}, _state} =
                Socket.handle_frame({:binary, frame}, state())
 
-      assert_receive {:dp_exchange, :webull, %Notice{details: %{dropped: dropped}}}
+      assert_receive {:dp_exchange, :webull, %Notice{details: %{dropped: dropped} = details}}
       assert dropped == {:unrecognised_topic, "crypto-tick"}
+      assert details.reason == :unrecognised_topic
     end
 
     test "acknowledgements owed to a dropped connection are not carried to the next one" do
@@ -1503,7 +1504,10 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:ok, state} = Socket.handle_frame({:binary, frame}, full)
 
       assert_receive {:dp_exchange, :webull,
-                      %Notice{kind: :data_quality, details: %{dropped: {:qos2, :window_full}}}}
+                      %Notice{
+                        kind: :data_quality,
+                        details: %{dropped: {:qos2, :window_full}, reason: :qos2_window_full}
+                      }}
 
       refute_receive {:dp_exchange, :webull, _message}, 50
       assert MapSet.size(state.qos2_pending) == 65_535
@@ -1518,6 +1522,8 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:ok, state} = Socket.handle_frame({:binary, suback}, state())
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:unhandled_packet, 9}
+      assert details.reason == :unhandled_packet
+      assert details.message =~ "unhandled_packet"
       assert details.bytes == 3
 
       assert {:ok, _state} = Socket.handle_frame({:binary, suback}, state)
@@ -1533,6 +1539,7 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %Quote{}}, 50
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:snapshot, {:invalid_decimal, :price}}
+      assert details.reason == :invalid_decimal
       assert details.price == "null"
       assert details.symbol == "BTCUSD"
     end
@@ -1543,6 +1550,17 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:snapshot, :undecodable}
+      assert details.reason == :undecodable
+    end
+
+    test "a tick that does not decode at all is reported with an atom reason" do
+      assert {:ok, _state} =
+               Socket.handle_frame({:binary, publish("tick", <<0xFF, 0xFF, 0xFF>>)}, state())
+
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
+      assert details.dropped == {:tick, :undecodable}
+      assert details.reason == :undecodable
+      assert is_binary(details.message)
     end
 
     test "a book that does not decode at all is reported" do
@@ -1551,6 +1569,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:quote, :undecodable}
+      assert details.reason == :undecodable
     end
 
     test "a book whose levels are both unreadable is reported, with what it said" do
@@ -1568,6 +1587,7 @@ defmodule DpExchange.Webull.SocketTest do
       refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:quote, :no_readable_level}
+      assert details.reason == :no_readable_level
       assert details.bid == "null"
       assert details.ask == "null"
     end
