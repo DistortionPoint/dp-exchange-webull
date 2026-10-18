@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.161] - 2026-10-18
+
 ### Changed (BREAKING for callers of `get_news/1`)
 
 - Depends on dp_exchange_core 0.3.103 (conformance groups 44, fake export parity, and 45, notice shapes).
