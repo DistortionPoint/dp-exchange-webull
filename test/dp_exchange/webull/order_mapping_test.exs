@@ -185,9 +185,9 @@ defmodule DpExchange.Webull.OrderMappingTest do
                Decimal.new("175.00")
     end
 
-    test "the camelCase form decodes too, matching every other field on this row" do
-      assert fetch(%{"order_type" => "STOP_LOSS", "stopPrice" => "175.00"}).stop_price ==
-               Decimal.new("175.00")
+    test "a camelCase spelling is not the venue's name and is not read" do
+      # `order-detail.md:321` defines `stop_price`; `stopPrice` appears in no page or capture.
+      assert fetch(%{"order_type" => "STOP_LOSS", "stopPrice" => "175.00"}).stop_price == nil
     end
 
     test "an order with no stop leaves stop_price nil rather than 0" do
@@ -199,16 +199,16 @@ defmodule DpExchange.Webull.OrderMappingTest do
     test "a 400 carrying a message keeps the message" do
       assert {:refused, {:venue_error, 400, "insufficient buying power"}} =
                Rest.cancel_order(@credentials, "abc",
-                 plug: responding(%{"msg" => "insufficient buying power"}, 400),
+                 plug: responding(%{"message" => "insufficient buying power"}, 400),
                  account_id: @account,
                  retry_attempts: 0
                )
     end
 
-    test "a 403 carrying only a code keeps the code" do
+    test "a 403 carrying only an error_code keeps the code" do
       assert {:refused, {:venue_error, 403, "TRADE_NOT_PERMITTED"}} =
                Rest.cancel_order(@credentials, "abc",
-                 plug: responding(%{"code" => "TRADE_NOT_PERMITTED"}, 403),
+                 plug: responding(%{"error_code" => "TRADE_NOT_PERMITTED"}, 403),
                  account_id: @account,
                  retry_attempts: 0
                )

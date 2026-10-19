@@ -94,7 +94,7 @@ defmodule DpExchange.Webull do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Capabilities, Config, Venue}
-  alias DpExchange.Webull.{Environment, Feed, Options, Rest, SymbolFormat}
+  alias DpExchange.Webull.{Environment, Feed, Options, Rest, Subscription, SymbolFormat}
 
   # Not implemented in this release. None of them is about authentication — the host
   # supplies credentials and these simply have not been ported yet, which is a different
@@ -530,8 +530,14 @@ defmodule DpExchange.Webull do
           "admitted it), read from the same equity bar path and not probed live; " <>
           "public_ceiling/authenticated_ceiling (corrected 2026-09-09) are doc-derived " <>
           "from developer.webull.com/apis/docs/rate-limits/ — the venue's per-endpoint " <>
-          "table, which caps EVERY market-data endpoint at 60/60s in production and " <>
-          "30/60s in sandbox — committed to docs/reference/webull/rest-rate-limits.md; " <>
+          "table as read 2026-09-09, whose Display Solution tier caps market-data " <>
+          "endpoints at 60/60s in production and 30/60s in sandbox; the same page as read " <>
+          "2026-10-18 (through a page fetch, which summarises, so not saved verbatim) also " <>
+          "lists a Non-Display Solution tier at 300/60s production for most reads and the " <>
+          "streaming subscribe calls; which tier an app key is on is NOT readable from " <>
+          "here and was never measured, so the 60/60s declared is the Display, stricter " <>
+          "figure and a Non-Display key is under-used, not over-used; committed to " <>
+          "docs/reference/webull/rest-rate-limits.md; " <>
           "max_candles_per_request (1200) is DOCUMENTED, read from each bars page's `count` " <>
           "maximum (stock M1: 1650) and never measured against a live response; " <>
           "this replaced a 5 req/s figure taken 2026-09-08 from the Market Data FAQ's " <>
@@ -980,12 +986,19 @@ defmodule DpExchange.Webull do
   Symbols are upper-cased, the caller's arguments are validated before the feed is reached,
   and a stopped feed answers `{:error, :feed_not_started}`. Under `environment: :uat`
   there is no stream: `{:error, {:streaming_unavailable, :uat}}`. Credentials are required.
+
+  `opts[:sub_types]` names the venue's data types to ask for (`"SNAPSHOT"`, `"QUOTE"`,
+  `"TICK"`; default all three). It must be a non-empty list of strings, else
+  `{:error, {:invalid_sub_types, value}}` before the feed is reached. Once given it is
+  **remembered by the feed** and used for every later request it makes for you: the
+  post-reconnect replay, the 60-second blind resubscribe and later calls that name none.
   See `c:DpExchange.Core.Venue.subscribe/2`.
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
          :ok <- Options.check(:subscribe, opts),
+         :ok <- Subscription.check_sub_types(opts),
          :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       feed_call(
         fn -> Feed.subscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
@@ -1003,7 +1016,8 @@ defmodule DpExchange.Webull do
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
-         :ok <- Options.check(:unsubscribe, opts) do
+         :ok <- Options.check(:unsubscribe, opts),
+         :ok <- Subscription.check_sub_types(opts) do
       feed_call(
         fn -> Feed.unsubscribe(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         :ok
@@ -1021,7 +1035,8 @@ defmodule DpExchange.Webull do
   @impl true
   def update_symbols(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
-         :ok <- Options.check(:update_symbols, opts) do
+         :ok <- Options.check(:update_symbols, opts),
+         :ok <- Subscription.check_sub_types(opts) do
       feed_call(
         fn -> Feed.update_symbols(feed(opts), canonical_case(symbols), feed_opts(opts)) end,
         {:error, :feed_not_started}

@@ -407,16 +407,16 @@ defmodule DpExchange.WebullTest do
     end
 
     test "subscribing in production delivers and reports coverage" do
-      assert :ok = Fake.subscribe(["BTC-USD"], to: self())
+      assert :ok = Fake.subscribe(["BTC-USD"], to: self(), credentials: @credentials)
       assert_receive {:dp_exchange, :webull, %DpExchange.Core.Types.Quote{symbol: "BTC-USD"}}
       assert Fake.coverage() == %{"BTC-USD" => :stream}
 
-      assert :ok = Fake.unsubscribe(["BTC-USD"])
+      assert :ok = Fake.unsubscribe(["BTC-USD"], credentials: @credentials)
       assert Fake.coverage() == %{}
     end
 
     test "coverage_by_kind/1 reports the symbol under both streamed kinds, as the real feed" do
-      assert :ok = Fake.subscribe(["BTC-USD"], to: self())
+      assert :ok = Fake.subscribe(["BTC-USD"], to: self(), credentials: @credentials)
       assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}, 5_000
       assert_receive {:dp_exchange, :webull, %TopOfBook{symbol: "BTC-USD"}}, 5_000
 
@@ -428,8 +428,8 @@ defmodule DpExchange.WebullTest do
     end
 
     test "update_symbols narrows coverage, and subscribe_notices sends no :link_up" do
-      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self())
-      :ok = Fake.update_symbols(["BTC-USD"])
+      :ok = Fake.subscribe(["BTC-USD", "ETH-USD"], to: self(), credentials: @credentials)
+      :ok = Fake.update_symbols(["BTC-USD"], credentials: @credentials)
       assert Fake.coverage() == %{"BTC-USD" => :stream}
 
       # The fake has no link, and the real feed sends a notice only when a link comes up.
@@ -439,11 +439,11 @@ defmodule DpExchange.WebullTest do
 
     test "update_symbols covers a symbol only once it was delivered to a subscriber" do
       # Before any subscribe there is nobody to deliver to: nothing is covered.
-      :ok = Fake.update_symbols(["BTC-USD"])
+      :ok = Fake.update_symbols(["BTC-USD"], credentials: @credentials)
       assert Fake.coverage() == %{}
 
-      :ok = Fake.subscribe(["ETH-USD"], to: self())
-      :ok = Fake.update_symbols(["ETH-USD", "BTC-USD"])
+      :ok = Fake.subscribe(["ETH-USD"], to: self(), credentials: @credentials)
+      :ok = Fake.update_symbols(["ETH-USD", "BTC-USD"], credentials: @credentials)
       assert_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}, 5_000
       assert Fake.coverage() == %{"ETH-USD" => :stream, "BTC-USD" => :stream}
     end
@@ -451,7 +451,7 @@ defmodule DpExchange.WebullTest do
     test "a subscriber named by an atom that is registered to nobody is skipped, not raised on" do
       nobody = :"webull_fake_nobody_#{System.unique_integer([:positive])}"
 
-      assert :ok = Fake.subscribe(["BTC-USD"], to: nobody)
+      assert :ok = Fake.subscribe(["BTC-USD"], to: nobody, credentials: @credentials)
       assert Fake.coverage() == %{}
     end
 
@@ -459,7 +459,7 @@ defmodule DpExchange.WebullTest do
       name = :"webull_fake_registered_#{System.unique_integer([:positive])}"
       Process.register(self(), name)
 
-      assert :ok = Fake.subscribe(["BTC-USD"], to: name)
+      assert :ok = Fake.subscribe(["BTC-USD"], to: name, credentials: @credentials)
       assert_receive {:dp_exchange, :webull, %Quote{}}, 5_000
       assert Fake.coverage() == %{"BTC-USD" => :stream}
     end
@@ -543,7 +543,7 @@ defmodule DpExchange.WebullTest do
     end
 
     test "subscribing to only an unlisted symbol pushes nothing" do
-      assert :ok = Fake.subscribe(["NOPE-USD"], to: self())
+      assert :ok = Fake.subscribe(["NOPE-USD"], to: self(), credentials: @credentials)
 
       assert Fake.coverage() == %{}
       refute_receive {:dp_exchange, :webull, _anything}, 500
@@ -655,11 +655,33 @@ defmodule DpExchange.WebullTest do
     # `Feed` drops a payload for a symbol it does not want, and the venue delivers `BTC-USD`,
     # so a `btc-usd` subscription left untouched would receive nothing at all.
     test "a lower-case symbol is wanted under its canonical form" do
-      name = :"case_feed_#{System.unique_integer([:positive])}"
-      {:ok, _pid} = DpExchange.Webull.Feed.start_link(name: name, shards: %{})
+      id = System.unique_integer([:positive])
+      name = :"case_feed_#{id}"
+      limiter = :"case_limiter_#{id}"
+      me = self()
 
-      Webull.update_symbols(["btc-usd"], feed: name)
+      {:ok, _pid} =
+        DpExchange.Core.DefaultRateLimiter.start_link(
+          name: limiter,
+          limits: %{default: %{limit: 1000, per_ms: 1000, burst: 1000}}
+        )
 
+      # A connected shard and a request that never answers: the call is in flight, so the feed
+      # still holds what it was asked for (a REFUSED call would have undone it).
+      shard = %{session_id: "s0", socket: self(), connected?: true, symbols: [], reply_to: nil}
+      {:ok, _pid} = DpExchange.Webull.Feed.start_link(name: name, shards: %{0 => shard})
+
+      plug = fn conn ->
+        send(me, :in_flight)
+        Process.sleep(:infinity)
+        conn
+      end
+
+      opts = [feed: name, credentials: @credentials, plug: plug, limiter: limiter]
+      caller = spawn(fn -> Webull.update_symbols(["btc-usd"], opts) end)
+      on_exit(fn -> Process.exit(caller, :kill) end)
+
+      assert_receive :in_flight, 5_000
       assert MapSet.member?(:sys.get_state(name).wanted, "BTC-USD")
     end
   end

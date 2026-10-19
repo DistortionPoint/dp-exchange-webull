@@ -187,7 +187,7 @@ defmodule DpExchange.Webull.TickACDecoderTest do
         contract = %{
           "expiration_date" => "2026-03-20",
           "strike_price" => strike,
-          "direction" => "CALL",
+          "option_type" => "CALL",
           "symbol" => "AAPL260320C00000000"
         }
 

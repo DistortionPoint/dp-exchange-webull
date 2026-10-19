@@ -44,7 +44,7 @@ defmodule DpExchange.Webull.TickAD2FacadeTest do
     end
 
     test "a 400 INVALID_SYMBOL is the same refusal, with no venue text in the reason" do
-      plug = responding(%{"msg" => "INVALID_SYMBOL: NOPE"}, 400)
+      plug = responding(%{"error_code" => "INVALID_SYMBOL", "message" => "NOPE"}, 400)
 
       assert {:refused, :not_listed} =
                Rest.get_price("NOPE-USD", @credentials, request_opts(plug))
@@ -67,7 +67,7 @@ defmodule DpExchange.Webull.TickAD2FacadeTest do
                Rest.get_price(
                  "BTC-USD",
                  @credentials,
-                 request_opts(responding(%{"msg" => "no"}, 401))
+                 request_opts(responding(%{"message" => "no"}, 401))
                )
     end
 
@@ -75,7 +75,7 @@ defmodule DpExchange.Webull.TickAD2FacadeTest do
       plugs = [
         responding(%{}, 404),
         responding(%{"error_code" => "INVALID_SYMBOL"}, 417),
-        responding(%{"msg" => "INVALID_SYMBOL"}, 400)
+        responding(%{"error_code" => "INVALID_SYMBOL"}, 400)
       ]
 
       reads = [

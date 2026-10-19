@@ -152,7 +152,10 @@ defmodule DpExchange.Webull.RestTest do
         if "BADUSD" in natives do
           conn
           |> Plug.Conn.put_resp_content_type("application/json")
-          |> Plug.Conn.send_resp(417, ~s({"msg":"INVALID_SYMBOL"}))
+          |> Plug.Conn.send_resp(
+            417,
+            ~s({"error_code":"INVALID_SYMBOL","message":"The symbols does not exist."})
+          )
         else
           Req.Test.json(conn, for(n <- natives, do: %{"symbol" => n, "price" => "3"}))
         end
@@ -164,7 +167,7 @@ defmodule DpExchange.Webull.RestTest do
                Rest.get_prices(symbols, @credentials, plug: plug, retry_attempts: 1)
 
       for symbol <- pairs(19), do: assert({:ok, %Types.Quote{}} = results[symbol])
-      assert {:refused, {:venue_error, 417, "INVALID_SYMBOL"}} = results["BAD-USD"]
+      assert {:refused, {:venue_error, 417, "INVALID_SYMBOL: " <> _words}} = results["BAD-USD"]
 
       requests =
         Enum.count(1..20, fn _n -> receive do: (:request -> true), after: (0 -> false) end)
@@ -182,7 +185,7 @@ defmodule DpExchange.Webull.RestTest do
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(401, ~s({"msg":"signature mismatch"}))
+        |> Plug.Conn.send_resp(401, ~s({"message":"signature mismatch"}))
       end
 
       assert {:ok, results} =
@@ -252,17 +255,25 @@ defmodule DpExchange.Webull.RestTest do
       assert quote_struct.volume_window == :running_total
     end
 
-    test "accepts any of the venue's three spellings for the last price" do
-      for key <- ["price", "lastPrice", "last_trade_price"] do
-        body = [%{key => "1.5", "time" => 1_787_936_147_000}]
+    test "reads the last price from `price` alone, the name every snapshot page defines" do
+      body = [%{"price" => "1.5", "last_trade_time" => 1_787_936_147_000}]
 
-        assert {:ok, quote_struct} =
+      assert {:ok, quote_struct} =
+               Rest.get_price("BTC-USD", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quote_struct.price, Decimal.new("1.5"))
+
+      # `lastPrice` and `last_trade_price` appear in no page or capture: a row carrying only
+      # one of them has no price, not a price under another name.
+      for key <- ["lastPrice", "last_trade_price"] do
+        assert {:error, :unexpected_response_shape} =
                  Rest.get_price("BTC-USD", @credentials,
-                   plug: responding(body),
+                   plug: responding([%{key => "1.5"}]),
                    retry_attempts: 0
                  )
-
-        assert Decimal.equal?(quote_struct.price, Decimal.new("1.5"))
       end
     end
 
@@ -348,9 +359,9 @@ defmodule DpExchange.Webull.RestTest do
     end
 
     test "a 401 is a refusal carrying the venue's own message" do
-      body = %{"code" => "AUTH_FAILED", "msg" => "signature mismatch"}
+      body = %{"error_code" => "UNAUTHORIZED", "message" => "signature mismatch"}
 
-      assert {:refused, {:venue_error, 401, "signature mismatch"}} =
+      assert {:refused, {:venue_error, 401, "UNAUTHORIZED: signature mismatch"}} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(body, 401),
                  retry_attempts: 0
@@ -362,7 +373,7 @@ defmodule DpExchange.Webull.RestTest do
 
       assert {:refused, {:venue_error, 400, reason}} =
                Rest.get_price("BTC-USD", @credentials,
-                 plug: responding(%{"msg" => long}, 400),
+                 plug: responding(%{"message" => long}, 400),
                  retry_attempts: 0
                )
 
@@ -371,13 +382,15 @@ defmodule DpExchange.Webull.RestTest do
 
       assert {:refused, {:venue_error, 400}} =
                Rest.get_price("BTC-USD", @credentials,
-                 plug: responding(%{"code" => %{"nested" => [1, 2, 3]}}, 400),
+                 plug: responding(%{"error_code" => %{"nested" => [1, 2, 3]}}, 400),
                  retry_attempts: 0
                )
 
-      assert {:refused, {:venue_error, 400, 17}} =
+      # `code` and `msg` are not the venue's names for an error (`error_code` and `message`
+      # are, on every page): nothing is read from them.
+      assert {:refused, {:venue_error, 400}} =
                Rest.get_price("BTC-USD", @credentials,
-                 plug: responding(%{"code" => 17}, 400),
+                 plug: responding(%{"code" => 17, "msg" => "no"}, 400),
                  retry_attempts: 0
                )
     end
@@ -394,7 +407,7 @@ defmodule DpExchange.Webull.RestTest do
       # unless the venue's prose happened to say. The clause that raises the refusal even
       # documents the 401 remedy — the code knew which status it had matched and then
       # discarded it.
-      body = %{"msg" => "no"}
+      body = %{"message" => "no"}
 
       assert {:refused, {:venue_error, 400, "no"}} =
                Rest.get_price("BTC-USD", @credentials,
@@ -624,8 +637,8 @@ defmodule DpExchange.Webull.RestTest do
     test "milliseconds and seconds are told apart by magnitude" do
       # Guessing wrong puts a 2026 bar in 1970 or in the year 58,000 — both loud, which is
       # why this is a threshold rather than a silent fallback.
-      seconds = [%{"price" => "1", "time" => 1_787_936_147}]
-      millis = [%{"price" => "1", "time" => 1_787_936_147_000}]
+      seconds = [%{"price" => "1", "last_trade_time" => 1_787_936_147}]
+      millis = [%{"price" => "1", "last_trade_time" => 1_787_936_147_000}]
 
       assert {:ok, from_seconds} =
                Rest.get_price("BTC-USD", @credentials,
@@ -644,7 +657,7 @@ defmodule DpExchange.Webull.RestTest do
     end
 
     test "an ISO-8601 timestamp is read too" do
-      body = [%{"price" => "1", "time" => "2026-08-28T17:00:01Z"}]
+      body = [%{"price" => "1", "last_trade_time" => "2026-08-28T17:00:01Z"}]
 
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
@@ -658,7 +671,7 @@ defmodule DpExchange.Webull.RestTest do
       # changed is that an unreadable OPTIONAL field no longer discards the required one
       # beside it. `get_historical_prices/5` keeps refusing, because `Core.Types.Candle`
       # enforces `:opened_at` and a bar at an invented minute is a different kind of wrong.
-      body = [%{"price" => "1", "time" => "whenever"}]
+      body = [%{"price" => "1", "last_trade_time" => "whenever"}]
 
       assert {:ok, quoted} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)

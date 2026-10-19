@@ -174,7 +174,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
 
     test "a refusal on the read is wrapped the same way" do
       assert {:error, {:replace_accepted_unread, "abc", {:venue_error, 403, _body}}} =
-               replace(replace_plug(responding(%{"msg" => "forbidden"}, 403)))
+               replace(replace_plug(responding(%{"message" => "forbidden"}, 403)))
     end
 
     test "a read-back that names another order is wrapped the same way" do
@@ -304,7 +304,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                )
     end
 
-    test "a filing's id may be a number, and its other text fields are text or nil" do
+    test "a filing's text fields are text or nil, and no id is read (the page defines none)" do
       envelope = %{
         "symbol" => "AAPL",
         "filings" => [
@@ -319,7 +319,7 @@ defmodule DpExchange.Webull.ContractVocabularyAndFakeParityTest do
                  retry_attempts: 0
                )
 
-      assert %Types.Filing{id: "12", title: nil, url: "https://example.invalid/f"} = first
+      assert %Types.Filing{id: nil, title: nil, url: "https://example.invalid/f"} = first
       assert %Types.Filing{id: nil, title: "10-K", url: nil} = second
     end
 

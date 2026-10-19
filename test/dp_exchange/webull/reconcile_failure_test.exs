@@ -55,7 +55,9 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       state = :sys.get_state(feed)
       assert state.shards[0].symbols == [], "the shard must not claim what was never subscribed"
       assert MapSet.member?(state.unsettled, 0)
-      assert MapSet.member?(state.wanted, "AAA-USD"), "the want itself is not undone"
+
+      refute MapSet.member?(state.wanted, "AAA-USD"),
+             "a refused call changes no state: the caller was told it is not wanted"
 
       # Before the fix this diffed empty and answered :ok without sending anything.
       working = recording_plug(self())

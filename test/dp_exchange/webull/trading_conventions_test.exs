@@ -384,13 +384,64 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       end
     end
 
-    test "a crypto preview is refused as unsupported before any other check" do
+    test "a valid crypto preview is refused as unsupported; an invalid one gets place's tuple" do
+      valid = %{
+        symbol: "BTC-USD",
+        side: :buy,
+        order_type: :limit,
+        time_in_force: :gtc,
+        quantity: Decimal.new("1"),
+        price: Decimal.new("1")
+      }
+
       assert {:error, {:preview_not_supported, :crypto}} =
-               Rest.preview_order(@credentials, %{symbol: "BTC-USD"},
+               Rest.preview_order(@credentials, valid,
                  account_id: @account,
                  plug: exploding(),
                  retry_attempts: 0
                )
+
+      # The request is judged as `place_order/3` judges it first (Core group 50), so a crypto
+      # request place refuses is refused with place's tuple, not as "unsupported".
+      invalid = %{symbol: "BTC-USD"}
+
+      assert {:error, {:missing_field, :side}} = place(invalid)
+
+      assert {:error, {:missing_field, :side}} =
+               Rest.preview_order(@credentials, invalid,
+                 account_id: @account,
+                 plug: exploding(),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:missing_field, :side}} =
+               Fake.preview_order(@credentials, invalid, account_id: @account)
+    end
+
+    test "replace_order/4 refuses an empty or non-map change map before any option is asked" do
+      for bad <- [%{}, nil, "price", [price: "1"]] do
+        expected = {:error, {:invalid_order_request, bad}}
+
+        assert expected == Rest.replace_order(@credentials, "abc", bad, account_id: @account)
+        assert expected == Fake.replace_order(@credentials, "abc", bad, account_id: @account)
+      end
+    end
+
+    test "replace_order/4 judges a present nil as place_order/3 judges that field" do
+      # `Core.Venue.replace_order/4`: "a present `nil` included, so `%{price: nil}` is
+      # `{:invalid_price, nil}`, not 'no change'".
+      opts = [account_id: @account, instrument_type: :equity, order_type: :limit]
+
+      for {changes, expected} <- [
+            {%{price: nil}, {:invalid_price, nil}},
+            {%{quantity: nil}, {:invalid_quantity, nil}},
+            {%{order_type: nil}, {:missing_field, :order_type}},
+            {%{time_in_force: nil}, {:missing_field, :time_in_force}},
+            {%{price: nil, quantity: nil}, {:invalid_quantity, nil}}
+          ] do
+        assert {:error, expected} == Rest.replace_order(@credentials, "abc", changes, opts)
+        assert {:error, expected} == Fake.replace_order(@credentials, "abc", changes, opts)
+      end
     end
 
     test "buy and sell are accepted as atoms or text in any case; short is not" do

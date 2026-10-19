@@ -759,6 +759,9 @@ defmodule DpExchange.Webull.Feed do
        # from => timer reference of the `{:caller_due, from}` deadline `reshard/3` armed, held
        # until the caller is answered and cancelled then. See `reply_caller/3`.
        caller_timers: %{},
+       # from => {added, removed} `wanted` symbols a call changed, undone if the call is refused.
+       # See `record_undo/4`.
+       call_undo: %{},
        # from => [timer reference] of the `{:connack_timeout, ...}` timers armed for a caller
        # parked on a connecting shard, cancelled when the caller is released. See
        # `arm_connack_timer/4`.
@@ -906,6 +909,7 @@ defmodule DpExchange.Webull.Feed do
 
     if Environment.streaming?(environment(state, opts)) do
       wanted = MapSet.union(state.wanted, MapSet.new(symbols))
+      state = record_undo(state, from, changed(wanted, state.wanted), [])
 
       state = %{
         state
@@ -915,7 +919,7 @@ defmodule DpExchange.Webull.Feed do
           resubscribe_opts: replayable(opts, state)
       }
 
-      reshard(state, opts, from)
+      reshard(state, with_remembered_sub_types(opts, state), from)
     else
       # UAT has REST but no broker — `mqtt-uat.webullbroker.com` is NXDOMAIN. Falling back
       # to the production stream would hand a consumer real market data while it believed
@@ -927,6 +931,7 @@ defmodule DpExchange.Webull.Feed do
   defp apply_unsubscribe(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
+    state = record_undo(state, from, [], changed(state.wanted, wanted))
 
     state = %{
       state
@@ -942,6 +947,14 @@ defmodule DpExchange.Webull.Feed do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.new(symbols)
 
+    state =
+      record_undo(
+        state,
+        from,
+        changed(wanted, state.wanted),
+        changed(state.wanted, wanted)
+      )
+
     state = %{
       state
       | wanted: wanted,
@@ -950,7 +963,22 @@ defmodule DpExchange.Webull.Feed do
         resubscribe_opts: replayable(opts, state)
     }
 
-    reshard(state, opts, from)
+    reshard(state, with_remembered_sub_types(opts, state), from)
+  end
+
+  # **`:sub_types` is remembered, not used once.** It rode in the call's `opts` and nowhere
+  # else: the post-CONNACK replay, the 60-second blind resubscribe, a reopened shard's
+  # replay and every later call that named none all send `state.resubscribe_opts`, which
+  # did not carry it, so a `subscribe(sub_types: ["SNAPSHOT"])` was honoured for the first
+  # request and silently became all three types at the first tick or reconnect after it.
+  # Same rule as the credentials: the last call that named it wins, and a call that names
+  # none uses what the feed has been told. `unsubscribe/3` sends what it is given and
+  # never changes what is remembered.
+  defp with_remembered_sub_types(opts, state) do
+    case Keyword.fetch(state.resubscribe_opts, :sub_types) do
+      {:ok, sub_types} when is_list(sub_types) -> Keyword.put_new(opts, :sub_types, sub_types)
+      _none_remembered -> opts
+    end
   end
 
   # A subscriber that died. Dropped from both sets, and its monitor forgotten.
@@ -1803,8 +1831,57 @@ defmodule DpExchange.Webull.Feed do
   # which finds nobody waiting and does nothing, so no flush is needed.
   defp reply_caller(state, from, result) do
     GenServer.reply(from, result)
-    release_caller(state, from)
+    state |> release_caller(from) |> settle_undo(from, result)
   end
+
+  # **A refused call changes no state.** `apply_subscribe/5`, `apply_unsubscribe/4` and
+  # `apply_update/4` record what they changed in `wanted` BEFORE the reshard that may fail, and
+  # the shard list is reverted on failure (`revert_failed_delta/4`) but `wanted` was not: the
+  # caller was told the symbol was refused while the feed kept it wanted, to resubscribe it
+  # later and count it as coverage nobody believed was theirs. Whatever answers the call
+  # (`reply_caller/3`, `reply_all/3`, `answer_overdue_caller/2`) settles the record here: `:ok`
+  # keeps the change, an error undoes it, and a capacity overflow undoes only the symbols it
+  # names (the rest were placed). Shards are then re-planned from the restored `wanted`, so a
+  # symbol left on a connecting shard by the refused call is removed, not replayed.
+  @spec record_undo(map(), GenServer.from(), [String.t()], [String.t()]) :: map()
+  defp record_undo(state, from, added, removed),
+    do: %{state | call_undo: Map.put(state.call_undo, from, {added, removed})}
+
+  defp settle_undo(state, from, result) do
+    case Map.pop(state.call_undo, from) do
+      {nil, _same} ->
+        state
+
+      {{added, removed}, rest} ->
+        state = %{state | call_undo: rest}
+
+        case result do
+          {:error, {:capacity_exceeded, overflow}} ->
+            restore_wanted(state, Enum.filter(added, &(&1 in overflow)), [])
+
+          {:error, _refused} ->
+            restore_wanted(state, added, removed)
+
+          _kept ->
+            state
+        end
+    end
+  end
+
+  @spec restore_wanted(map(), [String.t()], [String.t()]) :: map()
+  defp restore_wanted(state, added, removed) do
+    wanted =
+      state.wanted |> MapSet.difference(MapSet.new(added)) |> MapSet.union(MapSet.new(removed))
+
+    if MapSet.equal?(wanted, state.wanted) do
+      state
+    else
+      resync(%{state | wanted: wanted})
+    end
+  end
+
+  # The symbols in `set` that `other` lacks, as the list `record_undo/4` holds.
+  defp changed(set, other), do: set |> MapSet.difference(other) |> MapSet.to_list()
 
   defp release_caller(state, from) do
     state = release_connack_timers(state, from)
@@ -1863,10 +1940,12 @@ defmodule DpExchange.Webull.Feed do
 
     case parked || primary_overflow(state, from) do
       {:parked, overflow} ->
-        GenServer.reply(
-          from,
-          combine_overflow({:error, {:connack_timeout, state.connack_timeout_ms}}, overflow)
-        )
+        timeout = {:error, {:connack_timeout, state.connack_timeout_ms}}
+        answer = combine_overflow(timeout, overflow)
+        GenServer.reply(from, answer)
+        # Parked callers are released here and never answered again, so this is where the
+        # refusal is settled: the shard is not connected, so re-planning only edits its list.
+        settle_undo(state, from, answer)
 
       {:reconciling, overflow} ->
         GenServer.reply(
@@ -1874,11 +1953,15 @@ defmodule DpExchange.Webull.Feed do
           combine_overflow({:error, {:reconcile_pending, state.connack_timeout_ms}}, overflow)
         )
 
-      nil ->
-        :ok
-    end
+        # NOT settled: the reconcile is still running and its outcome is not known. It is
+        # settled when the reconcile concludes (`reply_caller/3` finds the call's record then;
+        # the reply itself lands nowhere). Undoing now would re-plan a shard with a request in
+        # flight for what that request is establishing, and queue an unsubscribe behind it.
+        state
 
-    state
+      nil ->
+        state
+    end
   end
 
   defp unpark(%{reply_to: waiters} = shard, from) when is_list(waiters) do
@@ -3568,6 +3651,9 @@ defmodule DpExchange.Webull.Feed do
         :adapter,
         :req_adapter,
         :rate_limit_blocking,
+        # What to ask the venue for. Without it a replay asked for the default three types
+        # whatever the caller had named; see `with_remembered_sub_types/2`.
+        :sub_types,
         # Every other key `Subscription.request_opts/1` forwards: a subscribe the caller made
         # before the shard connected is sent later, by the replay, and must carry the
         # caller's values rather than Core's defaults (tick AK).

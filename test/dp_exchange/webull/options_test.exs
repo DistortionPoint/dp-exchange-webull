@@ -68,7 +68,7 @@ defmodule DpExchange.Webull.OptionsTest do
         "symbol" => "AAPL250320C00100000",
         "expiration_date" => "2026-03-20",
         "strike_price" => "100",
-        "direction" => "CALL",
+        "option_type" => "CALL",
         "multiplier" => "100"
       },
       overrides
@@ -79,7 +79,7 @@ defmodule DpExchange.Webull.OptionsTest do
     test "a call and a put at one strike land on the same row" do
       body = [
         contract(),
-        contract(%{"direction" => "PUT", "symbol" => "AAPL250320P00100000"})
+        contract(%{"option_type" => "PUT", "symbol" => "AAPL250320P00100000"})
       ]
 
       assert {:ok, chain} =
@@ -193,7 +193,7 @@ defmodule DpExchange.Webull.OptionsTest do
 
     test "a right the venue words differently is still refused rather than defaulted" do
       # A put filed as a call is a position the opposite way round.
-      body = [contract(%{"direction" => "SIDEWAYS"})]
+      body = [contract(%{"option_type" => "SIDEWAYS"})]
 
       assert {:error, {:unreadable_option_contract, _keys}} =
                Rest.get_option_chain("AAPL", @credentials,
@@ -202,8 +202,22 @@ defmodule DpExchange.Webull.OptionsTest do
                )
     end
 
-    test "the venue's single-letter rights are read" do
-      body = [contract(%{"direction" => "C"}), contract(%{"direction" => "P"})]
+    test "only the venue's CALL and PUT are read; a single letter or `direction` is not" do
+      # `option-contract-list.md:338`: "Contract type: CALL / PUT". No page shows `C`, `P`
+      # or a `direction` field.
+      for body <- [
+            [contract(%{"option_type" => "C"})],
+            [contract(%{"option_type" => "P"})],
+            [contract(%{"option_type" => nil, "direction" => "CALL"})]
+          ] do
+        assert {:error, {:unreadable_option_contract, _keys}} =
+                 Rest.get_option_chain("AAPL", @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+      end
+
+      body = [contract(), contract(%{"option_type" => "PUT"})]
 
       assert {:ok, chain} =
                Rest.get_option_chain("AAPL", @credentials,
@@ -254,7 +268,7 @@ defmodule DpExchange.Webull.OptionsTest do
       plug = fn conn ->
         body =
           if String.contains?(conn.query_string || "", "pagination_key=page-2") do
-            [contract(%{"symbol" => "AAPL250320P00100000", "direction" => "PUT"})]
+            [contract(%{"symbol" => "AAPL250320P00100000", "option_type" => "PUT"})]
           else
             %{
               "data" => [contract()],
@@ -345,7 +359,7 @@ defmodule DpExchange.Webull.OptionsTest do
       body = [
         contract(%{"expiration_date" => "2026-06-19"}),
         contract(),
-        contract(%{"direction" => "PUT"})
+        contract(%{"option_type" => "PUT"})
       ]
 
       assert {:ok, expiries} =

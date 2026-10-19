@@ -94,7 +94,7 @@ defmodule DpExchange.Webull.Fake do
   @behaviour DpExchange.Core.Venue
 
   alias DpExchange.Core.{Config, FakeInjection, Instrument, Timeframe, Types, Venue}
-  alias DpExchange.Webull.{Auth, Environment, Feed, Options, Rest}
+  alias DpExchange.Webull.{Auth, Environment, Feed, Options, Rest, Subscription}
 
   # `XRP-USD` is a real member of `@symbols` (so `get_symbols/1` lists it — this fake
   # would be lying about the venue if it silently dropped a non-tradable row, and the
@@ -132,6 +132,10 @@ defmodule DpExchange.Webull.Fake do
   # live under the module name, as they always have) and the subscribers delivered to.
   @top_key {__MODULE__, :top}
   @targets_key {__MODULE__, :targets}
+  # Every symbol asked for, listed or not (the real feed's `wanted`), and whether a shard has
+  # been opened by a call that carried the App Key. See `stream_gate/2`.
+  @requested_key {__MODULE__, :requested}
+  @shard_key {__MODULE__, :shard_open}
   @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
 
   # The one token `create_token/1` mints; `check_token/2` knows only this one.
@@ -851,24 +855,41 @@ defmodule DpExchange.Webull.Fake do
         # transfer kinds would make the two functions look interchangeable. `activity_types`
         # narrows it, as it does at the venue (a list, or the venue's comma-joined string);
         # it used to be ignored.
+        #
+        # Every row carries all eight fields `trade-cash-activity-by-type.md` marks required
+        # on a cash activity (`account_id`, `activity_sub_type`, `activity_type`, `biz_time`,
+        # `currency`, `id`, `net_amount`, `trade_date`), as `get_transfers/2`'s rows do. These
+        # carried four, so a consumer's test parsed rows the venue never sends.
         rows = [
           %{
             "id" => "a1b2c3",
+            "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
             "activity_type" => "DEPOSIT",
+            "activity_sub_type" => "ACH",
             "currency" => "USD",
-            "net_amount" => "1500.0"
+            "trade_date" => "2026-08-31",
+            "net_amount" => "1500.0",
+            "biz_time" => "2026-08-31T10:15:30.691Z"
           },
           %{
             "id" => "d4e5f6",
+            "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
             "activity_type" => "DIVIDENDS",
+            "activity_sub_type" => "INCOME",
             "currency" => "USD",
-            "net_amount" => "12.40"
+            "trade_date" => "2026-08-30",
+            "net_amount" => "12.40",
+            "biz_time" => "2026-08-30T10:15:30.691Z"
           },
           %{
             "id" => "g7h8i9",
+            "account_id" => "93IUJ28O9VO2KBGHDHR4H9",
             "activity_type" => "FEES",
+            "activity_sub_type" => "SERVICE_FEE",
             "currency" => "USD",
-            "net_amount" => "-0.35"
+            "trade_date" => "2026-08-29",
+            "net_amount" => "-0.35",
+            "biz_time" => "2026-08-29T10:15:30.691Z"
           }
         ]
 
@@ -1178,13 +1199,17 @@ defmodule DpExchange.Webull.Fake do
   `self()`), as `{:dp_exchange, :webull, payload}`.
 
   Under `environment: :uat` it answers `{:error, {:streaming_unavailable, :uat}}`, as the
-  real feed does. State is per process. See `c:DpExchange.Core.Venue.subscribe/2`.
+  real feed does. A call that changes what is wanted needs `opts[:credentials]` (the App Key
+  while no shard is open, `{:error, {:missing_required_field, :app_key}}` otherwise missing
+  credentials, `{:error, {:missing_credentials, :webull}}`); see `stream_gate/2`. State is per
+  process. See `c:DpExchange.Core.Venue.subscribe/2`.
   """
   @impl true
   def subscribe(symbols, opts \\ []) do
     # Refused in the real facade's order: the symbol list, the options, then the subscriber.
     with :ok <- Feed.check_symbols(symbols),
          :ok <- Options.check(:subscribe, opts),
+         :ok <- Subscription.check_sub_types(opts),
          :ok <- Feed.check_subscriber(Config.opt(opts, :to, self())) do
       symbols |> canonical_case() |> subscribe_checked(opts)
     end
@@ -1194,22 +1219,61 @@ defmodule DpExchange.Webull.Fake do
     environment = Environment.resolve(opts)
 
     if Environment.streaming?(environment) do
-      target = Config.opt(opts, :to, self())
-      Process.put(@targets_key, MapSet.put(targets(), target))
+      # After the environment, as `Feed.apply_subscribe/5` is: it refuses UAT before it plans
+      # a shard, and the shard is where the credentials are first needed.
+      with :ok <- stream_gate(Enum.uniq(symbols) -- MapSet.to_list(requested()), opts) do
+        target = Config.opt(opts, :to, self())
+        Process.put(@targets_key, MapSet.put(targets(), target))
+        Process.put(@requested_key, MapSet.union(requested(), MapSet.new(symbols)))
 
-      # Coverage is recorded by `push/2`, only for what it actually delivered, so a symbol
-      # whose subscriber is unreachable is not reported as arriving.
-      push(Enum.filter(symbols, &(&1 in @symbols)), [target])
+        # Coverage is recorded by `push/2`, only for what it actually delivered, so a symbol
+        # whose subscriber is unreachable is not reported as arriving.
+        push(Enum.filter(symbols, &(&1 in @symbols)), [target])
 
-      # **Added to, never replacing.** The real facade unions (`wanted:
-      # MapSet.union(state.wanted, MapSet.new(symbols))` in `Feed`), and `push/2` only ever
-      # adds to the covered sets, so a second `subscribe/2` keeps what the first subscribed.
-      # `c:DpExchange.Core.Venue.update_symbols/2` is the call that replaces.
-      :ok
+        # **Added to, never replacing.** The real facade unions (`wanted:
+        # MapSet.union(state.wanted, MapSet.new(symbols))` in `Feed`), and `push/2` only ever
+        # adds to the covered sets, so a second `subscribe/2` keeps what the first subscribed.
+        # `c:DpExchange.Core.Venue.update_symbols/2` is the call that replaces.
+        :ok
+      end
     else
       {:error, {:streaming_unavailable, environment}}
     end
   end
+
+  # **When the real feed first needs a credential, and what it answers.** Credentials are read
+  # at the point a call has to TOUCH a shard (`Feed.reshard_step/4`): a call that changes
+  # nothing (an empty list, symbols already wanted) is `:ok` with none.
+  #
+  # With no shard open, touching one opens a socket, and `Feed.open_socket/2` needs the App Key
+  # first: `{:error, {:missing_required_field, :app_key}}`, answered synchronously to the
+  # caller. With a shard already open the HTTP subscribe or unsubscribe is signed from the
+  # call's own credentials (`Auth.headers/2`), so their absence is
+  # `{:error, {:missing_credentials, :webull}}`, the answer every other signed call gives.
+  # Neither changes any state, as the real feed's reverted delta does not.
+  #
+  # `FakeInjection`'s anonymous mode lifts both, as it lifts the other gates in this module.
+  defp stream_gate([], _opts), do: :ok
+
+  defp stream_gate(_changed, opts) do
+    gate =
+      if Process.get(@shard_key, false), do: authenticated(opts), else: app_key_gate(opts)
+
+    if gate == :ok, do: Process.put(@shard_key, true)
+    gate
+  end
+
+  defp app_key_gate(opts) do
+    with false <- FakeInjection.credentials_bypassed?(:webull),
+         %{app_key: app_key} when is_binary(app_key) <- Keyword.get(opts, :credentials) do
+      :ok
+    else
+      true -> :ok
+      _no_app_key -> {:error, {:missing_required_field, :app_key}}
+    end
+  end
+
+  defp requested, do: Process.get(@requested_key, MapSet.new())
 
   # What this fake pushes for a symbol, to every target: the quote (from `get_price/2`) and
   # the top of book (from `get_top_of_book/2`), the two kinds the real feed streams. A kind
@@ -1264,11 +1328,16 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def unsubscribe(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
-         :ok <- Options.check(:unsubscribe, opts) do
+         :ok <- Options.check(:unsubscribe, opts),
+         :ok <- Subscription.check_sub_types(opts) do
       gone = symbols |> canonical_case() |> MapSet.new()
-      Process.put(__MODULE__, MapSet.difference(subscribed(), gone))
-      Process.put(@top_key, MapSet.difference(top(), gone))
-      :ok
+
+      with :ok <- stream_gate(MapSet.to_list(MapSet.intersection(requested(), gone)), opts) do
+        Process.put(@requested_key, MapSet.difference(requested(), gone))
+        Process.put(__MODULE__, MapSet.difference(subscribed(), gone))
+        Process.put(@top_key, MapSet.difference(top(), gone))
+        :ok
+      end
     end
   end
 
@@ -1283,15 +1352,21 @@ defmodule DpExchange.Webull.Fake do
   @impl true
   def update_symbols(symbols, opts \\ []) do
     with :ok <- Feed.check_symbols(symbols),
-         :ok <- Options.check(:update_symbols, opts) do
-      wanted =
-        symbols |> canonical_case() |> Enum.filter(&(&1 in @symbols)) |> MapSet.new()
+         :ok <- Options.check(:update_symbols, opts),
+         :ok <- Subscription.check_sub_types(opts) do
+      asked = symbols |> canonical_case() |> MapSet.new()
+      wanted = asked |> Enum.filter(&(&1 in @symbols)) |> MapSet.new()
 
-      Process.put(__MODULE__, MapSet.intersection(subscribed(), wanted))
-      Process.put(@top_key, MapSet.intersection(top(), wanted))
+      changed = MapSet.to_list(MapSet.symmetric_difference(asked, requested()))
 
-      added = Enum.reject(wanted, &MapSet.member?(subscribed(), &1))
-      push(added, MapSet.to_list(targets()))
+      with :ok <- stream_gate(changed, opts) do
+        Process.put(@requested_key, asked)
+        Process.put(__MODULE__, MapSet.intersection(subscribed(), wanted))
+        Process.put(@top_key, MapSet.intersection(top(), wanted))
+
+        added = Enum.reject(wanted, &MapSet.member?(subscribed(), &1))
+        push(added, MapSet.to_list(targets()))
+      end
     end
   end
 
@@ -2013,7 +2088,13 @@ defmodule DpExchange.Webull.Fake do
           # own order. One event per calendar it reads: both without a `:kind`, the one named
           # with it. This answered a dividend whatever `:kind` was asked, and accepted a
           # `:kind` the real path refuses.
+          #
+          # And the fundamentals checks `Rest.get_fundamental/4` makes for each calendar it
+          # reads, before it signs: the `:category` option being a query value, and the symbol
+          # being non-blank. Both calendars take the same options, so one pass covers either.
+          # A blank symbol or a `category: %{}` was answered with events here.
           with {:ok, kinds} <- Rest.corporate_event_kinds_for(Keyword.get(opts, :kind)),
+               :ok <- Rest.validate_fundamental_request(:dividend_calendar, symbol, opts),
                :ok <- authenticated(opts) do
             {:ok, Enum.map(kinds, &fake_event(symbol, &1))}
           end
@@ -2076,19 +2157,23 @@ defmodule DpExchange.Webull.Fake do
 
   defp do_get_filings(symbol, opts) do
     with_injection(symbol, fn ->
-      with :ok <- Rest.validate_symbol(symbol),
+      # `Rest.get_filings/3` reads through `get_fundamental(:filings, ...)`, whose checks are
+      # these, in this order: the `:category` option being a query value, then the symbol.
+      with :ok <- Rest.validate_fundamental_request(:filings, symbol, opts),
            :ok <- authenticated(opts),
            :ok <- equity_listed(symbol) do
         {:ok,
          [
            %Types.Filing{
              symbol: symbol,
-             id: "f-1",
-             form_type: "10-Q",
+             # `title`, `url` and `publish_date` are all a filing row carries
+             # (`filings.md:182-192`), so the real decoder leaves the rest `nil`.
+             id: nil,
+             form_type: nil,
              title: "Quarterly report",
              url: "https://example.invalid/f-1",
-             filed_at: nil,
-             period_end: ~D[2025-12-27],
+             filed_at: ~U[2026-08-01 00:00:00Z],
+             period_end: nil,
              provider: :webull
            }
          ]}

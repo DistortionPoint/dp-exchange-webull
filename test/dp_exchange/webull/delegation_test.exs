@@ -139,8 +139,8 @@ defmodule DpExchange.Webull.DelegationTest do
       body = [
         %{
           "symbol" => "BTCUSD",
-          "bidPrice" => "39990",
-          "askPrice" => "40010",
+          "bid" => "39990",
+          "ask" => "40010",
           "quote_time" => 1_787_936_147_000
         }
       ]

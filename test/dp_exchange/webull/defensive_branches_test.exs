@@ -85,12 +85,11 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "an EMPTY-STRING field counts as absent, not as a value" do
       # Passing "" on as a price turns a missing field into an unparseable number a layer
       # down, which is a worse place to discover it.
-      body = [%{"price" => "", "lastPrice" => "2", "time" => 1_787_936_147_000}]
+      # And no other spelling stands in for it: `lastPrice` appears in no vendor page.
+      body = [%{"price" => "", "lastPrice" => "2", "last_trade_time" => 1_787_936_147_000}]
 
-      assert {:ok, quote_struct} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
-
-      assert Decimal.equal?(quote_struct.price, Decimal.new("2"))
     end
 
     test "a non-JSON 200 body names the decode failure rather than decoding to nothing" do
@@ -136,7 +135,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "numbers arriving as JSON numbers still become Decimals" do
       # JSON has one number type, so a venue emitting 1 and one emitting "1.00" mean the
       # same thing and both must reach Decimal.
-      body = [%{"price" => 1, "bidPrice" => 0.5, "time" => 1_787_936_147_000}]
+      body = [%{"price" => 1, "bid" => 0.5, "quote_time" => 1_787_936_147_000}]
 
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
@@ -169,7 +168,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     end
 
     test "a refusal with only a code still carries it" do
-      body = %{"code" => "AUTH_FAILED"}
+      body = %{"error_code" => "AUTH_FAILED"}
 
       assert {:refused, {:venue_error, 403, "AUTH_FAILED"}} =
                Rest.get_price("BTC-USD", @credentials,
@@ -186,7 +185,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
 
   describe "timestamps" do
     test "a seconds epoch as a STRING is read" do
-      body = [%{"price" => "1", "time" => "1787936147"}]
+      body = [%{"price" => "1", "last_trade_time" => "1787936147"}]
 
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
@@ -197,7 +196,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "a timestamp of an unexpected TYPE is nil, not a guess" do
       # See `Rest.to_order_book/2` and `build_quote`'s sibling: unreadable is not a licence
       # to guess, and it is also not a reason to discard the price the caller asked for.
-      body = [%{"price" => "1", "time" => %{"nested" => true}}]
+      body = [%{"price" => "1", "last_trade_time" => %{"nested" => true}}]
 
       assert {:ok, quoted} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
@@ -518,7 +517,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
 
   describe "the fake's short arities" do
     test "subscribe and subscribe_notices work without options" do
-      assert :ok = Fake.subscribe(["BTC-USD"])
+      assert :ok = Fake.subscribe(["BTC-USD"], credentials: @credentials)
       assert :ok = Fake.subscribe_notices()
     end
   end

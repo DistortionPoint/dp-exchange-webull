@@ -810,7 +810,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       # success and achieves nothing.
       exploding = fn _conn -> raise "must not send an empty amendment" end
 
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_order_request, %{}}} =
                Rest.replace_order(
                  @credentials,
                  "abc",

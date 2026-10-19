@@ -320,6 +320,20 @@ replay, the 60-second blind resubscribe, and `subscribe/2`/`unsubscribe/2`/`upda
 called with no `:limiter` in `opts` — is wired to it automatically. If you do pass one
 explicitly, it wins.
 
+**The request ceiling is the vendor's Display tier, documented and never measured.** The
+limiter meters each endpoint at 60 requests per 60 seconds with a burst of 1, and all
+endpoints together at 600 per 60 seconds (`capabilities/0`'s `public_ceiling` is the first
+figure). Those are the vendor's Display Solution numbers as read on 2026-09-09. Its
+rate-limit page read on 2026-10-18 also lists a Non-Display Solution tier at 300 per 60
+seconds in production; which tier your App Key is on is not something this package can read,
+so it stays at the stricter figure and an App Key on the higher tier is under-used, not
+over-used. Sandbox is metered at half. Neither figure was measured against a live key.
+
+**`opts[:sub_types]` on `subscribe/2`** (`"SNAPSHOT"`, `"QUOTE"`, `"TICK"`; default all three)
+is remembered by the feed and used for the replay after a reconnect and for the blind
+resubscribe, not only for the request that call made. A value that is not a non-empty list of
+strings is `{:error, {:invalid_sub_types, value}}` before anything is sent.
+
 ## A shard's socket crash costs one shard, never your whole subscription
 
 Each shard's MQTT-over-WebSocket connection is a **linked** child of `Feed` — not a
@@ -1403,7 +1417,8 @@ numeric text (a float is refused): otherwise `{:error, {:invalid_quantity, v}}` 
 `{:invalid_trailing_stop_step, v}` (it was `{:invalid_number, field, v}`), by index inside a
 batch. They go out as the venue's strings in full notation (`"0.00000001"`, never `"1.0e-8"`
 and never a JSON number). `replace_order/4` holds its `changes` to the same rule, treats a
-`nil` value as no change (`{:error, :no_order_changes}` when nothing is left), and refuses an
+present `nil` as `place_order/3` judges it (`%{price: nil}` is `{:invalid_price, nil}`; an empty
+map is `{:invalid_order_request, %{}}`), and refuses an
 `:order_type` or `:time_in_force` it has no wire name for
 (`{:unsupported_order_type, v}` / `{:unsupported_time_in_force, v}`) instead of dropping it.
 `cancel_order/3`, `get_order/3` and `replace_order/4` refuse a missing, empty or blank
@@ -1471,6 +1486,13 @@ A symbol is covered only once it was delivered to a reachable subscriber; a `to:
 names no process is skipped, never raised on. `update_symbols/2` delivers the symbols it adds
 to the existing subscribers (it takes no `:to`, as the feed does), and covers nothing for a
 symbol it did not push. `subscribe_notices/1` sends no `:link_up`: the fake has no link.
+
+**`Fake` streaming needs credentials where the feed does.** A `subscribe/2`,
+`unsubscribe/2` or `update_symbols/2` that changes what is wanted needs `credentials:` in its
+own options: with no shard open yet it is `{:error, {:missing_required_field, :app_key}}`
+(the feed cannot open its socket without the App Key), and with one open it is
+`{:error, {:missing_credentials, :webull}}` (the HTTP request is signed from the call's own
+credentials). A call that changes nothing needs none. A refused call changes nothing.
 
 ## Error shapes that mean "do not act on this answer"
 

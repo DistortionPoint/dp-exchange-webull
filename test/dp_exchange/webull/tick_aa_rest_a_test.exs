@@ -195,7 +195,7 @@ defmodule DpExchange.Webull.TickAaRestATest do
     test "a 4xx the package has no name for is a refusal keeping the status and words" do
       assert {:refused, {:venue_error, 418, "teapot"}} =
                Rest.check_token("token-test", @credentials,
-                 plug: responding(%{"msg" => "teapot"}, 418),
+                 plug: responding(%{"message" => "teapot"}, 418),
                  retry_attempts: 0
                )
     end
@@ -224,7 +224,7 @@ defmodule DpExchange.Webull.TickAaRestATest do
 
     test "a 4xx the package has no name for is a refusal keeping the status and words" do
       assert {:refused, {:venue_error, 418, "teapot"}} =
-               news(responding(%{"msg" => "teapot"}, 418))
+               news(responding(%{"message" => "teapot"}, 418))
     end
 
     test "a server error is an error, not a refusal" do
@@ -381,7 +381,10 @@ defmodule DpExchange.Webull.TickAaRestATest do
       assert {:refused, {:venue_error, 404, "gone"}} =
                Rest.oauth_token("CLIENT", "test-secret-not-real",
                  code: "c",
-                 plug: responding(%{"msg" => "gone"}, 404),
+                 # The reference documents no OAuth error body (no page for
+                 # `oauth-open-api.webull.com` is in docs/reference), so the pair every
+                 # other page documents is the only one read.
+                 plug: responding(%{"message" => "gone"}, 404),
                  retry_attempts: 0
                )
     end

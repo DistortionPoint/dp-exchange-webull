@@ -15,7 +15,10 @@ makes.
 
 ## The ceiling
 
-> **60/60s** in Production, **30/60s** in Sandbox — for every market-data endpoint.
+> **60/60s** in Production, **30/60s** in Sandbox — for every market-data endpoint, **as the
+> Display Solution tier of the vendor's table stated on 2026-09-09.** This is a documented
+> figure, never measured against a live key. The Non-Display tier below is a different
+> (higher) documented figure, and which tier an app key is on is unknown to this package.
 
 **Drift found 2026-10-18 — this sentence is no longer what the vendor's table says.** The
 live `rate-limits` page now has two market-data tables. **Display Solution**: 30/60s sandbox,
@@ -58,7 +61,12 @@ costs the connection, so this rounds toward the venue every time.
 
 ### The endpoints this package actually calls
 
-| endpoint | path | Sandbox | Production |
+Figures are the **Display Solution** columns as read 2026-09-09. The Non-Display Solution
+production column read 2026-10-18 is `300/60s` for the market-data rows below and the two
+streaming calls (read through a page fetch, not saved verbatim); sandbox is `30/60s` in both
+tiers. Auth is `10/10s` in both. None of these figures was measured against a live key.
+
+| endpoint | path | Sandbox | Production (Display) |
 |---|---|---|---|
 | Crypto Snapshot | `/market-data/crypto/snapshots/list` | 30/60s | 60/60s |
 | Crypto Historical Bars | `/market-data/crypto/bars/list` | 30/60s | 60/60s |

@@ -370,11 +370,13 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
       assert modification["limit_price"] == "10"
     end
 
-    test "a change to nothing is no change" do
-      assert {:error, :no_order_changes} =
+    test "a present nil is judged as place_order judges it, not read as no change" do
+      # `Core.Venue.replace_order/4`: "a present `nil` included, so `%{price: nil}` is
+      # `{:invalid_price, nil}`, not 'no change'". Webull's tag for each field follows.
+      assert {:error, {:invalid_quantity, nil}} =
                replace(%{quantity: nil}, plug: exploding())
 
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_price, nil}} =
                Fake.replace_order(
                  @credentials,
                  "abc",

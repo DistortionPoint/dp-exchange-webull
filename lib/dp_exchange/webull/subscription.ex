@@ -157,13 +157,34 @@ defmodule DpExchange.Webull.Subscription do
   defp symbol_list?(_not_a_list), do: false
 
   defp post_checked(path, session_id, symbols, opts) do
-    # Checked before anything is built: a `:sub_types` that is not a list of strings would
-    # either raise out of `Jason.encode!/1` (a tuple) or go to the venue as a body it
-    # rejects with a 417 naming nothing the caller wrote. Refused locally and by name.
+    with {:ok, sub_types} <- sub_types(opts),
+         do: send_request(path, session_id, symbols, sub_types, opts)
+  end
+
+  @doc """
+  Whether `opts[:sub_types]` is absent or a non-empty list of strings: the check every
+  subscribe and unsubscribe request makes before anything is built, for the facade and
+  `DpExchange.Webull.Fake` to make at the boundary too.
+
+  Anything else is `{:error, {:invalid_sub_types, value}}`. It used to be found only when the
+  request was about to go out: after a shard had been opened for the call, and on the
+  background reconcile path not at all until the CONNACK, so a typo cost a socket and answered
+  late. The value is not judged against the venue's `QUOTE` / `SNAPSHOT` / `TICK` list: the
+  venue owns that vocabulary and answers an unknown member `UNSUPPORTED_SUB_TYPE`.
+  """
+  @spec check_sub_types(keyword()) :: :ok | {:error, {:invalid_sub_types, term()}}
+  def check_sub_types(opts) do
+    with {:ok, _sub_types} <- sub_types(opts), do: :ok
+  end
+
+  # Checked before anything is built: a `:sub_types` that is not a list of strings would
+  # either raise out of `Jason.encode!/1` (a tuple) or go to the venue as a body it
+  # rejects with a 417 naming nothing the caller wrote. Refused locally and by name.
+  defp sub_types(opts) do
     sub_types = Config.opt(opts, :sub_types, ["SNAPSHOT", "QUOTE", "TICK"])
 
     if is_list(sub_types) and sub_types != [] and Enum.all?(sub_types, &is_binary/1),
-      do: send_request(path, session_id, symbols, sub_types, opts),
+      do: {:ok, sub_types},
       else: {:error, {:invalid_sub_types, sub_types}}
   end
 

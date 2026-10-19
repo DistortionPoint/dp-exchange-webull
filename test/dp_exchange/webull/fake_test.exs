@@ -571,7 +571,7 @@ defmodule DpExchange.Webull.FakeTest do
     end
 
     test "an empty amendment is refused" do
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_order_request, %{}}} =
                Fake.replace_order(@credentials, "abc", %{}, @edit_opts)
     end
 
@@ -653,7 +653,9 @@ defmodule DpExchange.Webull.FakeTest do
       # `to:` only: the account keys this used to carry (`account_id`, `account_number`,
       # `account_hash`) are not options of `subscribe/2` or `coverage/1` on this venue, and a
       # stray key is `{:error, {:unknown_option, key}}` now.
-      assert :ok = DpExchange.Webull.Fake.subscribe(["btc-usd"], to: self())
+      opts = [to: self(), credentials: @credentials]
+
+      assert :ok = DpExchange.Webull.Fake.subscribe(["btc-usd"], opts)
       assert_receive {:dp_exchange, _venue, %{symbol: "BTC-USD"}}, 5_000
       assert Map.has_key?(DpExchange.Webull.Fake.coverage(), "BTC-USD")
     end

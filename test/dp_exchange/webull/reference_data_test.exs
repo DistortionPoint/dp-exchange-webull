@@ -363,10 +363,13 @@ defmodule DpExchange.Webull.ReferenceDataTest do
         "category" => "US_STOCK",
         "filings" => [
           %{
+            "title" => "Quarterly report",
+            "url" => "https://example.invalid/f-1",
+            "publish_date" => "2026-08-01",
+            # Not fields of this endpoint (`filings.md:182-192` defines three): never read.
             "id" => "f-1",
             "form_type" => "10-Q",
-            "title" => "Quarterly report",
-            "url" => "https://example.invalid/f-1"
+            "period_end" => "2026-06-30"
           }
         ]
       }
@@ -374,7 +377,13 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {:ok, [filing]} =
                Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert %Types.Filing{form_type: "10-Q", url: "https://example.invalid/f-1"} = filing
+      assert %Types.Filing{
+               id: nil,
+               form_type: nil,
+               period_end: nil,
+               title: "Quarterly report",
+               url: "https://example.invalid/f-1"
+             } = filing
     end
 
     test "news is a GET of the stock-news list, one request per symbol, with the filters" do
@@ -779,8 +788,8 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert second.metrics["change_ratio"] == "0.09"
     end
 
-    test "a sector row is named by its own field rather than by an absent symbol" do
-      body = [%{"sector_name" => "Technology", "market_value" => "1"}]
+    test "a sector row is named by its `name` (get-market-sectors.md:224), never `sector_name`" do
+      body = [%{"name" => "Technology", "market_value" => "1"}]
 
       assert {:ok, [row]} =
                Rest.get_screener("market_sectors", @credentials,
@@ -789,6 +798,21 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                )
 
       assert row.symbol == "Technology"
+
+      # No page shows `sector_name`: a row carrying only that is unnamed, and refuses the read.
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_screener("market_sectors", @credentials,
+                 plug: responding([%{"sector_name" => "Technology"}]),
+                 retry_attempts: 0
+               )
+    end
+
+    test "a stock row is named by its symbol, never by its company `name`" do
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_screener("top_actives", @credentials,
+                 plug: responding([%{"name" => "Apple Inc."}]),
+                 retry_attempts: 0
+               )
     end
 
     # `get-top-active.md:51-57` documents `VOLUME` as this screener's own default —
@@ -849,12 +873,15 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
     test "market_sectors and market_sector both follow pagination_key, bounded" do
       for name <- ["market_sectors", "market_sector"] do
+        # The listing names its rows by `name`; the detail's rows are stocks, named by `symbol`.
+        key = if name == "market_sectors", do: "name", else: "symbol"
+
         plug = fn conn ->
           body =
             if String.contains?(conn.query_string || "", "pagination_key=page-2") do
-              [%{"sector_name" => "Energy"}]
+              [%{key => "Energy"}]
             else
-              %{"data" => [%{"sector_name" => "Technology"}], "pagination_key" => "page-2"}
+              %{"data" => [%{key => "Technology"}], "pagination_key" => "page-2"}
             end
 
           conn
@@ -873,6 +900,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
 
     test "a pagination_key that always advances is stopped, not followed forever" do
       for name <- ["market_sectors", "market_sector"] do
+        key = if name == "market_sectors", do: "name", else: "symbol"
         counter = :counters.new(1, [])
 
         plug = fn conn ->
@@ -884,7 +912,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
           |> Plug.Conn.resp(
             200,
             Jason.encode!(%{
-              "data" => [%{"sector_name" => "T"}],
+              "data" => [%{key => "T"}],
               "pagination_key" => "p-#{page}"
             })
           )

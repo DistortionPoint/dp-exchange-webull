@@ -58,7 +58,7 @@ defmodule DpExchange.Webull.TickAaRestBTest do
         "symbol" => "AAPL250320C00100000",
         "expiration_date" => "2026-03-20",
         "strike_price" => "100",
-        "direction" => "CALL",
+        "option_type" => "CALL",
         "multiplier" => "100"
       },
       overrides
@@ -231,14 +231,16 @@ defmodule DpExchange.Webull.TickAaRestBTest do
 
     test "a right that is not text is refused" do
       assert {:error, {:unreadable_option_contract, _keys}} =
-               chain([contract(%{"direction" => 1})])
+               chain([contract(%{"option_type" => 1})])
     end
 
-    test "a last trading day the venue states is carried" do
+    test "no last trading day is read: the page defines no such field" do
+      # `last_trade_date` appears in no page or capture (`option-contract-list.md` lists the
+      # contract's fields); a row carrying one is not given a last trading day by it.
       assert {:ok, grid} = chain([contract(%{"last_trade_date" => "2026-03-19"})])
 
       call = grid.expiries[~D[2026-03-20]][Decimal.new("100")].call
-      assert call.last_trading_day == ~D[2026-03-19]
+      assert call.last_trading_day == nil
     end
   end
 
@@ -251,8 +253,8 @@ defmodule DpExchange.Webull.TickAaRestBTest do
                )
     end
 
-    test "a refusal that carries its words under error_description keeps them" do
-      assert {:refused, {:venue_error, 401, "token expired"}} =
+    test "words under error_description are not read: no page shows that field" do
+      assert {:refused, {:venue_error, 401}} =
                Rest.get_price("BTC-USD", @credentials,
                  plug: responding(%{"error_description" => "token expired"}, 401),
                  retry_attempts: 0

@@ -73,12 +73,25 @@ defmodule DpExchange.Webull.FakeFidelityTest do
   end
 
   describe "replace_order/4 follows Rest's order and reads the order back" do
-    test "an unknown order type wins over an empty amendment" do
-      assert {:error, {:unsupported_order_type, :bogus}} =
+    test "an empty amendment is judged first, whatever the opts; an unknown type needs a change" do
+      # Core group 50: an empty map is `{:invalid_order_request, %{}}`, checked before the
+      # instrument and order-type options.
+      assert {:error, {:invalid_order_request, %{}}} =
                Fake.replace_order(
                  @credentials,
                  "abc",
                  %{},
+                 [instrument_type: :equity, order_type: :bogus] ++ @order_opts
+               )
+
+      assert {:error, {:invalid_order_request, %{}}} =
+               Fake.replace_order(@credentials, "abc", %{}, @order_opts)
+
+      assert {:error, {:unsupported_order_type, :bogus}} =
+               Fake.replace_order(
+                 @credentials,
+                 "abc",
+                 %{quantity: Decimal.new("1")},
                  [instrument_type: :equity, order_type: :bogus] ++ @order_opts
                )
     end
@@ -158,7 +171,7 @@ defmodule DpExchange.Webull.FakeFidelityTest do
     end
 
     test "a refused replace remembers nothing" do
-      assert {:error, :no_order_changes} =
+      assert {:error, {:invalid_order_request, %{}}} =
                Fake.replace_order(@credentials, "replace-refused", %{}, @edit_opts)
 
       assert {:refused, :not_found} =

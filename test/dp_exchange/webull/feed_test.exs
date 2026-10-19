@@ -1222,11 +1222,17 @@ defmodule DpExchange.Webull.FeedTest do
       # resync was simply still in flight. `assert_receive` returns the moment the message
       # lands, so the larger number costs nothing when the test passes — it only says how
       # long the suite waits before calling a slow resync a missing one.
-      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BBBUSD"]},
+      #
+      # **The caller WAS refused, so the call is undone.** It was answered
+      # `{:error, :oversubscribed}`, and a refused call changes no state: `wanted` returns to
+      # what it was (nothing), and the shards are re-planned from it. The overflow is therefore
+      # not kept on shard 1 on the caller's behalf, and what shard 0 still carries is taken
+      # back (this used to rebalance the two symbols as though the call had succeeded, leaving
+      # the feed streaming symbols its caller had been told were refused).
+      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["AAAUSD"]},
                      5_000
 
-      assert_receive {:request, "/market-data/streaming/subscribe", "shard-1", ["BBBUSD"]},
-                     5_000
+      assert Feed.wanted(feed) == []
     end
   end
 

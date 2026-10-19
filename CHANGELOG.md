@@ -22,6 +22,104 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING: order-write discipline, Core group 50)
+
+- `replace_order/4` given an EMPTY change map is `{:error, {:invalid_order_request, %{}}}`
+  (it was `{:error, :no_order_changes}`), like `nil`, text and a keyword list, and it is checked
+  before the `:instrument_type` / `:order_type` options are asked for. Facade, `Rest` and `Fake`
+  alike.
+- **A present `nil` in a change map is judged as `place_order/3` judges that field**, not read as
+  "no change": `%{price: nil}` is `{:invalid_price, nil}`, `%{quantity: nil}` is
+  `{:invalid_quantity, nil}`, `%{order_type: nil}` is `{:missing_field, :order_type}`, the first
+  in `place_order/3`'s check order (`DpExchange.Core.Venue.replace_order/4`: "each field that is
+  present is judged as `place_order/3` judges it ..., a present `nil` included"). The bare
+  `{:error, :no_order_changes}` no longer exists: an all-`nil` map is answered by its first
+  `nil` field, and an empty map by `{:invalid_order_request, %{}}`.
+- **A refused `subscribe/2`, `unsubscribe/2` or `update_symbols/2` changes no state.** `Feed`
+  changed `wanted` before resharding and reverted only the shard's list on failure, so a call
+  answered with an error left its symbols wanted: later resubscribed, and counted as coverage the
+  consumer believed it had been refused. Whatever answers the call (a failed reconcile, a refused
+  or timed-out shard, a crash) now undoes what the call changed in `wanted` (an unsubscribe's
+  removals return, an update's previous set returns, a capacity overflow undoes only the
+  symbols it names) and re-plans the shards from it. A call answered `:ok` keeps its change. A
+  caller answered `reconcile_pending` at its deadline is settled when its reconcile concludes,
+  not at the deadline. An oversubscribed rejection on a shard's own CONNACK therefore refuses
+  the parked caller and undoes its symbols too, instead of rebalancing them in the background.
+- `preview_order/3` judges its request exactly as `place_order/3` does, first: a request place
+  refuses is refused with place's identical tuple whatever its instrument (a crypto request
+  that lacks a side is `{:missing_field, :side}`, not `{:preview_not_supported, :crypto}`).
+  Only a valid order is then asked whether the venue can price it. `Fake` alike.
+- Refusal text is read from the documented error body only (`error_code`, `message`; see the
+  alias entry below), so a `{:refused, {:venue_error, status, words}}` carries the words of
+  those two fields and no others.
+
+### Changed (BREAKING for a caller whose responses used a name the vendor does not publish)
+
+- **Decoders read the vendor's field names and nothing else.** An alias that no page in
+  `docs/reference/webull/` and no captured response shows is a substitute source (a different
+  field of that name read as this one), so every such alias is gone from `Rest`, each remaining
+  key citing the page that shows it:
+  camel-case spellings of every snake-case field (`bidSize`, `lastPrice`, `strikePrice`,
+  `clientOrderId`, `pairedShares`, `imbalanceTime`, ...); `bidPrice` / `bid_price` /
+  `askPrice` / `ask_price` for `bid` / `ask`; `lastPrice` / `last_trade_price` for `price`;
+  `disSymbol` and `name` for an instrument's `symbol`; `paginationKey` / `next_page_key`;
+  `payment_date` and `dividend` on a dividend row; `direction`, `strike`, `instrument_id`
+  (as the contract symbol) and `unit` on an option contract, and the single-letter rights `C`
+  and `P`; `msg`, `code` and `error_description` as the words of a refusal (`error_code` and
+  `message` are the documented pair).
+- **Times are read from the field the page defines for that row**, not from the first of a list.
+  A bar, tick or footprint row is dated by `time` only; a snapshot's `venue_time` is its
+  `last_trade_time` only; a top of book and an order book are dated by `quote_time` only.
+  `ts`, `timestamp`, `tradeTime` and `trade_time` are gone, and a bar can no longer be dated by a
+  quote's time.
+- **A filing carries `title`, `url` and `filed_at` only** (`filings.md:182-192`): `id`,
+  `form_type` and `period_end` are `nil` (the aliases `id`, `filing_id`, `form_type`, `type`,
+  `name`, `link`, `period_end` and `end_date` appear in no page). An option contract's
+  `last_trading_day` is `nil`: the page defines no such field.
+- A screener row is named by its `symbol`; only the `market_sectors` listing is named by its
+  sector's `name`. `sector_name` is not read, and a stock's company `name` no longer stands in for
+  a missing `symbol`.
+- `Fake.get_filings/2` fixtures follow (`id: nil`, ...).
+
+### Fixed (tick AM)
+
+- **`Fake.subscribe/2`, `unsubscribe/2` and `update_symbols/2` need credentials where the real
+  feed does.** A call that changes the wanted set touches a shard. With none open the real
+  `Feed` needs the App Key to open the socket and answers the call itself,
+  `{:error, {:missing_required_field, :app_key}}`; with one open the HTTP request is signed
+  from the call's own credentials, `{:error, {:missing_credentials, :webull}}`. A call that
+  changes nothing (an empty list, symbols already wanted) needs none. The fake answered `:ok`
+  without them and a consumer's test went green on a call the venue path refuses. A refused
+  call changes no state, as the real feed's reverted delta does not. Core's conformance suite
+  already gives these calls `credentials:` through `arg_value/2`.
+
+- `subscribe/2`'s `:sub_types` was honoured for the one request the call made and then lost:
+  the post-CONNACK replay, the 60-second blind resubscribe, a reopened shard's replay and any
+  later call naming none all sent the default `SNAPSHOT`, `QUOTE`, `TICK`, so a consumer who
+  asked for fewer types silently got all three back at the first tick or reconnect. `Feed`
+  now remembers the last `:sub_types` a `subscribe/2` or `update_symbols/2` named (with the
+  credentials and the other replayed options) and uses it for every request it makes for you.
+- A `:sub_types` that is not a non-empty list of strings is refused at the boundary,
+  `{:error, {:invalid_sub_types, value}}`, by `subscribe/2`, `unsubscribe/2` and
+  `update_symbols/2` and by their `Fake` twins, after the symbols and the unknown-option
+  check and before the subscriber and the feed. It was found only when the request was about
+  to be sent, after a shard had been opened for the call. New `Subscription.check_sub_types/1`.
+- `Fake.get_corporate_events/1` and `Fake.get_filings/2` now make the fundamentals checks the
+  real path makes before it signs (`Rest.validate_fundamental_request/3`): a blank
+  `:symbol` is `{:error, {:invalid_symbol, symbol}}` and a `:category` that cannot be a query
+  value is `{:error, {:invalid_option, :category, value}}`, as there. Both were answered with
+  fixture rows.
+- `Fake.get_transactions/2` rows carry all eight fields `trade-cash-activity-by-type.md` marks
+  required (`account_id`, `activity_sub_type`, `activity_type`, `biz_time`, `currency`, `id`,
+  `net_amount`, `trade_date`), as `Fake.get_transfers/2` rows already did; they had four.
+- Docs: `capabilities/0`'s `measured_against` and `rest-rate-limits.md` no longer say the
+  60/60s ceiling is the venue's figure for "every market-data endpoint". It is the Display
+  Solution tier as read 2026-09-09; the same page read 2026-10-18 lists a Non-Display
+  Solution tier at 300/60s production (read through a page fetch, not saved verbatim). Which
+  tier an app key is on was never measured and cannot be read from here, so the declared
+  figure is the stricter one and a Non-Display key is under-used, not over-used.
+  `usage-rules.md` says the same.
+
 ## [0.4.163] - 2026-10-18
 
 ### Changed (BREAKING: tick AL)
