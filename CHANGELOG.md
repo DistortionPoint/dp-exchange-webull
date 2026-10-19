@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.164] - 2026-10-19
+
 ### Changed (BREAKING: order-write discipline, Core group 50)
 
 - `replace_order/4` given an EMPTY change map is `{:error, {:invalid_order_request, %{}}}`
