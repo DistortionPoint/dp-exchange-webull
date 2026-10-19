@@ -22,6 +22,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick AN)
+
+- **`Feed` replayed with credentials a refused or unusable call had left behind, which is what
+  answered `{:error, {:missing_required_field, :app_key}}` on a feed that had been streaming.**
+  The error is this package's own (`Feed.open_socket/2`), never the venue's: a live run recorded
+  it "while a shard was open" and it was never explained. `subscribe/3` and `update_symbols/3`
+  merged the call's `credentials:` over the stored ones before resharding, whatever it held.
+  `credentials: nil`, `%{}` or a map with a blank key or secret replaced the working credentials;
+  the call itself was refused at signing (or, changing nothing, answered `:ok`), and every later
+  reconnect replay, blind resubscribe, staggered open and crash or `INVALID_SESSION` reopen
+  then ran from the emptied credentials. Two changes: a credential `Auth.present?/1` would not
+  sign with is never stored, and a REFUSED call puts back the options it replaced (credentials,
+  environment, `:sub_types`, the rest of what a replay forwards), like it already did for
+  `wanted`. A blank (`""` or whitespace) `:app_key` is also the missing key it is, where it
+  opened a socket whose CONNECT named an empty key. Traced and found sound: every `Subscription`
+  request is signed per attempt through `Auth.headers/2`, which refuses before sending without
+  both halves of the credential, and always carries `x-app-key`; `Socket` takes its key from
+  `open_socket/2` only.
+- **`oauth_token/3` answered a bare `{:error, _}` for an outcome that may have followed a
+  honoured grant.** An authorization code is single-use and a refresh token may rotate, so a
+  transport error or timeout, a 5xx or 408, and a 2xx that is undecodable, not an object or has
+  no `access_token` can all follow a grant the venue accepted: a caller reading the bare error as
+  "worth retrying" retried with a credential that no longer worked. They are now
+  `{:error, {:write_unconfirmed, nil, reason}}`, as `create_token/2` answers (Core's W1); a 4xx
+  but 408 and 429 stays `{:refused, {:venue_error, status, reason}}` and our own limiter refusing
+  stays plain.
+
+### Changed (documentation)
+
+- `usage-rules.md`: the credential-replay rule above; `oauth_token/3` as a write; the order
+  book's unreadable price refuses the book (it said the level was dropped); `get_screener/2`'s
+  unnamed row refuses the read (two paragraphs still said it was dropped); a refused CONNACK
+  emits no `:down` telemetry and says which notice it does emit; the option table was split by
+  a paragraph and rendered as text; the 4xx statement names which calls it covers.
+- `README.md`: 89 callbacks, 48 declared `:experimental` (it said 88 and 47; Core 0.3.109 has
+  89 and the facade implements all 89).
+- `QuoteProto` moduledoc: values go to `Decimal.parse/1` (guarded), not `Decimal.new/1`.
+
 ## [0.4.164] - 2026-10-19
 
 ### Changed (BREAKING: order-write discipline, Core group 50)

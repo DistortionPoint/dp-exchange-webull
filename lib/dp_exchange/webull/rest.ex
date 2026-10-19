@@ -3639,6 +3639,13 @@ defmodule DpExchange.Webull.Rest do
   A 2xx answer with no `access_token` is `{:error, {:missing_required_field, :access_token}}`,
   not a token response: this package has no vendor schema for this body (the page is not
   retrievable), but a grant that returned no token has not succeeded whatever else it said.
+
+  **A grant that may have been honoured and is not proven is `{:error, {:write_unconfirmed,
+  nil, reason}}`**, never a bare error: a transport error or timeout, a 5xx or 408, and a 2xx
+  that is undecodable, is not an object or carries no `access_token`. The code may be spent or
+  the refresh token rotated with the answer lost, so retrying the same credential is not the
+  remedy; start the consent flow again. A 4xx but 408 and 429 is `{:refused, reason}`, and a
+  failure decided before sending (our own limiter refusing) stays plain. Sent once.
   """
   @spec oauth_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -3658,29 +3665,20 @@ defmodule DpExchange.Webull.Rest do
       # Sent once: an authorization code is single-use and a refresh token may rotate, so a
       # retry after a lost answer to a request that succeeded fails, and the token it issued
       # is gone.
-      case HttpClient.request(
-             :post,
-             url,
-             headers,
-             URI.encode_query(form),
-             send_once(request_opts(opts))
-           ) do
-        {:ok, %{status: status, body: body}} when status in 200..299 ->
-          with {:ok, tokens} <- decoded_token(body),
-               {:ok, _access_token} <- required_string(tokens, "access_token", :access_token),
-               do: {:ok, tokens}
+      #
+      # **And for the same reason an answer that was lost is not a plain error.** A transport
+      # error or timeout, a 5xx or 408, and a 2xx that is no token (undecodable, not an object,
+      # no `access_token`) may all follow a grant the venue honoured: the code is spent or the
+      # refresh token rotated, and the new token is gone with the answer. A caller reading a
+      # bare `{:error, _}` as "worth retrying" retries with a credential that no longer works.
+      # `write_outcome/2` (Core's W1) tags them `{:write_unconfirmed, nil, reason}`, as
+      # `create_token/2` does; what was decided before sending stays plain.
+      sent_opts = send_once(request_opts(opts))
 
-        # Any 4xx but 408 and 429 is the venue declining the grant (`write_refusal?/2`): the
-        # code or refresh token was read and refused, not lost in transit.
-        {:ok, %{status: status, body: body}} when declined?(status) ->
-          {:refused, refusal(status, body)}
-
-        {:ok, %{status: status, body: body}} ->
-          unexpected_status(status, body)
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      :post
+      |> HttpClient.request(url, headers, URI.encode_query(form), sent_opts)
+      |> oauth_result()
+      |> write_outcome(sent_opts)
     end
   end
 
@@ -3691,6 +3689,20 @@ defmodule DpExchange.Webull.Rest do
 
   def oauth_token(_client_id, _client_secret, _opts),
     do: {:error, {:invalid_field, :client_secret}}
+
+  defp oauth_result({:ok, %{status: status, body: body}}) when status in 200..299 do
+    with {:ok, tokens} <- decoded_token(body),
+         {:ok, _access_token} <- required_string(tokens, "access_token", :access_token),
+         do: {:ok, tokens}
+  end
+
+  # Any 4xx but 408 and 429 is the venue declining the grant (`declined?/1`): the code or
+  # refresh token was read and refused, not lost in transit.
+  defp oauth_result({:ok, %{status: status, body: body}}) when declined?(status),
+    do: {:refused, refusal(status, body)}
+
+  defp oauth_result({:ok, %{status: status, body: body}}), do: unexpected_status(status, body)
+  defp oauth_result({:error, reason}), do: {:error, reason}
 
   @doc """
   The checks `oauth_token/3` makes before it sends anything, in its order: `client_id` is

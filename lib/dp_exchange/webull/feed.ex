@@ -414,7 +414,7 @@ defmodule DpExchange.Webull.Feed do
 
   alias DpExchange.Core.{Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Webull.{Credentials, Environment, Socket, Subscription}
+  alias DpExchange.Webull.{Auth, Credentials, Environment, Socket, Subscription}
 
   require Logger
 
@@ -760,7 +760,7 @@ defmodule DpExchange.Webull.Feed do
        # until the caller is answered and cancelled then. See `reply_caller/3`.
        caller_timers: %{},
        # from => {added, removed} `wanted` symbols a call changed, undone if the call is refused.
-       # See `record_undo/4`.
+       # See `record_undo/5`.
        call_undo: %{},
        # from => [timer reference] of the `{:connack_timeout, ...}` timers armed for a caller
        # parked on a connecting shard, cancelled when the caller is released. See
@@ -909,14 +909,23 @@ defmodule DpExchange.Webull.Feed do
 
     if Environment.streaming?(environment(state, opts)) do
       wanted = MapSet.union(state.wanted, MapSet.new(symbols))
-      state = record_undo(state, from, changed(wanted, state.wanted), [])
+      replay = replayable(opts, state)
+
+      state =
+        record_undo(
+          state,
+          from,
+          changed(wanted, state.wanted),
+          [],
+          {state.resubscribe_opts, replay}
+        )
 
       state = %{
         state
         | subscribers: MapSet.put(state.subscribers, subscriber),
           monitors: Fanout.watch(subscriber, state.monitors),
           wanted: wanted,
-          resubscribe_opts: replayable(opts, state)
+          resubscribe_opts: replay
       }
 
       reshard(state, with_remembered_sub_types(opts, state), from)
@@ -931,7 +940,7 @@ defmodule DpExchange.Webull.Feed do
   defp apply_unsubscribe(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
-    state = record_undo(state, from, [], changed(state.wanted, wanted))
+    state = record_undo(state, from, [], changed(state.wanted, wanted), nil)
 
     state = %{
       state
@@ -946,13 +955,15 @@ defmodule DpExchange.Webull.Feed do
   defp apply_update(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.new(symbols)
+    replay = replayable(opts, state)
 
     state =
       record_undo(
         state,
         from,
         changed(wanted, state.wanted),
-        changed(state.wanted, wanted)
+        changed(state.wanted, wanted),
+        {state.resubscribe_opts, replay}
       )
 
     state = %{
@@ -960,7 +971,7 @@ defmodule DpExchange.Webull.Feed do
       | wanted: wanted,
         delivering: Map.take(state.delivering, symbols),
         delivering_by_kind: take_symbols_by_kind(state.delivering_by_kind, symbols),
-        resubscribe_opts: replayable(opts, state)
+        resubscribe_opts: replay
     }
 
     reshard(state, with_remembered_sub_types(opts, state), from)
@@ -1843,30 +1854,55 @@ defmodule DpExchange.Webull.Feed do
   # keeps the change, an error undoes it, and a capacity overflow undoes only the symbols it
   # names (the rest were placed). Shards are then re-planned from the restored `wanted`, so a
   # symbol left on a connecting shard by the refused call is removed, not replayed.
-  @spec record_undo(map(), GenServer.from(), [String.t()], [String.t()]) :: map()
-  defp record_undo(state, from, added, removed),
-    do: %{state | call_undo: Map.put(state.call_undo, from, {added, removed})}
+  #
+  # **What the feed will replay is part of that state.** `subscribe/3` and `update_symbols/3`
+  # also replace `state.resubscribe_opts` (the credentials, environment and sub types every
+  # replay, blind resubscribe and reopen is sent with) BEFORE the reshard that may be refused.
+  # A call refused for its own credentials left those credentials in place of the working ones,
+  # so the next reconnect or reopen was sent with them: `{:missing_required_field, :app_key}`
+  # from `open_socket/2` on a feed that had been streaming. `replay` is `{previous, applied}`
+  # (or `nil` for a call that changes nothing replayable) and the refusal puts `previous` back.
+  @spec record_undo(
+          map(),
+          GenServer.from(),
+          [String.t()],
+          [String.t()],
+          {keyword(), keyword()} | nil
+        ) :: map()
+  defp record_undo(state, from, added, removed, replay),
+    do: %{state | call_undo: Map.put(state.call_undo, from, {added, removed, replay})}
 
   defp settle_undo(state, from, result) do
     case Map.pop(state.call_undo, from) do
       {nil, _same} ->
         state
 
-      {{added, removed}, rest} ->
-        state = %{state | call_undo: rest}
-
-        case result do
-          {:error, {:capacity_exceeded, overflow}} ->
-            restore_wanted(state, Enum.filter(added, &(&1 in overflow)), [])
-
-          {:error, _refused} ->
-            restore_wanted(state, added, removed)
-
-          _kept ->
-            state
-        end
+      {{added, removed, replay}, rest} ->
+        undo_refusal(%{state | call_undo: rest}, added, removed, replay, result)
     end
   end
+
+  defp undo_refusal(state, added, _removed, _replay, {:error, {:capacity_exceeded, overflow}}),
+    do: restore_wanted(state, Enum.filter(added, &(&1 in overflow)), [])
+
+  defp undo_refusal(state, added, removed, replay, {:error, _refused}) do
+    # The re-plan runs first, from the options the call itself brought (its `:plug`,
+    # `:limiter` and the rest of the transport seam): reverting them first would send the
+    # cleanup unsubscribe of what the call added with none of them. Then they go back.
+    state |> restore_wanted(added, removed) |> restore_replay_opts(replay)
+  end
+
+  defp undo_refusal(state, _added, _removed, _replay, _kept), do: state
+
+  # Only while the options are still the ones THIS call stored: a call that answered in the
+  # meantime has its own, and putting an older set back over them would undo that call.
+  defp restore_replay_opts(state, {previous, applied}) do
+    if state.resubscribe_opts == applied,
+      do: %{state | resubscribe_opts: previous},
+      else: state
+  end
+
+  defp restore_replay_opts(state, nil), do: state
 
   @spec restore_wanted(map(), [String.t()], [String.t()]) :: map()
   defp restore_wanted(state, added, removed) do
@@ -1880,7 +1916,7 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
-  # The symbols in `set` that `other` lacks, as the list `record_undo/4` holds.
+  # The symbols in `set` that `other` lacks, as the list `record_undo/5` holds.
   defp changed(set, other), do: set |> MapSet.difference(other) |> MapSet.to_list()
 
   defp release_caller(state, from) do
@@ -2726,12 +2762,16 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # A blank key is no key: `""` (a `.env` line with nothing after the `=`) is a binary, and
+  # opened a socket whose CONNECT named an empty client key, which then sat unauthenticated.
   defp app_key_from(opts) do
     case Keyword.get(opts, :credentials) do
-      %{app_key: app_key} when is_binary(app_key) -> app_key
+      %{app_key: app_key} when is_binary(app_key) -> non_blank(app_key)
       _no_usable_credentials -> nil
     end
   end
+
+  defp non_blank(text), do: if(String.trim(text) == "", do: nil, else: text)
 
   # A shard's HTTP subscribe rejected as oversubscribed measures, directly, that this
   # shard can carry fewer symbols than assumed — not a guess, the venue's own answer.
@@ -3639,6 +3679,15 @@ defmodule DpExchange.Webull.Feed do
   # `:rate_limit_blocking` rides along here too: an explicit `false` from a caller's own
   # opts overrides `state.resubscribe_opts`' defaulted `true` (Keyword.merge/2 keeps the
   # right-hand value), and a caller with no opinion leaves the default in place.
+  #
+  # **A credential the package cannot sign with is never stored.** `Keyword.take/2` keeps
+  # `credentials: nil` (or `%{}`, or a map with no secret) when a caller names one, and the
+  # merge then replaced the working credentials the feed had been started or called with. The
+  # call that carried it was then refused at signing (or, with nothing to change, answered
+  # `:ok`), and every later replay, blind resubscribe and shard reopen used the emptied
+  # credentials: `open_socket/2` answered `{:missing_required_field, :app_key}` for a shard
+  # that had been open and streaming. `Auth.present?/1` is the same gate `Auth.headers/2` signs
+  # through, so what is kept is exactly what could be signed with.
   defp replayable(opts, state) do
     Keyword.merge(
       state.resubscribe_opts,
@@ -3670,7 +3719,20 @@ defmodule DpExchange.Webull.Feed do
       # `state.resubscribe_opts`' already-wrapped credentials as the value `Keyword.merge/2`
       # keeps, not get them silently replaced with `nil`.
       |> Credentials.wrap_opt()
+      |> keep_signable_credentials()
     )
+  end
+
+  defp keep_signable_credentials(opts) do
+    case Keyword.fetch(opts, :credentials) do
+      {:ok, credentials} ->
+        if Auth.present?(credentials) == :ok,
+          do: opts,
+          else: Keyword.delete(opts, :credentials)
+
+      :error ->
+        opts
+    end
   end
 
   defp environment(state, opts), do: Environment.resolve(Keyword.merge(state.socket_opts, opts))

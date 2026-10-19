@@ -270,16 +270,50 @@ defmodule DpExchange.WebullTest do
         max_body_bytes: 1_024
       ]
 
-      _answer =
-        Webull.subscribe(
-          ["BTC-USD"],
-          [feed: opts[:feed], credentials: %{app_key: "k", app_secret: "s"}] ++ sent
-        )
+      # A shard that is still connecting parks the caller, so the call is PENDING (not
+      # answered) while the options are inspected. Once answered with an error the call is
+      # refused and, like its `wanted` change, its replay options are put back
+      # (`Feed`'s `undo_refusal/5`), so the stored keys are only observable while it is pending.
+      :sys.replace_state(opts[:feed], fn state ->
+        shard = %{
+          session_id: "s-connecting-#{unique}",
+          socket: self(),
+          connected?: false,
+          symbols: [],
+          reply_to: nil
+        }
 
+        %{state | shards: %{0 => shard}}
+      end)
+
+      task =
+        Task.async(fn ->
+          Webull.subscribe(
+            ["BTC-USD"],
+            [feed: opts[:feed], credentials: %{app_key: "k", app_secret: "s"}] ++ sent
+          )
+        end)
+
+      wait_until_parked(opts[:feed], 100)
       stored = :sys.get_state(opts[:feed]).resubscribe_opts
 
       for {key, value} <- sent do
         assert stored[key] == value, "the replay lost #{key}"
+      end
+
+      Task.shutdown(task, :brutal_kill)
+    end
+
+    defp wait_until_parked(_feed, 0), do: flunk("the call never parked on the connecting shard")
+
+    defp wait_until_parked(feed, attempts) do
+      case :sys.get_state(feed).shards do
+        %{0 => %{reply_to: [_caller | _rest]}} ->
+          :ok
+
+        _not_yet ->
+          Process.sleep(50)
+          wait_until_parked(feed, attempts - 1)
       end
     end
 

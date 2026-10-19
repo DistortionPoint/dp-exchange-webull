@@ -19,7 +19,8 @@ defmodule DpExchange.Webull.QuoteProto do
 
   **Every field is a string**, which is the reason this venue's numbers are trustworthy: no
   float ever enters, so nothing is rounded on the way in. Values go straight to
-  `Decimal.new/1` at the boundary that needs them.
+  `Decimal.parse/1` at the boundary that needs them (`Socket`'s `decimal/1`, which refuses
+  text that is not a finite number: `Decimal.new/1` raises on it).
 
   ## Unknown fields are skipped, not fatal
 

@@ -2073,8 +2073,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                )
     end
 
-    test "oauth_token/3 refuses a 2xx answer that carries no access_token" do
-      assert {:error, {:missing_required_field, :access_token}} =
+    test "oauth_token/3 does not take a 2xx answer with no access_token for a grant" do
+      assert {:error, {:write_unconfirmed, nil, {:missing_required_field, :access_token}}} =
                Rest.oauth_token("CLIENT", "secret",
                  code: "auth-code",
                  plug: responding(%{"token_type" => "Bearer"}),

@@ -95,14 +95,6 @@ same one.
 | `update_watchlist/2` | `:name`, `:sort` (`:symbols` is refused) |
 | `add_watchlist_instruments/3`, `remove_watchlist_instruments/3` | `:category` |
 | `sort_watchlist_instruments/2` | `:sorts`, `:category` |
-
-The watchlist `:category` is `"US_STOCK"` (the default), the one value the instrument endpoints'
-enum lists; any other is `{:error, {:invalid_category, v}}` before a request, in `Fake` too.
-A futures `replace_order/4` changes `:order_type` one way only (limit or stop to `:market`,
-stop-limit to `:limit`), else `{:error, {:unsupported_order_type_change, from, to}}`.
-Every 4xx but 408 and 429, on a read as on a write, is `{:refused, {:venue_error, status, reason}}`
-(404 is `{:refused, :not_found}`) and is never retried.
-
 | `get_financials/3` | `:category`, `:type`, `:count` |
 | `get_corporate_events/1` | `:symbol`, `:kind`, `:category` |
 | `get_filings/2` | `:category` |
@@ -115,6 +107,15 @@ Every 4xx but 408 and 429, on a read as on a write, is `{:refused, {:venue_error
 A kind or screener the venue does not publish is `{:error, {:unknown_fundamental, kind}}` /
 `{:error, {:unknown_screener, name}}`, answered before the options.
 
+The watchlist `:category` is `"US_STOCK"` (the default), the one value the instrument endpoints'
+enum lists; any other is `{:error, {:invalid_category, v}}` before a request, in `Fake` too.
+A futures `replace_order/4` changes `:order_type` one way only (limit or stop to `:market`,
+stop-limit to `:limit`), else `{:error, {:unsupported_order_type_change, from, to}}`.
+Every 4xx but 408 and 429, on a REST read as on a REST write, is
+`{:refused, {:venue_error, status, reason}}` (404 is `{:refused, :not_found}`) and is never
+retried. The streaming calls (`subscribe/2` and its two siblings) answer their own HTTP
+failures in their own shapes, listed under "Every answer a streaming call can give".
+
 ## BREAKING — a refusal now carries the venue's status as well as its words
 
 ```elixir
@@ -125,8 +126,9 @@ A kind or screener the venue does not publish is `{:error, {:unknown_fundamental
 {:refused, {:venue_error, 401, "signature mismatch"}}
 ```
 
-This package refuses on `400`, `401` and `403`, and **all three used to look identical to a
-caller** even though their remedies are opposite:
+This package refuses on every 4xx but `408` and `429`. Three of them have a remedy a caller
+can act on, and **all three used to look identical to a caller** even though their remedies
+are opposite:
 
 | status | what to do |
 |---|---|
@@ -430,7 +432,18 @@ is subscribed. `subscribe_notices/1` takes `to:` under the same rule.
 
 **The venue does not restore subscriptions after a reconnect.** This package replays them
 for you, which is the whole reason you never have to notice a reconnect. That replay uses
-the credentials you supplied — at start, or on the subscribe call.
+the credentials you supplied — at start, or on a `subscribe/2` or `update_symbols/2` call.
+
+**What the replay uses is only ever replaced by credentials this package can sign with, and
+only by a call that was not refused.** A call naming `credentials: nil`, `%{}` or a map whose
+`:app_key` or `:app_secret` is blank leaves the stored credentials alone (such a call that
+changes nothing answers `:ok`, one that has to open a shard is `{:error,
+{:missing_required_field, :app_key}}` and one that has to sign is `{:error,
+{:missing_credentials, :webull}}`), and a call refused for any reason puts back what the feed
+was replaying with.
+Before this, one such call emptied them, and the next reconnect or shard reopen was answered
+`{:error, {:missing_required_field, :app_key}}` by a feed that had been streaming: that error is
+this package's own, never the venue's.
 
 ### What one subscription delivers, and where its volume comes from
 
@@ -843,18 +856,22 @@ positive whole number is `{:error, {:invalid_option, :depth, value}}` (it was
 `depth_out_of_range`), and on `US_FUTURES`, where the venue states 1 to 10, so is one
 outside that range. Nothing is clamped to the nearest depth the venue would accept.
 
-A level whose price this package cannot read is dropped rather than passed on with a `nil`
-price, because `level/0` is `{Decimal.t(), Decimal.t()}` and `hd(bids)` must be able to
-answer with a real number. A level with a readable price and **no readable size refuses the
-whole book** - `{:error, {:missing_required_field, :size}}`, or `{:error, {:invalid_decimal,
-:size, value}}` for text that is not a number - because `level/0` is a pair of Decimals, and
-dropping the level would publish a hole in the book as "no liquidity at that price". (Earlier
-releases passed `{price, nil}` through, a pair `OrderBook.new/1` refuses.)
+**A level whose price this package cannot read refuses the whole book**, and so does a price
+of zero or less (`{:error, {:missing_required_field, :price}}`, `{:invalid_decimal, :price,
+value}` or `{:non_positive_price, :price, value}`): `level/0` is `{Decimal.t(), Decimal.t()}`
+and `hd(bids)` must be able to answer with a real number, and dropping the level would publish
+a hole in the book as "no liquidity at that price". The same goes for a level with a readable
+price and **no readable size** - `{:error, {:missing_required_field, :size}}`, or
+`{:error, {:invalid_decimal, :size, value}}` for text that is not a number - and for a
+negative size (`{:non_positive_size, :size, value}`). Only a level whose size is exactly zero
+is dropped: no liquidity there, and nothing hidden. (Earlier releases passed `{price, nil}`
+through, a pair `OrderBook.new/1` refuses.)
 
-## A row the venue did not identify is dropped, not given an empty id
+## A row the venue did not identify refuses the read, and is never given an empty id
 
-As of 0.4.38, `get_screener/2` drops a row that cannot supply its own identifying field
-rather than publishing it with `""`. **`list_watchlists/1` no longer drops one: a listing row
+Since 0.4.38 no row is published with `""` for an identifying field it could not supply. It
+used to be dropped; it now refuses the whole read. **`get_screener/2`: a row that names
+nothing is `{:error, :unexpected_response_shape}`.** **`list_watchlists/1`: a listing row
 with no text `watchlist_id` refuses the whole reply as `{:error, {:missing_required_field,
 :id}}`**, because a list missing a watchlist reads as "that watchlist does not exist".
 
@@ -868,9 +885,9 @@ of tickers is `{:error, :unexpected_response_shape}` — each for the whole read
 venue's `news_id`, never a ticker stand-in: an old JSON-row fallback once used the symbol,
 which looks like an id and collides for every story about that symbol.
 
-**So a shorter list is not an error, and the venue's own ranking is preserved.** A dropped
-screener row leaves a gap in `rank` rather than renumbering the survivors, because `rank` is
-the position the venue returned the row in and closing the gap would re-rank the list.
+**The venue's own ranking is preserved.** A screener's `rank` is the position the venue
+returned the row in, and nothing is renumbered or re-ranked: because an unnamed row refuses
+the read, a `rank` is never missing from the middle of a list.
 
 **An order list is the exception: it is refused, not thinned.** `get_orders/2` answers
 `{:error, {:unreadable_orders, ids}}` when any group in it cannot be read as one `Order`,
@@ -1008,8 +1025,9 @@ Six things to know before you build on them:
   a reset. The wait ends at once if the socket's parent stops it.
 - **`[:dp_exchange, :link, :down]` is emitted once per lost link, and only for a link that
   came up** (`:link, :up` fires at CONNACK 0). A failed reconnect that never got a session
-  emits `:reconnect_attempt`, not `:down`, and a refused CONNACK (any non-zero code) emits
-  only its `:link_down` notice. A socket process that crashed, and a shard rebuilt on
+  emits `:reconnect_attempt`, not `:down`, and a refused CONNACK (any non-zero code) emits no
+  `:down` at all, only its notice (`:credentials_rejected` for codes 3, 4, 5, 103 and 104,
+  `:degraded` for 105, `:link_down` for any other). A socket process that crashed, and a shard rebuilt on
   INVALID_SESSION, each emit one `:down` if their link was up, with `reason` as bounded text.
   `:down` is emitted only to close a `:up`.
 
@@ -1355,7 +1373,8 @@ in the Webull app — which needs a person. `check_token/2` is the only call tha
 each has a different remedy. A response with no `token`, or a `status` outside the venue's
 four (`PENDING`, `NORMAL`, `INVALID`, `EXPIRED`), is refused —
 `{:error, {:missing_required_field, field}}` / `{:error, {:unknown_token_status, status}}` —
-and `oauth_token/3` refuses a 2xx with no `access_token`. `NORMAL` is never inferred.
+and `oauth_token/3` does not take a 2xx with no `access_token` for a grant (see below).
+`NORMAL` is never inferred.
 
 **`create_token/1` is a write.** A create that may have reached the venue and is not proven
 (a transport error or timeout, a 5xx, a 2xx whose body is unreadable, names no token or states
@@ -1369,6 +1388,15 @@ our own limiter refusing stay the plain `{:error, reason}`; a 4xx is `{:refused,
 `opts[:code]` exchanges, `opts[:refresh_token]` refreshes, and exactly one is required.
 **Two expiries come back and they are not the same clock** — `rt_expires_in` is the one that
 ends the session.
+
+**`oauth_token/3` is a write too.** An authorization code is single-use and a refresh token
+may rotate, so a grant whose answer was lost may still have been honoured. A transport error
+or timeout, a 5xx or 408, and a 2xx that is undecodable, is not an object or carries no
+`access_token` are `{:error, {:write_unconfirmed, nil, reason}}` (it was a bare `{:error,
+reason}`, which invites a retry with a credential that no longer works): do not retry the same
+code or refresh token, start the consent flow again. A 4xx but 408 and 429 is
+`{:refused, {:venue_error, status, reason}}` (a 404 included, unlike the REST reads), and our
+own limiter refusing stays the plain `{:error, reason}`.
 
 ## Rows this package will not flatten, and rows that are not yours
 
@@ -1554,7 +1582,7 @@ wrapped as `{:error, reason}`:
 | `{:invalid_symbols, symbols}` | Your list was malformed (decided in your process), **or** the venue refused those symbols (a list of canonical names). The venue's refusals are excluded and the rest is retried, so you see this only when no retry is left. |
 | `{:invalid_subscriber, to}` | `to:` is not a pid or a registered-name atom. |
 | `{:streaming_unavailable, :uat}` | There is no UAT broker. |
-| `{:missing_required_field, :app_key}` | A shard had to be opened and the call carried no usable `:credentials`. |
+| `{:missing_required_field, :app_key}` | A shard had to be opened and the credentials in use carried no usable `:app_key` (absent, not text, or blank). This package's own answer, not the venue's. |
 | `{:connection_refused, details}` | The venue refused the shard's MQTT session. `details.connack` is its code and `details.session_id` names the shard; `details.reason: :connection_limit` is code 105 (five connections per App Key), which is not a credentials problem. |
 | `{:shard_crashed, reason}` | The shard's socket died while you waited. It is reopened; retry. |
 | `{:invalid_session, session_id}` | The venue discarded the shard's session. The shard is reopened on a fresh one; retry. |
@@ -1588,7 +1616,7 @@ Passed in the options of `{DpExchange.Webull, opts}`. Every one is optional.
 
 | Option | Default | What it does |
 |---|---|---|
-| `:credentials` | none | Kept (wrapped) to replay subscriptions after a reconnect. |
+| `:credentials` | none | Kept (wrapped) to replay subscriptions after a reconnect. A later call's own credentials replace them only if they can be signed with and the call is not refused. |
 | `:max_queue_len` | see the slow-subscriber section | Mailbox bound before a subscriber is skipped. |
 | `:priority_symbols` | none | See `priority_symbols:` below. |
 | `:resubscribe_interval_ms` | 60_000, at least 1_000 | Blind re-assert cadence. A smaller value raises `ArgumentError` at start. |

@@ -118,7 +118,10 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       # The sharpest one. A token exchange that did not return a token used to answer
       # `{:ok, %{}}`, so the failure surfaced later as an authentication error at the next
       # signed call, with nothing tying it back to the refresh that caused it.
-      assert {:error, {:undecodable_response, :webull}} =
+      #
+      # It is `:write_unconfirmed` and not a bare error: the grant may have been honoured (a
+      # refresh token rotated, a code spent) with only the answer unreadable.
+      assert {:error, {:write_unconfirmed, nil, {:undecodable_response, :webull}}} =
                Rest.oauth_token("client", "secret", Keyword.put(opts, :refresh_token, "r"))
     end
 
@@ -128,7 +131,7 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       # about a token that does not exist.
       opts = [plug: raw(~s(["token"])), retry_attempts: 0, refresh_token: "r"]
 
-      assert {:error, :unexpected_response_shape} =
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
                Rest.oauth_token("client", "secret", opts)
     end
 

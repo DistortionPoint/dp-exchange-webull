@@ -1948,6 +1948,10 @@ defmodule DpExchange.Webull do
   See `DpExchange.Webull.Rest.oauth_token/3`. `opts[:code]` exchanges, `opts[:refresh_token]`
   refreshes, and exactly one of them is required. **Two expiries come back and they are not
   the same clock**: `rt_expires_in` is the one that ends the session.
+
+  A grant is sent once, and one whose answer was lost (a transport error or timeout, a 5xx or
+  408, a 2xx that is no token) is `{:error, {:write_unconfirmed, nil, reason}}`: the code may be
+  spent or the refresh token rotated, so do not retry the same one.
   """
   @spec oauth_token(String.t(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}

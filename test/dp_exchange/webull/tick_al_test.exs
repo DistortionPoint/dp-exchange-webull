@@ -214,15 +214,17 @@ defmodule DpExchange.Webull.TickALTest do
       assert hits() == 1
     end
 
-    test "oauth_token/3 refuses on a 422 and leaves a 408 an error" do
+    test "oauth_token/3 refuses on a 422 and leaves a 408 unconfirmed, never a bare error" do
       assert {:refused, {:venue_error, 422, "bad grant"}} =
                Rest.oauth_token("CLIENT", "secret",
                  code: "c",
                  plug: answering(422, %{"message" => "bad grant"})
                )
 
-      assert {:error, {:exchange_error, :webull, "HTTP 408" <> _rest}} =
+      assert {:error, {:write_unconfirmed, nil, reason}} =
                Rest.oauth_token("CLIENT", "secret", code: "c", plug: answering(408, %{}))
+
+      assert {:exchange_error, :webull, "HTTP 408" <> _rest} = reason
 
       assert hits() == 2
     end
