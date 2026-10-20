@@ -409,8 +409,11 @@ defmodule DpExchange.WebullTest do
     end
 
     test "with credentials it answers" do
-      assert {:ok, _quote} = Fake.get_price("BTC-USD", credentials: @credentials)
-      assert {:ok, _symbols} = Fake.get_symbols(credentials: @credentials)
+      assert {:ok, %Quote{symbol: "BTC-USD"}} =
+               Fake.get_price("BTC-USD", credentials: @credentials)
+
+      assert {:ok, symbols} = Fake.get_symbols(credentials: @credentials)
+      assert "BTC-USD" in symbols
 
       assert {:ok, [_bar]} =
                Fake.get_historical_prices("BTC-USD", "1m", [], credentials: @credentials)

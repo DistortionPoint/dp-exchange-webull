@@ -158,6 +158,29 @@ defmodule DpExchange.Webull.FeedTest do
       assert :sys.get_state(feed).shards[0].reply_to != nil
     end
 
+    test "a per-caller timeout answers that caller only, not one that joined the shard later" do
+      # The timer used to carry the shard alone and answer every waiter, so a caller that
+      # joined late was told `:connack_timeout` with most of its own budget unspent.
+      feed = start_feed(shards: %{0 => connected_shard("s0")})
+      early_ref = make_ref()
+      late_ref = make_ref()
+      early = {self(), early_ref}
+      late = {self(), late_ref}
+
+      :sys.replace_state(feed, fn state ->
+        state
+        |> put_in([:shards, 0, :connected?], false)
+        |> put_in([:shards, 0, :reply_to], [{early, []}, {late, []}])
+      end)
+
+      send(feed, {:connack_timeout, 0, "s0", early})
+      _settled = Feed.coverage(feed)
+
+      assert_receive {^early_ref, {:error, {:connack_timeout, _ms}}}, 5_000
+      refute_receive {^late_ref, _answer}, 500
+      assert [{^late, []}] = :sys.get_state(feed).shards[0].reply_to
+    end
+
     test "a shard that DID connect is not disturbed by its own late timer" do
       feed = start_feed(shards: %{0 => connected_shard("s0")})
 
@@ -724,6 +747,10 @@ defmodule DpExchange.Webull.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
+      # No tracked shard was touched: a link_up counts the connection of ITS shard only.
+      refute Enum.any?(:sys.get_state(feed).shards, fn {_index, shard} ->
+               Map.has_key?(shard, :link)
+             end)
     end
 
     test "a reconnect with nothing wanted sends no request", %{limiter: limiter} do
@@ -753,7 +780,7 @@ defmodule DpExchange.Webull.FeedTest do
       # The replay's reconcile task is spawned inside the same handler, so an empty
       # `reconciling` after the synchronous call proves none was started.
       assert :sys.get_state(feed).reconciling == %{}
-      refute_received {:request, :unexpected}
+      refute_receive {:request, :unexpected}, 500
       assert Process.alive?(feed)
     end
   end
@@ -800,6 +827,9 @@ defmodule DpExchange.Webull.FeedTest do
 
       assert {:error, reason} = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
       refute reason == {:missing_required_field, :app_key}
+      # And it is the dial that failed, not some other refusal that merely differs from the
+      # one above: nothing listens on port 1.
+      assert inspect(reason) =~ "econnrefused"
     end
   end
 
@@ -838,7 +868,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # Parked in the feed's state, not guessed at with a timeout.
       wait_for_parked(feed, 1)
-      refute_received {:subscribed, _symbols}
+      refute_receive {:subscribed, _symbols}, 500
       refute Task.yield(task, 0)
 
       send(feed, {:dp_exchange, :webull, link_up(session_id)})
@@ -970,19 +1000,34 @@ defmodule DpExchange.Webull.FeedTest do
       # is already tightest on.
       feed = start_feed()
 
-      plug = fn _conn -> flunk("a request was made for an empty symbol list") end
+      # Reported to the test process: a `flunk/1` in the plug would only kill the task the
+      # request runs in, and the test would pass whether or not a request was made.
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
 
       assert :ok = Feed.unsubscribe(feed, [], subscribe_opts(limiter, plug: plug))
+      refute_receive {:request, :unexpected}, 500
     end
 
     test "unsubscribing a symbol never subscribed makes no request and does not error",
          %{limiter: limiter} do
       feed = start_feed()
 
-      plug = fn _conn -> flunk("a request was made for a never-subscribed symbol") end
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
 
       assert :ok =
                Feed.unsubscribe(feed, ["NEVER-SUBSCRIBED"], subscribe_opts(limiter, plug: plug))
+
+      refute_receive {:request, :unexpected}, 500
     end
   end
 
@@ -1123,6 +1168,7 @@ defmodule DpExchange.Webull.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
+      assert Enum.all?(:sys.get_state(feed).shards, fn {_index, shard} -> shard.connected? end)
     end
 
     test "five shards already at capacity refuse a sixth symbol as capacity_exceeded, never silently dropped or oversubscribed",
@@ -1131,7 +1177,12 @@ defmodule DpExchange.Webull.FeedTest do
       # real, hard ceiling being reached — the one case §3.5 says cannot be absorbed
       # internally. No HTTP call should even be attempted: nothing about any existing
       # shard's symbol set changes.
-      plug = fn _conn -> flunk("no shard's symbol set changes; no request should fire") end
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:request, :unexpected})
+        Req.Test.json(conn, %{"code" => "200"})
+      end
 
       existing = for i <- 0..4, do: {i, "S#{i}-USD"}
 
@@ -1148,6 +1199,8 @@ defmodule DpExchange.Webull.FeedTest do
 
       assert {:error, {:capacity_exceeded, ["ZZZ-USD"]}} =
                Feed.subscribe(feed, ["ZZZ-USD"], subscribe_opts(limiter, plug: plug))
+
+      refute_receive {:request, :unexpected}, 500
     end
 
     test "an oversubscribed rejection discovered on a shard's own CONNACK rebalances via resync, not the caller's retry",
@@ -1429,8 +1482,8 @@ defmodule DpExchange.Webull.FeedTest do
       assert session_id not in ["shard-0", "shard-1"]
 
       # The call returned, so every request it made has already been sent.
-      refute_received {:request, "shard-0", _symbols}
-      refute_received {:request, "shard-1", _symbols}
+      refute_receive {:request, "shard-0", _symbols}, 500
+      refute_receive {:request, "shard-1", _symbols}, 500
     end
   end
 
@@ -1795,7 +1848,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       refute_receive {:dp_exchange, :webull,
                       %Notice{kind: :coverage_change, details: %{shard: 1}}},
-                     200
+                     500
 
       # Shard 1 now fails independently — shard 0 stays latched and silent this tick.
       send(feed, {:reconcile_done, {:resubscribe, 1}, {:error, :timeout}})
@@ -1808,7 +1861,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       refute_receive {:dp_exchange, :webull,
                       %Notice{kind: :coverage_change, details: %{shard: 0}}},
-                     200
+                     500
 
       # Shard 0 recovers; shard 1 stays latched.
       send(feed, {:reconcile_done, {:resubscribe, 0}, :ok})
@@ -2159,7 +2212,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # The shard delivered a moment ago — exactly the live case.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond)}}
+        %{state | delivering: %{"BTC-USD" => System.monotonic_time(:millisecond)}}
       end)
 
       fail_resubscribe(feed, 0, 5)
@@ -2187,7 +2240,7 @@ defmodule DpExchange.Webull.FeedTest do
       # Delivered, but longer ago than `stale_delivery_ms` — the case where a reopen has
       # something to gain, because nothing is being lost by it.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond) - 10_000}}
+        %{state | delivering: %{"BTC-USD" => System.monotonic_time(:millisecond) - 10_000}}
       end)
 
       Feed.subscribe_notices(feed, to: self())
@@ -2219,7 +2272,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       # Only shard 1's symbol is arriving.
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"ETH-USD" => System.system_time(:millisecond)}}
+        %{state | delivering: %{"ETH-USD" => System.monotonic_time(:millisecond)}}
       end)
 
       fail_resubscribe(feed, 0, 3)

@@ -318,6 +318,21 @@ defmodule DpExchange.Webull.MicrostructureTest do
       assert imbalance.observed_at
     end
 
+    test "imbalance_time is documented in milliseconds, so a seconds-sized value is no time" do
+      # `get-noii-snapshot.md:228` and `get-noii-bars.md:195`: "Timestamp ... in milliseconds".
+      # The magnitude guess read 1_774_272_599 as a 2026 instant in seconds.
+      body = noii_body() |> put_in([Access.at(0), "imbalance_time"], 1_774_272_599)
+
+      assert {:ok, [imbalance]} =
+               Rest.get_auction_imbalance("AAPL", @credentials,
+                 auction: :closing,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert imbalance.venue_time == nil
+    end
+
     test "the two auctions are two different requests" do
       me = self()
 

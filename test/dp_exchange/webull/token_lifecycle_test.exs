@@ -251,7 +251,7 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
       # `:retry_attempts`, so a caller passing it is refused (pinned below).
       once = [credentials: @credentials]
 
-      assert {:ok, _token} =
+      assert {:ok, %{"token" => "t", "status" => "PENDING"}} =
                DpExchange.Webull.create_token(
                  once ++ [plug: responding(%{"token" => "t", "status" => "PENDING"})]
                )
@@ -269,13 +269,13 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
                  plug: exploding()
                )
 
-      assert {:ok, _checked} =
+      assert {:ok, %{"token" => "t", "status" => "NORMAL"}} =
                DpExchange.Webull.check_token(
                  "t",
                  base ++ [plug: responding(%{"token" => "t", "status" => "NORMAL"})]
                )
 
-      assert {:ok, _tokens} =
+      assert {:ok, %{"access_token" => "a"}} =
                DpExchange.Webull.oauth_token(
                  "CLIENT",
                  "secret",

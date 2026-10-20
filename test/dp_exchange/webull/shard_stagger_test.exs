@@ -40,7 +40,9 @@ defmodule DpExchange.Webull.ShardStaggerTest do
     # and fails at once for want of an app key (a deterministic refusal needing no socket);
     # shards 1 and 2 are the background opens under test.
     symbols = for n <- 1..250, do: "S#{n}-USD"
-    assert {:error, _reason} = Feed.subscribe(feed, symbols, credentials: %{app_secret: "s"})
+
+    assert {:error, {:missing_required_field, :app_key}} =
+             Feed.subscribe(feed, symbols, credentials: %{app_secret: "s"})
 
     assert_receive {:trace_ts, ^feed, :receive, {:open_staggered, 1, _, _}, first}, 5_000
 

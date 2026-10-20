@@ -187,13 +187,23 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
   end
 
   describe "timestamps" do
-    test "a seconds epoch as a STRING is read" do
+    test "a seconds epoch as a STRING is read where the page states no unit (the stock " <>
+           "snapshot), and is no time where it states milliseconds (crypto)" do
       body = [%{"price" => "1", "last_trade_time" => "1787936147"}]
 
-      assert {:ok, quote_struct} =
+      assert {:ok, stock} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert stock.venue_time.year == 2026
+
+      assert {:ok, crypto} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert quote_struct.venue_time.year == 2026
+      assert crypto.venue_time == nil
     end
 
     test "a timestamp of an unexpected TYPE is nil, not a guess" do
@@ -558,7 +568,8 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
 
       position = %{"symbol" => [%{}], "quantity" => "1", "instrument_type" => "CRYPTO"}
 
-      assert {:error, _unreadable} = Rest.get_positions(@credentials, wrong_type_opts([position]))
+      assert {:error, {:missing_required_field, :symbol}} =
+               Rest.get_positions(@credentials, wrong_type_opts([position]))
     end
 
     test "an auction side code that is not a code is nil" do

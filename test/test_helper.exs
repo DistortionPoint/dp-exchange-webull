@@ -19,7 +19,16 @@
 # the message at all and still fails, just five seconds later instead of one. And it does
 # not touch `refute_receive`, which has its own separate `refute_receive_timeout` — so no
 # "this must NOT arrive" assertion is weakened by it.
-ExUnit.start(exclude: [:tier2], assert_receive_timeout: 5_000)
+#
+# `refute_receive_timeout` is 500, not ExUnit's 100ms default: a `refute_receive` with no
+# explicit window guards a negative, and a window shorter than the process hops between the
+# trigger and the message (a reconcile task, an HTTP stub) passes whether or not the guarded
+# message would have come. 500ms is the floor this suite holds every negative to.
+ExUnit.start(
+  exclude: [:tier2],
+  assert_receive_timeout: 5_000,
+  refute_receive_timeout: 500
+)
 
 # **Tier 1 never reaches a venue, and this makes that a fact rather than a convention.** A
 # request that brings no `:plug` of its own gets this one, which refuses it and names the

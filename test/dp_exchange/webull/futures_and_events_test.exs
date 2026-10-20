@@ -213,6 +213,8 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
                )
 
       assert length(book.bids) == 1
+      # `futures-depth-of-book.md:195`: `quote_time` is "Unix epoch time in milliseconds".
+      assert book.venue_time == DateTime.from_unix!(1_761_131_409_276, :millisecond)
       assert_receive {:request, "/market-data/futures/depths/list", query}
       assert query =~ "depth=5"
       refute query =~ "overnight_required"

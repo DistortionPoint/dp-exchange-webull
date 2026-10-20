@@ -196,7 +196,7 @@ defmodule DpExchange.Webull.SocketTest do
 
         assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 500
       end
     end
 
@@ -209,7 +209,7 @@ defmodule DpExchange.Webull.SocketTest do
           proto_field(3, "0") <> proto_field(4, "0.5") <> proto_field(5, "B")
 
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", zero)}, state())
-      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 500
 
       good =
         basic <>
@@ -239,7 +239,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
 
     for nan_or_inf <- ["NaN", "Inf", "-Inf"] do
@@ -251,7 +251,7 @@ defmodule DpExchange.Webull.SocketTest do
 
         assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 500
       end
     end
 
@@ -261,7 +261,7 @@ defmodule DpExchange.Webull.SocketTest do
 
         assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-        refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+        refute_receive {:dp_exchange, :webull, %Quote{}}, 500
       end
     end
 
@@ -281,7 +281,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert top.ask == nil
       refute Map.has_key?(top, :price)
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
 
     test "a book whose levels are both \"null\" delivers nothing" do
@@ -299,7 +299,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 500
     end
 
     test "a present but unreadable side refuses the frame's top of book, even beside a good one" do
@@ -317,7 +317,7 @@ defmodule DpExchange.Webull.SocketTest do
 
         assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-        refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+        refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 500
         assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 5_000
       end
     end
@@ -433,7 +433,7 @@ defmodule DpExchange.Webull.SocketTest do
           proto_field(3, "77845.79") <> proto_field(4, "0.5")
 
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", undated)}, state())
-      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 500
 
       dated = undated <> proto_field(2, "1787936147000")
 
@@ -457,7 +457,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert details.price == "77845.79"
 
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", undated)}, state)
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 500
     end
 
     test "a tick whose own time is unreadable falls back to the frame's timestamp" do
@@ -478,7 +478,7 @@ defmodule DpExchange.Webull.SocketTest do
           proto_field(2, "1787936147000") <> proto_field(3, "77845.79")
 
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", frame)}, state())
-      refute_receive {:dp_exchange, :webull, %Trade{}}, 50
+      refute_receive {:dp_exchange, :webull, %Trade{}}, 500
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert {:tick, _reason} = details.dropped
     end
@@ -491,12 +491,12 @@ defmodule DpExchange.Webull.SocketTest do
       assert details.dropped == {:unrecognised_topic, "crypto-tick"}
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state)
-      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 500
     end
 
     test "the empty heartbeat topic is not reported" do
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("echo", "")}, state())
-      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 500
     end
 
     test "a book with no levels at all delivers nothing" do
@@ -505,7 +505,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
   end
 
@@ -717,7 +717,7 @@ defmodule DpExchange.Webull.SocketTest do
           assert byte_size(notice.details.message) < 1_100
         end
 
-        refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+        refute_receive {:dp_exchange, :webull, %Notice{}}, 500
       end
     end
 
@@ -728,13 +728,13 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 500
     end
 
     test "an echo heartbeat carries no payload and produces nothing" do
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("echo", "")}, state())
 
-      refute_receive {:dp_exchange, :webull, _anything}, 50
+      refute_receive {:dp_exchange, :webull, _anything}, 500
     end
 
     test "an unparseable protobuf is dropped without costing the connection" do
@@ -742,7 +742,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
   end
 
@@ -766,7 +766,7 @@ defmodule DpExchange.Webull.SocketTest do
       {head, tail} = String.split_at(full, byte_size(full) - 4)
 
       assert {:ok, state} = Socket.handle_frame({:binary, head}, state())
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
       assert state.buffer == head
 
       assert {:ok, state} = Socket.handle_frame({:binary, tail}, state)
@@ -1013,7 +1013,7 @@ defmodule DpExchange.Webull.SocketTest do
       # blocking its caller indefinitely.
       unresponsive = spawn(fn -> Process.sleep(:infinity) end)
 
-      assert {:error, _reason} = Socket.disconnect(unresponsive, 50)
+      assert {:error, {:exit, {:timeout, _call}}} = Socket.disconnect(unresponsive, 50)
 
       Process.exit(unresponsive, :kill)
     end
@@ -1070,7 +1070,7 @@ defmodule DpExchange.Webull.SocketTest do
       # transport-vs-link confusion `Core.Telemetry`'s own "Why `:link` and not `:ws`"
       # section exists to prevent, and this venue is where the two genuinely come apart.
       assert {:ok, _state} = Socket.handle_connect(%{}, state())
-      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 500
 
       assert {:ok, _state} = Socket.handle_frame({:binary, connack(0)}, state())
       assert_receive {:telemetry, [:dp_exchange, :link, :up], %{count: 1}, _metadata}
@@ -1080,7 +1080,7 @@ defmodule DpExchange.Webull.SocketTest do
       # 105 is the venue's "too many concurrent connections". A socket that reported the
       # link up here would show a healthy venue for a session it never got.
       assert {:ok, _state} = Socket.handle_frame({:binary, connack(105)}, state())
-      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 50
+      refute_receive {:telemetry, [:dp_exchange, :link, :up], _measurements, _metadata}, 500
     end
 
     test "disconnecting a live link emits link down with an already-inspected reason" do
@@ -1096,7 +1096,7 @@ defmodule DpExchange.Webull.SocketTest do
       # `link_up` never fired for this attempt, so a `link_down` would be a down with no up.
       assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :econnrefused}, state())
 
-      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 5000
     end
 
     test "one live drop is one link down, however many failed reconnects follow" do
@@ -1108,7 +1108,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:reconnect, _again} =
                Socket.handle_disconnect(%{reason: :econnrefused, attempt_number: 2}, dropped)
 
-      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 5000
     end
 
     test "an unknown CONNACK code is a Notice and no link down telemetry" do
@@ -1116,11 +1116,11 @@ defmodule DpExchange.Webull.SocketTest do
       assert {:ok, after_connack} = Socket.handle_frame({:binary, connack(9)}, state())
 
       assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 5_000
-      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 5000
 
       # Nor does the transport drop that may follow: the link never came up.
       assert {:reconnect, _state} = Socket.handle_disconnect(%{reason: :closed}, after_connack)
-      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 500
+      refute_receive {:telemetry, [:dp_exchange, :link, :down], _measurements, _metadata}, 5000
     end
 
     test "every WEBSOCKET frame is a link event, whatever it reassembles into" do
@@ -1400,7 +1400,7 @@ defmodule DpExchange.Webull.SocketTest do
                Socket.handle_frame({:binary, dup(frame)}, state)
 
       assert second_ack == pubrec(9), "the broker is still owed its PUBREC"
-      refute_receive {:dp_exchange, :webull, _message}, 50
+      refute_receive {:dp_exchange, :webull, _message}, 500
       assert MapSet.member?(state.qos2_pending, 9)
     end
 
@@ -1416,7 +1416,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert acks == pubrec(4) <> pubrec(4)
       assert_receive {:dp_exchange, :webull, %Quote{} = delivered}
       assert Decimal.equal?(delivered.price, Decimal.new("1"))
-      refute_receive {:dp_exchange, :webull, _message}, 50
+      refute_receive {:dp_exchange, :webull, _message}, 500
       assert state.qos2_pending == MapSet.new([4])
     end
 
@@ -1509,7 +1509,7 @@ defmodule DpExchange.Webull.SocketTest do
                         details: %{dropped: {:qos2, :window_full}, reason: :qos2_window_full}
                       }}
 
-      refute_receive {:dp_exchange, :webull, _message}, 50
+      refute_receive {:dp_exchange, :webull, _message}, 500
       assert MapSet.size(state.qos2_pending) == 65_535
       refute MapSet.member?(state.qos2_pending, 0)
     end
@@ -1527,7 +1527,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert details.bytes == 3
 
       assert {:ok, _state} = Socket.handle_frame({:binary, suback}, state)
-      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 500
     end
 
     test "a snapshot with no readable price is reported, not dropped in silence" do
@@ -1536,7 +1536,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %Quote{}}, 50
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:snapshot, {:invalid_decimal, :price}}
       assert details.reason == :invalid_decimal
@@ -1584,7 +1584,7 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
-      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 50
+      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 500
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality, details: details}}
       assert details.dropped == {:quote, :no_readable_level}
       assert details.reason == :no_readable_level
@@ -1600,7 +1600,7 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
 
       assert {:ok, state} = Socket.handle_frame({:binary, second}, state)
-      refute_receive {:dp_exchange, :webull, %Notice{}}, 50
+      refute_receive {:dp_exchange, :webull, %Notice{}}, 500
       assert MapSet.size(state.drops_reported) == 1
     end
 

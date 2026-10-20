@@ -438,7 +438,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  retry_attempts: 0
                )
 
-      refute_receive {:sent, _body, _path}, 50
+      refute_receive {:sent, _body, _path}, 500
     end
 
     test "an expire date on a DAY order is refused, not silently dropped" do
@@ -451,7 +451,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  retry_attempts: 0
                )
 
-      refute_receive {:sent, _body, _path}, 50
+      refute_receive {:sent, _body, _path}, 500
     end
 
     test "a Date is written as the yyyy-MM-dd the page requires" do
@@ -497,7 +497,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  )
       end
 
-      refute_receive {:sent, _body, _path}, 50
+      refute_receive {:sent, _body, _path}, 500
     end
   end
 
@@ -539,7 +539,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                  )
       end
 
-      refute_receive {:sent, _body, _path}, 50
+      refute_receive {:sent, _body, _path}, 500
     end
   end
 
@@ -786,7 +786,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                )
 
       assert_receive {:sent, "/trading/orders/replace"}, 5_000
-      refute_receive {:sent, "/trading/orders/replace"}, 100
+      refute_receive {:sent, "/trading/orders/replace"}, 500
     end
 
     test "a trailing stop takes only its step" do

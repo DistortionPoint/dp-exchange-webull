@@ -119,7 +119,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # The tick has been handled once this call answers; any re-ask it made was spawned
       # inside that handler, so the refute below no longer decides a race.
       _settled = Feed.coverage(feed)
-      refute_receive {:subscribe_attempt, "dead-session"}, 300
+      refute_receive {:subscribe_attempt, "dead-session"}, 500
 
       assert Process.alive?(feed)
     end
@@ -141,7 +141,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed = start_feed(shards: %{0 => shard}, plug: plug, credentials: credentials())
 
       :sys.replace_state(feed, fn state ->
-        %{state | delivering: %{"BTC-USD" => System.system_time(:millisecond)}}
+        %{state | delivering: %{"BTC-USD" => System.monotonic_time(:millisecond)}}
       end)
 
       send(feed, :resubscribe)
@@ -149,7 +149,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
 
       # No reconcile was spawned for the tick: it is spawned inside the same handler.
       assert :sys.get_state(feed).reconciling == %{}
-      refute_received {:request, :unexpected}
+      refute_receive {:request, :unexpected}, 500
       assert Process.alive?(feed)
     end
 
@@ -174,7 +174,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
           retry_attempts: 0
         )
 
-      long_ago = System.system_time(:millisecond) - 120_000
+      long_ago = System.monotonic_time(:millisecond) - 120_000
       :sys.replace_state(feed, &%{&1 | delivering: %{"BTC-USD" => long_ago}})
 
       send(feed, :resubscribe)
@@ -227,7 +227,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
         )
 
       :ok = Feed.subscribe_notices(feed, to: self())
-      now = System.system_time(:millisecond)
+      now = System.monotonic_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{
@@ -239,15 +239,15 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       send(feed, :resubscribe)
 
       assert_receive {:request, "shard-0"}
-      refute_receive {:request, "shard-2"}, 200
-      refute_received {:request, "shard-1"}
+      refute_receive {:request, "shard-2"}, 500
+      refute_receive {:request, "shard-1"}, 500
 
-      assert_received {:dp_exchange, :webull,
-                       %Notice{
-                         kind: :coverage_change,
-                         severity: :info,
-                         details: %{shard: 0, session_id: "shard-0"}
-                       }}
+      assert_receive {:dp_exchange, :webull,
+                      %Notice{
+                        kind: :coverage_change,
+                        severity: :info,
+                        details: %{shard: 0, session_id: "shard-0"}
+                      }}
     end
 
     test "with priority_symbols:, the priority shard is re-asserted when quiet even while another streams",
@@ -263,7 +263,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      now = System.system_time(:millisecond)
+      now = System.monotonic_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now - 120_000, "SOL-USD" => now}}
@@ -272,7 +272,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       send(feed, :resubscribe)
 
       assert_receive {:request, "shard-0"}
-      refute_receive {:request, "shard-1"}, 200
+      refute_receive {:request, "shard-1"}, 500
     end
 
     test "with priority_symbols:, no other shard is re-asserted against a streaming priority shard",
@@ -290,7 +290,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      now = System.system_time(:millisecond)
+      now = System.monotonic_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
@@ -303,7 +303,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # synchronous call above an empty `reconciling` proves no re-assert was started; the
       # refute then only catches a request that was somehow sent without being tracked.
       assert :sys.get_state(feed).reconciling == %{}
-      refute_receive {:request, _session}, 300
+      refute_receive {:request, _session}, 500
     end
 
     test "with priority_symbols: none of which is wanted, shard 0 is ordinary and the rest rotate",
@@ -321,7 +321,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["XRP-USD"])
 
-      now = System.system_time(:millisecond)
+      now = System.monotonic_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => now, "SOL-USD" => now - 300_000}}
@@ -344,7 +344,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       feed =
         two_shards(plug: plug, limiter: limiter, retry_attempts: 0, priority_symbols: ["BTC-USD"])
 
-      long_ago = System.system_time(:millisecond) - 300_000
+      long_ago = System.monotonic_time(:millisecond) - 300_000
 
       :sys.replace_state(feed, fn state ->
         state = put_in(state.shards[0].connected?, false)
@@ -354,7 +354,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       send(feed, :resubscribe)
 
       assert_receive {:request, "shard-1"}
-      refute_receive {:request, "shard-0"}, 200
+      refute_receive {:request, "shard-0"}, 500
     end
 
     test "a shard that already had a rotation turn is not picked again over one still waiting",
@@ -383,7 +383,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
           retry_attempts: 0
         )
 
-      now = System.system_time(:millisecond)
+      now = System.monotonic_time(:millisecond)
 
       :sys.replace_state(feed, fn state ->
         %{
@@ -396,7 +396,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       send(feed, :resubscribe)
 
       assert_receive {:request, "shard-2"}
-      refute_receive {:request, "shard-1"}, 200
+      refute_receive {:request, "shard-1"}, 500
     end
 
     test "a shard torn down mid-resubscribe drops that attempt instead of holding the reopened shard",
@@ -445,7 +445,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       end
 
       feed = two_shards(plug: plug, limiter: limiter, retry_attempts: 0)
-      long_ago = System.system_time(:millisecond) - 120_000
+      long_ago = System.monotonic_time(:millisecond) - 120_000
 
       :sys.replace_state(feed, fn state ->
         %{state | delivering: %{"BTC-USD" => long_ago, "SOL-USD" => long_ago}}
@@ -483,7 +483,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # The tick spawns its reconcile inside the same handler, so an empty `reconciling`
       # after the synchronous call proves none was started for the unlinked shard.
       assert :sys.get_state(feed).reconciling == %{}
-      refute_received {:request, :unexpected}
+      refute_receive {:request, :unexpected}, 500
       assert Process.alive?(feed)
     end
 
@@ -506,7 +506,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       _settled = Feed.coverage(feed)
 
       assert :sys.get_state(feed).reconciling == %{}
-      refute_received {:request, :unexpected}
+      refute_receive {:request, :unexpected}, 500
       assert Process.alive?(feed)
     end
 
@@ -634,6 +634,11 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # would send its request after the ~300ms wait and BEFORE `reconciling` empties.
       await_idle(feed)
       refute_received {:request, ["BTCUSD"]}
+
+      # The attempt WAS made and was refused by our own limiter: without this the refute above
+      # also passes when no re-assert was ever started, which would prove nothing about
+      # fail-fast.
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1}
       assert Process.alive?(feed)
     end
 
@@ -676,6 +681,11 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
 
       await_idle(feed)
       refute_received {:request, ["BTCUSD"]}
+
+      # The attempt WAS made and was refused by our own limiter: without this the refute above
+      # also passes when no re-assert was ever started, which would prove nothing about
+      # fail-fast.
+      assert :sys.get_state(feed).resubscribe_failed == %{0 => 1}
       assert Process.alive?(feed)
     end
 

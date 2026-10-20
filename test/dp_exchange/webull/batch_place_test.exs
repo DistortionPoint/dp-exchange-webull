@@ -217,7 +217,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     test "fifty is allowed" do
       orders = for i <- 1..50, do: order(%{symbol: "SYM#{i}"})
 
-      assert {:ok, _results} =
+      assert {:ok, [%{"order_id" => "1"}]} =
                Rest.place_orders(@credentials, orders,
                  account_id: "acct-1",
                  plug: responding([%{"order_id" => "1"}]),
@@ -437,7 +437,7 @@ defmodule DpExchange.Webull.BatchPlaceTest do
     end
 
     test "the facade delegates" do
-      assert {:ok, _results} =
+      assert {:ok, [%{"order_id" => "1"}]} =
                DpExchange.Webull.place_orders(@credentials, [order()],
                  account_id: "acct-1",
                  plug: responding([%{"order_id" => "1"}])

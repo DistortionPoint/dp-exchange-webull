@@ -124,7 +124,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
       _settled = Feed.coverage(feed)
 
       assert Map.keys(:sys.get_state(feed).reconciling) == [{:link_up, 0}]
-      refute_received {:hit, _path, _symbols}
+      refute_receive {:hit, _path, _symbols}, 500
     end
 
     test "still re-asserts the shard once the replay is gone", %{limiter: limiter} do
@@ -258,7 +258,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
       send(feed, {:reconcile_done, {:background, 0}, :ok})
 
       assert_receive {:hit, @unsubscribe_path, ["ETHUSD"]}, 5_000
-      refute_received {:hit, @subscribe_path, _symbols}
+      refute_receive {:hit, @subscribe_path, _symbols}, 500
     end
 
     test "an unsubscribe answered after the symbol was subscribed again is subscribed again",
@@ -279,7 +279,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
       send(feed, {:reconcile_done, {:background, 0}, :ok})
 
       assert_receive {:hit, @subscribe_path, ["SOLUSD"]}, 5_000
-      refute_received {:hit, @unsubscribe_path, _symbols}
+      refute_receive {:hit, @unsubscribe_path, _symbols}, 500
     end
 
     test "answers with nothing overtaken send nothing", %{limiter: limiter} do
@@ -299,7 +299,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
 
       # A cleanup would already be tracked: it is spawned inside the handler that ran.
       assert :sys.get_state(feed).reconciling == %{}
-      refute_received {:hit, _path, _symbols}
+      refute_receive {:hit, _path, _symbols}, 500
     end
 
     test "an answer for a replaced session repairs nothing", %{limiter: limiter} do

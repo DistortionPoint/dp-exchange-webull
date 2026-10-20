@@ -47,8 +47,10 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       feed = start_feed(shards: %{0 => connected_shard("s0")})
       failing = recording_plug(self(), [@subscribe_path])
 
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :webull, message}} =
                Feed.subscribe(feed, ["AAA-USD"], subscribe_opts(limiter, plug: failing))
+
+      assert message =~ "500"
 
       assert_receive {:hit, @subscribe_path, ["AAAUSD"]}, 5_000
 
@@ -99,8 +101,10 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       want(feed, ["OLD-USD"])
       failing = recording_plug(self(), [@unsubscribe_path])
 
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :webull, message}} =
                Feed.update_symbols(feed, ["NEW-USD"], subscribe_opts(limiter, plug: failing))
+
+      assert message =~ "500"
 
       assert_receive {:hit, @unsubscribe_path, ["OLDUSD"]}, 5_000
 

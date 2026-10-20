@@ -345,8 +345,10 @@ drop out of `coverage/1` and `coverage_by_kind/1` (cleared immediately, not left
 report `:stream` for a connection that no longer exists), you get a `:link_down`
 `Core.Notice` naming the crashed shard, and this package reopens it on its own — you
 never need to call `subscribe/2` again. The first crash reopens at once. A shard that crashes
-again within a minute of its last crash waits first, 1 s doubling to 60 s, so a socket that
-connects and dies cannot spin through the venue's five-connections-per-key budget. The same
+again within a minute of its last crash waits first, 1 s doubling to 60 s (each wait shortened
+by a random amount of up to a quarter, never lengthened, so shards torn down together do not
+reopen together), so a socket that connects and dies cannot spin through the venue's
+five-connections-per-key budget. The same
 goes for a socket that reaches the broker's CONNACK and drops within 30 s: it counts as a
 failed attempt toward the reconnect backoff instead of resetting it.
 
@@ -849,7 +851,16 @@ What an undated value does depends on the TYPE, because the contract differs:
 longer (microseconds, nanoseconds) is not a time this package can read and is refused
 (`{:error, :invalid_unix_time}` on REST, an undated frame on the stream) rather than becoming a
 `DateTime` tens of thousands of years out. The streaming schema states no unit or format for
-`timestamp`/`time` at all, so the same reading there is **unmeasured**.
+`timestamp`/`time` at all, so the same reading there is **unmeasured**. **A trade tape's
+`time` is the exception on REST: `tick.md` documents it in milliseconds, so `get_trades/2`
+reads it as milliseconds only** and a value at or below 100,000,000,000 (a seconds-sized
+number, or `0`) is `{:error, :invalid_unix_time}` rather than being taken for seconds. **So are
+the crypto, option and futures snapshots' `last_trade_time` and `quote_time`, the futures
+depth's `quote_time` and the auction imbalance's `imbalance_time`**, each documented as epoch
+milliseconds: there a seconds-sized number is no time, and `venue_time` is `nil` (the quote, the
+top of book, the depth or the imbalance is still delivered). The stock snapshot, the stock
+depth, the bars and the event pages state no unit and keep the seconds-or-milliseconds reading.
+All of this follows what the pages state; none of it was measured against a live response.
 
 **An order's `created_at` is the venue's `place_time_at`** (ISO8601 UTC, per
 `order-detail.md`), and `updated_at` is `filled_time_at` ("time of the last executed trade")
@@ -1580,7 +1591,9 @@ the call is answered anyway, with one of these:
 
 This holds wherever the call has got to, including after the package moved your symbols to
 another shard because the first was full or the venue refused one: the ten seconds run from
-when your call arrived, not from the latest internal retry.
+when your call arrived, not from the latest internal retry. They are **your** ten seconds: a
+call that joined a connecting shard after another one was parked on it is not answered
+`:connack_timeout` when the earlier call's deadline arrives.
 
 A list that is not made of non-blank strings (empty or whitespace-only is blank) is refused at
 once with `{:error, {:invalid_symbols, symbols}}` (your argument exactly as given, whole, even
@@ -1762,7 +1775,8 @@ instant to age, and **"never worked" is not "stopped working"**.
 (A socket that *was* up and dropped is a different thing again: it reconnects itself, with the
 jittered backoff described under Telemetry.)
 
-Such a shard is retried on its own schedule: one second, doubling, capped at a minute, until
+Such a shard is retried on its own schedule: one second, doubling, capped at a minute (each
+wait shortened by up to a quarter, so shards that failed together do not retry together), until
 it opens or the slot is filled by a resubscribe of its own. A `:coverage_change` warning
 naming the shard fires once when it first fails to open, and a matching `:info` fires once
 when it opens — so a shard going dark at boot is something you hear about rather than

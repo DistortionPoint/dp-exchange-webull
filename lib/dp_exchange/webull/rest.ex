@@ -315,7 +315,7 @@ defmodule DpExchange.Webull.Rest do
          # over an optional field discards the fact the caller asked for. **The time of the
          # last trade and nothing else** (`trade_time/1`): a row that states only a
          # `quote_time` has no trade time, and that quote's time is a different event.
-         venue_time: trade_time(row),
+         venue_time: trade_time(row, category),
          observed_at: DateTime.utc_now(),
          provider: :webull
        }}
@@ -1036,7 +1036,7 @@ defmodule DpExchange.Webull.Rest do
       # the same rule for the same type on the other transport.
       bid_size: bid && size_or_nil(value(row, ["bid_size"])),
       ask_size: ask && size_or_nil(value(row, ["ask_size"])),
-      venue_time: quote_time(row),
+      venue_time: quote_time(row, category),
       observed_at: DateTime.utc_now(),
       provider: :webull
     }
@@ -1056,9 +1056,9 @@ defmodule DpExchange.Webull.Rest do
   # thinly traded name, hours before the quote. `TopOfBook.venue_time` is the venue's stated
   # time of THAT quote and nil when it states none (family convention MD7); `observed_at`
   # says when this package read it.
-  defp quote_time(row) do
+  defp quote_time(row, category) do
     # `parse_time(nil)` is an error, so an absent field is nil with the unparseable.
-    case parse_time(value(row, ["quote_time"])) do
+    case snapshot_time(value(row, ["quote_time"]), category) do
       {:ok, at} -> at
       _absent_or_unparseable -> nil
     end
@@ -1066,19 +1066,34 @@ defmodule DpExchange.Webull.Rest do
 
   # `Quote.venue_time`: the venue's stated time of the last trade; `nil` when the row states
   # none or states one this package cannot read.
-  defp trade_time(row) do
+  defp trade_time(row, category) do
     # `last_trade_time` alone (`snapshot.md:214`, `crypto-snapshot.md:183`,
     # `option-snapshot.md:221`, `futures-snapshot.md:221`, `event-snapshot.md:210`); no page
     # shows a `time`, `ts`, `timestamp` or `tradeTime` on a snapshot row.
-    case parse_time(value(row, ["last_trade_time"])) do
+    case snapshot_time(value(row, ["last_trade_time"]), category) do
       {:ok, at} -> at
       _absent_or_unparseable -> nil
     end
   end
 
+  # **The unit follows what the page states.** The crypto, option and futures snapshots and the
+  # futures depth state their `last_trade_time` / `quote_time` as "Unix epoch ... in milliseconds"
+  # (`crypto-snapshot.md:185,221`, `option-snapshot.md:223,274`, `futures-snapshot.md:223,234`,
+  # `futures-depth-of-book.md:195`), so those are read as milliseconds only
+  # (`parse_time_ms/1`): a seconds-sized number is no time of this venue and is `nil`, not a
+  # 2026 instant reached by guessing the unit from the digits. The stock snapshot
+  # (`snapshot.md:216`, "Last trade time"), the stock depth (`quotes.md:207`, "Quote time") and
+  # the event pages state no unit, so there the seconds-or-milliseconds reading stays.
+  @ms_stated_categories ["US_CRYPTO", "US_OPTION", "US_FUTURES"]
+
+  defp snapshot_time(raw, category) when category in @ms_stated_categories,
+    do: parse_time_ms(raw)
+
+  defp snapshot_time(raw, _unstated_unit), do: parse_time(raw)
+
   # The book's own stamp where the row carries one. `nil` rather than the local clock —
   # `observed_at` already holds that, and says which it is.
-  defp top_of_book_time(row), do: quote_time(row)
+  defp top_of_book_time(row, category), do: quote_time(row, category)
 
   # A flat rate, published, not queried — see the moduledoc note on `get_fees/3`.
   @crypto_spread_pct Decimal.new("1.00")
@@ -2660,7 +2675,7 @@ defmodule DpExchange.Webull.Rest do
 
       with {:ok, body} <- get_symbol(path, params, credentials, opts),
            {:ok, row} <- symbol_row(body, symbol) do
-        to_order_book(row, symbol)
+        to_order_book(row, symbol, category)
       end
     end
   end
@@ -2704,7 +2719,7 @@ defmodule DpExchange.Webull.Rest do
   #
   # The guarantee that mattered is kept and is what the test now asserts directly: an
   # undated book is `nil` here, never this package's clock.
-  defp to_order_book(row, symbol) do
+  defp to_order_book(row, symbol, category) do
     with {:ok, bids} <- book_levels(value(row, ["bids"]), :desc),
          {:ok, asks} <- book_levels(value(row, ["asks"]), :asc) do
       {:ok,
@@ -2712,7 +2727,7 @@ defmodule DpExchange.Webull.Rest do
          symbol: symbol,
          bids: bids,
          asks: asks,
-         venue_time: top_of_book_time(row),
+         venue_time: top_of_book_time(row, category),
          observed_at: DateTime.utc_now(),
          # No sequence on this endpoint. `nil` means the venue did not say, so a caller
          # cannot use this book to detect a gap in a stream.
@@ -3108,7 +3123,8 @@ defmodule DpExchange.Webull.Rest do
         nil
 
       raw ->
-        case parse_time(raw) do
+        # `get-noii-snapshot.md` and `get-noii-bars.md`: "Timestamp in milliseconds".
+        case parse_time_ms(raw) do
           {:ok, at} -> at
           _unparsable -> nil
         end
@@ -3239,8 +3255,24 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **A tick's `time` is documented in milliseconds, so it is read as milliseconds.**
+  # `tick.md:223`, `option-tick.md` and `futures-tick.md` all say "Unix epoch timestamp in
+  # milliseconds". `venue_time/1` tells seconds from milliseconds by magnitude, which is right
+  # for the bar pages that state no unit and wrong here: a seconds-valued `time`
+  # (`1787936147`) was accepted as a real second and dated a trade correctly by accident of
+  # its magnitude, where the documented contract makes it a unit the venue does not use. A
+  # value at or below 100_000_000_000 ms (1973) cannot be a tick of this venue, so it is
+  # refused `:invalid_unix_time` rather than reinterpreted. An ISO string is still read as
+  # written.
+  defp tick_time(tick) do
+    case value(tick, ["time"]) do
+      nil -> {:error, :missing_venue_timestamp}
+      raw -> parse_time_ms(raw)
+    end
+  end
+
   defp to_trade(tick, symbol) do
-    with {:ok, timestamp} <- venue_time(tick),
+    with {:ok, timestamp} <- tick_time(tick),
          {:ok, price} <- required_price(value(tick, ["price"]), :price),
          {:ok, quantity} <- required_size(value(tick, ["volume"]), :quantity) do
       {:ok,
@@ -6180,6 +6212,27 @@ defmodule DpExchange.Webull.Rest do
       raw -> parse_time(raw)
     end
   end
+
+  # A time the page states in milliseconds, read as milliseconds and nothing else: a number at
+  # or below 100_000_000_000 (1973 as milliseconds, so a seconds-sized value) or past thirteen
+  # digits is `:invalid_unix_time`, never reinterpreted in another unit. A number written as
+  # text is read the same way; anything that is not a number (an ISO 8601 string) is read as
+  # written by `parse_time/1`.
+  defp parse_time_ms(value) when is_integer(value), do: strict_epoch_ms(value)
+
+  defp parse_time_ms(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {epoch, ""} -> strict_epoch_ms(epoch)
+      _not_an_epoch -> parse_time(value)
+    end
+  end
+
+  defp parse_time_ms(other), do: parse_time(other)
+
+  defp strict_epoch_ms(ms) when ms > 100_000_000_000 and ms <= 9_999_999_999_999,
+    do: DateTime.from_unix(ms, :millisecond)
+
+  defp strict_epoch_ms(_not_a_millisecond_time), do: {:error, :invalid_unix_time}
 
   defp parse_time(value) when is_integer(value), do: from_epoch(value)
 

@@ -136,11 +136,11 @@ defmodule DpExchange.Webull.FeedReviewTest do
       assert_receive {:hit, @subscribe_path, ["CCCUSD"]}, 5_000
 
       # The deferred message is handled after the call returns; let it run before looking,
-      # then wait for every reconcile to finish so a stray request would already be in the
-      # mailbox: the refute below is a check of settled state, not a timing window.
+      # then wait for every reconcile to finish. A request comes from a task, so the refute
+      # keeps a real window rather than looking once.
       _settled = Feed.coverage(feed)
       wait_until(fn -> :sys.get_state(feed).reconciling == %{} end)
-      refute_receive {:hit, @unsubscribe_path, _symbols}, 0
+      refute_receive {:hit, @unsubscribe_path, _symbols}, 500
 
       shard = :sys.get_state(feed).shards[1]
       assert shard.symbols == [], "the new list is recorded for the link-up replay"

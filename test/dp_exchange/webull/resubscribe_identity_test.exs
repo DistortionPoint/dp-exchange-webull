@@ -95,7 +95,8 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       # Answered after the tick above has been handled.
       assert :sys.get_state(feed).reconciling == %{{:resubscribe, 0} => current}
       assert Process.alive?(live)
-      refute_received :unexpected_subscribe
+      # A request would come from a task, after the state read above, so the window is a wait.
+      refute_receive :unexpected_subscribe, 500
     end
   end
 

@@ -552,7 +552,14 @@ defmodule DpExchange.Webull do
           "schema, NOT measured live against a real response — the endpoint requires a " <>
           "credential this repo does not hold, the same limitation the symbol-count figure " <>
           "above already carries; Rest.list_instruments/2's own moduledoc has the full " <>
-          "derivation and why US_STOCK/US_ETF are refused rather than served"
+          "derivation and why US_STOCK/US_ETF are refused rather than served; " <>
+          "the REST time-unit rule (the tick, option-tick and futures-tick `time`, the " <>
+          "crypto, option and futures snapshots' `last_trade_time` and `quote_time`, the " <>
+          "futures depth `quote_time` and the NOII `imbalance_time` are read as " <>
+          "milliseconds only) follows what each page states and was never measured " <>
+          "against a live response; the stock snapshot, the stock depth, the bars, the " <>
+          "event pages and the streaming protobuf state no unit and keep the " <>
+          "seconds-or-milliseconds reading by magnitude"
     )
   end
 
@@ -1093,15 +1100,15 @@ defmodule DpExchange.Webull do
   its two streamed kinds had gone dark for nearly all of them — the discrepancy hid behind
   the single boolean across two issues before anyone noticed.
 
-  This venue genuinely has three independent kinds, not one adopted only for cross-venue
+  This venue has two independent declared kinds, not two adopted only for cross-venue
   uniformity: every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK`, and this
   package's socket decodes them on separate topics into three different structs — a
   snapshot becomes `DpExchange.Core.Types.Quote` (kind `:quotes`, a traded price), a quote
   becomes `DpExchange.Core.Types.TopOfBook` (kind `:top_of_book`, bid/ask), a tick becomes
-  `DpExchange.Core.Types.Trade` (kind `:trades`, one print) — and any one topic can go
-  quiet without the others doing the same. So the same failure this callback exists to
-  catch on Coinbase can genuinely happen here too: a symbol present under `:quotes` while
-  absent under `:top_of_book`, or any other combination.
+  `DpExchange.Core.Types.Trade` (one print, delivered but not a declared kind, see below) —
+  and any one topic can go quiet without the others doing the same. So the same failure
+  this callback exists to catch on Coinbase can genuinely happen here too: a symbol present
+  under `:quotes` while absent under `:top_of_book`, or the reverse.
 
   The kind reported is derived from the struct type that actually arrived, never assumed
   from `capabilities/0`'s own `streamable` list — so a further kind reaching the feed

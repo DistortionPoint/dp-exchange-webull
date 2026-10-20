@@ -709,7 +709,7 @@ defmodule DpExchange.Webull.Feed do
        max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
-       # shard index => epoch ms its last rotation turn was granted. See
+       # shard index => monotonic ms its last rotation turn was granted. See
        # `resubscribe_quiet_shards/1`: a turn counts as recent activity, so a shard whose
        # symbols never tick does not win every rotation on a `last_delivery` of zero.
        rotated_at: %{},
@@ -1274,6 +1274,23 @@ defmodule DpExchange.Webull.Feed do
   #
   # The socket is left alone for the same reason the refusal clause leaves it alone: the
   # connection may still come good, and what must not persist is the caller's wait.
+  #
+  # **Armed per caller, answers that caller only.** The timer carries the `from` it was armed
+  # for. It used to carry the shard alone and answer EVERY waiter parked on it, so a caller
+  # that joined the same connecting shard nine seconds into another caller's ten-second wait
+  # was answered `:connack_timeout` one second after it arrived, with nine seconds of its own
+  # budget unspent. The three-element form below is the answer-everyone form, kept for a
+  # test or operator that wants the whole shard released at once.
+  def handle_info({:connack_timeout, index, session_id, from}, state) do
+    case Map.get(state.shards, index) do
+      %{session_id: ^session_id, connected?: false, reply_to: [_first | _rest] = waiters} ->
+        {:noreply, time_out_waiter(state, index, waiters, from)}
+
+      _connected_refused_or_replaced ->
+        {:noreply, state}
+    end
+  end
+
   def handle_info({:connack_timeout, index, session_id}, state) do
     case Map.get(state.shards, index) do
       %{session_id: ^session_id, connected?: false, reply_to: [_first | _rest] = waiters} ->
@@ -1884,7 +1901,7 @@ defmodule DpExchange.Webull.Feed do
   # every rotation: it took the permission from the streaming sibling each tick and then
   # delivered nothing with it. Ties (two shards that have had neither) go to the lower index.
   defp rotation_key(state, index),
-    do: {max(last_delivery(state, index), Map.get(state.rotated_at, index, 0)), index}
+    do: {max(last_delivery(state, index), Map.get(state.rotated_at, index, never_ms())), index}
 
   # `opts` and `symbols` are bound outside the closure so it captures those and not the whole
   # `state`, which would be copied into the task's heap on every tick: every delivery record,
@@ -1909,8 +1926,8 @@ defmodule DpExchange.Webull.Feed do
     state.shards
     |> Map.fetch!(index)
     |> Map.fetch!(:symbols)
-    |> Enum.map(&Map.get(state.delivering, &1, 0))
-    |> Enum.max(fn -> 0 end)
+    |> Enum.map(&Map.get(state.delivering, &1, never_ms()))
+    |> Enum.max(fn -> never_ms() end)
   end
 
   defp announce_rotation(state, index, shard) do
@@ -2048,6 +2065,19 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # Answers one parked caller whose own CONNACK deadline arrived, and leaves the rest parked.
+  defp time_out_waiter(state, index, waiters, from) do
+    case List.keytake(waiters, from, 0) do
+      {waiter, rest} ->
+        remaining = if rest == [], do: nil, else: rest
+        state = put_in(state.shards[index].reply_to, remaining)
+        reply_all(state, [waiter], {:error, {:connack_timeout, state.connack_timeout_ms}})
+
+      nil ->
+        state
+    end
+  end
+
   # **A `{:connack_timeout, ...}` timer lives only as long as the caller it was armed for.**
   # Each caller parked on a connecting shard arms one, and it used to run its full
   # `connack_timeout_ms` after the caller was answered by the CONNACK, a refusal, a crash or
@@ -2058,7 +2088,7 @@ defmodule DpExchange.Webull.Feed do
     timer =
       Process.send_after(
         self(),
-        {:connack_timeout, index, session_id},
+        {:connack_timeout, index, session_id, from},
         state.connack_timeout_ms
       )
 
@@ -2822,7 +2852,11 @@ defmodule DpExchange.Webull.Feed do
       send(self(), {:open_shard, index, symbols, state.resubscribe_opts})
       state
     else
-      delay = min(state.open_retry_base_ms * 2 ** min(count - 2, 30), state.open_retry_max_ms)
+      # Jittered, shortened only: shards torn down by one venue fault share the ladder.
+      delay =
+        (state.open_retry_base_ms * 2 ** min(count - 2, 30))
+        |> min(state.open_retry_max_ms)
+        |> Socket.jittered_delay_ms()
 
       Logger.warning(
         "[Webull Feed] shard #{index} has been torn down (#{what}) #{count} times within " <>
@@ -3390,7 +3424,14 @@ defmodule DpExchange.Webull.Feed do
     # The exponent is clamped before the power, as `reopen_after_crash/3` does: `attempt`
     # counts every failed open of an outage and has no ceiling of its own, and the cap is
     # reached long before 2^30 for any sane `open_retry_base_ms`.
-    delay = min(state.open_retry_base_ms * 2 ** min(attempt - 1, 30), state.open_retry_max_ms)
+    #
+    # Jittered, shortened only (`Socket.jittered_delay_ms/1`): up to five shards fail
+    # together when the venue drops, and an identical ladder retried them together on every
+    # rung. The cap stays the ceiling.
+    delay =
+      (state.open_retry_base_ms * 2 ** min(attempt - 1, 30))
+      |> min(state.open_retry_max_ms)
+      |> Socket.jittered_delay_ms()
 
     Logger.warning(
       "[Webull Feed] shard #{index} did not open (#{inspect(reason)}) on attempt " <>
@@ -3577,7 +3618,7 @@ defmodule DpExchange.Webull.Feed do
   # the worst case of doing nothing is a stale subscription set, and the worst case of acting
   # is losing live data.
   #
-  # `delivering` is `%{symbol => epoch_ms}`, written on every arrival. A shard that has never
+  # `delivering` is `%{symbol => monotonic_ms}`, written on every arrival. A shard that has never
   # delivered at all reads as quiet here, which is right: reaching the failure limit takes
   # `resubscribe_failure_limit` minutes, and a working shard delivers well inside that.
   defp shard_delivering?(state, index),
@@ -3593,7 +3634,10 @@ defmodule DpExchange.Webull.Feed do
 
       {:ok, %{symbols: symbols}} ->
         cutoff = now_ms() - window_ms
-        Enum.any?(symbols, fn symbol -> Map.get(state.delivering, symbol, 0) > cutoff end)
+
+        Enum.any?(symbols, fn symbol ->
+          Map.get(state.delivering, symbol, never_ms()) > cutoff
+        end)
     end
   end
 
@@ -3985,14 +4029,16 @@ defmodule DpExchange.Webull.Feed do
   end
 
   # The scale `state.delivering` and `state.rotated_at` are written and compared on:
-  # milliseconds since the epoch on the VM's own system time (`System.system_time/1`), not
-  # `:os.system_time/1`. Both fields are in-VM durations ("did this shard deliver in the last
-  # five minutes", "which shard was rotated longest ago"), and `:os.system_time/1` is the
-  # host's clock: an NTP step or a resync after a bad RTC moved it by whatever distance, so a
-  # forward step made every delivering shard look silent (and a quiet one eligible for a
-  # reopen) and a backward step made a dead shard look alive for that long. The VM's system
-  # time is slewed, never stepped, in the default `no_time_warp` mode. Kept epoch-based, not
-  # monotonic, because `0` is the "never" default these maps are read with and a monotonic
-  # reading can be negative.
-  defp now_ms, do: System.system_time(:millisecond)
+  # `System.monotonic_time(:millisecond)`. Both are in-VM intervals ("did this shard deliver in
+  # the last five minutes", "which shard was rotated longest ago"), and a wall clock is not an
+  # interval source: a step (NTP, a resume from a snapshot) made every delivering shard look
+  # silent, or a dead one look alive for as long as the step was wide, and under
+  # `+C multi_time_warp` the VM's own system time steps too. Neither value is shown to a
+  # consumer: `coverage/1` reads only the keys. A monotonic reading can be negative, so "never
+  # delivered" is `never_ms/0`, not `0`.
+  defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # Older than any reading `now_ms/0` can produce, so a symbol or shard that never delivered
+  # or never had a turn is the oldest, and is never "recent" however small the monotonic clock.
+  defp never_ms, do: -9_223_372_036_854_775_808
 end

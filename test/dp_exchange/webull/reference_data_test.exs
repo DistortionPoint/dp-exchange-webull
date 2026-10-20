@@ -506,8 +506,13 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     test "a category or sentiment outside the page's enum is refused before a request" do
       exploding = fn _conn -> raise "must not reach the venue" end
 
-      for opts <- [[category: "EU"], [sentiment: "BULL"], [sentiment: 5], [category: %{}]] do
-        assert {:error, {:invalid_option, _key, _value}} =
+      for {opts, key, value} <- [
+            {[category: "EU"], :category, "EU"},
+            {[sentiment: "BULL"], :sentiment, "BULL"},
+            {[sentiment: 5], :sentiment, 5},
+            {[category: %{}], :category, %{}}
+          ] do
+        assert {:error, {:invalid_option, ^key, ^value}} =
                  Rest.get_news(@credentials, [symbols: ["TSLA"], plug: exploding] ++ opts)
       end
     end
@@ -1133,12 +1138,14 @@ defmodule DpExchange.Webull.ReferenceDataTest do
         |> Plug.Conn.resp(500, Jason.encode!(%{"error" => "nope"}))
       end
 
-      assert {:error, _reason} =
+      assert {:error, {:exchange_error, :webull, message}} =
                Rest.get_corporate_events(@credentials,
                  symbol: "AAPL",
                  plug: plug,
                  retry_attempts: 0
                )
+
+      assert message =~ "500"
     end
 
     test "a paged listing that answers with a bare list still comes back paged" do

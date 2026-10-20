@@ -541,40 +541,40 @@ defmodule DpExchange.Webull.WatchlistsTest do
       assert {:error, {:unknown_option, :retry_attempts}} =
                DpExchange.Webull.delete_watchlist("wl-1", base ++ [plug: ok()])
 
-      assert {:ok, [_watchlist]} =
+      assert {:ok, [%Types.Watchlist{id: "wl-1"}]} =
                DpExchange.Webull.list_watchlists(
                  base ++ [plug: responding([%{"watchlist_id" => "wl-1"}])]
                )
 
-      assert {:ok, _read} =
+      assert {:ok, %Types.Watchlist{id: "wl-1"}} =
                DpExchange.Webull.get_watchlist(
                  "wl-1",
                  base ++ [plug: responding([%{"watchlist_id" => "wl-1"}])]
                )
 
-      assert {:ok, _created} =
+      assert {:ok, %Types.Watchlist{id: "wl-new"}} =
                DpExchange.Webull.create_watchlist(
                  "Tech",
                  [],
                  once ++ [plug: responding([%{"watchlist_id" => "wl-new"}])]
                )
 
-      assert {:ok, _updated} =
+      assert {:ok, %Types.Watchlist{id: "wl-1", name: "X"}} =
                DpExchange.Webull.update_watchlist("wl-1", once ++ [name: "X", plug: ok()])
 
       assert {:ok, :ok} = DpExchange.Webull.delete_watchlist("wl-1", once ++ [plug: ok()])
 
-      assert {:ok, _added} =
+      assert {:ok, %{"success" => true}} =
                DpExchange.Webull.add_watchlist_instruments("wl-1", ["AAPL"], once ++ [plug: ok()])
 
-      assert {:ok, _removed} =
+      assert {:ok, %{"success" => true}} =
                DpExchange.Webull.remove_watchlist_instruments(
                  "wl-1",
                  ["AAPL"],
                  once ++ [plug: ok()]
                )
 
-      assert {:ok, _sorted} =
+      assert {:ok, %{"success" => true}} =
                DpExchange.Webull.sort_watchlist_instruments(
                  "wl-1",
                  once ++ [sorts: %{"AAPL" => 1}, plug: ok()]
@@ -600,7 +600,7 @@ defmodule DpExchange.Webull.WatchlistsTest do
     test "a failing create is attempted exactly once" do
       counter = :counters.new(1, [])
 
-      assert {:error, _reason} =
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
                Rest.create_watchlist("desk", [], @credentials,
                  plug: counting_failure(counter),
                  retry_delay: 1

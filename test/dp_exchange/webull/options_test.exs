@@ -137,11 +137,13 @@ defmodule DpExchange.Webull.OptionsTest do
                )
 
       # The underlying the row names, in either case, is the one asked for.
-      assert {:ok, _chain} =
+      assert {:ok, %Types.OptionChain{underlying: "AAPL"} = lower} =
                Rest.get_option_chain("AAPL", @credentials,
                  plug: responding([contract(%{"underlying_symbol" => "aapl"})]),
                  retry_attempts: 0
                )
+
+      assert lower.expiries[~D[2026-03-20]][Decimal.new("100")].call
     end
 
     test "the same contract listed twice is one contract" do

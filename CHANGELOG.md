@@ -22,6 +22,93 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick AP)
+
+- **A caller that joined a connecting shard was answered `{:connack_timeout, ms}` when an
+  EARLIER caller's deadline arrived.** Each parked caller armed a `{:connack_timeout, index,
+  session_id}` timer, and the first to fire answered every waiter on the shard, so a call that
+  arrived nine seconds into another's ten-second wait was told the shard had not connected after
+  one second. The timer now carries the caller it was armed for (`{:connack_timeout, index,
+  session_id, from}`) and answers that caller only; the three-element form still answers every
+  waiter. Test: `feed_test.exs`, "a per-caller timeout answers that caller only".
+
+- **A tick's `time` was read by magnitude although the page documents milliseconds.**
+  `get_trades/2` took a ten-digit number for seconds, so a seconds-valued tick time dated the
+  trade 2026 for a field `tick.md` types as epoch milliseconds. It is read as milliseconds only
+  now; a value at or below 100,000,000,000 (a seconds-sized number, `0`) is
+  `{:error, :invalid_unix_time}`. Bars and the stream (which state no unit) keep the
+  documented seconds-or-milliseconds reading. Test: `tick_ap_test.exs`.
+
+- **The shard reopen ladders had a cap and no jitter.** `reopen_with_backoff/4` (a crashed
+  socket or INVALID_SESSION) and `retry_shard_open/7` (a shard that failed to open) retried
+  every shard torn down by one venue fault on the same 1s, 2s, 4s ... schedule. Each wait is now
+  shortened by a random amount of up to a quarter (`Socket.jittered_delay_ms/1`, never
+  lengthened, so the 60s cap holds). Test: `shard_reopen_backoff_test.exs`.
+
+- **Snapshot, quote, depth and imbalance times were read by magnitude although the pages state
+  milliseconds.** The crypto, option and futures snapshots (`last_trade_time`, `quote_time`), the
+  futures depth `quote_time` and the NOII `imbalance_time` are documented as epoch
+  milliseconds; a seconds-sized number there was read as seconds and dated a quote 2026. They
+  are read as milliseconds only (`parse_time_ms/1`): a seconds-sized or non-positive number is
+  no time, so `venue_time` is `nil` on a quote, a top of book, a depth or an imbalance. The
+  stock snapshot, the stock depth, the bars and the event pages state no unit and keep the
+  seconds-or-milliseconds reading. `capabilities/0`'s `measured_against` now says the rule is
+  documented, not measured. Tests: `rest_test.exs`, `microstructure_test.exs`,
+  `futures_and_events_test.exs`, `defensive_branches_test.exs`.
+
+- **`Feed` decided delivery staleness, shard rotation and quiet-shard reopens on the wall
+  clock.** `now_ms/0` was `System.system_time/1`, so a clock step (NTP, a VM resume) made a
+  shard look freshly delivered, or silent for hours, and the rotation or the reopen fired early
+  or never. Every interval it decides is on `System.monotonic_time/1` now, through the same
+  `now_ms/0` the tests inject; "never delivered" is a minimum-integer sentinel (the monotonic
+  clock is negative on the BEAM, so `0` is not "never"). The delivery and rotation records are
+  never shown to a consumer. Tests: `tick_ap_test.exs` ("an arrival is stamped on the
+  monotonic clock", "a shard that never delivered is quiet and is re-asserted") and the existing
+  feed tests, which inject monotonic instants.
+
+- **`Auth.timestamp/1` read the clock with no seam.** It takes the instant from
+  `Config.get(:dp_exchange_webull, :webull_clock, nil)` (a zero-arity function, process-scoped
+  like every other override) when set, else `DateTime.utc_now/0`. Test: `tick_ap_test.exs`
+  ("a retry carries a later x-timestamp and a different x-signature-nonce").
+
+### Docs
+
+- `DpExchange.Webull.coverage_by_kind/1` called `:trades` one of "three independent kinds" and,
+  three paragraphs later, said `:trades` never appears. The venue streams three payload topics
+  and declares two kinds; the text says so.
+- `usage-rules.md` states the REST time-unit rule per page.
+
+### Tests
+
+- `refute_receive` windows that guard a negative were 0, 50, 100, 200 or 300 ms, or the
+  100 ms ExUnit default, shorter than the task and HTTP-stub hops they wait out. They are 500 ms
+  now, and `test_helper.exs` sets `refute_receive_timeout: 500` (its comment already said the
+  option existed and left it at the default). A `refute_received` after a call that returns
+  before an asynchronous reconcile task has run (the plug sends from the task) is now a
+  `refute_receive` with a window.
+- Assertions that could not fail were tightened: a `flunk/1` inside a plug that runs in a
+  reconcile task (the test passed whether or not the request was made) reports to the test
+  process and is refuted instead; an `{:error, _reason}` or `{:ok, _}` that named no reason or
+  value now pins it (the dial that failed, the HTTP 500 carried in `:exchange_error`, a write
+  that is `:write_unconfirmed`, the missing-credentials refusal, the facade's delegated
+  answers); a `Socket.disconnect/2` timeout is the `{:exit, {:timeout, _}}` it returns.
+
+### Audited, no change
+
+- `x-timestamp` is `YYYY-MM-DDThh:mm:ssZ` (second precision, UTC) as every reference page
+  states, and is minted per attempt AFTER the rate limiter has cleared (Core signs again once a
+  blocking wait is over); `x-signature-nonce` is 128 random bits per attempt.
+- The MQTT keep-alive and PINGRESP-silence timers carry a per-connection reference and are
+  cancelled on disconnect; the CONNACK deadline matches its shard by session id; the socket
+  reconnect backoff is capped at 30s and jittered. The package holds no access token, so there
+  is no expiry check to skew: `expires_at` / `expires_in` are passed through as the venue sent
+  them.
+- `Fake` returns canned structs and never parses a wire time, so there is no seconds-valued
+  tick for it to refuse; its REST-shaped time fields (the event book's `quote_time`, a tick's
+  `time`) are milliseconds, as the real path now requires.
+- `quote_proto.ex` and `mqtt_packet.ex` hold no clock and no timer (the keep-alive is a CONNECT
+  field and the PINGREQ schedule lives in `Socket`); `webull.ex` holds no token state.
+
 ## [0.4.166] - 2026-10-20
 
 ### Dependencies

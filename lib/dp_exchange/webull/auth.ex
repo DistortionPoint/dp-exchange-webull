@@ -67,6 +67,8 @@ defmodule DpExchange.Webull.Auth do
   know the six steps above were read the same way the venue meant them.
   """
 
+  alias DpExchange.Core.Config
+
   @typedoc "Credentials the host obtained. Signed with, and not kept."
   @type credentials :: %{
           required(:app_key) => String.t(),
@@ -267,11 +269,23 @@ defmodule DpExchange.Webull.Auth do
   signed all the same.
   """
   @spec timestamp(DateTime.t()) :: String.t()
-  def timestamp(now \\ DateTime.utc_now()) do
+  def timestamp(now \\ clock_now()) do
     now
     |> DateTime.to_unix()
     |> DateTime.from_unix!()
     |> DateTime.to_iso8601(:extended)
+  end
+
+  # The wall clock a request is stamped from. A process-scoped seam (`Core.Config`, so an async
+  # test sets its own and a request task launched inside it finds it): `:webull_clock` is a
+  # zero-arity function returning a `DateTime`. Unset, which is every production call, it is
+  # `DateTime.utc_now/0`. The stamp is read when a request is SIGNED, which `Core.HttpClient`
+  # does per attempt and again after a blocking rate-limit wait.
+  defp clock_now do
+    case Config.get(:dp_exchange_webull, :webull_clock, nil) do
+      clock when is_function(clock, 0) -> clock.()
+      _unset -> DateTime.utc_now()
+    end
   end
 
   defp with_access_token(headers, token) when is_binary(token) and token != "",

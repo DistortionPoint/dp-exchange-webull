@@ -575,7 +575,7 @@ defmodule DpExchange.Webull.RestTest do
           }
         ]
 
-        assert {:error, _reason} =
+        assert {:error, :invalid_unix_time} =
                  Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
                    plug: responding(body),
                    retry_attempts: 0
@@ -634,26 +634,77 @@ defmodule DpExchange.Webull.RestTest do
   end
 
   describe "epoch precision" do
-    test "milliseconds and seconds are told apart by magnitude" do
-      # Guessing wrong puts a 2026 bar in 1970 or in the year 58,000 — both loud, which is
-      # why this is a threshold rather than a silent fallback.
+    test "where the page states no unit (the stock snapshot) milliseconds and seconds are told " <>
+           "apart by magnitude" do
+      # `snapshot.md:216` says only "Last trade time". Guessing wrong puts a 2026 bar in 1970
+      # or in the year 58,000 — both loud, which is why this is a threshold rather than a silent
+      # fallback.
       seconds = [%{"price" => "1", "last_trade_time" => 1_787_936_147}]
       millis = [%{"price" => "1", "last_trade_time" => 1_787_936_147_000}]
 
       assert {:ok, from_seconds} =
-               Rest.get_price("BTC-USD", @credentials,
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
                  plug: responding(seconds),
                  retry_attempts: 0
                )
 
       assert {:ok, from_millis} =
-               Rest.get_price("BTC-USD", @credentials,
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
                  plug: responding(millis),
                  retry_attempts: 0
                )
 
-      assert from_seconds.venue_time.year == 2026
-      assert from_millis.venue_time.year == 2026
+      assert from_seconds.venue_time == ~U[2026-08-28 16:55:47Z]
+      assert DateTime.compare(from_millis.venue_time, ~U[2026-08-28 16:55:47Z]) == :eq
+    end
+
+    test "where the page states milliseconds (crypto, option, futures) a seconds-sized time is " <>
+           "no time, not a guessed one" do
+      # `crypto-snapshot.md:185,221`, `option-snapshot.md:223,274`, `futures-snapshot.md:223,234`:
+      # "Unix epoch ... in milliseconds". 1_787_936_147 read as milliseconds is January 1970, and
+      # read as seconds (the old magnitude guess) is a 2026 instant the venue never stated.
+      stamp = 1_787_936_147
+      seconds = [%{"price" => "1", "last_trade_time" => stamp, "quote_time" => stamp}]
+
+      for {category, symbol} <- [
+            {"US_CRYPTO", "BTC-USD"},
+            {"US_OPTION", "AAPL260522C00300000"},
+            {"US_FUTURES", "ESZ5"}
+          ] do
+        assert {:ok, quoted} =
+                 Rest.get_price(symbol, @credentials,
+                   category: category,
+                   plug: responding(seconds),
+                   retry_attempts: 0
+                 )
+
+        assert quoted.venue_time == nil, "#{category}: a seconds-sized time was guessed"
+
+        assert {:ok, book} =
+                 Rest.get_top_of_book(symbol, @credentials,
+                   category: category,
+                   plug: responding([Map.put(hd(seconds), "bid", "1")]),
+                   retry_attempts: 0
+                 )
+
+        assert book.venue_time == nil, "#{category}: a seconds-sized time was guessed"
+      end
+    end
+
+    test "a millisecond time on those endpoints is read, as a number or as text" do
+      for time <- [1_787_936_147_000, "1787936147000"] do
+        body = [%{"price" => "1", "last_trade_time" => time}]
+
+        assert {:ok, quoted} =
+                 Rest.get_price("BTC-USD", @credentials,
+                   plug: responding(body),
+                   retry_attempts: 0
+                 )
+
+        assert DateTime.compare(quoted.venue_time, ~U[2026-08-28 16:55:47Z]) == :eq
+      end
     end
 
     test "an ISO-8601 timestamp is read too" do

@@ -137,7 +137,7 @@ defmodule DpExchange.Webull.TickAmSubTypesTest do
       # Something new: signed from the call's own credentials, which it does not carry. The
       # fake answers what the real feed answers.
       real = Feed.subscribe(feed, ["ETH-USD"], limiter: limiter)
-      assert {:error, _reason} = real
+      assert real == missing
       assert real == Fake.subscribe(["ETH-USD"], to: self())
       assert missing == Fake.unsubscribe(["BTC-USD"])
 
@@ -157,10 +157,11 @@ defmodule DpExchange.Webull.TickAmSubTypesTest do
       assert :ok == Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], subscribe_opts(limiter))
 
       # No credentials on the call: the HTTP request cannot be signed, so the call is refused.
-      assert {:error, _reason} = Feed.unsubscribe(feed, ["ETH-USD"], limiter: limiter)
+      missing = {:error, {:missing_credentials, :webull}}
+      assert missing == Feed.unsubscribe(feed, ["ETH-USD"], limiter: limiter)
       assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
 
-      assert {:error, _reason} = Feed.update_symbols(feed, ["SOL-USD"], limiter: limiter)
+      assert missing == Feed.update_symbols(feed, ["SOL-USD"], limiter: limiter)
       assert Feed.wanted(feed) == ["BTC-USD", "ETH-USD"]
     end
 

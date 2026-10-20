@@ -142,7 +142,7 @@ defmodule DpExchange.Webull.FailClosedEdgesTest do
     test "the OAuth token exchange is sent once, never retried" do
       counter = :counters.new(1, [])
 
-      assert {:error, _reason} =
+      assert {:error, {:write_unconfirmed, nil, _reason}} =
                Rest.oauth_token("CLIENT", "secret",
                  code: "single-use",
                  plug: counting(counter, 503, %{}),

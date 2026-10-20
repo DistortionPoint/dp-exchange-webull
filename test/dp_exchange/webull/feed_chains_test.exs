@@ -55,7 +55,7 @@ defmodule DpExchange.Webull.FeedChainsTest do
     test "a call answered at once holds no timer" do
       feed = start_feed(shards: %{})
 
-      assert {:error, _reason} =
+      assert {:error, {:missing_required_field, :app_key}} =
                Feed.subscribe(feed, ["AAA-USD"], credentials: %{app_secret: "s"})
 
       assert :sys.get_state(feed).caller_timers == %{}
