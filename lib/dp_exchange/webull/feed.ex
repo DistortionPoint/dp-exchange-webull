@@ -414,7 +414,7 @@ defmodule DpExchange.Webull.Feed do
 
   alias DpExchange.Core.{Config, Fanout, Notice, Telemetry}
   alias DpExchange.Core.Types.{Quote, TopOfBook, Trade}
-  alias DpExchange.Webull.{Auth, Credentials, Environment, Socket, Subscription}
+  alias DpExchange.Webull.{Auth, Credentials, Environment, Ledger, Socket, Subscription}
 
   require Logger
 
@@ -791,8 +791,101 @@ defmodule DpExchange.Webull.Feed do
        # out several real five-second gaps.
        shard_spacing_ms: Config.opt(opts, :shard_spacing_ms, @shard_spacing_ms),
        # Monotonic ms of the last background (staggered) open; see `{:open_staggered, ...}`.
-       last_background_open: nil
-     }}
+       last_background_open: nil,
+       # The process that outlives this one and holds its durable intent (`Ledger`), or `nil`
+       # for a feed started on its own. `ledgered` is what was last written there, so a change
+       # is written once, when it is accepted. See `persist/1`.
+       ledger: Keyword.get(opts, :ledger),
+       ledgered: nil
+     }, {:continue, :restore}}
+  end
+
+  # **A restarted feed picks its intent back up.** A crash used to restart this process from its
+  # static options: no wanted symbols, no subscribers, `coverage/1` empty, and nobody told. The
+  # sockets died with it (linked), so the stream was gone with nothing saying so. `Ledger`
+  # holds what the previous incarnation had accepted; this reads it here and not in `init/1`,
+  # so the supervisor is never held up by it. Subscribers are monitored again (a dead one is
+  # dropped), shards are planned again from the wanted set (opened staggered, as any background
+  # open is), and every subscriber is told with a `:coverage_change` notice.
+  @impl true
+  def handle_continue(:restore, %{ledger: nil} = state), do: {:noreply, state}
+
+  def handle_continue(:restore, state) do
+    case Ledger.fetch(state.ledger) do
+      {:ok, intent} -> {:noreply, restore(state, intent)}
+      :none -> {:noreply, state}
+    end
+  end
+
+  defp restore(state, intent) do
+    subscribers = Enum.filter(intent.subscribers, &subscriber_alive?/1)
+    notice_subscribers = Enum.filter(intent.notice_subscribers, &subscriber_alive?/1)
+    monitors = Enum.reduce(subscribers ++ notice_subscribers, state.monitors, &Fanout.watch/2)
+
+    state = %{
+      state
+      | wanted: MapSet.new(intent.wanted),
+        subscribers: MapSet.new(subscribers),
+        notice_subscribers: MapSet.new(notice_subscribers),
+        monitors: monitors,
+        resubscribe_opts: Keyword.merge(state.resubscribe_opts, intent.resubscribe_opts)
+    }
+
+    state = if intent.wanted == [], do: state, else: resync(state)
+    announce_restart(state)
+    persist(state)
+  end
+
+  # A local pid must still be alive; a name or a remote pid is kept, as `Core.Fanout` keeps them.
+  defp subscriber_alive?(pid) when is_pid(pid) and node(pid) == node(), do: Process.alive?(pid)
+  defp subscriber_alive?(_name_or_remote), do: true
+
+  defp announce_restart(state) do
+    audience = MapSet.union(state.subscribers, state.notice_subscribers)
+
+    if MapSet.size(audience) > 0 do
+      symbols = state.wanted |> MapSet.to_list() |> Enum.sort()
+
+      notice =
+        Notice.new(:coverage_change, :webull,
+          severity: :warning,
+          message:
+            "the feed restarted: its #{length(symbols)} wanted symbol(s) and its subscribers " <>
+              "were restored and its sockets are being reopened - coverage is empty until " <>
+              "payloads arrive again",
+          details: %{reason: :feed_restarted, symbols: symbols}
+        )
+
+      fan_out(audience, {:dp_exchange, :webull, notice})
+    end
+
+    :ok
+  end
+
+  # Writes the durable intent when it differs from what was last written. Called where a change
+  # has been ACCEPTED - a caller answered (`reply_caller/3`, after `settle_undo/3` has taken back
+  # whatever a refusal reverted), a notice subscriber added, a subscriber dropped - so a refused
+  # call never reaches the ledger. A write that fails is not recorded as done and is repeated at
+  # the next accepted change.
+  defp persist(%{ledger: nil} = state), do: state
+
+  defp persist(state) do
+    current = intent(state)
+
+    cond do
+      current == state.ledgered -> state
+      Ledger.put(state.ledger, current) == :ok -> %{state | ledgered: current}
+      true -> state
+    end
+  end
+
+  defp intent(state) do
+    %{
+      wanted: state.wanted |> MapSet.to_list() |> Enum.sort(),
+      subscribers: state.subscribers |> MapSet.to_list() |> Enum.sort(),
+      notice_subscribers: state.notice_subscribers |> MapSet.to_list() |> Enum.sort(),
+      resubscribe_opts: state.resubscribe_opts
+    }
   end
 
   @impl true
@@ -845,7 +938,7 @@ defmodule DpExchange.Webull.Feed do
             monitors: Fanout.watch(subscriber, state.monitors)
         }
 
-        {:reply, :ok, state}
+        {:reply, :ok, persist(state)}
 
       {:error, _reason} = refused ->
         {:reply, refused, state}
@@ -1521,10 +1614,33 @@ defmodule DpExchange.Webull.Feed do
   # "let it crash" means the reconnect-and-resubscribe path this module already has
   # handles recovery, not that shutdown must also clean up the wire.
   @impl true
-  def terminate(:normal, state), do: disconnect_connected_shards(state)
+  def terminate(:normal, state) do
+    disconnect_connected_shards(state)
+    stop_shard_sockets(state)
+  end
+
   def terminate(:shutdown, state), do: disconnect_connected_shards(state)
   def terminate({:shutdown, _reason}, state), do: disconnect_connected_shards(state)
   def terminate(_crash_reason, _state), do: :ok
+
+  # **A `:normal` exit of this process does not reach a socket through its link, so a clean
+  # stop with that reason stops them itself.** `WebSockex` does not trap exits (nothing in it,
+  # or in `DpExchange.Webull.Vendor.WebSockex`, sets the flag), and a process that is not
+  # trapping ignores an exit signal whose reason is `:normal`. So `GenServer.stop(feed)` -
+  # reason `:normal` - ended this process and left every socket it had opened running:
+  # DISCONNECT had told the venue the session was over, the socket's `handle_disconnect/2`
+  # then reconnected as it does for any drop, and it went on doing so, delivering to a dead
+  # pid, for as long as the node lived. Each is one of the venue's five connections per App
+  # Key. A supervisor's `:shutdown` and a crash both kill the sockets through the link, which
+  # is why this went unnoticed; the sweep is for the one reason that does not.
+
+  # Not this process's own pid: a test fixture can hand `terminate/2` a shard whose socket is
+  # the caller (see `Socket.disconnect/2`'s `:calling_self`), and stopping that would be
+  # stopping ourselves from inside our own shutdown.
+  defp stop_shard_sockets(state) do
+    for {_index, %{socket: socket}} <- state.shards, socket != self(), do: stop_socket(socket)
+    :ok
+  end
 
   # Best-effort, one MQTT `DISCONNECT` per shard still connected — see `Socket.disconnect/2`
   # and `MqttPacket.disconnect/0` for what this sends and why. A shard that never linked up
@@ -1842,7 +1958,7 @@ defmodule DpExchange.Webull.Feed do
   # which finds nobody waiting and does nothing, so no flush is needed.
   defp reply_caller(state, from, result) do
     GenServer.reply(from, result)
-    state |> release_caller(from) |> settle_undo(from, result)
+    state |> release_caller(from) |> settle_undo(from, result) |> persist()
   end
 
   # **A refused call changes no state.** `apply_subscribe/5`, `apply_unsubscribe/4` and
@@ -1981,7 +2097,7 @@ defmodule DpExchange.Webull.Feed do
         GenServer.reply(from, answer)
         # Parked callers are released here and never answered again, so this is where the
         # refusal is settled: the shard is not connected, so re-planning only edits its list.
-        settle_undo(state, from, answer)
+        state |> settle_undo(from, answer) |> persist()
 
       {:reconciling, overflow} ->
         GenServer.reply(
@@ -2437,9 +2553,9 @@ defmodule DpExchange.Webull.Feed do
 
     if was_data_subscriber? and MapSet.size(state.subscribers) == 0 and
          MapSet.size(state.wanted) > 0 do
-      {:noreply, release_wanted(state)}
+      {:noreply, state |> release_wanted() |> persist()}
     else
-      {:noreply, state}
+      {:noreply, persist(state)}
     end
   end
 

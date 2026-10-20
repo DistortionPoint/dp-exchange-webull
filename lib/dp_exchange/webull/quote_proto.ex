@@ -174,8 +174,14 @@ defmodule DpExchange.Webull.QuoteProto do
   # Length-delimited: strings and nested messages, which is every field in this schema.
   # Kept as a binary — whether it is text or a sub-message depends on the field, and only
   # the caller knows which.
+  #
+  # **A length past the end of the buffer is refused by a comparison, not by a failed match.**
+  # A varint may announce up to 2^70, and handing that to `binary-size(length)` leaves what the
+  # runtime does with an absurd size to the runtime. The check keeps this decoder's "ends the
+  # walk, never raises" promise explicit, and costs one integer comparison.
   defp decode_value(2, binary) do
     with {length, rest} <- decode_varint(binary),
+         true <- length <= byte_size(rest),
          <<value::binary-size(length), remainder::binary>> <- rest do
       {value, remainder}
     else

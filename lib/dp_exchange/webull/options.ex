@@ -168,8 +168,18 @@ defmodule DpExchange.Webull.Options do
   @spec check(atom(), term(), [atom()]) ::
           :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
   def check(function, opts, extra \\ []) do
-    CoreOptions.check(opts, transport(function) ++ own_keys(function) ++ extra)
+    allowed = transport(function) ++ name_keys(function) ++ own_keys(function) ++ extra
+    CoreOptions.check(opts, allowed)
   end
+
+  # `:name` is the tree a call addresses (`DpExchange.Webull.Supervisor`): the facade resolves
+  # that tree's feed and limiter from it, as it does for `:feed` and `:limiter`. It is read by
+  # every call that reaches the limiter or the feed, and by nothing else: `get_fees/2` builds no
+  # request, and `streaming?/1` and `live?/1` resolve only the environment.
+  @no_name [:get_fees, :streaming?, :live?]
+
+  defp name_keys(function) when function in @no_name, do: []
+  defp name_keys(_function), do: [:name]
 
   # The transport keys `function` reads, from `DpExchange.Core.Options.transport_options/0`.
   #
@@ -243,10 +253,21 @@ defmodule DpExchange.Webull.Options do
       {:error, {:unknown_option, key}} ->
         raise ArgumentError, "#{function}/1 does not take the option #{inspect(key)}"
 
+      # The value is described, not echoed. A caller that builds `opts` wrongly (a map, say) is
+      # likely to have put `:credentials` in it, and the message of an exception is what ends up
+      # in a log; the options as given never go through `Credentials.wrap_opt/1` on this path.
       {:error, {:invalid_options, bad}} ->
-        raise ArgumentError, "#{function}/1 takes a keyword list, got: #{inspect(bad)}"
+        raise ArgumentError,
+              "#{function}/1 takes a keyword list, got #{describe(bad)} " <>
+                "(not shown: options may carry credentials)"
     end
   end
+
+  defp describe(term) when is_map(term), do: "a map"
+  defp describe(term) when is_list(term), do: "a list that is not a keyword list"
+  defp describe(term) when is_binary(term), do: "a string"
+  defp describe(nil), do: "nil"
+  defp describe(_term), do: "another term"
 
   @doc """
   The symbol is checked first, then the options: `{:error, {:invalid_symbol, symbol}}` wins

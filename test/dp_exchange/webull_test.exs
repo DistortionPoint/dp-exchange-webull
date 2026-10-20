@@ -203,14 +203,14 @@ defmodule DpExchange.WebullTest do
   end
 
   describe "the supervision tree" do
-    test "starts a limiter and a feed, and no socket" do
+    test "starts a ledger, a limiter and a feed, and no socket" do
       unique = System.unique_integer([:positive])
       opts = [name: :"sup_#{unique}", feed: :"feed_#{unique}", limiter: :"lim_#{unique}"]
 
       assert {:ok, pid} = Webull.start_link(opts)
       on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :shutdown) end)
 
-      assert length(Elixir.Supervisor.which_children(pid)) == 2
+      assert length(Elixir.Supervisor.which_children(pid)) == 3
       assert Webull.coverage(feed: opts[:feed]) == %{}
       assert Webull.coverage_by_kind(feed: opts[:feed]) == %{}
     end
@@ -351,6 +351,7 @@ defmodule DpExchange.WebullTest do
 
       assert :ok =
                Webull.subscribe(["BTC-USD"],
+                 name: opts[:name],
                  feed: opts[:feed],
                  credentials: @credentials,
                  plug: plug,

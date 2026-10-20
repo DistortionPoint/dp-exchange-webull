@@ -416,8 +416,13 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       # 5000 ms, not the 500 ms default: under the full --cover gate the call can queue past it.
       assert Socket.disconnect(socket, 5_000) == :ok
 
+      # A `:normal` stop also stops the socket (tick AO), and this test is the socket's parent:
+      # trapping turns the exit it is linked to into a message instead of ending the test.
+      Process.flag(:trap_exit, true)
+
       shards = %{0 => %{connected_shard("tick-aa-live") | socket: socket}}
       assert Feed.terminate(:normal, %{shards: shards}) == :ok
+      assert_receive {:EXIT, ^socket, :shutdown}, 5_000
     end
   end
 end

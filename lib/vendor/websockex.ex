@@ -45,6 +45,12 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   alias WebSockex.{Utils}
   @handshake_guid "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+  # The largest WebSocket frame, or fragmented message, this fork will wait for. **Chosen, not
+  # measured**: Webull documents no message size, an MQTT packet on this stream is held to 1 MiB
+  # by `DpExchange.Webull.MqttPacket`, and a frame may carry several of them. See "What changed
+  # from upstream 0.5.1", item 4.
+  @max_frame_bytes 4_194_304
+
   @moduledoc ~S"""
   A **vendored, patched fork of `websockex` 0.5.1**, private to this package — never
   `alias`ed or referenced as `WebSockex` from outside `DpExchange.Webull`, and not part
@@ -84,7 +90,8 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
 
   ## What changed from upstream 0.5.1
 
-  **Exactly three things**, each marked `## VENDORED FIX` at its call site below:
+  **Four things**, each marked `## VENDORED FIX` at its call site below (the first three
+  are the original fork; the fourth was added in tick AO, see the end of this list):
 
   1. `websocket_loop/3` gains a clause for `{:error, %WebSockex.FrameError{}}`, routed
      through the *already-existing* `handle_close({:error, reason}, ...)` path that
@@ -109,6 +116,16 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
      task is killed and the attempt ends as `%WebSockex.ConnError{original: :timeout}`, the
      error a timed-out `recv` already produces, so the existing start and reconnect paths
      handle it unchanged. Added 2026-09-27.
+  4. `websocket_loop/3` refuses a frame, or a fragmented message, larger than
+     `@max_frame_bytes` (4 MiB, chosen and not measured). Upstream buffers whatever a peer
+     announces: a header declaring a 64-bit payload length kept the process reading into one
+     ever-growing binary (each TCP segment copying all of it again, so quadratic work as well
+     as unbounded memory) until the node ran out, and a message built from continuation
+     frames grew the same way. The connection is closed as RFC 6455 section 7.4.1 asks of a
+     frame that is too big (`%WebSockex.FrameError{reason: :frame_too_large}` or close code
+     1009), and the ordinary disconnect and reconnect path takes over. The MQTT layer's own
+     1 MiB packet bound (`MqttPacket`) cannot help here: it only sees a frame once it is whole.
+     Added in tick AO.
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
@@ -931,40 +948,73 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
         handle_close({:error, frame_error}, parent, debug, state)
 
       :incomplete ->
-        transport = state.conn.transport
-        socket = state.conn.socket
-
-        receive do
-          {:system, from, req} ->
-            state = Map.put(state, :connection_status, :connected)
-            :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
-
-          {:"$websockex_cast", msg} ->
-            debug = Utils.sys_debug(debug, {:in, :cast, msg}, state)
-            common_handle({:handle_cast, msg}, parent, debug, state)
-
-          {:"$websockex_send", from, frame} ->
-            sync_send(frame, from, parent, debug, state)
-
-          {^transport, ^socket, message} ->
-            buffer = read_all_data(transport, socket, [message, state.buffer])
-            websocket_loop(parent, debug, %{state | buffer: buffer})
-
-          {:tcp_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:ssl_closed, ^socket} ->
-            handle_close({:remote, :closed}, parent, debug, state)
-
-          {:EXIT, ^parent, reason} ->
-            terminate(reason, parent, debug, state)
-
-          msg ->
-            debug = Utils.sys_debug(debug, {:in, :msg, msg}, state)
-            common_handle({:handle_info, msg}, parent, debug, state)
-        end
+        await_frame(parent, debug, state)
     end
   end
+
+  # ## VENDORED FIX (4, tick AO) — the rest of an incomplete frame is waited for only if the frame
+  # is one this fork will accept. See the moduledoc, item 4.
+  defp await_frame(parent, debug, state) do
+    if frame_too_large?(state.buffer) do
+      # A prefix of the header only: the exception's message prints its buffer, and the
+      # buffer here is whatever a peer chose to send.
+      error = %WebSockex.FrameError{
+        reason: :frame_too_large,
+        opcode: nil,
+        buffer: binary_part(state.buffer, 0, min(byte_size(state.buffer), 10))
+      }
+
+      handle_close({:error, error}, parent, debug, state)
+    else
+      receive_data(parent, debug, state)
+    end
+  end
+
+  defp receive_data(parent, debug, state) do
+    transport = state.conn.transport
+    socket = state.conn.socket
+
+    receive do
+      {:system, from, req} ->
+        state = Map.put(state, :connection_status, :connected)
+        :sys.handle_system_msg(req, from, parent, __MODULE__, debug, state)
+
+      {:"$websockex_cast", msg} ->
+        debug = Utils.sys_debug(debug, {:in, :cast, msg}, state)
+        common_handle({:handle_cast, msg}, parent, debug, state)
+
+      {:"$websockex_send", from, frame} ->
+        sync_send(frame, from, parent, debug, state)
+
+      {^transport, ^socket, message} ->
+        buffer = read_all_data(transport, socket, [message, state.buffer])
+        websocket_loop(parent, debug, %{state | buffer: buffer})
+
+      {:tcp_closed, ^socket} ->
+        handle_close({:remote, :closed}, parent, debug, state)
+
+      {:ssl_closed, ^socket} ->
+        handle_close({:remote, :closed}, parent, debug, state)
+
+      {:EXIT, ^parent, reason} ->
+        terminate(reason, parent, debug, state)
+
+      msg ->
+        debug = Utils.sys_debug(debug, {:in, :msg, msg}, state)
+        common_handle({:handle_info, msg}, parent, debug, state)
+    end
+  end
+
+  # RFC 6455 section 5.2: byte 0 is FIN, RSV and the opcode; byte 1 is the mask bit and a 7-bit
+  # length, where 126 means a 16-bit length follows (at most 65,535, always accepted) and 127
+  # a 64-bit one. Only the 64-bit form can announce more than `@max_frame_bytes`, and the
+  # header says so before a single byte of the payload is waited for.
+  defp frame_too_large?(<<_opcode_byte, _mask::1, 127::7, length::64, _rest::bitstring>>),
+    do: length > @max_frame_bytes
+
+  defp frame_too_large?(_buffer), do: false
+
+  defp fragment_too_big?(part, next), do: byte_size(part) + byte_size(next) > @max_frame_bytes
 
   defp read_all_data(transport, socket, buffer) do
     receive do
@@ -1085,14 +1135,25 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
     )
   end
 
+  # ## VENDORED FIX (4, tick AO) — a message built from fragments is held to `@max_frame_bytes`
+  # as a whole, so continuation frames that are each small cannot add up to an unbounded
+  # buffer. Close code 1009 is RFC 6455 section 7.4.1's "message too big".
   defp handle_fragment({:continuation, next}, parent, debug, %{fragment: {type, part}} = state) do
-    websocket_loop(parent, debug, %{state | fragment: {type, <<part::binary, next::binary>>}})
+    if fragment_too_big?(part, next) do
+      handle_close({:local, 1009, "Message too big"}, parent, debug, %{state | fragment: nil})
+    else
+      websocket_loop(parent, debug, %{state | fragment: {type, <<part::binary, next::binary>>}})
+    end
   end
 
   defp handle_fragment({:finish, next}, parent, debug, %{fragment: {type, part}} = state) do
-    frame = {type, <<part::binary, next::binary>>}
-    debug = Utils.sys_debug(debug, {:in, :completed_fragment, frame}, state)
-    handle_frame(frame, parent, debug, %{state | fragment: nil})
+    if fragment_too_big?(part, next) do
+      handle_close({:local, 1009, "Message too big"}, parent, debug, %{state | fragment: nil})
+    else
+      frame = {type, <<part::binary, next::binary>>}
+      debug = Utils.sys_debug(debug, {:in, :completed_fragment, frame}, state)
+      handle_frame(frame, parent, debug, %{state | fragment: nil})
+    end
   end
 
   defp handle_close({:remote, :closed} = reason, parent, debug, state) do

@@ -562,6 +562,12 @@ defmodule DpExchange.Webull.Socket do
   # and then dialled the venue once more before it noticed. Against a five-connections-per-
   # App-Key ceiling that is a stray connection from a socket nobody owns.
   #
+  # **That message exists only in a process that traps exits, and `WebSockex` does not** (found
+  # in tick AO: nothing in it, or in the vendored fork, sets the flag). For a socket that does
+  # not trap, the exit signal does the work itself: any reason but `:normal` kills it in the
+  # middle of this wait. `:normal` is the one reason that does not, and `Feed.terminate/2`
+  # stops its sockets for that reason. The clause below serves a socket that does trap.
+  #
   # Exiting with the parent's own reason is what `WebSockex` does when it reads the message
   # itself (`terminate/4`). A state with no `:parent` (one a test built by hand) matches no
   # exit and waits the full delay, exactly as the sleep did.

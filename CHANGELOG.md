@@ -22,6 +22,69 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (BREAKING for a caller who started a named tree and addressed it by `:feed` alone)
+
+- **A tree started with its own `name:` now names its feed, rate limiter and ledger from it**
+  (`<name>.Feed`, `<name>.RateLimiter`, `<name>.Ledger`); an explicit `:feed`, `:limiter` or
+  `:ledger` still wins, and a tree with no `name:` keeps today's names exactly. Two trees given only
+  distinct names used to collide on the feed and the limiter. Facade calls take `:name` (listed in
+  `DpExchange.Webull.Options` wherever the limiter or the feed is read; not on `get_fees/2`,
+  `streaming?/1`, `live?/1`) and resolve the same names. **A call that names the tree's `:feed`
+  but neither its `:name` nor its `:limiter` now meters in the default limiter, which a named
+  tree does not start** ("Rate limiter unavailable"); pass `name:`.
+
+### Fixed (tick AO)
+
+- **A `Feed` crash lost everything it had been asked to do.** It restarted from its static start
+  options: no wanted symbols, no subscribers, empty `coverage/1`, and nobody told; the sockets
+  died with it. New `DpExchange.Webull.Ledger`, started first under the tree and not restarted with
+  the feed, holds the feed's durable intent (wanted symbols, data and notice subscribers, replay
+  options with the credentials inside `Credentials`). The feed writes it when a change is
+  accepted (a caller answered after any refusal was undone, a notice subscriber added, a
+  subscriber dropped), never for a refused one. A restarted feed reads it in `handle_continue/2`,
+  monitors the live subscribers again, plans its shards again and sends every subscriber a
+  `:coverage_change` notice, `details.reason: :feed_restarted`. The tree now has three children.
+
+- **A WebSocket frame, or a fragmented message, of any size was buffered for as long as the peer
+  kept sending.** The vendored `websockex` read into one growing binary until a frame was whole
+  (each TCP segment copying all of it again): a header announcing a 64-bit payload length, or
+  continuation frames that each stayed small, grew memory without limit and made the work
+  quadratic. The MQTT layer's own 1 MiB packet bound (`MqttPacket`) never saw it, because it only
+  runs once a frame is whole. The fork now closes the connection past 4 MiB (a frame announcing
+  more: `{:error, %WebSockex.FrameError{reason: :frame_too_large}}` and close code 1011; a message
+  that adds up to more: close code 1009), and the ordinary `:link_down`, reconnect and resubscribe
+  path takes over. 4 MiB is chosen, not measured.
+- **`GenServer.stop(feed)` (reason `:normal`) left every shard's socket running.** `WebSockex`
+  does not trap exits, and a process that is not trapping ignores a `:normal` exit signal, so the
+  link did nothing. `Feed.terminate/2` had said DISCONNECT, the socket's `handle_disconnect/2`
+  then reconnected as it does for any drop, and it went on doing so, delivering to a dead pid,
+  holding one of the venue's five connections per App Key for as long as the node lived. A
+  `:normal` stop now stops each shard's socket after the DISCONNECT. A supervisor's `:shutdown`
+  and a crash already killed them through the link and are unchanged. The comment in
+  `Socket.wait_to_reconnect/2` that said `WebSockex` traps exits was wrong and is corrected.
+- **A protobuf length prefix is checked against the buffer by comparison.** A varint may announce
+  up to 2^70; the decoder now refuses a length beyond what is left before it is used as a
+  `binary-size`, so "ends the walk, never raises" no longer rests on how the runtime treats an
+  absurd size. No change for any real frame.
+- **The `ArgumentError` from `coverage/1`, `wanted/1`, `coverage_by_kind/1`, `streaming?/1` and
+  `live?/1` no longer echoes the options it was given** when they are not a keyword list. A caller
+  that built `opts` as a map has usually put `:credentials` in it, and an exception message is
+  what reaches a log. It says what kind of term it got.
+
+### Reviewed, not changed (tick AO)
+
+- The stream path creates no atom from wire text (topics, field numbers and symbols are binaries
+  or fixed lookups); `test/dp_exchange/webull/tick_ao_test.exs` proves an unknown topic does not
+  become one. Protobuf decoding is linear and bounded by the 1 MiB packet bound.
+- The MQTT `CONNECT` carries the App Key as its username and the constant `"x"` as its password
+  (the venue authenticates on the signed HTTP subscribe), so it holds no signature or token. The
+  socket's state holds the key wrapped in `Credentials`, and `[:websockex, :frame, :sent]`
+  telemetry fires only for frames sent through `send_frame/3` (the `DISCONNECT`), never for the
+  `CONNECT`.
+- Two instances of this package in one VM need `:name`, `:feed` and `:limiter` passed explicitly
+  (the defaults derive from the environment only); a second default instance fails to start with
+  `{:error, {:already_started, pid}}` rather than sharing a feed or a rate-limit bucket.
+
 ## [0.4.165] - 2026-10-19
 
 ### Dependencies

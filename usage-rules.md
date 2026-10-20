@@ -407,15 +407,38 @@ merged over those defaults (so `cacerts:` alone keeps `verify_peer` and the host
 and `ssl_options: nil`, `[]` or anything that is not a keyword list means "none given", never
 "no verification". Only an explicit `verify:` of yours changes that.
 
-**What still costs you your whole subscription: `Feed` itself crashing** — a bug outside
-the per-shard crash path, or anything that kills the `Feed` pid directly.
-`DpExchange.Webull.Supervisor` restarts `Feed` under `:one_for_one`, but from the
-*static* `opts` your supervision tree started it with; every `subscribe/2`,
-`update_symbols/2` and `subscribe_notices/1` call you made afterward is gone. Nothing
-inside this package can replay those calls — it never held onto the functions or the
-process that made them. If your consumer needs to survive a `Feed` restart unattended,
-monitor the `Feed` pid (or the `DpExchange.Webull` pid it sits under) yourself and
-re-issue `subscribe/2` on `:DOWN`.
+**`Feed` itself crashing no longer costs you your subscription.** A bug outside the per-shard
+crash path, or anything that kills the `Feed` pid directly, restarts it under `:one_for_one`.
+A small `DpExchange.Webull.Ledger` process, started before the feed and not restarted with it,
+holds what the feed had accepted: the wanted symbols, the subscribers (data and notice), and the
+replay options with your credentials inside their redacting struct. A call the feed refused is
+never written. The restarted feed reads it back, monitors the subscribers again (a dead one is
+dropped), plans its shards again (the sockets died with the old feed, so they reopen staggered,
+about five seconds apart) and sends every subscriber a `:coverage_change` notice with
+`details.reason: :feed_restarted` and `details.symbols`. `coverage/1` is empty until payloads
+arrive again, and the notice says so; there is nothing for you to re-issue. A crash in the
+*ledger* loses nothing live: the feed writes its whole intent again at its next accepted change.
+
+## Two trees in one VM (two accounts)
+
+```elixir
+children = [
+  {DpExchange.Webull, name: :account_a, credentials: creds_a()},
+  {DpExchange.Webull, name: :account_b, credentials: creds_b()}
+]
+
+DpExchange.Webull.subscribe(["BTC-USD"], name: :account_a, credentials: creds_a())
+DpExchange.Webull.wanted(name: :account_b)
+```
+
+A `:name` of your own is enough: the feed, the rate limiter and the ledger are named
+`:account_a.Feed`, `:account_a.RateLimiter` and `:account_a.Ledger`, and a facade call given the
+same `name:` addresses that tree. Every call that reaches the rate limiter or the feed takes
+`:name` (all except `get_fees/2`, `streaming?/1` and `live?/1`); the option tables above do not
+repeat it. An explicit `:feed`, `:limiter` or `:ledger` still wins. A tree with no `:name` keeps
+`DpExchange.Webull.Feed` and the rest (and the `Uat*` names under `environment: :uat`).
+**A call that names a tree's `:feed` but not its `:name` or `:limiter` meters in the default
+limiter, which a named tree does not start**; pass `name:`.
 
 ## Subscribing is two protocols, and you see neither
 

@@ -19,14 +19,22 @@ defmodule DpExchange.Webull.Supervisor do
   against the production budget would surface as a throttle on a real order, with nothing
   pointing back at the cause.
 
-  Explicit `:name` / `:feed` / `:limiter` still win, for running two of the same
-  environment under different credentials.
+  A `:name` of your own is enough to run two of the same environment under different
+  credentials: the feed, the limiter and the ledger are named `<name>.Feed`,
+  `<name>.RateLimiter` and `<name>.Ledger`, and a facade call given the same `name:` addresses
+  them. Explicit `:feed` / `:limiter` / `:ledger` still win.
+
+  ## The ledger: a restarted feed picks up where it was
+
+  `Feed` keeps what it was asked to do (wanted symbols, subscribers, replay options) in its own
+  state, which a crash empties. `DpExchange.Webull.Ledger` is started before it, outlives it, and
+  is written on every accepted change; a restarted feed reads it back (see `Feed`).
   """
 
   use Supervisor
 
   alias DpExchange.Core.DefaultRateLimiter
-  alias DpExchange.Webull.{Environment, Feed}
+  alias DpExchange.Webull.{Environment, Feed, Ledger}
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts) do
@@ -57,15 +65,20 @@ defmodule DpExchange.Webull.Supervisor do
     # reconnect and blind resubscribe thereafter — actually names the limiter this
     # Supervisor just started, not the one nobody starts.
     children = [
+      # First, so it exists when the feed starts and outlives it: it holds what the feed was
+      # asked to do, for a restarted feed to pick up. See `DpExchange.Webull.Ledger`.
+      {Ledger, name: ledger_name(opts)},
       {DefaultRateLimiter, name: limiter_name(opts), limits: limits(opts)},
       {Feed,
        opts
        |> Keyword.put_new(:limiter, limiter_name(opts))
+       |> Keyword.put(:ledger, ledger_name(opts))
        |> Keyword.put(:name, feed_name(opts))}
     ]
 
     # `:one_for_one` — the feed losing its socket is not a reason to reset the limiter,
-    # and resetting it would hand back budget the venue has already been spent.
+    # and resetting it would hand back budget the venue has already been spent. Nor is the
+    # feed crashing a reason to reset the ledger: surviving that is what it is for.
     Supervisor.init(children, strategy: :one_for_one)
   end
 
@@ -73,33 +86,71 @@ defmodule DpExchange.Webull.Supervisor do
   @spec supervisor_name(keyword()) :: atom()
   def supervisor_name(opts) do
     Keyword.get_lazy(opts, :name, fn ->
-      case Environment.resolve(opts) do
-        :production -> __MODULE__
-        :uat -> DpExchange.Webull.UatSupervisor
-      end
+      env_default(opts, __MODULE__, DpExchange.Webull.UatSupervisor)
     end)
   end
 
-  @doc "The limiter this venue meters against."
+  @doc """
+  The limiter this venue meters against: `:limiter` if given, else `<name>.RateLimiter` for a
+  tree started with its own `:name`, else the environment's default.
+  """
   @spec limiter_name(keyword()) :: atom()
   def limiter_name(opts) do
     Keyword.get_lazy(opts, :limiter, fn ->
-      case Environment.resolve(opts) do
-        :production -> DpExchange.Webull.RateLimiter
-        :uat -> DpExchange.Webull.UatRateLimiter
-      end
+      child_name(
+        opts,
+        "RateLimiter",
+        DpExchange.Webull.RateLimiter,
+        DpExchange.Webull.UatRateLimiter
+      )
     end)
   end
 
-  @doc "This venue's feed process."
+  @doc "This venue's feed process, named the way `limiter_name/1` names the limiter."
   @spec feed_name(keyword()) :: atom()
   def feed_name(opts) do
     Keyword.get_lazy(opts, :feed, fn ->
-      case Environment.resolve(opts) do
-        :production -> Feed
-        :uat -> DpExchange.Webull.UatFeed
-      end
+      child_name(opts, "Feed", Feed, DpExchange.Webull.UatFeed)
     end)
+  end
+
+  @doc "The process holding what the feed was asked to do, named the way `limiter_name/1` is."
+  @spec ledger_name(keyword()) :: atom()
+  def ledger_name(opts) do
+    Keyword.get_lazy(opts, :ledger, fn ->
+      child_name(opts, "Ledger", Ledger, DpExchange.Webull.UatLedger)
+    end)
+  end
+
+  # **Two trees in one VM need distinct names for every process, and `name:` alone must be
+  # enough to get them.** The defaults derived from the environment only, so a second tree given
+  # just `name: :account_b` collided on the feed and the limiter. A tree whose `:name` is not
+  # its environment's default now names its children `<name>.Feed`, `<name>.RateLimiter` and
+  # `<name>.Ledger`. An explicit `:feed`, `:limiter` or `:ledger` still wins, and a tree with no
+  # `:name` keeps today's names exactly. Facade calls resolve the same names from `name:` in
+  # their options.
+  defp child_name(opts, suffix, production, uat) do
+    case custom_name(opts) do
+      nil -> env_default(opts, production, uat)
+      name -> Module.concat(name, suffix)
+    end
+  end
+
+  defp custom_name(opts) do
+    case Keyword.get(opts, :name) do
+      name when is_atom(name) and not is_nil(name) ->
+        if name in [__MODULE__, DpExchange.Webull.UatSupervisor], do: nil, else: name
+
+      _no_custom_name ->
+        nil
+    end
+  end
+
+  defp env_default(opts, production, uat) do
+    case Environment.resolve(opts) do
+      :production -> production
+      :uat -> uat
+    end
   end
 
   # **Two limits, so two buckets.** Every endpoint page states both: "1 request per second
