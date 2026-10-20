@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.166] - 2026-10-20
+
 ### Dependencies
 
 - **Requires `dp_exchange_core ~> 0.3.114`** (was `~> 0.3.111`). The conformance suite now runs
