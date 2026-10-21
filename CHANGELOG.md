@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.168] - 2026-10-21
+
 ### Fixed (tick AQ)
 
 - **A caller told `:ok` could find the tree's Ledger not yet written.** The Feed answered a
