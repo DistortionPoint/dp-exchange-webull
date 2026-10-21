@@ -65,8 +65,11 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
     test "a bare object is treated as a single row" do
       body = %{"price" => "1", "time" => 1_787_936_147_000}
 
-      assert {:ok, _quote} =
+      assert {:ok, single} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
+
+      assert Decimal.equal?(single.price, Decimal.new("1"))
+      assert single.provider == :webull
     end
 
     test "a body that is neither list nor map is an unreadable response" do
@@ -522,16 +525,21 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
       set_opts = Keyword.delete(opts, :to)
 
       assert :ok = DpExchange.Webull.subscribe(["BTC-USD"], opts)
-      assert :ok = DpExchange.Webull.update_symbols(["BTC-USD"], set_opts)
-      assert :ok = DpExchange.Webull.unsubscribe(["BTC-USD"], set_opts)
+      assert Feed.wanted(name) == ["BTC-USD"]
+      assert :ok = DpExchange.Webull.update_symbols(["ETH-USD"], set_opts)
+      assert Feed.wanted(name) == ["ETH-USD"]
+      assert :ok = DpExchange.Webull.unsubscribe(["ETH-USD"], set_opts)
+      assert Feed.wanted(name) == []
       # Registering for notices sends no request, so it reads no transport key (tick AK).
       assert :ok = DpExchange.Webull.subscribe_notices(Keyword.take(opts, [:feed, :to]))
+      assert MapSet.member?(:sys.get_state(name).notice_subscribers, self())
     end
   end
 
   describe "the fake's short arities" do
     test "subscribe and subscribe_notices work without options" do
       assert :ok = Fake.subscribe(["BTC-USD"], credentials: @credentials)
+      assert Fake.coverage()["BTC-USD"] == :stream
       assert :ok = Fake.subscribe_notices()
     end
   end

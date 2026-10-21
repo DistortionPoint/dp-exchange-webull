@@ -82,6 +82,9 @@ defmodule DpExchange.Webull.MicrostructureTest do
       assert Decimal.equal?(profile.sell_volume, Decimal.new("400"))
       assert profile.session == :regular
       assert profile.provider == :webull
+      assert Decimal.equal?(profile.delta, Decimal.new("200"))
+      assert map_size(profile.buy_at_price) == 2
+      assert map_size(profile.sell_at_price) == 2
     end
 
     test "the price maps keep the venue's own price strings" do

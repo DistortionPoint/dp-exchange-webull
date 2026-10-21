@@ -168,7 +168,9 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %Quote{} = quoted}
       assert Decimal.equal?(quoted.price, Decimal.new("1"))
       assert quoted.venue_time == nil, "the venue stated no time, and nil says exactly that"
-      assert quoted.observed_at, "freshness is still stated, by the field that says what it is"
+
+      assert %DateTime{} = quoted.observed_at,
+             "freshness is still stated, by the field that says what it is"
     end
 
     test "a snapshot's venue_time is its trade_time, and the assembly timestamp is never used" do
@@ -417,7 +419,9 @@ defmodule DpExchange.Webull.SocketTest do
       assert_receive {:dp_exchange, :webull, %TopOfBook{} = top}
       assert Decimal.equal?(top.bid, Decimal.new("77845.79"))
       assert top.venue_time == nil, "the venue stated no time, and nil says exactly that"
-      assert top.observed_at, "freshness is still stated, by the field that says what it is"
+
+      assert %DateTime{} = top.observed_at,
+             "freshness is still stated, by the field that says what it is"
     end
 
     test "an undated tick delivers nothing, because Trade DOES require a timestamp" do
@@ -507,6 +511,9 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, state())
 
+      # A book frame is delivered as a `TopOfBook`, never a `Quote`: refuting only the latter
+      # proved nothing, so both are refuted.
+      refute_receive {:dp_exchange, :webull, %TopOfBook{}}, 500
       refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
   end
@@ -904,7 +911,7 @@ defmodule DpExchange.Webull.SocketTest do
       untouched = state()
 
       assert {:ok, ^untouched} = Socket.handle_frame({:text, "hello"}, untouched)
-      refute_receive {:dp_exchange, :webull, _anything}
+      refute_receive {:dp_exchange, :webull, _anything}, 500
     end
   end
 

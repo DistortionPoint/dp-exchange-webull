@@ -14,11 +14,38 @@ defmodule DpExchange.Webull.FakeParityTest do
   @missing {:error, {:missing_credentials, :webull}}
 
   describe "the public surface" do
+    # Fake-only control functions, by {name, arity}, that the facade deliberately lacks.
+    # Empty today: the fake's injection, coverage and reset seams all live in
+    # `DpExchange.Core.Config` and the process dictionary, not in extra exports. Add a
+    # name here only with a comment saying why a consumer needs it and the facade must not.
+    @fake_only_control []
+
     test "the facade's public exports minus the fake's exports is empty" do
       facade = Webull.__info__(:functions)
       fake = Fake.__info__(:functions)
 
       assert facade -- fake == []
+    end
+
+    test "the fake's public exports minus the facade's, minus the named control list, is empty" do
+      facade = Webull.__info__(:functions)
+      fake = Fake.__info__(:functions)
+
+      # An extra short arity on the fake (a default argument the facade lacks) is a call a
+      # consumer's suite can make that fails in production with UndefinedFunctionError.
+      assert Enum.sort((fake -- facade) -- @fake_only_control) == []
+    end
+
+    test "the two export sets are exactly equal, arity for arity" do
+      facade = Enum.sort(Webull.__info__(:functions))
+      fake = Enum.sort(Fake.__info__(:functions) -- @fake_only_control)
+
+      # Guards the comparison against being vacuous.
+      assert {:get_positions, 1} in facade
+      refute {:get_positions, 0} in fake
+      assert length(facade) > 100
+
+      assert fake == facade
     end
   end
 
@@ -224,6 +251,17 @@ defmodule DpExchange.Webull.FakeParityTest do
       assert Fake.venue_does_not_serve() == Webull.venue_does_not_serve()
       assert Fake.streaming?(environment: :uat) == Webull.streaming?(environment: :uat)
       assert Fake.live?(environment: :uat) == Webull.live?(environment: :uat)
+
+      # The comparisons above hold for two constants that agree by accident, so the values
+      # themselves are pinned: UAT has no broker and moves no money, production has both.
+      refute Fake.streaming?(environment: :uat)
+      refute Fake.live?(environment: :uat)
+      assert Fake.streaming?(environment: :production)
+      assert Fake.live?(environment: :production)
+      assert Fake.adjusted?("1d") == true
+      assert Webull.adjusted?("1d") == true
+      assert Fake.adjusted?("nope") == nil
+      assert Webull.adjusted?("nope") == nil
     end
   end
 end

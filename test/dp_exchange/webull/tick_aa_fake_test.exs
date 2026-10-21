@@ -33,24 +33,19 @@ defmodule DpExchange.Webull.TickAaFakeTest do
       assert Fake.list_instruments() == Fake.list_instruments([])
     end
 
-    test "unserved wallet and conversion calls refuse as not supported" do
-      assert Fake.request_approved_address("BTC", "BTC", "addr") ==
-               Fake.request_approved_address("BTC", "BTC", "addr", [])
-
-      assert Fake.quote_conversion("BTC", "USD", "1") ==
-               Fake.quote_conversion("BTC", "USD", "1", [])
-
-      assert Fake.get_deposit_address("BTC", "BTC") == Fake.get_deposit_address("BTC", "BTC", [])
-
-      assert Fake.estimate_withdrawal_fee("BTC", "BTC", "1") ==
-               Fake.estimate_withdrawal_fee("BTC", "BTC", "1", [])
-
-      assert Fake.withdraw("BTC", "BTC", "1", "addr") ==
-               Fake.withdraw("BTC", "BTC", "1", "addr", [])
+    test "unserved wallet and conversion calls refuse as not supported, at the facade's arity" do
+      for result <- [
+            Fake.request_approved_address("BTC", "BTC", "addr", []),
+            Fake.quote_conversion("BTC", "USD", "1", []),
+            Fake.get_deposit_address("BTC", "BTC", []),
+            Fake.estimate_withdrawal_fee("BTC", "BTC", "1", []),
+            Fake.withdraw("BTC", "BTC", "1", "addr", [])
+          ] do
+        assert result == {:error, :not_supported}
+      end
     end
 
     test "account, watchlist and order calls" do
-      assert Fake.get_positions() == Fake.get_positions([])
       assert Fake.update_watchlist("1") == Fake.update_watchlist("1", [])
       assert Fake.preview_order(%{}, %{}) == Fake.preview_order(%{}, %{}, [])
       assert Fake.replace_order(%{}, "abc", %{}) == Fake.replace_order(%{}, "abc", %{}, [])
@@ -61,6 +56,20 @@ defmodule DpExchange.Webull.TickAaFakeTest do
 
       assert Fake.get_order(%{}, @known_order_id) == Fake.get_order(%{}, @known_order_id, [])
       assert Fake.get_orders(%{}) == Fake.get_orders(%{}, [])
+
+      # Every one of these is called with no credentials or an empty request, so each must
+      # refuse; two identical `{:ok, _}` answers would otherwise satisfy the equalities above.
+      for result <- [
+            Fake.get_positions([]),
+            Fake.preview_order(%{}, %{}),
+            Fake.replace_order(%{}, "abc", %{}),
+            Fake.place_order(%{}, %{}),
+            Fake.cancel_order(%{}, @known_order_id),
+            Fake.get_order(%{}, @known_order_id),
+            Fake.get_orders(%{})
+          ] do
+        assert match?({:error, _reason}, result) or match?({:refused, _reason}, result)
+      end
     end
   end
 

@@ -260,8 +260,9 @@ defmodule DpExchange.Webull.Rest do
 
   @doc """
   Whether `range` is a keyword list whose `:start` and `:end`, where present, are
-  `DateTime`s: the check `get_historical_prices/5` makes before anything is signed, for
-  `DpExchange.Webull.Fake`. Anything else is `{:error, {:invalid_range, range}}`.
+  `DateTime`s, with `:start` not after `:end`: the check `get_historical_prices/5` makes
+  before anything is signed, for `DpExchange.Webull.Fake`. Anything else (a non-keyword, a
+  non-`DateTime` bound, an inverted range) is `{:error, {:invalid_range, range}}`.
 
   A non-`DateTime` bound used to raise in `DateTime.compare/2` after the request had been
   made and charged against the endpoint's bucket.
@@ -344,8 +345,9 @@ defmodule DpExchange.Webull.Rest do
   A member that is not a usable symbol (`nil`, a number, blank text) is answered
   `{:error, {:invalid_symbol, member}}` under its own key, with no request, and does not cost
   the other members anything (so such a key is not always text); a `symbols` that is not a
-  proper list is `{:error, {:invalid_symbols, symbols}}`. `US_CRYPTO` only. Other categories answer `{:error, {:unsupported_category, category}}`,
-  because their snapshot limits are not read here.
+  proper list is `{:error, {:invalid_symbols, symbols}}`. `US_CRYPTO` only. Other categories
+  answer `{:error, {:unsupported_category, category}}`, because their snapshot limits are not
+  read here.
   """
   @spec get_prices([String.t()], map(), keyword()) ::
           {:ok, %{String.t() => {:ok, Quote.t()} | {:error, term()} | {:refused, term()}}}
@@ -525,6 +527,21 @@ defmodule DpExchange.Webull.Rest do
       the pages call `time` "Bar UTC time" without saying it is the open.
     * An open, high, low or close of zero or less is `{:error, {:non_positive_price, field,
       raw}}`.
+
+  ## Refusals decided before a request
+
+  In this order: `{:error, {:unsupported_option, :real_time}}` / `{:invalid_option,
+  :include_partial, v}`; a `range` that is not a keyword list of `DateTime` bounds, or whose
+  `:start` is after its `:end`, is `{:invalid_range, range}`; then the category's own checks.
+  Options, futures and event-contract bars take no range, so a `:start` or `:end` there is
+  `{:error, {:unsupported_bar_range, :option | :future | :event}}` (they serve only the latest
+  `count` bars). A width the category does not serve is `{:unsupported_timeframe, width}`
+  (crypto and event contracts stop at `1d`). A `:limit` that is not a whole number from 1 to
+  the page maximum (1200; 1650 for stock `1m`) is `{:invalid_option, :limit, n}`. A category
+  that is not `US_CRYPTO`, `US_OPTION`, `US_FUTURES` or `US_EVENT` is the equity path, which
+  takes `US_STOCK` and `US_ETF` only: any other is `{:unsupported_book_category, category}`.
+  `:sessions` (stock only) names `PRE`, `RTH`, `ATH` or `OVN`, else `{:invalid_option,
+  :sessions, v}`.
   """
   @spec get_historical_prices(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -830,9 +847,11 @@ defmodule DpExchange.Webull.Rest do
   end
 
   @doc """
-  Whether `category` and `opts[:depth]` are an order-book request `get_order_book/3` sends:
-  the category (`US_STOCK`, `US_ETF` or `US_FUTURES`) and a depth in the range its page
-  states. The checks it makes before anything is signed, for `DpExchange.Webull.Fake`.
+  Whether `category` and `opts` are an order-book request `get_order_book/3` sends: no
+  `:limit` (`{:unsupported_option, :limit}`), the category (`US_STOCK`, `US_ETF` or
+  `US_FUTURES`), a depth in the range its page states (`{:invalid_option, :depth, v}`) and
+  boolean hours flags. The checks it makes before anything is signed (the symbol is judged
+  after them there), for `DpExchange.Webull.Fake`.
   """
   @spec validate_book_request(term(), keyword()) :: :ok | {:error, term()}
   def validate_book_request(category, opts) do
@@ -862,9 +881,11 @@ defmodule DpExchange.Webull.Rest do
   end
 
   @doc """
-  Whether `opts[:category]` (default `US_STOCK`) and `opts[:limit]` are a tape request
-  `get_trades/3` sends: a category with a tape endpoint, and a count within that endpoint's
-  stated maximum. The checks it makes before anything is signed, for
+  Whether `opts[:category]` (default `US_STOCK`), `opts[:limit]` and `opts[:sessions]` are a
+  tape request `get_trades/3` sends: no `:since` (`{:unsupported_option, :since}`), a category
+  with a tape endpoint, a count within that endpoint's stated maximum
+  (`{:invalid_option, :limit, n}`) and named sessions (`{:invalid_option, :sessions, v}`).
+  The checks it makes before anything is signed (the symbol is judged after them there), for
   `DpExchange.Webull.Fake`.
   """
   @spec validate_trades_request(keyword()) :: :ok | {:error, term()}
@@ -1095,7 +1116,7 @@ defmodule DpExchange.Webull.Rest do
   # `observed_at` already holds that, and says which it is.
   defp top_of_book_time(row, category), do: quote_time(row, category)
 
-  # A flat rate, published, not queried — see the moduledoc note on `get_fees/3`.
+  # A flat rate, published, not queried — see the `get_fees/2` doc.
   @crypto_spread_pct Decimal.new("1.00")
   @crypto_spread_captured_at ~D[2026-09-03]
 
@@ -1161,6 +1182,12 @@ defmodule DpExchange.Webull.Rest do
   So this follows the key until the venue stops sending one. `@max_pages` bounds it: a
   server that always returns a key would otherwise loop forever, and an infinite loop
   inside a facade call is worse than an error.
+
+  Errors: `{:error, :history_truncated}` past `@max_pages` pages,
+  `{:error, :pagination_key_did_not_advance}` for a repeated key,
+  `{:error, :unexpected_pagination_key}` for a key that is not text,
+  `{:error, {:unsupported_instrument_category, category}}` for a category with no listing
+  endpoint, and `{:error, :unexpected_response_shape}` when any row names no text `symbol`.
   """
   @spec get_symbols(map(), keyword()) ::
           {:ok, [String.t()]} | {:error, term()} | {:refused, term()}
@@ -1219,11 +1246,14 @@ defmodule DpExchange.Webull.Rest do
   agree for `currency` values `SymbolFormat.quotes/0` also lists, which is every
   `currency` this venue has been seen to publish.
 
-  A row whose `symbol` does not literally end in its own `currency` is DROPPED, not
-  guessed at and not made to fail the whole reply — `dp_exchange_robinhood`'s
-  `Rest.list_instruments/2` (`row_symbol/1`/`has_symbol?/1`) is the precedent for
-  dropping one unreadable row from an otherwise-honest catalogue rather than refusing
-  the lot for it.
+  A row whose `symbol` does not literally end in its own `currency` (or that has no
+  `symbol` or `currency`, or is not an object) **refuses the whole listing** as
+  `{:error, :unexpected_response_shape}`. It is not guessed at, and it is not dropped: a
+  dropped row leaves a hole in the catalogue, so an instrument the venue lists reads as
+  unlisted. (This paragraph used to say such a row was dropped; `collect_instruments/1`
+  stopped doing that and the documentation was never told.) The walk's own failures are
+  `{:error, :history_truncated}` (more than `@max_pages` pages),
+  `{:error, :pagination_key_did_not_advance}` and `{:error, :unexpected_pagination_key}`.
 
   ## status: `OC` is `:tradable`; `CO` and `NT` are both `:unknown`
 
@@ -1833,6 +1863,13 @@ defmodule DpExchange.Webull.Rest do
   `balance` is `cash_balance` and `hold` is `frozen_amount`, both of which are the venue's
   own single-meaning fields. The rest is reachable through `get_accounts/2` on a package
   that carries it, and is a known gap in this contract rather than in this venue.
+
+  A missing or blank `opts[:account_id]` is `{:error, {:missing_option, :account_id}}`. A
+  currency-asset list that is present and is not a list, or a row with no text `currency`,
+  refuses the whole reply as `{:error, :unexpected_response_shape}`; an absent list is
+  `{:ok, []}`. A `cash_balance` or `frozen_amount` that is absent or blank (the page: "empty"
+  on an `EVENTS_CASH` account) is `nil`, and one that is present and not a readable number
+  refuses the whole reply as `{:error, {:invalid_decimal, field, value}}`.
   """
   @spec get_balances(map(), keyword()) ::
           {:ok, [Balance.t()]} | {:error, term()} | {:refused, term()}
@@ -1889,21 +1926,35 @@ defmodule DpExchange.Webull.Rest do
   # same kind of required: an unknown quantity is still a balance, an unattributable one is
   # not.
   defp to_balance(row, asked_at) do
-    with {:ok, currency} <- required_currency(value(row, ["currency"])) do
+    with {:ok, currency} <- required_currency(value(row, ["currency"])),
+         {:ok, cash} <- balance_figure(value(row, ["cash_balance"]), :cash_balance),
+         {:ok, frozen} <- balance_figure(value(row, ["frozen_amount"]), :frozen_amount) do
       {:ok,
        %Balance{
          currency: currency,
-         balance: decimal(value(row, ["cash_balance"])),
+         balance: cash,
          # Not derived. See the note on get_balances/2: this venue publishes several
          # different "available" figures and they disagree.
          available_balance: nil,
-         hold: decimal(value(row, ["frozen_amount"])),
+         hold: frozen,
          # When we asked. A balance has no venue event time.
          timestamp: asked_at,
          provider: :webull
        }}
     end
   end
+
+  # **Absent is `nil`; a figure the venue sent and this package cannot read is an error.**
+  # `account-balance.md`: `cash_balance` is "empty" on an `EVENTS_CASH` account (absent, `null`
+  # or blank text), which is an unknown balance and stays one. `"abc"`, `"NaN"` or a 40-digit
+  # number is not empty, and `decimal/1`'s `nil` for it made `balance: nil` ("unknown") out of
+  # a figure that WAS sent - indistinguishable from the legitimate case.
+  # `{:invalid_decimal, field, raw}`, refusing the whole reply like an unattributable row.
+  defp balance_figure(raw, field) when is_binary(raw) do
+    if String.trim(raw) == "", do: {:ok, nil}, else: optional_decimal(raw, field)
+  end
+
+  defp balance_figure(raw, field), do: optional_decimal(raw, field)
 
   # One unattributable row refuses the whole reply rather than leaving a gap in it. A balance
   # list with an entry silently missing reads as "you hold none of that currency", which is a
@@ -1960,7 +2011,12 @@ defmodule DpExchange.Webull.Rest do
   **A row with no readable `quantity` refuses the whole list**
   (`{:error, {:missing_required_field, :quantity}}`, or `{:invalid_decimal, :quantity,
   value}` for text that is not a number): the page lists it as required, and
-  `Core.Types.Position` has no `nil` quantity or side to put in its place.
+  `Core.Types.Position` has no `nil` quantity or side to put in its place. A row with no
+  `symbol` refuses the list the same way, as `{:error, {:missing_required_field, :symbol}}`.
+  A `cost_price`, `last_price` or `unrealized_profit_loss` that is absent is `nil` on the
+  position, and one that is present and not a readable number refuses the list as
+  `{:error, {:invalid_decimal, field, value}}`.
+  A missing or blank `opts[:account_id]` is `{:error, {:missing_option, :account_id}}`.
   """
   @spec get_positions(map(), keyword()) ::
           {:ok, [Position.t()]} | {:error, term()} | {:refused, term()}
@@ -1998,8 +2054,12 @@ defmodule DpExchange.Webull.Rest do
              |> canonical_or_nil(row_instrument_type(row))
            ),
          :ok <- representable_position(row, symbol),
-         {:ok, quantity} <- required_decimal(value(row, ["quantity"]), :quantity) do
-      {:ok, position_struct(row, symbol, quantity)}
+         {:ok, quantity} <- required_decimal(value(row, ["quantity"]), :quantity),
+         {:ok, cost} <- optional_decimal(value(row, ["cost_price"]), :cost_price),
+         {:ok, mark} <- optional_decimal(value(row, ["last_price"]), :last_price),
+         {:ok, pnl} <-
+           optional_decimal(value(row, ["unrealized_profit_loss"]), :unrealized_profit_loss) do
+      {:ok, position_struct(row, symbol, quantity, {cost, mark, pnl})}
     end
   end
 
@@ -2051,7 +2111,11 @@ defmodule DpExchange.Webull.Rest do
   defp required_position_symbol(nil), do: {:error, {:missing_required_field, :symbol}}
   defp required_position_symbol(symbol), do: {:ok, symbol}
 
-  defp position_struct(row, symbol, signed_quantity) do
+  # **`cost_price`, `last_price` and `unrealized_profit_loss` are required by the page; one
+  # absent is `nil` ("not stated"), one PRESENT and unreadable refuses the list**
+  # (`{:invalid_decimal, field, raw}`, `optional_decimal/2`). `decimal/1` alone made a
+  # figure the venue sent ("abc", `"NaN"`) the same `nil` as one it never sent.
+  defp position_struct(row, symbol, signed_quantity, {cost, mark, pnl}) do
     {side, quantity} = Position.from_signed_quantity(signed_quantity)
 
     %Position{
@@ -2059,10 +2123,10 @@ defmodule DpExchange.Webull.Rest do
       side: side,
       quantity: quantity,
       instrument_type: row |> value(["instrument_type"]) |> instrument_atom(),
-      average_cost: decimal(value(row, ["cost_price"])),
-      mark_price: decimal(value(row, ["last_price"])),
+      average_cost: cost,
+      mark_price: mark,
       # Marked, not booked. The venue reports only the open figure here.
-      unrealised_pnl: decimal(value(row, ["unrealized_profit_loss"])),
+      unrealised_pnl: pnl,
       provider: :webull
     }
   end
@@ -2088,8 +2152,11 @@ defmodule DpExchange.Webull.Rest do
 
   It lists **every** cash activity: `TRADE`, `FEES`, `DIVIDENDS`, `TAX`, `INTERESTS`,
   `CORPORATE_ACTION`, `OPTION_EA`, `JOURNAL` and `EC_SETTLEMENT` (the page's twelve-value
-  enum; `OTHER` is not one) alongside `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks `get_transfers/2` for deposit and
-  withdrawal history, because that is what a cost basis for transferred-in assets needs.
+  enum; `OTHER` is not one) alongside `DEPOSIT`, `WITHDRAW` and `TRANSFER`. The contract asks
+  `get_transfers/2` for deposit and withdrawal history, because that is what a cost basis for
+  transferred-in assets needs. The page also says a crypto account supports only `TRADE`,
+  `DEPOSIT`, `WITHDRAW` and `FEES`, so `TRANSFER` in the default list is read from the page and
+  not probed against a crypto account.
 
   **Returning all of it under that name would be wrong in a way that costs money.** A
   dividend and a deposit both credit cash and neither is the other; a caller computing what
@@ -2121,6 +2188,15 @@ defmodule DpExchange.Webull.Rest do
   were sent before this fix and neither is a parameter the venue reads, so `opts[:limit]`
   and `opts[:after]` did nothing — the whole first page always came back, cursor or not.
   This now walks `pagination_key` to the end (or `@max_pages`, fail closed) instead.
+
+  Refused before a request: a `:start` or `:end` that is not a `DateTime` is
+  `{:error, {:invalid_time, key, value}}`, `:start` after `:end` is
+  `{:error, {:invalid_option, :start, start}}`, a range across two UTC calendar years is
+  `{:error, {:cross_year_range, from_year, to_year}}`, and `:activity_types` that is not
+  text or a non-empty list of text is `{:error, {:invalid_activity_types, value}}`. A walk that
+  never ends is `{:error, :history_truncated}`; a repeated key is
+  `{:error, :pagination_key_did_not_advance}`. A row that is not an object refuses the read as
+  `{:error, :unexpected_response_shape}`.
   """
   @spec get_transfers(map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -2242,7 +2318,10 @@ defmodule DpExchange.Webull.Rest do
   anything is signed, for `DpExchange.Webull.Fake` to refuse exactly as the real path does.
   A list with a non-text member, or a number, is
   `{:error, {:invalid_activity_types, value}}`: it raised out of `Enum.join/2` or went to
-  the wire as whatever `to_string/1` made of it.
+  the wire as whatever `to_string/1` made of it. A bound that is not a `DateTime` is
+  `{:error, {:invalid_time, key, value}}`, `:start` after `:end` is
+  `{:error, {:invalid_option, :start, start}}` and a range across two UTC years is
+  `{:error, {:cross_year_range, from_year, to_year}}`, checked in that order.
   """
   @spec validate_activity_range(keyword()) :: :ok | {:error, term()}
   def validate_activity_range(opts) do
@@ -2352,11 +2431,20 @@ defmodule DpExchange.Webull.Rest do
   business error a caller cannot distinguish from a rejected order, so this refuses with
   `{:preview_not_supported, :crypto}` and names the reason.
 
+  **A cash-sized preview is refused before the request** as
+  `{:cash_sizing_not_supported, instrument}` (an `:amount` instead of a `:quantity`).
+  `common-order-preview.md` documents no `total_cash_amount` field, so the venue may ignore
+  it and price a different order than the one `place_order/3` would send; `place_order/3`'s
+  own page does document it, so place is unaffected. Preview by `:quantity`.
+
   Returns the venue's own two figures: `estimated_cost` and `estimated_transaction_fee`.
   **What `estimated_cost` means depends on the instrument** — for stocks and options it is
   the total consideration including premium and charges; for futures it is the initial
-  margin required to open the position. Those are different quantities, and the key carries
-  the instrument so a caller cannot read one as the other.
+  margin required to open the position. Those are different quantities, and the result's
+  `instrument_type` key carries the instrument so a caller cannot read one as the other.
+  The answer is `%{instrument_type: atom, estimated_cost: Decimal.t(), estimated_fee:
+  Decimal.t() | nil}`; a request `place_order/3` would refuse is refused with place's tuple
+  first, and a missing or blank `opts[:account_id]` is `{:missing_option, :account_id}`.
 
   A figure the venue sent that cannot be read as a number is
   `{:error, {:invalid_decimal, :estimated_cost | :estimated_fee, value}}`, not a `nil`; an
@@ -2370,7 +2458,7 @@ defmodule DpExchange.Webull.Rest do
     # refuses is refused with place's tuple, whatever its instrument. Only a valid order is
     # then asked whether this venue can price it (crypto cannot).
     with {:ok, _order_type, _tif, leaf} <- checked_order(request),
-         :ok <- previewable(instrument_type(request)),
+         :ok <- previewable(request),
          {:ok, account_id} <- account_id(opts) do
       instrument = instrument_type(request)
 
@@ -2385,8 +2473,21 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp previewable(:crypto), do: {:error, {:preview_not_supported, :crypto}}
-  defp previewable(_instrument), do: :ok
+  # Called only with a request `checked_order/1` accepted, so a non-nil `:amount` is a
+  # cash-sized order (a quantity AND an amount was refused already). **A cash-sized preview
+  # is refused**: `common-order-preview.md` documents no `total_cash_amount` field, so the
+  # venue may ignore it and price a different order than the one `place_order/3` would send.
+  # The refusal is the one place uses for a sizing the instrument cannot take, naming the
+  # instrument, and `place_order/3` is unaffected (its page does document the field).
+  defp previewable(request) do
+    instrument = instrument_type(request)
+
+    cond do
+      instrument == :crypto -> {:error, {:preview_not_supported, :crypto}}
+      not is_nil(Map.get(request, :amount)) -> {:error, {:cash_sizing_not_supported, instrument}}
+      true -> :ok
+    end
+  end
 
   defp to_preview(response, instrument) do
     case rows(response) do
@@ -2546,7 +2647,20 @@ defmodule DpExchange.Webull.Rest do
   order: the order id (`{:invalid_order_id, v}`), `changes` being a map
   (`{:invalid_order_request, changes}`), the two options that say WHICH order is being
   edited (`opts[:instrument_type]` and `opts[:order_type]`, each `{:missing_option, key}`
-  when absent), crypto (`{:preview_not_supported, :crypto}`), and the per-type edit table.
+  when absent), crypto (`{:preview_not_supported, :crypto}`), an instrument type this package
+  does not place (`{:unsupported_instrument_type, type}`), and the per-type edit table: an
+  order type with no table is `{:unsupported_order_type, type}`, a field outside the table is
+  `{:unsupported_order_edit, order_type, fields}`, a present `nil` or a number that is not
+  above zero is the tag `place_order/3` gives that field (`{:invalid_price, v}` and so on), an
+  `:order_type` or `:time_in_force` with no wire name is `{:unsupported_order_type, v}` /
+  `{:unsupported_time_in_force, v}`, an event contract's quantity beyond two decimal places is
+  `{:invalid_quantity, q}`, an amended `:time_in_force` (or a changed `:order_type`) outside
+  the instrument's matrix is `{:unsupported_order_combination, type, tif}` /
+  `{:unsupported_order_type, type}`, an amended `:gtd` is `{:unsupported_time_in_force, :gtd}`
+  (the replace body has no `expire_date`), an option order is
+  `{:unsupported_instrument_type, :option}` (its `legs` cannot be sent), and a futures order
+  may change type only in the direction the venue allows
+  (`{:unsupported_order_type_change, from, to}`).
 
   **Neither option is defaulted.** `replace_order/4` used to assume an equity limit order
   where `place_order/3` assumes crypto, so a caller who forgot to say was checked against,
@@ -2557,13 +2671,46 @@ defmodule DpExchange.Webull.Rest do
     with :ok <- validate_replace_arguments(client_order_id, changes),
          {:ok, instrument} <- replace_option(opts, :instrument_type),
          {:ok, order_type} <- replace_option(opts, :order_type),
-         :ok <- previewable(instrument),
-         {:ok, _allowed} <- allowed_combinations(instrument),
+         :ok <- replaceable_instrument(instrument),
+         {:ok, allowed} <- allowed_combinations(instrument),
          :ok <- amendable(order_type, changes),
          # An amended size is judged as a placed one is (an event contract takes at most two
          # decimal places); a change that names no quantity has nothing to judge.
-         :ok <- quantity_precision(Map.get(changes, :quantity), "QTY", instrument) do
+         :ok <- quantity_precision(Map.get(changes, :quantity), "QTY", instrument),
+         :ok <- replace_duration(allowed, order_type, changes),
+         :ok <- contract_legs(instrument) do
       futures_type_change(instrument, order_type, changes)
+    end
+  end
+
+  # **An amended type or duration is judged against the instrument's matrix, as a placed one
+  # is.** `common-order-replace.md` reuses place's `time_in_force` and `order_type` enums and
+  # its page lists no wider set, so a stock order amended to `IOC`, an event order to `MARKET`
+  # or a pair outside the instrument's list was sent for the venue to refuse - and the Fake
+  # took it. `GTD` cannot be amended at all: the page's replace body has no `expire_date`, so
+  # the date the duration needs has nowhere to go (`{:unsupported_time_in_force, :gtd}`).
+  defp replace_duration(allowed, order_type, changes) do
+    target = Map.get(changes, :order_type, order_type)
+
+    case Map.get(changes, :time_in_force) do
+      nil -> served_changed_type(allowed, changes)
+      :gtd -> {:error, {:unsupported_time_in_force, :gtd}}
+      tif -> served_pair(allowed, target, tif)
+    end
+  end
+
+  defp served_changed_type(allowed, changes) do
+    case Map.get(changes, :order_type) do
+      nil -> :ok
+      type -> served_order_type(allowed, type)
+    end
+  end
+
+  defp served_pair(allowed, type, tif) do
+    with :ok <- served_order_type(allowed, type) do
+      if {type, tif} in allowed,
+        do: :ok,
+        else: {:error, {:unsupported_order_combination, type, tif}}
     end
   end
 
@@ -2573,6 +2720,12 @@ defmodule DpExchange.Webull.Rest do
   # refuse; it is `{:unsupported_order_type_change, from, to}` before the request, in the Fake
   # too. The page states no such rule for equities or options, so none is made up for them.
   @futures_type_changes %{limit: :market, stop: :market, stop_limit: :limit}
+
+  # `previewable/1` judges a whole request (its cash sizing too); a replace names only the
+  # instrument, so only the crypto refusal applies. Passing the bare atom to `previewable/1`
+  # raised `BadMapError` on every replace.
+  defp replaceable_instrument(:crypto), do: {:error, {:preview_not_supported, :crypto}}
+  defp replaceable_instrument(_instrument), do: :ok
 
   defp futures_type_change(:futures, order_type, changes) do
     case Map.get(changes, :order_type) do
@@ -2723,6 +2876,17 @@ defmodule DpExchange.Webull.Rest do
   `venue_time` is the venue's `quote_time`. **A book the venue did not stamp is delivered
   with `venue_time: nil`**, never the local clock: `observed_at` states when this package
   read it, and refusing would discard real levels over an optional field.
+
+  ## Refusals
+
+  `opts[:limit]` is `{:error, {:unsupported_option, :limit}}` (`depth:` is the level count).
+  A `:depth` that is not a whole number from 1 (stock, ETF) or from 1 to 10 (`US_FUTURES`, the
+  page's "Valid range: 1 - 10") is `{:error, {:invalid_option, :depth, depth}}`. A level with
+  no readable price, or a non-zero size that is not a number, refuses the book
+  (`{:missing_required_field, :price | :size}`, `{:invalid_decimal, field, raw}`,
+  `{:non_positive_price, :price, raw}`, `{:non_positive_size, :size, raw}`); a level whose
+  size is zero is dropped, and a side that is present and not a list is
+  `{:error, :unexpected_response_shape}`.
   """
   @spec get_order_book(String.t(), map(), keyword()) ::
           {:ok, OrderBook.t()} | {:error, term()} | {:refused, term()}
@@ -2911,6 +3075,13 @@ defmodule DpExchange.Webull.Rest do
 
   The price maps come back **keyed on the venue's own price strings**. See
   `Core.Types.VolumeProfile` for why they are not re-keyed on `Decimal`.
+
+  `opts[:category]` is `US_STOCK` (the default) or `US_FUTURES`; `US_ETF` and anything else is
+  `{:error, {:unsupported_footprint_category, category}}`. A session outside `PRE`, `RTH` and
+  `ATH` is `{:error, {:unsupported_session, session}}`. A `:count` that is not a whole number
+  from 1 to 1200 is `{:error, {:limit_out_of_range, count, max: 1200}}`. A price level whose
+  size cannot be read refuses the profile (`{:invalid_decimal, :buy_detail | :sell_detail,
+  size}`).
   """
   @spec get_volume_profile(String.t(), String.t(), map(), keyword()) ::
           {:ok, [VolumeProfile.t()]} | {:error, term()} | {:refused, term()}
@@ -2970,9 +3141,10 @@ defmodule DpExchange.Webull.Rest do
   defp footprint_session(session), do: {:error, {:unsupported_session, session}}
 
   @doc """
-  Whether a footprint request names a category, width and session the endpoint serves: the
-  three checks `get_volume_profile/4` makes before anything is signed, in the same order,
-  for `DpExchange.Webull.Fake` to refuse exactly what the real path refuses.
+  Whether a footprint request names a category, width, session and `:count` the endpoint
+  serves: the four checks `get_volume_profile/4` makes before anything is signed, in the same
+  order (the symbol is judged after them there), for `DpExchange.Webull.Fake` to refuse
+  exactly what the real path refuses.
   """
   @spec validate_footprint_request(String.t(), keyword()) :: :ok | {:error, term()}
   def validate_footprint_request(timeframe, opts) do
@@ -3091,6 +3263,11 @@ defmodule DpExchange.Webull.Rest do
   publication windows the venue returns history, and a row for the other auction must not be
   labelled with the requested one. A row that names none takes the requested auction; one
   that names any other value is `{:error, {:unsupported_auction, value}}`.
+
+  Before a request: an absent `opts[:auction]` is `{:error, :auction_required}`, a value other
+  than `:opening` or `:closing` is `{:error, {:unsupported_auction, value}}`, and a `:history`
+  that is not a boolean is `{:error, {:invalid_option, :history, value}}`. A row that names a
+  different symbol than the one asked for is `{:error, :not_in_response}`.
   """
   @spec get_auction_imbalance(String.t(), map(), keyword()) ::
           {:ok, [AuctionImbalance.t()]} | {:error, term()} | {:refused, term()}
@@ -3241,6 +3418,16 @@ defmodule DpExchange.Webull.Rest do
 
   `broken` is `false` on every tick: this venue publishes no bust flag here, and a venue
   with no concept of busts has nothing busted — which is the same answer.
+
+  **The count sent is always explicit:** `opts[:limit]`, else 30 on every tape. The futures
+  page documents a default of 200; this package does not rely on the venue's default and asks
+  for 30. A `:limit` that is not a whole number from 1 to the tape's maximum is
+  `{:error, {:invalid_option, :limit, n}}`, `opts[:since]` is `{:error, {:unsupported_option,
+  :since}}` (the tape takes a count and no start time), and a `:sessions` that is not a
+  session or list of distinct sessions from `PRE`, `RTH`, `ATH`, `OVN` is
+  `{:error, {:invalid_option, :sessions, v}}`. A tick time that is not milliseconds is
+  `{:error, :invalid_unix_time}`, and a tick with no `time` is
+  `{:error, :missing_venue_timestamp}`.
   """
   @spec get_trades(String.t(), map(), keyword()) ::
           {:ok, [Trade.t()]} | {:error, term()} | {:refused, term()}
@@ -3433,6 +3620,13 @@ defmodule DpExchange.Webull.Rest do
   can open, not an observed stamp.
 
   Widths: the eight the crypto endpoint serves plus `1w`, `1M` and `1y`.
+
+  Refusals before a request: a category other than `US_STOCK` or `US_ETF` is
+  `{:error, {:unsupported_book_category, category}}`; a width outside the eleven is
+  `{:error, {:unsupported_timeframe, width}}`; a `:limit` that is not a whole number from 1 to
+  1200 (1650 for `1m`) is `{:error, {:invalid_option, :limit, n}}`; `:sessions` is judged as
+  for `get_trades/3`; a `range` that is not a keyword list of `DateTime` bounds, or is
+  inverted, is `{:error, {:invalid_range, range}}`.
   """
   @spec get_stock_bars(String.t(), String.t(), keyword(), map(), keyword()) ::
           {:ok, [Candle.t()]} | {:error, term()} | {:refused, term()}
@@ -3705,7 +3899,8 @@ defmodule DpExchange.Webull.Rest do
   "not usable" covers three different problems with three different remedies. A response
   with no `status`, or one outside the venue's four, is refused rather than returned as a
   verdict (`{:error, {:missing_required_field, :status}}` /
-  `{:error, {:unknown_token_status, status}}`).
+  `{:error, {:unknown_token_status, status}}`). A `token` that is not text is
+  `{:error, {:invalid_field, :token}}` before anything is signed; the value is never echoed.
   """
   @spec check_token(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -3738,9 +3933,18 @@ defmodule DpExchange.Webull.Rest do
   token's, in seconds; `rt_expires_in` is the refresh token's, and it is the one that ends
   the session when it runs out. A caller tracking only the first will be surprised.
 
-  A 2xx answer with no `access_token` is `{:error, {:missing_required_field, :access_token}}`,
-  not a token response: this package has no vendor schema for this body (the page is not
-  retrievable), but a grant that returned no token has not succeeded whatever else it said.
+  A 2xx answer with no `access_token` is not a token response, and it is reported as
+  `{:error, {:write_unconfirmed, nil, {:missing_required_field, :access_token}}}` (see the
+  paragraph below: the grant may still have been honoured): this package has no vendor schema
+  for this body (the page is not retrievable), but a grant that returned no token has not
+  succeeded whatever else it said.
+
+  Refused before anything is sent, as plain errors: `client_id` or `client_secret` that is not
+  text is `{:error, {:invalid_field, :client_id | :client_secret}}` (the secret is never
+  echoed); both `opts[:code]` and `opts[:refresh_token]` given is
+  `{:error, :code_and_refresh_token_are_exclusive}`; a blank one counts as absent; and an
+  `opts[:oauth_url]` that is not `https` (or `http` to a loopback host) is
+  `{:error, {:insecure_url, :webull}}`.
 
   **A grant that may have been honoured and is not proven is `{:error, {:write_unconfirmed,
   nil, reason}}`**, never a bare error: a transport error or timeout, a 5xx or 408, and a 2xx
@@ -3930,7 +4134,10 @@ defmodule DpExchange.Webull.Rest do
   a membership from now.
 
   The `id` is the one the venue's reply names. A reply that names none is
-  `{:error, {:missing_required_field, :id}}`; it is not filled in from the id asked for.
+  `{:error, {:missing_required_field, :id}}`; it is not filled in from the id asked for, and a
+  reply that names a different watchlist is `{:error, :not_in_response}`. An id that is not
+  non-empty text is `{:error, {:invalid_watchlist_id, id}}` before anything is sent, and a
+  member with no text `symbol` refuses the read as `{:error, :unexpected_response_shape}`.
   """
   @spec get_watchlist(String.t(), map(), keyword()) ::
           {:ok, Watchlist.t()} | {:error, term()} | {:refused, term()}
@@ -3994,8 +4201,10 @@ defmodule DpExchange.Webull.Rest do
 
   `symbols` is checked before the watchlist is created: a member that is not non-empty text
   is `{:error, {:invalid_symbols, symbols}}`, and `opts[:sort]` must be a whole number
-  (`{:error, {:invalid_sort, sort}}`), so a mistake knowable from the arguments does not
-  leave an empty watchlist behind.
+  (`{:error, {:invalid_sort, sort}}`), and `opts[:category]` must be absent or `US_STOCK`, the
+  one value the instrument endpoints' enum lists (`{:error, {:invalid_category, category}}`),
+  so a mistake knowable from the arguments does not leave an empty watchlist behind. A `name`
+  that is not text is `{:error, {:invalid_watchlist_name, name}}`.
 
   **A create that may have reached the venue and is not proven** (a transport error or
   timeout, a 5xx, a 2xx whose body is unreadable or names no id) is `{:error,
@@ -4101,6 +4310,20 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  @doc """
+  Whether `opts[:name]`, where given, is text a watchlist update can send: absent (or `nil`)
+  changes nothing, anything but text is `{:error, {:invalid_watchlist_name, name}}`. The check
+  `update_watchlist/3` makes after the sort and before anything is signed, for
+  `DpExchange.Webull.Fake`. A number was written to the wire as its text, and a map raised.
+  """
+  @spec validate_watchlist_rename(keyword()) :: :ok | {:error, {:invalid_watchlist_name, term()}}
+  def validate_watchlist_rename(opts) do
+    case Keyword.get(opts, :name) do
+      nil -> :ok
+      name -> validate_watchlist_target(:name, name)
+    end
+  end
+
   defp venue_watchlist_id(row) do
     case value(row, ["watchlist_id"]) do
       id when is_binary(id) -> {:ok, id}
@@ -4145,7 +4368,10 @@ defmodule DpExchange.Webull.Rest do
   refused rather than silently skipped — `opts[:symbols]` is
   `{:error, :membership_not_updatable_here}`.
 
-  Only what is given is changed: the venue leaves unprovided fields alone.
+  Only what is given is changed: the venue leaves unprovided fields alone. Refused before
+  anything is sent: an id that is not non-empty text (`{:invalid_watchlist_id, id}`), a `:sort`
+  that is not a whole number (`{:invalid_sort, sort}`) and a `:name` that is not text
+  (`{:invalid_watchlist_name, name}`; it used to be written to the wire as its text).
 
   A write that may have reached the venue and is not proven is `{:error,
   {:write_unconfirmed, nil, reason}}`; failures decided before sending stay plain.
@@ -4160,12 +4386,15 @@ defmodule DpExchange.Webull.Rest do
     if Keyword.has_key?(opts, :symbols) do
       {:error, :membership_not_updatable_here}
     else
-      body =
-        %{"watchlist_id" => watchlist_id}
-        |> put_present("name", Keyword.get(opts, :name))
-        |> put_present("sort", Keyword.get(opts, :sort))
-
+      # The sort and the name are judged BEFORE the body is built: `put_present/3` writes any
+      # value out through `to_string/1`, so a `name: 123` went to the venue as `"123"` and a
+      # map raised `Protocol.UndefinedError` in the caller.
       with :ok <- validate_watchlist_sort(Keyword.get(opts, :sort)),
+           :ok <- validate_watchlist_rename(opts),
+           body =
+             %{"watchlist_id" => watchlist_id}
+             |> put_present("name", Keyword.get(opts, :name))
+             |> put_present("sort", Keyword.get(opts, :sort)),
            {:ok, response} <-
              write_outcome(
                post_write("/market-data/watchlists/update", body, credentials, opts),
@@ -4194,10 +4423,12 @@ defmodule DpExchange.Webull.Rest do
   @doc """
   Deletes a watchlist and everything in it — `POST /market-data/watchlists/delete`.
 
-  **Irreversible, in the venue's own words.** Returns `:ok` rather than the venue's
-  `%{"success" => true}`, because the contract's `delete_watchlist/2` is documented as
-  returning `:ok` — and a `false` in that field is an error here rather than a successful
-  call that deleted nothing. A delete that may have reached the venue and is not proven is
+  **Irreversible, in the venue's own words.** Returns `{:ok, :ok}` (the contract's
+  `result(:ok)`) rather than the venue's `%{"success" => true}`, because the contract's
+  `delete_watchlist/2` is documented as returning `:ok` — and a `false` in that field is an
+  error here rather than a successful call that deleted nothing. An id that is not non-empty
+  text is `{:error, {:invalid_watchlist_id, id}}` before anything is sent. A delete that may
+  have reached the venue and is not proven is
   `{:error, {:write_unconfirmed, nil, reason}}` (re-listing shows whether it took); an unknown
   id is `{:refused, :not_found}`.
   """
@@ -4267,6 +4498,13 @@ defmodule DpExchange.Webull.Rest do
 
   A write that may have reached the venue and is not proven is `{:error,
   {:write_unconfirmed, nil, reason}}` (`write_outcome/1`); read the watchlist before retrying.
+
+  Success is `{:ok, %{"success" => true}}`; a 200 saying `"success": false` is
+  `{:refused, :watchlist_write_rejected}`. Refused before a request, in this order: `symbols`
+  (`validate_watchlist_membership/1`: `{:error, :symbols_required}` for none), a `:category`
+  other than `US_STOCK` (`{:error, {:invalid_category, category}}`), then a blank or non-text
+  `watchlist_id` (`{:error, {:invalid_watchlist_id, id}}`). The 1000-instrument cap is the
+  venue's to enforce and is not counted here.
   """
   @spec add_watchlist_instruments(String.t(), [String.t()], map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -4292,7 +4530,10 @@ defmodule DpExchange.Webull.Rest do
 
   **`opts[:sorts]` is required and is a map of symbol to position.** The endpoint updates
   sort order and nothing else, and a call without positions would send the venue a list of
-  symbols with no change in it.
+  symbols with no change in it. A missing or empty `:sorts` is `{:error, :sorts_required}`; a
+  symbol that is not non-empty text or a position that is not an integer is
+  `{:error, {:invalid_sorts, sorts}}`. The other refusals and the result are
+  `add_watchlist_instruments/4`'s.
   """
   @spec sort_watchlist_instruments(String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()} | {:refused, term()}
@@ -4499,7 +4740,16 @@ defmodule DpExchange.Webull.Rest do
   endpoints that document them**, and are dropped elsewhere rather than sent — a parameter
   an endpoint does not know is at best ignored and at worst a refusal, and neither tells the
   caller which happened. `fund_files`, `fund_holdings` and `fund_splits` are three such
-  endpoints for `:count` specifically — none of their own pages define it.
+  endpoints for `:count` specifically — none of their own pages define it. The options a kind
+  does read are `fundamental_option_keys/1`'s: `:category` (default `US_STOCK`), and by kind
+  `:type`, `:count`, `:last_date` (`:fund_net_values`) and `:sort_by` (`:industry_comparisons`).
+
+  **Refusals, all before a request.** A query option that is not text, a number, an atom, a
+  `Decimal` or a `Date` is `{:error, {:invalid_option, key, value}}`. A `:count` over the page's
+  stated maximum (20 for the statement, indicator and net-value kinds, 5 for `:capital_flows`)
+  or not a whole number of at least one is `{:error, {:limit_out_of_range, count, max: max}}`.
+  A `symbol` that is not
+  non-empty text is `{:error, {:invalid_symbol, symbol}}`.
 
   `:fund_dividends` is the one kind (besides `:filings`, which `get_filings/2` reaches
   through its own envelope) whose page documents `pagination_key`
@@ -4707,6 +4957,11 @@ defmodule DpExchange.Webull.Rest do
   the venue publishes a code, so the code is mapped with the venue's own key and the raw
   integer stays in `line_items` — a code this legend does not cover leaves the label `nil`
   rather than inventing one, and the integer is still there to read.
+
+  `opts` are `get_fundamental/4`'s for the statement's endpoint (`:type`, `:count`,
+  `:category`) and are refused as it refuses them. `{:error, {:unsupported_statement_kind,
+  kind}}` is a `kind` outside the four; a row that is not an object is
+  `{:error, :unexpected_response_shape}`.
   """
   @spec get_financials(String.t(), atom(), map(), keyword()) ::
           {:ok, [FinancialStatement.t()]} | {:error, term()} | {:refused, term()}
@@ -4883,7 +5138,9 @@ defmodule DpExchange.Webull.Rest do
 
   `opts[:symbol]` is **required**: this venue's calendars are per issuer, not market-wide.
   A market-wide calendar and one issuer's are different questions, and this endpoint answers
-  only the second.
+  only the second. A missing or non-text `:symbol` is `{:error, :symbol_required}`, and a
+  `:kind` other than `:dividend` or `:earnings` is
+  `{:error, {:unsupported_event_kind, kind}}`, both before a request.
 
   **Splits are not here.** Webull publishes `fund-splits` for funds and nothing for equities,
   so a `:split` kind would be answerable for some symbols and silently empty for the rest.
@@ -5251,14 +5508,18 @@ defmodule DpExchange.Webull.Rest do
   # `nil`, not this package's clock.
   defp news_time(nil), do: {:ok, nil}
 
+  # The same 64-byte bound as every other venue time (`unreadable_time/1`), and the refusal
+  # carries a bounded copy: a `publish_time` of any length was copied whole into the error.
   defp news_time(text) when is_binary(text) do
-    case DateTime.from_iso8601(text) do
-      {:ok, datetime, _offset} -> {:ok, datetime}
-      {:error, _reason} -> {:error, {:unparseable_venue_timestamp, text}}
+    with false <- time_text_too_long?(text),
+         {:ok, datetime, _offset} <- DateTime.from_iso8601(text) do
+      {:ok, datetime}
+    else
+      _unreadable -> refused_time(text)
     end
   end
 
-  defp news_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+  defp news_time(other), do: refused_time(other)
 
   # The page's own example for an item is a JSON-encoded array in a string (`"[\"NVDA\"]"`),
   # which is not a symbol; anything that is not ticker-shaped text refuses the read.
@@ -5659,7 +5920,9 @@ defmodule DpExchange.Webull.Rest do
   **Paged, and the absence of a key is the end.** `opts[:pagination_key]` continues, and the
   page's own `pagination_key` is returned alongside the rows as
   `{:ok, %{rows: [...], pagination_key: key_or_nil}}` — `nil` means this was the last page.
-  Returning a bare list would make the last page and a truncated one look identical.
+  Returning a bare list would make the last page and a truncated one look identical. A
+  `pagination_key` that is not text is `{:error, :unexpected_pagination_key}`; the options are
+  checked first (`{:error, {:invalid_option, key, value}}`).
   """
   @spec list_event_series(map(), keyword()) ::
           {:ok, %{rows: [map()], pagination_key: String.t() | nil}}
@@ -5844,7 +6107,9 @@ defmodule DpExchange.Webull.Rest do
   rows are returned and nothing is normalised.
 
   The venue's default count here is **30**, the same as its other tapes (`event-tick.md`,
-  `tick.md`); the maximum is 1200.
+  `tick.md`); the maximum is 1200. A `:limit` that is not a whole number from 1 to 1200 is
+  `{:error, {:invalid_option, :limit, value}}` before a request, and a row naming another
+  market than the one asked for is `{:error, :not_in_response}`.
   """
   @spec get_event_trades(String.t(), map(), keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:refused, term()}
@@ -5881,8 +6146,9 @@ defmodule DpExchange.Webull.Rest do
   identity is the venue's; this package does not derive one side from the other, because a
   derived level cannot be told from a quoted one.
 
-  Returned as `%{yes_bids:, yes_asks:, no_bids:, no_asks:, quote_time:}` with the venue's own
-  level maps and its `quote_time` in milliseconds. A side that is present and not a list is
+  Returned as `%{symbol:, yes_bids:, yes_asks:, no_bids:, no_asks:, quote_time:}` with the
+  venue's own level maps, the symbol the row names (the one asked for when it names none) and
+  its `quote_time` as the venue sent it (not converted). A side that is present and not a list is
   `{:error, :unexpected_response_shape}` (an absent one is `[]`), and a row naming another
   market than the one asked for is `{:error, :not_in_response}`. `opts[:depth]` must be a
   whole number of levels, one or more, or `{:error, {:invalid_option, :depth, depth}}`
@@ -5933,7 +6199,9 @@ defmodule DpExchange.Webull.Rest do
 
   **A contract this package cannot read is refused, not skipped.** An expiry, a strike and a
   right are what address a contract; a row missing any of them yields
-  `{:error, {:unreadable_option_contract, keys}}` naming the keys the venue actually sent.
+  `{:error, {:unreadable_option_contract, keys}}` naming the keys the venue actually sent (a
+  row that is not an object names the row). A row naming another underlying than the one
+  asked for is `{:error, :not_in_response}`.
   Dropping the row would return a chain with a hole in it that looks complete, and a caller
   walking strikes would never learn the strike was there.
 
@@ -5948,7 +6216,8 @@ defmodule DpExchange.Webull.Rest do
   The grid holds one contract per cell, and an index whose standard and weekly roots share a
   date (SPX and SPXW on the third Friday) can list two. The second used to replace the
   first silently, so a caller trading the cell got whichever row the venue sent last. That
-  is now `{:error, {:ambiguous_option_contract, expiry, strike, right, [venue_symbol]}}`;
+  is now `{:error, {:ambiguous_option_contract, expiry, strike, right, [held_symbol,
+  new_symbol]}}`, the venue symbols of the two;
   narrow the request with `opts[:expiry]` / `opts[:strike]` or read the flat contract list.
   The same contract listed twice is one contract, and is kept once.
 
@@ -6010,7 +6279,28 @@ defmodule DpExchange.Webull.Rest do
   #     this" with a range-only pair, not a synthesized bound.
   #   * `page_size` is undefined here — the venue paginates this endpoint on
   #     `pagination_key` (`:167`) instead, which `option_contracts/3` now follows bounded.
+  #
+  # **`:expiry` and `:strike` are checked before the query is built**
+  # (`validate_option_filters/1`): a map or a list for either raised
+  # `Protocol.UndefinedError` out of `put_present/3`'s `to_string/1`, in the caller's process.
   defp option_contracts(underlying, credentials, opts) do
+    with :ok <- validate_symbol(underlying),
+         :ok <- validate_option_filters(opts),
+         {:ok, contract_rows} <- paginate(option_contract_pages(underlying, credentials, opts)) do
+      decode_option_contracts(contract_rows, underlying)
+    end
+  end
+
+  @doc """
+  The `opts[:expiry]` and `opts[:strike]` check `get_option_chain/3` and
+  `get_option_expirations/3` make after the underlying: each is text, a number, an atom, a
+  `Decimal` or a `Date`, or absent. Anything else (a map, a tuple, a list) is
+  `{:error, {:invalid_option, key, value}}` before a request. For `DpExchange.Webull.Fake`.
+  """
+  @spec validate_option_filters(keyword()) :: :ok | {:error, term()}
+  def validate_option_filters(opts), do: scalar_opts(opts, [:expiry, :strike])
+
+  defp option_contract_pages(underlying, credentials, opts) do
     base_params =
       %{"underlying_symbols" => underlying, "category" => "US_OPTION"}
       |> put_present("start_date", option_date_param(Keyword.get(opts, :expiry)))
@@ -6026,10 +6316,7 @@ defmodule DpExchange.Webull.Rest do
       end
     end
 
-    with :ok <- validate_symbol(underlying),
-         {:ok, contract_rows} <- paginate(fetch_page) do
-      decode_option_contracts(contract_rows, underlying)
-    end
+    fetch_page
   end
 
   defp option_strike_params(params, nil), do: params
@@ -6298,6 +6585,24 @@ defmodule DpExchange.Webull.Rest do
   defp unreadable_time(text),
     do: {:error, {:unparseable_venue_timestamp, text |> binary_part(0, 32) |> :binary.copy()}}
 
+  defp time_text_too_long?(text), do: byte_size(text) > @max_time_chars
+
+  # The refusal for a venue time this package cannot read, carrying what it was: text of up to
+  # 64 bytes as it was written, longer text as a 32-byte copy, and a value that is not text (a
+  # map, a list, a float) as a bounded description, never the venue's structure whole.
+  defp refused_time(text) when is_binary(text) do
+    if time_text_too_long?(text),
+      do: unreadable_time(text),
+      else: {:error, {:unparseable_venue_timestamp, text}}
+  end
+
+  # An absent field stays `nil`, as it always was: `quote_time/2` and `trade_time/2` ask for
+  # an absent one on every snapshot row and read the refusal as "none".
+  defp refused_time(nil), do: {:error, {:unparseable_venue_timestamp, nil}}
+
+  defp refused_time(other),
+    do: {:error, {:unparseable_venue_timestamp, inspect(other, limit: 3, printable_limit: 32)}}
+
   # A time the page states in milliseconds, read as milliseconds and nothing else: a number at
   # or below 100_000_000_000 (1973 as milliseconds, so a seconds-sized value) or past thirteen
   # digits is `:invalid_unix_time`, never reinterpreted in another unit. A number written as
@@ -6343,7 +6648,7 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
-  defp parse_time(other), do: {:error, {:unparseable_venue_timestamp, other}}
+  defp parse_time(other), do: refused_time(other)
 
   defp iso_time(datetime) do
     if DateTime.to_unix(datetime) > 0, do: {:ok, datetime}, else: {:error, :invalid_unix_time}
@@ -6917,8 +7222,8 @@ defmodule DpExchange.Webull.Rest do
 
   ## An accepted response that names no order is `:order_unconfirmed`
 
-  A 2xx whose row carries no `client_order_id`, **or no row at all** (`{}` with an empty or
-  unreadable `data`), is
+  A 2xx whose row carries no `client_order_id` **or a different one from the id sent**, **or
+  no row at all** (`{}` with an empty or unreadable `data`), is
   `{:error, {:order_unconfirmed, client_order_id, :unexpected_response_shape}}` - the same
   shape a timeout gets, with the id this package sent, because the order may be live. Use
   `get_order/3` with that id to find out.
@@ -6946,8 +7251,25 @@ defmodule DpExchange.Webull.Rest do
   (`{:unexpected_field, key}` for one the type does not use, `{:missing_field, key}` for one
   it needs, `{:invalid_price, v}`, `{:invalid_stop_price, v}`,
   `{:invalid_trailing_stop_step, v}`); `:client_order_id`
-  (`{:invalid_client_order_id, v}`, 32 characters at most); then the account option
-  (`{:missing_option, :account_id}`) and the credentials.
+  (`{:invalid_client_order_id, v}`, non-blank text of 32 characters at most); then the account
+  option (`{:missing_option, :account_id}`) and the credentials.
+
+  Also refused in that pass, each by the field it names: an `:instrument_type` this package
+  has no matrix for (`{:unsupported_instrument_type, type}`); a GTD `:expire_date` that is
+  not a real `yyyy-MM-dd` date (`{:invalid_expire_date, v}`); cash sizing on a futures or
+  option order (`{:cash_sizing_not_supported, instrument}`); an event contract sized in cash
+  that is a sell, or is not `:fok` (`{:invalid_side, side}`, `{:unsupported_order_combination,
+  :amount, tif}`); a trailing stop without `:trailing_type` (`:amount` or `:percentage`,
+  `{:missing_field, :trailing_type}`, `{:invalid_trailing_type, v}`, a percentage step over 1
+  is `{:invalid_trailing_stop_step, v}`) and `:trailing_type` on any other type
+  (`{:unexpected_field, :trailing_type}`); `:event_outcome` other than `yes`/`no`
+  (`{:invalid_event_outcome, v}`); `:support_trading_session` other than `ALL`, `CORE` or
+  `NIGHT` (`{:unsupported_support_trading_session, v}`); `:support_trading_session` on any
+  instrument but `:equity` and `:event_outcome` on any but `:event` (`{:unexpected_field, key}`:
+  the page scopes them to "U.S. stock market orders only" / "event orders"); and an `:option`
+  order, last of all (`{:unsupported_instrument_type, :option}`: the venue requires its
+  `legs`, and the request has no key to carry them). A futures order takes the trailing stop,
+  as an equity one does; only options are excluded by the page.
 
   ## A quantity finer than the venue's documented places is refused, never rounded
 
@@ -7060,8 +7382,19 @@ defmodule DpExchange.Webull.Rest do
   per request, and **equities only** — `docs/reference/webull/batch-orders.md` quotes the
   page verbatim for both. A batch over the cap is refused before it is sent rather than
   split, because splitting turns one request into several and undoes the only reason to
-  call this. An order whose instrument type is not equity is refused by index, so a caller
-  knows which one.
+  call this. An empty batch is `{:error, :empty_batch}`, one over the cap
+  `{:error, {:batch_too_large, count, 50}}`, and anything that is not a proper list
+  `{:error, :invalid_batch}`. An order whose `:instrument_type` is not equity (absent means
+  equity here, unlike `place_order/3`, where absent means crypto) is
+  `{:error, {:batch_instrument_not_supported, index, type}}`, so a caller knows which one; an
+  entry that is not a map is `{:error, {:batch_order_rejected, index, :not_an_order}}`.
+
+  **The batch entry is narrower than `place_order/3`'s**, per `order-batch-place.md`:
+  `:order_type` is required and is `:market` or `:limit` (`{:unsupported_batch_order_type,
+  type}`), `:time_in_force` is required and is `:day` (`{:unsupported_batch_time_in_force,
+  tif}`), and `:support_trading_session` is required, `ALL`, `CORE` or `NIGHT` in any case
+  (`{:missing_field, :support_trading_session}`, `{:unsupported_support_trading_session,
+  value}`), none of them defaulted. Each is refused by index like the rest.
 
   **The vendor also says this is not available to every client.** A refusal here can mean
   the account is not entitled rather than that the batch was wrong, and the venue's own
@@ -7080,9 +7413,13 @@ defmodule DpExchange.Webull.Rest do
   `{:error, {:order_unconfirmed, ids, reason}}`, `ids` being every `client_order_id` sent, in
   order (generated ones included). Decided-before-sending failures (`unsent?/2`) stay plain.
 
-  Each order takes the same shape `place_order/3` builds, and `client_order_id` is generated
-  per order where the caller did not supply one — the venue requires one per order and
-  requires them unique per account.
+  `client_order_id` is generated per order where the caller did not supply one — the venue
+  requires one per order and requires them unique per account. A supplied one that is not
+  non-blank text of at most 32 characters is `{:batch_order_rejected, index,
+  {:invalid_client_order_id,
+  id}}`, and one repeated inside the batch is `{:batch_order_rejected, index_of_the_repeat,
+  {:duplicate_client_order_id, id}}`. Every refusal here is made before anything is signed;
+  `opts[:account_id]` is checked first (`{:missing_option, :account_id}`).
 
   Returns the venue's own rows, one per order, unnormalised: the venue validates per order
   and a batch where three of five were accepted is the normal shape, not the exception.
@@ -7406,7 +7743,8 @@ defmodule DpExchange.Webull.Rest do
   #   CRYPTO   MARKET/IOC, LIMIT/DAY|GTC, STOP_LOSS_LIMIT/DAY|GTC
   #   EQUITY   MARKET, LIMIT, STOP_LOSS, STOP_LOSS_LIMIT, TRAILING_STOP_LOSS × DAY|GTC
   #   OPTION   as EQUITY minus TRAILING_STOP_LOSS ("Options not supported")
-  #   FUTURES  as OPTION; BUY and SELL only
+  #   FUTURES  as EQUITY (trailing stop included: only options are excluded); BUY and SELL
+  #            only
   #   EVENT    LIMIT only, and DAY|GTC|IOC|GTD|FOK
   #
   # The institutional-only types (MARKET_ON_OPEN, MARKET_ON_CLOSE, LIMIT_ON_OPEN) are
@@ -7458,7 +7796,11 @@ defmodule DpExchange.Webull.Rest do
     ],
     equity: for(type <- @equity_types, tif <- @stock_tifs, do: {type, tif}),
     option: for(type <- @option_types, tif <- @stock_tifs, do: {type, tif}),
-    futures: for(type <- @option_types, tif <- @stock_tifs, do: {type, tif}),
+    # `common-order-place.md` (`order_type`): "For stock, options and futures trading: ...
+    # TRAILING_STOP_LOSS: Trailing Stop Order, Options not supported" - only options are
+    # excluded, so a futures trailing stop is listed (and `common-order-replace.md` has a
+    # futures rule for one).
+    futures: for(type <- @equity_types, tif <- @stock_tifs, do: {type, tif}),
     event: for(tif <- @event_tifs, do: {:limit, tif})
   }
 
@@ -7470,6 +7812,10 @@ defmodule DpExchange.Webull.Rest do
     event: "EVENT"
   }
 
+  # The instrument types in `@combinations` whose orders this package cannot build whole
+  # (see `contract_legs/1`).
+  @unbuildable_instruments [:option]
+
   @doc """
   Every instrument type this package can build an order for, as the venue names them.
 
@@ -7477,7 +7823,23 @@ defmodule DpExchange.Webull.Rest do
   with the builder it describes is a declaration worth nothing.
   """
   @spec order_instrument_types() :: [atom()]
-  def order_instrument_types, do: @combinations |> Map.keys() |> Enum.sort()
+  def order_instrument_types do
+    @combinations |> Map.keys() |> Kernel.--(@unbuildable_instruments) |> Enum.sort()
+  end
+
+  # **An option order names its contract in `legs`, and this package cannot send them.**
+  # `common-order-place.md` / `common-order-preview.md`: `legs` is "Only required when
+  # placing option orders" (each leg: `strike_price`, `option_expire_date`, `option_type`,
+  # `option_strategy` SINGLE), and `common-order-replace.md` requires a leg `id` and
+  # `quantity` to modify one. The request has no key for any of it, so an `OPTION` order
+  # built here carried only the underlying's ticker: no strike, no expiry, no side of the
+  # chain. Fail closed - `{:unsupported_instrument_type, :option}` - rather than send an
+  # order that does not say which contract it is for. The matrix rows stay so a type or
+  # duration that is wrong is still named before this refusal.
+  defp contract_legs(instrument) when instrument in @unbuildable_instruments,
+    do: {:error, {:unsupported_instrument_type, instrument}}
+
+  defp contract_legs(_instrument), do: :ok
 
   # A request that does not say is crypto, which is what this package served before the
   # instrument types widened. Changing that default would silently re-route existing
@@ -7580,8 +7942,7 @@ defmodule DpExchange.Webull.Rest do
          :ok <- required_order_prices(request, order_type),
          {:ok, trailing} <- checked_prices(request, order_type),
          :ok <- valid_client_order_id(Map.get(request, :client_order_id)),
-         {:ok, outcome} <- event_outcome(request),
-         {:ok, session} <- support_trading_session(request) do
+         {:ok, outcome, session} <- instrument_fields(request, instrument) do
       leaf =
         %{
           "combo_type" => "NORMAL",
@@ -7650,6 +8011,28 @@ defmodule DpExchange.Webull.Rest do
   # (`order-batch-place.md`'s own schema marks it required, no default), an absent value
   # here is left off the wire rather than refused; a value that does not match the venue's
   # three-member enum is refused rather than sent unchecked.
+  #
+  # **Two fields the page scopes to one instrument are refused anywhere else.**
+  # `support_trading_session` is "Applicable to U.S. stock market orders only" and
+  # `event_outcome` is "only applicable to event orders" (`common-order-place.md`): on any
+  # other order each was sent as typed, a trading-session or yes/no instruction the venue was
+  # never going to honour, so the caller believed an extended-hours or outcome choice was in
+  # force. `{:unexpected_field, key}`, judged after the field's own value so a bad value is
+  # still named as one. The option refusal (`contract_legs/1`) comes last of all.
+  defp instrument_fields(request, instrument) do
+    with {:ok, outcome} <- event_outcome(request),
+         {:ok, session} <- support_trading_session(request),
+         :ok <- scoped_field(outcome, :event_outcome, instrument, :event),
+         :ok <- scoped_field(session, :support_trading_session, instrument, :equity),
+         :ok <- contract_legs(instrument) do
+      {:ok, outcome, session}
+    end
+  end
+
+  defp scoped_field(nil, _key, _instrument, _only), do: :ok
+  defp scoped_field(_given, _key, instrument, instrument), do: :ok
+  defp scoped_field(_given, key, _instrument, _only), do: {:error, {:unexpected_field, key}}
+
   defp support_trading_session(request) do
     case Map.get(request, :support_trading_session) do
       nil ->
@@ -7856,12 +8239,13 @@ defmodule DpExchange.Webull.Rest do
   Whether `request` is an order `preview_order/3` would price: every check
   `validate_order_request/1` makes FIRST, so a request `place_order/3` refuses is refused with
   the identical tuple (a non-map is `{:invalid_order_request, r}`, never a raise), and then an
-  instrument the venue can preview (crypto is `{:preview_not_supported, :crypto}`). The same
+  order the venue can preview (crypto is `{:preview_not_supported, :crypto}`; a cash-sized
+  order is `{:cash_sizing_not_supported, instrument}`). The same
   steps `preview_order/3` takes, for `DpExchange.Webull.Fake`.
   """
   @spec validate_preview_request(term()) :: :ok | {:error, term()}
   def validate_preview_request(request) do
-    with :ok <- validate_order_request(request), do: previewable(instrument_type(request))
+    with :ok <- validate_order_request(request), do: previewable(request)
   end
 
   defp required_order_prices(request, order_type) do
@@ -7965,9 +8349,9 @@ defmodule DpExchange.Webull.Rest do
   defp stop_for(_request, _order_type), do: nil
 
   # **Never sent at all before this fix.** `TRAILING_STOP_LOSS` is a real, `@combinations`-
-  # listed order type for **equity** instruments — the venue's own matrix excludes it from
-  # option and futures orders ("Options not supported"), which is why `@option_types` above
-  # stops at `STOP_LOSS_LIMIT` — and the venue's own
+  # listed order type for **equity** and **futures** instruments — the venue's own matrix
+  # excludes it from option orders only ("Options not supported"), which is why
+  # `@option_types` above stops at `STOP_LOSS_LIMIT` — and the venue's own
   # `replace_order/4` field table (and `@amendable` below) names `trailing_stop_step` as the
   # one field that type takes. `order_leaf/3` built every other field for it — instrument,
   # side, sizing, time in force — and never this one, so every trailing-stop order this
@@ -8118,6 +8502,14 @@ defmodule DpExchange.Webull.Rest do
   for exactly that reason, so `place_order/3` then `cancel_order/3` round-trips.
 
   Requires `opts[:account_id]`, as every order call on this venue does.
+
+  Refusals before anything is sent: a blank or non-text id is
+  `{:error, {:invalid_order_id, id}}`, then a missing account is
+  `{:error, {:missing_option, :account_id}}`. An id the venue has no record of is
+  `{:refused, :not_found}`. The cancel is sent once (`retry_attempts: 1`); a transport
+  failure is Core's bare `{:error, reason}` (not `:order_unconfirmed`: a cancel has no order to
+  reconcile), and the 2xx body is not read, so `{:ok, :cancelled}` says the venue accepted the
+  request, not that the order was still open - `get_order/3` shows its final status.
   """
   @spec cancel_order(map(), term(), keyword()) ::
           {:ok, :cancelled} | {:error, term()} | {:refused, term()}
@@ -8126,10 +8518,29 @@ defmodule DpExchange.Webull.Rest do
          {:ok, account_id} <- account_id(opts) do
       body = %{"account_id" => account_id, "client_order_id" => client_order_id}
 
-      with {:ok, _response} <- post_write("/trading/orders/cancel", body, credentials, opts) do
-        {:ok, :cancelled}
+      with {:ok, response} <- post_write("/trading/orders/cancel", body, credentials, opts) do
+        confirm_cancel(response, client_order_id)
       end
     end
+  end
+
+  # **A 2xx that does not name the order is not a confirmed cancel.**
+  # `common-order-cancel.md:170-189` documents the answer as the order's own
+  # `client_order_id` echoed back. A 2xx naming another id, or none, is not an answer about
+  # this order, so `{:ok, :cancelled}` would claim a cancel nobody confirmed. It is
+  # `{:order_unconfirmed, id, :unexpected_response_shape}`, as for a placement, and
+  # `get_order/3` with the id says what the order is now. A refusal (an order already filled
+  # is the venue's to refuse) is passed through by `post_write/4` and is never success.
+  defp confirm_cancel(response, client_order_id) do
+    echoed =
+      case first_row(response) do
+        {:ok, row} -> value(row, ["client_order_id"])
+        {:error, _reason} -> nil
+      end
+
+    if echoed == client_order_id,
+      do: {:ok, :cancelled},
+      else: {:error, {:order_unconfirmed, client_order_id, :unexpected_response_shape}}
   end
 
   @doc """
@@ -8145,6 +8556,15 @@ defmodule DpExchange.Webull.Rest do
   group itself, which is what this did before, finds nothing at every key and returns an
   `Order` every field of which is `nil` except `provider` — a response that looks like an
   order and answers no question about one. See `to_order/1`.
+
+  Refused: a blank or non-text id `{:invalid_order_id, id}`; a missing account
+  `{:missing_option, :account_id}`; a group naming another `client_order_id` than the one asked
+  for `{:error, :not_in_response}`; a group whose id is absent or not text
+  `{:error, {:missing_required_field, :id}}`; a group with no `orders`
+  `{:error, {:missing_required_field, :orders}}`; a multi-leg group
+  `{:error, {:unsupported_combo_type, combo_type}}`; a reply that is not a group
+  `{:error, :unexpected_response_shape}`. An unknown venue `status` is `nil` on the order, not a
+  guessed one.
   """
   @spec get_order(map(), term(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
@@ -8189,6 +8609,13 @@ defmodule DpExchange.Webull.Rest do
   format (`order-history.md:47,58`). **Omitted, the venue defaults to the last 7 days** —
   its own words, not a default this package invented — so a caller reconciling a longer
   history must pass both.
+
+  A window asked of the open listing is `{:error, {:unsupported_option, key}}`; on a history
+  read a bound that is not a `DateTime` is `{:error, {:invalid_time, key, value}}` and
+  `:since` after `:until` is `{:error, {:invalid_option, :since, value}}`. A listing that does
+  not end within the bounded number of pages is `{:error, :history_truncated}`, and a group
+  this package cannot decode into one `Order` refuses the WHOLE list as
+  `{:error, {:unreadable_orders, client_order_ids}}` (`nil` for a group naming none).
   """
   @spec get_orders(map(), keyword()) ::
           {:ok, [Order.t()]} | {:error, term()} | {:refused, term()}
@@ -8246,32 +8673,11 @@ defmodule DpExchange.Webull.Rest do
   # (`dp-exchange-schwab`'s `Orders.leg_fields/1`), where the venue's `orderLegCollection`
   # genuinely is one strategy filled together, nothing here is misdescribed by refusing.
   defp to_order(%{"orders" => [leg]} = group) when is_map(leg) do
-    status = leg |> value(["status"]) |> status_atom()
-
-    {:ok,
-     %Order{
-       # The names `order-detail.md:167-331` defines (`client_order_id`, `order_type`,
-       # `time_in_force`, `total_quantity`, `filled_quantity`, `limit_price`, `stop_price`,
-       # `filled_price`); no page or capture shows their camel-case spellings.
-       id: value(group, ["client_order_id"]) || leg_id(leg),
-       symbol: leg |> value(["symbol"]) |> canonical_or_nil(row_instrument_type(leg)),
-       side: leg |> value(["side"]) |> side_atom(),
-       order_type: leg |> value(["order_type"]) |> order_type_atom(),
-       time_in_force: leg |> value(["time_in_force"]) |> tif_atom(),
-       quantity: decimal(value(leg, ["total_quantity"])),
-       filled_quantity: decimal(value(leg, ["filled_quantity"])),
-       price: decimal(value(leg, ["limit_price"])),
-       stop_price: decimal(value(leg, ["stop_price"])),
-       # `filled_price` is documented as "Average transaction price of the filled
-       # quantity" (`order-detail.md`) — `Core.Types.Order.average_price`'s own meaning,
-       # not a separate field. The venue names no `avg_filled_price` anywhere this
-       # package's own reference pages cover; that key was never proven, only assumed.
-       average_price: decimal(value(leg, ["filled_price"])),
-       status: status,
-       created_at: iso_order_time(value(leg, ["place_time_at"])),
-       updated_at: updated_at(leg, status),
-       provider: :webull
-     }}
+    with :ok <- representable_order(group, leg),
+         %Order{} = order <- build_order(group, leg),
+         :ok <- consistent_fill(order) do
+      {:ok, order}
+    end
   end
 
   defp to_order(%{"orders" => [_first | _rest]} = group),
@@ -8279,6 +8685,135 @@ defmodule DpExchange.Webull.Rest do
 
   defp to_order(%{"orders" => []}), do: {:error, {:missing_required_field, :orders}}
   defp to_order(_other), do: {:error, :unexpected_response_shape}
+
+  # **An order `Core.Types.Order` cannot say is refused, not flattened into one it can.**
+  # The multi-leg refusal above keys on the number of entries in `orders`, but the venue puts
+  # three other shapes inside ONE entry, and each decoded as a plain single-instrument order:
+  #
+  #   * a `combo_type` that names a parent with contingent children (`MASTER`, `OTO`, `OCO`,
+  #     `OTOCO`), or any word this package does not know, on a group that lists one order
+  #     (`order-detail.md:177-180`). The children are not in this read, so the group read as a
+  #     lone order with nothing contingent on it. `NORMAL`, `STOP_PROFIT` and `STOP_LOSS` are
+  #     one order each (a take-profit or stop on an existing position) and decode as they are;
+  #     an ABSENT `combo_type` is read as before (the page lists it required, so that is the
+  #     undocumented shape).
+  #   * an `option_strategy` other than `SINGLE`, or a `legs` list of more than one contract
+  #     (`order-detail.md:446-537`): ONE entry for a whole strategy, whose `symbol`,
+  #     `limit_price` and quantity describe the strategy and not any one contract. The same
+  #     two shapes `representable_position/2` refuses on a position.
+  #   * an `event_outcome` (`yes` or `no`): the opposite exposures to one market, and an
+  #     `Order` has nowhere to say which. A `no` order read back as a `yes` one is the
+  #     backwards-but-plausible failure this family exists to refuse.
+  #
+  # The refusal of a list is the whole list (`collect_orders/1`): an open-orders list quietly
+  # missing a working spread reads as "nothing is working there".
+  @single_order_combo_types [nil, "NORMAL", "STOP_PROFIT", "STOP_LOSS"]
+
+  defp representable_order(group, leg) do
+    combo = value(group, ["combo_type"])
+    strategy = value(leg, ["option_strategy"])
+
+    cond do
+      combo not in @single_order_combo_types ->
+        {:error, {:unsupported_combo_type, combo}}
+
+      strategy not in [nil, "SINGLE"] ->
+        {:error, {:unsupported_option_strategy, strategy}}
+
+      multi_contract?(value(leg, ["legs"])) ->
+        {:error, {:unsupported_option_strategy, :multi_leg}}
+
+      value(leg, ["event_outcome"]) != nil ->
+        {:error, {:unsupported_order, :event_outcome}}
+
+      true ->
+        :ok
+    end
+  end
+
+  # **A row whose status and fill contradict each other is refused, not reported.** Core's
+  # `Order.new/1` refuses `:filled` or `:partially_filled` with nothing filled, `:pending` or
+  # `:partially_filled` with the whole quantity filled, and `:filled` with only part of it
+  # filled. A venue row in one of those shapes (a `FILLED` with `filled_quantity` 0) is the
+  # venue contradicting itself, and either half could be the wrong one, so neither is chosen:
+  # the order is `{:error, :unexpected_response_shape}` (and a list holding it is refused by
+  # `collect_orders/1`). An absent figure (`nil`) contradicts nothing and is let through.
+  defp consistent_fill(%Order{status: status, quantity: quantity, filled_quantity: filled}) do
+    if fill_contradicts?(status, quantity, filled),
+      do: {:error, :unexpected_response_shape},
+      else: :ok
+  end
+
+  defp fill_contradicts?(_status, _quantity, nil), do: false
+
+  defp fill_contradicts?(status, quantity, %Decimal{} = filled) do
+    nothing_filled? = Decimal.compare(filled, 0) == :eq
+
+    if nothing_filled? and status in [:filled, :partially_filled],
+      do: true,
+      else: size_contradicts?(status, quantity, filled, nothing_filled?)
+  end
+
+  defp size_contradicts?(status, %Decimal{} = quantity, filled, nothing_filled?) do
+    case Decimal.compare(filled, quantity) do
+      :lt -> status == :filled
+      :gt -> status in [:pending, :partially_filled]
+      :eq -> status in [:pending, :partially_filled] and not nothing_filled?
+    end
+  end
+
+  defp size_contradicts?(_status, _no_quantity, _filled, _nothing_filled?), do: false
+
+  defp multi_contract?([_first, _second | _rest]), do: true
+  defp multi_contract?(_none_or_single), do: false
+
+  defp build_order(group, leg) do
+    status = leg |> value(["status"]) |> status_atom()
+
+    %Order{
+      # The names `order-detail.md:167-331` defines (`client_order_id`, `order_type`,
+      # `time_in_force`, `total_quantity`, `filled_quantity`, `limit_price`, `stop_price`,
+      # `filled_price`); no page or capture shows their camel-case spellings.
+      id: value(group, ["client_order_id"]) || leg_id(leg),
+      symbol: leg |> value(["symbol"]) |> canonical_or_nil(row_instrument_type(leg)),
+      side: leg |> value(["side"]) |> side_atom(),
+      order_type: leg |> value(["order_type"]) |> order_type_atom(),
+      time_in_force: leg |> value(["time_in_force"]) |> tif_atom(),
+      quantity: decimal(value(leg, ["total_quantity"])),
+      filled_quantity: filled_quantity(leg),
+      price: decimal(value(leg, ["limit_price"])),
+      stop_price: decimal(value(leg, ["stop_price"])),
+      average_price: average_price(leg),
+      status: status,
+      created_at: iso_order_time(value(leg, ["place_time_at"])),
+      updated_at: updated_at(leg, status),
+      provider: :webull
+    }
+  end
+
+  # A fill size is not negative. `decimal/1` reads `"-1"` as a number, and a negative
+  # `filled_quantity` is no execution: kept, it is subtracted by every consumer summing fills.
+  # `nil` is the honest answer, as for a quantity that is not a number. A partial fill that
+  # was then cancelled keeps its `filled_quantity` (the status is the leg's own).
+  defp filled_quantity(leg) do
+    case decimal(value(leg, ["filled_quantity"])) do
+      %Decimal{} = filled -> if Decimal.negative?(filled), do: nil, else: filled
+      nil -> nil
+    end
+  end
+
+  # `filled_price` is documented as "Average transaction price of the filled quantity. If the
+  # order has not been executed yet, this may be zero or null" (`order-detail.md:313`) -
+  # `Core.Types.Order.average_price`'s own meaning, not a separate field. **A zero is the
+  # venue's placeholder for "nothing filled", not a price of zero**: returned as `0` it reads
+  # as an average fill price a consumer multiplies by the filled size. Only a price above
+  # zero is an average price; anything else is `nil`.
+  defp average_price(leg) do
+    case decimal(value(leg, ["filled_price"])) do
+      %Decimal{} = price -> if Decimal.positive?(price), do: price, else: nil
+      nil -> nil
+    end
+  end
 
   # `place_time_at` is "Order placement time in ISO8601 format (UTC). Format:
   # yyyy-MM-dd'T'HH:mm:ss.SSSZ", example `2025-11-11T05:44:35.385Z` (`order-detail.md:342`,

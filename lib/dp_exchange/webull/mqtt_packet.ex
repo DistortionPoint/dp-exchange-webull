@@ -9,7 +9,8 @@ defmodule DpExchange.Webull.MqttPacket do
   is sixteen callbacks modelling an **active-mode byte stream**: `setopts`,
   `controlling_process`, `{:tcp, socket, data}` messages to an owner process. Shimming a
   frame-oriented WebSocket into that faithfully is more moving parts, and more ways to be
-  subtly wrong, than encoding the six packet types actually used here.
+  subtly wrong, than encoding the handful of packet types actually used here (ten, listed
+  below).
 
   The connection lifecycle is already solved by `websockex`, which this family runs for
   several venues. Only the framing was missing.
@@ -19,6 +20,11 @@ defmodule DpExchange.Webull.MqttPacket do
   Outbound: `CONNECT` (1), `PINGREQ` (12), `DISCONNECT` (14), and the acknowledgements
   `PUBACK` (4), `PUBREC` (5) and `PUBCOMP` (7) described below.
   Inbound: `CONNACK` (2), `PUBLISH` (3), `PUBREL` (6), `PINGRESP` (13).
+
+  Every other packet a server may legally send (`PUBACK`, `PUBREC`, `PUBCOMP`, `SUBACK`,
+  `UNSUBACK`) is framed and returned as `{:unhandled, type, body}`, so a caller can report it
+  instead of losing it. A header no server sends, or one with flags or a length the spec does
+  not allow for its type, is `{:error, :malformed_header}`.
 
   **QoS 0 is what this package expects, but it does not choose it.** The client never
   sends a `SUBSCRIBE` (see below), so the QoS a session is delivered at is set by the
@@ -63,8 +69,14 @@ defmodule DpExchange.Webull.MqttPacket do
   ## Remaining length
 
   MQTT encodes variable-header-plus-payload size as a base-128 varint of **at most four
-  bytes**. The encoder handles the full range because a truncated length silently corrupts
-  every subsequent packet in the stream rather than failing where the mistake was made.
+  bytes**. The encoder is not capped at one byte because a truncated length silently corrupts
+  every subsequent packet in the stream rather than failing where the mistake was made. The
+  only packet it is asked to size is `CONNECT`, whose three strings are each at most 65,535
+  bytes, so it never nears the four-byte ceiling.
+
+  The decoder refuses a remaining length of more than 1 MiB (`@max_packet_bytes`, chosen and
+  not measured, since the venue documents no size) as `{:error, :malformed_length}`, as it
+  does a fifth length byte.
   """
 
   import Bitwise
@@ -121,6 +133,11 @@ defmodule DpExchange.Webull.MqttPacket do
   `clean_session` is set: there is no durable subscription state worth resuming, and a
   resumed session would replay stale queued prices on reconnect. The venue does not restore
   subscriptions across a reconnect anyway.
+
+  `keep_alive_s` is the interval in seconds the broker holds this client to (1 to 65,535,
+  default 60; a value outside it matches no clause and raises `FunctionClauseError`). Any of
+  the three strings longer than 65,535 bytes raises `ArgumentError` (§1.5.3), where it is built
+  and not as a corrupt packet on the wire.
   """
   @spec connect(String.t(), String.t(), String.t(), 1..65_535) :: binary()
   def connect(client_id, username, password, keep_alive_s \\ 60)

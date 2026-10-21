@@ -76,12 +76,20 @@ defmodule DpExchange.Webull.ShardStaggerTest do
   end
 
   test "an open for a shard that is already open neither waits nor counts as an open" do
-    feed = start_feed(shards: %{1 => connected_shard("already-open")}, shard_spacing_ms: 60_000)
+    feed = start_feed(shards: %{1 => connected_shard("already-open")}, shard_spacing_ms: 300)
+    :erlang.trace(feed, true, [:receive, :timestamp])
 
+    # Two opens of the already-open shard, back to back. Had either counted as an open, the
+    # second would be re-armed for the remainder of the spacing and arrive a second time.
+    send(feed, {:open_staggered, 1, ["AAA-USD"], unopenable_opts()})
     send(feed, {:open_staggered, 1, ["AAA-USD"], unopenable_opts()})
 
     state = :sys.get_state(feed)
     assert state.last_background_open == nil
     assert Map.has_key?(state.shards, 1)
+
+    # Each message arrived exactly once: none was re-armed. A re-arm is the spacing (300 ms)
+    # away, so the window is well past it.
+    assert length(arrivals(feed, 1, 1_000)) == 2
   end
 end

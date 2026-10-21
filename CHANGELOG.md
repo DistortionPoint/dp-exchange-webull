@@ -22,6 +22,144 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed (tick AR)
+
+- **`DpExchange.Webull.Fake` no longer exports short arities the facade does not have** (29
+  functions, for example `get_positions/0`, `list_portfolios/0`, `withdraw/4`,
+  `get_deposit_address/2`): a consumer's test calling one now fails with `UndefinedFunctionError`
+  as it would against the real facade. `fake_parity_test.exs` asserts the two export sets are
+  equal arity for arity.
+
+### Changed (tick AR, order specs)
+
+- A futures order may be a `:trailing_stop`: `common-order-place.md` excludes only options.
+- `:support_trading_session` is refused on any order but a stock one, and `:event_outcome` on any
+  but an event one, as `{:unexpected_field, key}` in `place_order/3`, `preview_order/3` and
+  `Fake`.
+- **BREAKING:** an `:option` order is refused with `{:unsupported_instrument_type, :option}` on
+  place, preview and replace, because the venue requires `legs` (and a leg id on replace) and the
+  request has no key to carry them; `capabilities/0` no longer declares an option order
+  instrument.
+- `preview_order/3` refuses a cash-sized order (`:amount`) with `{:cash_sizing_not_supported,
+  instrument}`, from `Rest` and the `Fake`, with nothing sent: `common-order-preview.md` documents
+  no `total_cash_amount`, so the venue could ignore it and price a different order than the one
+  placed. `place_order/3` is unchanged.
+- `replace_order/4` judges an amended `:time_in_force` or `:order_type` against the instrument's
+  matrix like place does, and an amended `:gtd` is `{:unsupported_time_in_force, :gtd}`; `Fake`
+  matches.
+- A present but unreadable `cash_balance` or `frozen_amount` refuses `get_balances/2`
+  (`{:invalid_decimal, field, raw}`), and an unreadable `cost_price`, `last_price` or
+  `unrealized_profit_loss` refuses `get_positions/2`; absent figures stay `nil`. Test:
+  `tick_ar_order_specs_test.exs`.
+
+### Fixed (tick AR)
+
+- **Refusing an earlier overlapping subscribe restored replay options a later pending call still
+  needed.** The feed put back the replay options (credentials) from before the refused call, so
+  the later call's CONNACK replay answered `{:error, {:missing_credentials, :webull}}`. The
+  options are now handed down to the later pending call, and an accepted call drops the record
+  from earlier pending calls. Test: `tick_ar_feed_docs_test.exs`.
+- **`Fake.subscribe/2` delivery read through the injection seam.** The Fake built its pushed
+  payloads with the public `get_price/2` and `get_top_of_book/2`, so an injected failure made every
+  subscribe push fail (nothing delivered, `coverage/1` empty) and a queued outcome was consumed by
+  a subscribe's internal read. The push now reads without the seam; `subscribe/2` stays unwired to
+  injection. Test: `fake_injection_test.exs`.
+- **Overlapping pending calls naming one symbol undid each other's wanted symbols.** A refusal
+  removes only symbols that were not wanted before the first call naming them and that no other
+  pending call still holds, and an accepted call keeps its symbols against a sibling's later
+  refusal (`subscribe`, `update_symbols` and capacity-exceeded refusals; and `unsubscribe`
+  against a pending subscribe of the same symbol). A refusal that removes a pid or symbol already
+  rewrote the Ledger before replying; that is now tested. Test: `tick_ar_feed_docs_test.exs`.
+- **Overlapping `subscribe/3` calls for one pid left it registered when all were refused.**
+  Registration is now tracked across the calls in flight: the last refusal removes the pid and
+  its monitor, an accepted call keeps it for its siblings, and a pid registered before the calls
+  is never removed. Test: `tick_ar_feed_docs_test.exs`.
+- **A status that its own fill contradicts is refused (Core group 54).** `Fake`'s history
+  listing answered the canned order as `:filled` with `filled_quantity` 0; it now carries its
+  whole quantity and `average_price`. On the real path, a row that says `FILLED` or
+  `PARTIAL_FILLED` with nothing filled, `PARTIAL_FILLED` or `PENDING` with the whole quantity
+  filled, or `FILLED` with only part filled is `{:error, :unexpected_response_shape}`
+  (`get_orders/2` refuses the list, naming it) rather than an `Order` Core's `Order.new/1`
+  would refuse. An absent figure contradicts nothing. Tests: `tick_ar_orders_test.exs`,
+  `tick_ar_fake_orders_test.exs`.
+- **`get_order/3` and `get_orders/2` decoded a one-entry group that is not a plain order as
+  one.** A contingent parent (`MASTER`/`OTO`/`OCO`/`OTOCO`), an unknown `combo_type`, an
+  `option_strategy` other than `SINGLE` (or two or more contract `legs`) and an event-outcome
+  order are now `{:unsupported_combo_type, c}`, `{:unsupported_option_strategy, s | :multi_leg}`
+  and `{:unsupported_order, :event_outcome}`; `get_orders/2` refuses the whole list
+  (`{:unreadable_orders, ids}`). Test: `tick_ar_orders_test.exs`.
+- **A zero `filled_price` was an average price, and a negative `filled_quantity` a quantity.**
+  The page says `filled_price` "may be zero or null" when nothing filled: `average_price` is now
+  `nil` unless the value is above zero, and a negative `filled_quantity` is `nil`. A cancelled
+  order with fills keeps its status, `filled_quantity` and `average_price`. Test:
+  `tick_ar_orders_test.exs`.
+- **`cancel_order/3` answered `{:ok, :cancelled}` for any 2xx.** `common-order-cancel.md`
+  documents the `client_order_id` echo; a 2xx that does not echo the id asked for is now
+  `{:error, {:order_unconfirmed, id, :unexpected_response_shape}}`. A venue 4xx still passes
+  through as `{:refused, ...}`. Test: `tick_ar_orders_test.exs`.
+- **`Fake.cancel_order/3` of a finished order succeeded and overwrote it.** A `:filled`,
+  `:cancelled`, `:rejected` or `:expired` order is now `{:refused, {:order_not_cancellable,
+  status}}` and nothing is stored; a partly filled order still cancels and keeps its
+  `filled_quantity`. `Fake.replace_order/4` of a finished order is `{:refused,
+  {:order_not_replaceable, status}}`, and an `opts[:order_type]` that is not the stored order's is
+  `{:refused, {:order_type_mismatch, stored, named}}`. The venue's own wording for these is
+  unmeasured (the real calls send the request and report what the venue says). Test:
+  `tick_ar_fake_orders_test.exs`.
+- **`Fake.wanted/1` reported what was delivered, not what was asked for**, unlike
+  `Webull.wanted/1`. `Fake.list_watchlists/1` listed `wl-1` twice after a membership write, and
+  `Fake.update_watchlist/2` answered `{:ok, _}` for any id (a rename of `wl-1` was dropped); an
+  id the Fake does not hold is now `{:refused, :not_found}`. Test: `tick_ar_fake_docs_test.exs`.
+- **A socket sent a `:link_down` notice for every failed reconnect.** One per outage now: the
+  notice is sent for the first drop and the flag is cleared at CONNACK 0 (each retry stays
+  visible as `link_reconnect_attempt` telemetry). Test: `tick_ar_transport_docs_test.exs`.
+- **A refused `subscribe/2` left its `to:` subscriber (and monitor) registered**, so that process
+  received other callers' payloads. A subscribe answered with any error, `{:connack_timeout, ms}`
+  included, now takes back the subscriber it added. Test: `tick_ar_feed_docs_test.exs`.
+- **`resubscribe_interval_ms: false` was read as absent** and started the feed on the default;
+  it is now an `ArgumentError` naming the option (`nil` is absent). Test:
+  `tick_ar_feed_docs_test.exs`.
+- **`get_option_chain/2` and `get_option_expirations/2` raised on a map or list `:expiry` or
+  `:strike`**; they now return `{:error, {:invalid_option, key, value}}` before a request, in
+  `Fake` too (`Rest.validate_option_filters/1`). Test: `tick_ar_rest_docs_b_test.exs`.
+- **`update_watchlist/3` sent a non-text `name:` as its text, or raised on a map.** It is now
+  `{:error, {:invalid_watchlist_name, name}}` before a request, in `Fake` too
+  (`Rest.validate_watchlist_rename/1`). Test: `tick_ar_rest_docs_a_test.exs`.
+- **A news item's `publish_time` was copied whole into `{:unparseable_venue_timestamp, text}`.**
+  The tick AQ bound (64 bytes read, 32-byte copy) now applies, and a non-text value is described
+  rather than copied. Test: `tick_ar_docs_test.exs`.
+
+### Documentation (tick AR)
+
+- Every refusal tuple the code returns for the order, bar, book, footprint, fundamentals, news,
+  option, event, watchlist, token and OAuth calls is now named in the `Rest` docs and
+  `usage-rules.md`; `place_orders/3` states its narrower schema (market or limit, `:day`, session
+  required, equity default). `Feed`'s moduledoc lists every answer of its writes, every notice it
+  raises, every start key with its default and the venue's connection limits (only the
+  five-connection ceiling is enforced). `Socket`, `MqttPacket`, `QuoteProto` and the vendored
+  `WebSockex` docs were corrected (ten packet types, seven schema messages, four vendored fixes).
+- A refused start option fails the tree's start (`{:error, {:shutdown, {:failed_to_start_child,
+  Feed, {%ArgumentError{}, _}}}}`); it does not raise in the caller. `{:connack_timeout, ms}` is a
+  refusal that needs a retry; only `{:reconcile_pending, ms}` carries on.
+- The event-book identity is the vendor's `100-X`, not `1-X`. `negative-claims.md` now has a row
+  for every endpoint in `venue_does_not_serve/0` and `endpoint-inventory.md` counts are current
+  (48 of 89). `list_instruments/2`, `oauth_token/3`, `delete_watchlist/3` docs now match what
+  they return.
+
+### Tests (tick AR)
+
+- Every test file was read; weak assertions now check values (wire side, type and time in force,
+  batch rows, spec-example decoders, screener metrics as literals, symbol format conversions,
+  QuoteProto field mapping, facade delegation paths, Fake parity), two `refute_receive` guards
+  that could never fail now match what the code sends, and negative `refute_receive` windows are
+  at least 500 ms.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.120` (tick AR: conformance group 54 rebuilds
+  every Order and Fill the Fake answers through `new/1`, and `Order.new/1` refuses a status
+  that contradicts its filled quantity; groups 33, 35 and 37 no longer pass having examined
+  nothing).
+
 ## [0.4.168] - 2026-10-21
 
 ### Fixed (tick AQ)

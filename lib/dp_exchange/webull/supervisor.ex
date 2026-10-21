@@ -4,8 +4,11 @@ defmodule DpExchange.Webull.Supervisor do
 
   ## The limiter is configured from what `capabilities/0` declares
 
-  The declaration is not decoration beside the mechanism; it **is** the mechanism's
-  configuration, so the two cannot drift.
+  The declaration is not decoration beside the mechanism; for the per-endpoint bucket it
+  **is** the mechanism's configuration (`public_ceiling`, halved under UAT), so the two cannot
+  drift. The second bucket, the 600/60s market-data global cap, is not in `capabilities/0`:
+  it is this module's `@market_data_global`, read from `rest-rate-limits.md`, and `limits/1`
+  is where both are derived.
 
   Webull is the venue whose REST budget is the binding constraint in the family — the
   prior adapter measured 118 ms per call across 342 symbols — so the ceiling here matters

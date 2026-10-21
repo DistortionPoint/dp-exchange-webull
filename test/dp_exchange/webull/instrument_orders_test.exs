@@ -122,6 +122,8 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert leaf["instrument_type"] == "EQUITY"
       assert leaf["order_type"] == "LIMIT"
       assert leaf["time_in_force"] == "DAY"
+      assert leaf["symbol"] == "AAPL"
+      assert leaf["limit_price"] == "190.50"
     end
 
     test "a trailing stop is an equity order and NOT an option one" do
@@ -621,6 +623,10 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       previewed = preview_body["new_orders"] |> List.first() |> Map.delete("client_order_id")
       placed = place_body["new_orders"] |> List.first() |> Map.delete("client_order_id")
       assert previewed == placed
+      # Not two empty bodies agreeing with each other.
+      assert placed["symbol"] == "AAPL"
+      assert placed["limit_price"] == "190.50"
+      assert placed["side"] == "BUY"
     end
 
     test "a body with no estimated cost is unreadable, not a free order" do
@@ -703,7 +709,11 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
                Rest.replace_order(
                  @credentials,
                  "abc",
-                 %{price: Decimal.new("191.00"), quantity: Decimal.new("5")},
+                 %{
+                   price: Decimal.new("191.00"),
+                   quantity: Decimal.new("5"),
+                   time_in_force: :gtc
+                 },
                  edit(:equity, :limit, plug: plug, account_id: @account, retry_attempts: 0)
                )
 
@@ -720,6 +730,7 @@ defmodule DpExchange.Webull.InstrumentOrdersTest do
       assert modification["client_order_id"] == "abc"
       assert modification["limit_price"] == "191.00"
       assert modification["quantity"] == "5"
+      assert modification["time_in_force"] == "GTC"
 
       # The order was read back, not reported from the request.
       assert_receive {:sent, read_path, _raw2}

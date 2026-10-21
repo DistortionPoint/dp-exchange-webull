@@ -266,8 +266,13 @@ defmodule DpExchange.Webull do
 
   A key nothing reads is `{:error, {:unknown_option, key}}`, and options that are not a keyword
   list are `{:error, {:invalid_options, opts}}` (credentials redacted), before anything starts;
-  `DpExchange.Webull.Options.check_start/1` holds the table. An invalid timing option or
-  `:url` raises `ArgumentError` from the feed's `init/1`.
+  `DpExchange.Webull.Options.check_start/1` holds the table. A timing or count option that is
+  not an integer in range, a `:max_queue_len` that is not a positive integer, a
+  `:priority_symbols` that is not a list of strings, or a `:url` the socket would refuse,
+  raises `ArgumentError` in the feed's `init/1`: the tree fails to start and this answers
+  `{:error, {:shutdown, {:failed_to_start_child, DpExchange.Webull.Feed, {%ArgumentError{},
+  stacktrace}}}}`, it does not raise in the caller. `usage-rules.md` lists every start option
+  and its default.
 
   Prefer supervising `child_spec/1`. Calling this directly wraps the credentials too, but a
   child spec you build yourself does not. See `c:DpExchange.Core.Venue.start_link/1`.
@@ -525,7 +530,7 @@ defmodule DpExchange.Webull do
       # declared here: `capabilities/0` takes no arguments and so cannot state a figure
       # that differs per environment.
       #
-      # Load-bearing, not documentation: `Supervisor`'s private `limits/1` feeds this
+      # Load-bearing, not documentation: `Supervisor.limits/1` feeds this
       # straight into the real `DefaultRateLimiter` this package starts. Every endpoint is
       # signed (`credential_benefit: :required` above), so there is no public/authenticated
       # split to make; both ceilings carry the same figure.
@@ -650,7 +655,9 @@ defmodule DpExchange.Webull do
   for, each in `get_price/2`'s own shape.
 
   For a consumer covering many pairs from REST, `get_price/2` per symbol spends one
-  request of the endpoint's 1/s budget on each, where this spends one on twenty. See
+  request of the endpoint's 1/s budget on each, where this spends one on twenty. A `:category`
+  other than `US_CRYPTO` is `{:error, {:unsupported_category, category}}`, and a `symbols` that
+  is not a proper list is `{:error, {:invalid_symbols, symbols}}`. See
   `DpExchange.Webull.Rest.get_prices/3` (issue #9).
   """
   @spec get_prices([String.t()], keyword()) ::
@@ -711,6 +718,9 @@ defmodule DpExchange.Webull do
 
       DpExchange.Webull.adjusted?("1d")  #=> true
       DpExchange.Webull.adjusted?("1m")  #=> false
+
+  A width this package does not serve answers `nil`, never `false`: an unknown width has no
+  answer, and `false` would claim minute-bar behaviour for it.
   """
   @spec adjusted?(String.t()) :: boolean() | nil
   def adjusted?(timeframe), do: Rest.adjusted?(timeframe)

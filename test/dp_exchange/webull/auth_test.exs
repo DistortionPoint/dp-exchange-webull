@@ -292,5 +292,27 @@ defmodule DpExchange.Webull.AuthTest do
       assert Auth.present?(%{app_key: "k", app_secret: "s"}) == :ok
       assert {:ok, _headers} = Auth.headers(@request, %{app_key: "k", app_secret: "s"})
     end
+
+    test "a padded or control-character value is invalid, never signed with, never echoed" do
+      for credentials <- [
+            %{app_key: "k\n", app_secret: "s"},
+            %{app_key: "k", app_secret: " s"},
+            %{app_key: "k", app_secret: "s\t"},
+            %{app_key: "k", app_secret: "s", access_token: "tok\n"},
+            %{app_key: "k", app_secret: "s", access_token: " tok"}
+          ] do
+        expected = {:error, {:invalid_credentials, :webull}}
+
+        assert Auth.present?(credentials) == expected
+        assert Auth.headers(@request, credentials) == expected
+      end
+    end
+
+    test "a non-string app_key or secret is a missing credential" do
+      for credentials <- [%{app_key: nil, app_secret: "s"}, %{app_key: "k", app_secret: 5}] do
+        assert Auth.present?(credentials) == {:error, {:missing_credentials, :webull}}
+        assert Auth.headers(@request, credentials) == {:error, {:missing_credentials, :webull}}
+      end
+    end
   end
 end

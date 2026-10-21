@@ -219,7 +219,12 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
     test "coverage and coverage_by_kind report no :trades, which capabilities do not declare",
          %{limiter: limiter} do
       feed = start_feed()
-      :ok = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter))
+      :ok = Feed.subscribe(feed, ["BTC-USD", "ETH-USD"], subscribe_opts(limiter))
+
+      # A positive control: a quote for ETH-USD IS counted, so the `%{}`-shaped assertions
+      # below cannot pass merely because coverage is always empty.
+      send(feed, {:dp_exchange, :webull, quote_for("ETH-USD")})
+      assert Feed.coverage(feed) == %{"ETH-USD" => :stream}
 
       trade = %Trade{
         id: nil,
@@ -236,7 +241,8 @@ defmodule DpExchange.Webull.ReconcileFailureTest do
       _settled = Feed.coverage(feed)
 
       assert_receive {:dp_exchange, :webull, %Trade{symbol: "BTC-USD"}}, 5_000
-      assert Feed.coverage(feed) == %{}
+      # Only the quoted symbol is covered: the traded one never became so.
+      assert Feed.coverage(feed) == %{"ETH-USD" => :stream}
       refute Map.has_key?(Feed.coverage_by_kind(feed), :trades)
 
       reported = Feed.coverage_by_kind(feed) |> Map.keys() |> MapSet.new()

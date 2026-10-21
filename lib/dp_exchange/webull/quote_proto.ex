@@ -9,7 +9,8 @@ defmodule DpExchange.Webull.QuoteProto do
 
   ## Why hand-rolled rather than the `protobuf` package
 
-  The schema is **six messages of nothing but `string` and `repeated <message>`**, so
+  The schema is **seven messages (`Basic`, `Quote`, `AskBid`, `Order`, `Broker`, `Snapshot`
+  and `Tick`) of nothing but `string` and `<message>` fields, some of them `repeated`**, so
   exactly one wire type matters — length-delimited (2) — plus varints for lengths and
   field headers. No floats, no zigzag, no packed repeated fields. Taking a dependency and a
   codegen step to read that is more machinery than the thing it reads.
@@ -56,6 +57,11 @@ defmodule DpExchange.Webull.QuoteProto do
 
   `Quote` carries book levels and `Tick` carries individual trades; this is the one a
   price collector wants.
+
+  Returns `{:ok, map}` with `:symbol` (`Basic.symbol`), `:price` (field 3), `:volume`
+  (field 8, the session's running total) and `:timestamp` (`trade_time`, field 2, with no
+  fallback). Every value is the venue's own string, `:volume` and `:timestamp` are `nil` when
+  absent or empty. `:error` when the payload is not binary or lacks a symbol or a price.
   """
   @spec decode_snapshot(binary()) :: {:ok, map()} | :error
   def decode_snapshot(payload) when is_binary(payload) do
@@ -83,7 +89,15 @@ defmodule DpExchange.Webull.QuoteProto do
 
   def decode_snapshot(_other), do: :error
 
-  @doc "Decodes a `Tick` — a single trade."
+  @doc """
+  Decodes a `Tick` — a single trade.
+
+  Returns `{:ok, map}` with `:symbol` (`Basic.symbol`), `:price` (field 3), `:volume` (field 4),
+  `:side` (field 5, a code the venue does not enumerate), `:timestamp` (`time`, field 2, else
+  `Basic.timestamp`) and `:basic_timestamp` (`Basic.timestamp` on its own). Values are the
+  venue's strings, and `nil` when absent or empty. `:error` when the payload is not binary or
+  lacks a symbol or a price.
+  """
   @spec decode_tick(binary()) :: {:ok, map()} | :error
   def decode_tick(payload) when is_binary(payload) do
     fields = decode_message(payload)
@@ -116,8 +130,16 @@ defmodule DpExchange.Webull.QuoteProto do
   documented guarantee**: the venue's schema (`docs/reference/webull/streaming-api.md`) says
   nothing about the order of `asks` and `bids`, and no frame has been captured that would
   settle it. Choosing the best price instead would mean decoding every level of every book
-  on the hot path, so the assumption stands and is stated. **No mid is computed here.** A mid is a decision about what a price means, and it
+  on the hot path, so the assumption stands and is stated.
+
+  **No mid is computed here.** A mid is a decision about what a price means, and it
   belongs with the caller that also knows whether both sides are present.
+
+  Returns `{:ok, map}` with `:symbol` (`Basic.symbol`, field 1 of field 1), `:ask`, `:ask_size`
+  (the first `asks` entry, field 2: `AskBid.price` 1 and `AskBid.size` 2), `:bid`, `:bid_size`
+  (the first `bids` entry, field 3) and `:timestamp` (`Basic.timestamp`, a string whose unit
+  the venue does not state). Any of the last five is `nil` when absent or an empty string.
+  `:error` when the payload is not binary or carries no symbol.
   """
   @spec decode_quote(binary()) :: {:ok, map()} | :error
   def decode_quote(payload) when is_binary(payload) do
@@ -154,7 +176,14 @@ defmodule DpExchange.Webull.QuoteProto do
 
   # --- proto3 wire format -------------------------------------------------
 
-  @doc "Field number to value, repeats in wire order. Exposed for tests and for `Socket`."
+  @doc """
+  Field number to value, repeats in wire order. Exposed for tests; the decoders above and
+  `scalar/2` read through it, and `Socket` does not call it.
+
+  A field seen once is its bare binary, a field seen again becomes a list in wire order, and a
+  stepped-over varint, 64-bit or 32-bit field has a non-binary value. A truncated or
+  unparseable tail ends the walk with what was read.
+  """
   @spec decode_message(binary()) :: field_map()
   def decode_message(binary), do: binary |> decode_message(%{}) |> reverse_repeats()
 
@@ -254,7 +283,8 @@ defmodule DpExchange.Webull.QuoteProto do
   # --- reading ------------------------------------------------------------
 
   @doc """
-  The scalar value of a field: the **last** occurrence, per proto3.
+  The scalar value of a field: the **last** occurrence, per proto3. `nil` when the field is
+  absent or only ever arrived as a non-text wire type.
 
   A wire walk cannot tell a scalar from a repeated field, so a scalar sent twice arrives
   as a list. Reading it with an `is_binary` guard — as the prior adapter did — rejects the

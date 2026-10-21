@@ -61,7 +61,7 @@ defmodule DpExchange.Webull.SocketBackoffParentExitTest do
 
     # Without the fix the process sleeps the full 30s and finishes the callback.
     assert_receive {:DOWN, ^ref, :process, ^pid, :shutdown}, 5_000
-    refute_receive {:backoff_finished, ^pid}
+    refute_receive {:backoff_finished, ^pid}, 500
   end
 
   test "an exit from a process that is not the parent does not end the backoff" do

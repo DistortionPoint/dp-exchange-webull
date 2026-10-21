@@ -84,7 +84,9 @@ defmodule DpExchange.Webull.TickAPTest do
       {:ok, first, _offset} = DateTime.from_iso8601(first_at)
       {:ok, second, _offset} = DateTime.from_iso8601(second_at)
 
-      assert DateTime.compare(second, first) in [:gt, :eq]
+      # The clock moves a second per read: a stamp minted once for the call and replayed would
+      # be equal here, so only a stamp minted per attempt passes.
+      assert DateTime.compare(second, first) == :gt
       assert first_at =~ ~r/\A\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ\z/
       refute first_nonce == second_nonce
     end

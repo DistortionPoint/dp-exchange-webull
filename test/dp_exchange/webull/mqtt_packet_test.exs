@@ -9,7 +9,8 @@ defmodule DpExchange.Webull.MqttPacketTest do
     test "carries the protocol name, level and the three payload strings" do
       packet = MqttPacket.connect("session-1", "app-key", "anything")
 
-      assert <<1::4, 0::4, _length, rest::binary>> = packet
+      assert <<1::4, 0::4, remaining, rest::binary>> = packet
+      assert remaining == byte_size(rest)
       assert <<4::16, "MQTT", 4, flags, keep_alive::16, payload::binary>> = rest
 
       # bit 7 username, bit 6 password, bit 1 clean session
@@ -24,7 +25,8 @@ defmodule DpExchange.Webull.MqttPacketTest do
       # that is up and a subscription that feeds a different one.
       packet = MqttPacket.connect("shared-session", "key", "pw")
 
-      assert packet =~ "shared-session"
+      assert <<1::4, 0::4, _len, 4::16, "MQTT", 4, _flags, _keep::16, 14::16, "shared-session",
+               _creds::binary>> = packet
     end
 
     test "the keep-alive is configurable" do

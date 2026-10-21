@@ -130,12 +130,30 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
 
     test "buy and sell are accepted in either case, as atoms or strings" do
-      for side <- [:buy, :sell, "buy", "SELL"] do
-        assert {:ok, _order} =
-                 place(limit_request(%{side: side}),
-                   plug: responding(accepted()),
-                   account_id: @account
-                 )
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        send(me, {:sent_side, get_in(decoded, ["new_orders", Access.at(0), "side"])})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
+      end
+
+      for {side, wire, atom} <- [
+            {:buy, "BUY", :buy},
+            {:sell, "SELL", :sell},
+            {"buy", "BUY", :buy},
+            {"SELL", "SELL", :sell}
+          ] do
+        assert {:ok, order} =
+                 place(limit_request(%{side: side}), plug: plug, account_id: @account)
+
+        # The wire spelling AND the Core atom handed back both follow the caller's side.
+        assert_receive {:sent_side, ^wire}
+        assert order.side == atom
       end
     end
   end
@@ -204,12 +222,25 @@ defmodule DpExchange.Webull.PlaceOrderTest do
     end
 
     test "every documented pair builds and is accepted" do
-      for {type, tif} <- [
-            {:market, :ioc},
-            {:limit, :day},
-            {:limit, :gtc},
-            {:stop_limit, :day},
-            {:stop_limit, :gtc}
+      me = self()
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        leaf = get_in(decoded, ["new_orders", Access.at(0)])
+        send(me, {:sent_pair, leaf["order_type"], leaf["time_in_force"]})
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(200, Jason.encode!(accepted(sent_id(decoded))))
+      end
+
+      for {type, tif, wire_type, wire_tif} <- [
+            {:market, :ioc, "MARKET", "IOC"},
+            {:limit, :day, "LIMIT", "DAY"},
+            {:limit, :gtc, "LIMIT", "GTC"},
+            {:stop_limit, :day, "STOP_LOSS_LIMIT", "DAY"},
+            {:stop_limit, :gtc, "STOP_LOSS_LIMIT", "GTC"}
           ] do
         # Only the price fields the type uses: a `:price` on a market order, or a
         # `:stop_price` on a limit one, is refused rather than dropped.
@@ -218,9 +249,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
           |> limit_request()
           |> Map.drop(unused_price_fields(type))
 
-        assert {:ok, _order} =
-                 place(request, plug: responding(accepted()), account_id: @account),
+        assert {:ok, order} = place(request, plug: plug, account_id: @account),
                "#{type}/#{tif} is documented but did not build"
+
+        assert_receive {:sent_pair, ^wire_type, ^wire_tif}
+        assert order.order_type == type
+        assert order.time_in_force == tif
       end
     end
   end
@@ -384,6 +418,12 @@ defmodule DpExchange.Webull.PlaceOrderTest do
       assert order.provider == :webull
       assert order.order_type == :limit
       assert order.time_in_force == :gtc
+      # Echoed from the request, in Core's vocabulary: the venue's answer carries no more.
+      assert order.symbol == "BTC-USD"
+      assert order.side == :buy
+      assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
+      assert Decimal.equal?(order.price, Decimal.new("40000"))
+      assert order.stop_price == nil
     end
 
     test "an accepted row that names no order is unconfirmed, with the id that was sent" do
@@ -443,7 +483,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
 
       plug = fn conn ->
         {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(me, {:sent, Jason.decode!(body)})
+        send(me, {:sent, conn.request_path, Jason.decode!(body)})
 
         conn
         |> Plug.Conn.put_resp_content_type("application/json")
@@ -457,7 +497,10 @@ defmodule DpExchange.Webull.PlaceOrderTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:sent, %{"client_order_id" => "abc", "account_id" => @account}}
+      assert_receive {:sent, path, body}
+      assert path == "/trading/orders/cancel"
+      assert body["client_order_id"] == "abc"
+      assert body["account_id"] == @account
     end
 
     test "cancelling without an account is refused before the call" do
@@ -598,7 +641,7 @@ defmodule DpExchange.Webull.PlaceOrderTest do
         price: Decimal.normalize(Decimal.new("150.00"))
       })
 
-    place(request, plug: plug, account_id: @account)
+    assert {:ok, _order} = place(request, plug: plug, account_id: @account)
 
     assert_receive {:sent, body}
     leaf = body |> Map.get("new_orders") |> List.first()

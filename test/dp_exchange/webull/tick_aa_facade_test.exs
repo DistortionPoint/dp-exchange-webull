@@ -32,68 +32,72 @@ defmodule DpExchange.Webull.TickAAFacadeTest do
     :ok
   end
 
+  # Every call below is given the arguments its own validation requires (a screener's rank
+  # type, a contract list's symbols), so the ONLY thing wrong with it is the missing
+  # credentials. An `{:error, _}` of any kind would also pass for a call refused on an
+  # argument it was never given, which proves nothing about the signing refusal.
+  defp assert_unsigned(results) do
+    assert results != []
+
+    for result <- results do
+      assert result == {:error, {:missing_credentials, :webull}}
+    end
+  end
+
   describe "called without opts, a signed read refuses rather than raising" do
     test "get_prices/1 with no symbols asked for answers an empty map" do
       assert Webull.get_prices([]) == {:ok, %{}}
     end
 
     test "market data" do
-      for result <- [
-            Webull.get_top_of_book("BTC-USD"),
-            Webull.get_order_book("AAPL"),
-            Webull.get_trades("AAPL"),
-            Webull.get_volume_profile("AAPL", "1m"),
-            Webull.get_auction_imbalance("AAPL"),
-            Webull.quantization("BTC-USD"),
-            Webull.get_option_chain("AAPL"),
-            Webull.get_option_expirations("AAPL")
-          ] do
-        assert {:error, _reason} = result
-      end
+      assert_unsigned([
+        Webull.get_top_of_book("BTC-USD"),
+        Webull.get_order_book("AAPL"),
+        Webull.get_trades("AAPL"),
+        Webull.get_volume_profile("AAPL", "1m"),
+        Webull.get_auction_imbalance("AAPL", auction: :opening),
+        Webull.quantization("BTC-USD"),
+        Webull.get_option_chain("AAPL"),
+        Webull.get_option_expirations("AAPL")
+      ])
     end
 
     test "futures and event contracts" do
-      for result <- [
-            Webull.list_futures_contracts(),
-            Webull.list_futures_product_classes(),
-            Webull.list_event_categories(),
-            Webull.list_event_series(),
-            Webull.list_event_events(),
-            Webull.list_event_markets(),
-            Webull.get_event_trades("EVENT-1"),
-            Webull.get_event_order_book("EVENT-1")
-          ] do
-        assert {:error, _reason} = result
-      end
+      assert_unsigned([
+        Webull.list_futures_contracts(symbols: "ES"),
+        Webull.list_futures_product_classes(),
+        Webull.list_event_categories(),
+        Webull.list_event_series(),
+        Webull.list_event_events(series_symbol: "SERIES-1"),
+        Webull.list_event_markets(),
+        Webull.get_event_trades("EVENT-1"),
+        Webull.get_event_order_book("EVENT-1")
+      ])
     end
 
     test "watchlists" do
-      for result <- [
-            Webull.list_watchlists(),
-            Webull.get_watchlist("watchlist-1"),
-            Webull.create_watchlist("tech", ["AAPL"]),
-            Webull.update_watchlist("watchlist-1"),
-            Webull.delete_watchlist("watchlist-1"),
-            Webull.add_watchlist_instruments("watchlist-1", ["AAPL"]),
-            Webull.remove_watchlist_instruments("watchlist-1", ["AAPL"]),
-            Webull.sort_watchlist_instruments("watchlist-1")
-          ] do
-        assert {:error, _reason} = result
-      end
+      assert_unsigned([
+        Webull.list_watchlists(),
+        Webull.get_watchlist("watchlist-1"),
+        Webull.create_watchlist("tech", ["AAPL"]),
+        Webull.update_watchlist("watchlist-1"),
+        Webull.delete_watchlist("watchlist-1"),
+        Webull.add_watchlist_instruments("watchlist-1", ["AAPL"]),
+        Webull.remove_watchlist_instruments("watchlist-1", ["AAPL"]),
+        Webull.sort_watchlist_instruments("watchlist-1", sorts: %{"AAPL" => 1})
+      ])
     end
 
     test "fundamentals, filings, screeners and tokens" do
-      for result <- [
-            Webull.get_financials("AAPL", :income),
-            Webull.get_corporate_events(),
-            Webull.get_filings("AAPL"),
-            Webull.get_screener(hd(Webull.screeners())),
-            Webull.get_fundamental(hd(Webull.fundamental_kinds()), "AAPL"),
-            Webull.create_token(),
-            Webull.check_token("token-not-real")
-          ] do
-        assert {:error, _reason} = result
-      end
+      assert_unsigned([
+        Webull.get_financials("AAPL", :income),
+        Webull.get_corporate_events(symbol: "AAPL"),
+        Webull.get_filings("AAPL"),
+        Webull.get_screener(hd(Webull.screeners())),
+        Webull.get_fundamental(hd(Webull.fundamental_kinds()), "AAPL"),
+        Webull.create_token(),
+        Webull.check_token("token-not-real")
+      ])
     end
   end
 

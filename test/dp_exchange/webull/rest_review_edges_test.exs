@@ -168,19 +168,26 @@ defmodule DpExchange.Webull.RestReviewEdgesTest do
     test "the same symbol in another case is the same symbol, and a row with none is read" do
       named = %{"symbol" => "aapl", "imbalance_ref_price" => "1"}
 
-      assert {:ok, [_one]} =
+      assert {:ok, [by_name]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(named),
                  retry_attempts: 0
                )
 
-      assert {:ok, [_one]} =
+      assert by_name.symbol == "AAPL"
+      assert by_name.auction == :closing
+      assert Decimal.equal?(by_name.reference_price, Decimal.new("1"))
+
+      assert {:ok, [unnamed]} =
                Rest.get_auction_imbalance("AAPL", @credentials,
                  auction: :closing,
                  plug: responding(%{"imbalance_ref_price" => "1"}),
                  retry_attempts: 0
                )
+
+      assert unnamed.symbol == "AAPL"
+      assert Decimal.equal?(unnamed.reference_price, Decimal.new("1"))
     end
   end
 

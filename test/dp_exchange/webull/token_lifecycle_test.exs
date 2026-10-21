@@ -113,7 +113,8 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
         |> Plug.Conn.resp(400, Jason.encode!(%{"code" => "BAD"}))
       end
 
-      assert {:refused, _body} = Rest.create_token(@credentials, plug: rejected)
+      # No `message` or `error_code` in the body: the status is all there is to keep.
+      assert {:refused, {:venue_error, 400}} = Rest.create_token(@credentials, plug: rejected)
     end
   end
 
@@ -239,7 +240,8 @@ defmodule DpExchange.Webull.TokenLifecycleTest do
         |> Plug.Conn.resp(400, Jason.encode!(%{"error" => "invalid_grant"}))
       end
 
-      assert {:refused, _body} =
+      # `error` is no field the venue's pages define, so only the status is kept.
+      assert {:refused, {:venue_error, 400}} =
                Rest.oauth_token("CLIENT", "secret", code: "used", plug: plug, retry_attempts: 0)
     end
   end

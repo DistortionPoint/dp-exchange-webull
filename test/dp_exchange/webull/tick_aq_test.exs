@@ -366,10 +366,13 @@ defmodule DpExchange.Webull.TickAqTest do
     end
 
     test "every type of number meets the same bound" do
-      assert Rest.number_to_decimal(@digits_34)
-      assert Rest.number_to_decimal(String.to_integer(@digits_34))
-      assert Rest.number_to_decimal(Decimal.new(@digits_34))
-      assert Rest.number_to_decimal(1.5)
+      for readable <- [@digits_34, String.to_integer(@digits_34), Decimal.new(@digits_34)] do
+        assert %Decimal{} = value = Rest.number_to_decimal(readable)
+        assert Decimal.equal?(value, Decimal.new(@digits_34))
+      end
+
+      assert %Decimal{} = float = Rest.number_to_decimal(1.5)
+      assert Decimal.equal?(float, Decimal.new("1.5"))
 
       assert Rest.number_to_decimal(@digits_35) == nil
       assert Rest.number_to_decimal(10 ** 40) == nil
@@ -433,14 +436,14 @@ defmodule DpExchange.Webull.TickAqTest do
       frame = snapshot_frame(@digits_34)
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, socket_state())
 
-      assert_receive {:dp_exchange, :webull, %Quote{price: price}}
+      assert_receive {:dp_exchange, :webull, %Quote{price: price}}, 5_000
       assert Decimal.equal?(price, Decimal.new(@digits_34))
 
       frame = snapshot_frame(@digits_35)
       assert {:ok, _state} = Socket.handle_frame({:binary, frame}, socket_state())
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}
-      refute_receive {:dp_exchange, :webull, %Quote{}}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :data_quality}}, 5_000
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
     end
   end
 
@@ -568,7 +571,7 @@ defmodule DpExchange.Webull.TickAqTest do
         {:reconcile_done, {:background, 0}, {:error, {:invalid_symbols, ["AAA-USD", "ZZZ-USD"]}}}
       )
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :refusal} = notice}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :refusal} = notice}, 5_000
       assert notice.details.symbols == ["AAA-USD", "ZZZ-USD"]
       assert Map.keys(:sys.get_state(feed).rejected) == ["AAA-USD"]
     end
@@ -620,7 +623,7 @@ defmodule DpExchange.Webull.TickAqTest do
 
       ref = Process.monitor(doomed)
       Process.exit(doomed, :kill)
-      assert_receive {:DOWN, ^ref, :process, ^doomed, _reason}
+      assert_receive {:DOWN, ^ref, :process, ^doomed, _reason}, 5_000
       # A call is answered only after the feed has handled its own `:DOWN`.
       _settled = Feed.coverage(feed)
 
@@ -653,14 +656,14 @@ defmodule DpExchange.Webull.TickAqTest do
       state = settle_tick(feed)
       assert Map.has_key?(state.idle_since, 0)
       assert Map.has_key?(state.shards, 0)
-      refute_receive {:DOWN, ^ref, :process, ^socket, _reason}
+      refute_receive {:DOWN, ^ref, :process, ^socket, _reason}, 500
 
       :sys.replace_state(feed, &%{&1 | idle_since: %{0 => long_ago()}})
 
       state = settle_tick(feed)
       refute Map.has_key?(state.shards, 0)
       assert state.idle_since == %{}
-      assert_receive {:DOWN, ^ref, :process, ^socket, :shutdown}
+      assert_receive {:DOWN, ^ref, :process, ^socket, :shutdown}, 5_000
     end
 
     test "a shard somebody is parked on is not idle" do

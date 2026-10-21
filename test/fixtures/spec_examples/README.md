@@ -1,6 +1,12 @@
 # Spec-example fixtures
 
-Every fixture here backs a test in `test/dp_exchange/webull/spec_examples_test.exs`. Each
+Every fixture here backs a test in `test/dp_exchange/webull/spec_examples_test.exs`, with one
+exception: `fund_report_news_sse.json` is read by no test (see its row below; kept only as the
+record of a retired endpoint's shape). Some fixtures repeat one value across fields that mean
+different things (both sides of a book, five quantization limits, all four prices of a bar);
+the vendor's page does the same, so the fixture is kept verbatim and the tests under "Mappings
+the vendor's own examples cannot prove" use labelled test-only variants with distinct values.
+Each
 one is either **the vendor's own documented worked example** (a `"jsonRequestBodyExample"`
 or a full response example embedded in the page's OpenAPI JSON) or, where no such example
 exists, **assembled strictly from the schema's own per-property `"example"` values**, using
@@ -80,7 +86,7 @@ each backs.
 |---|---|---|
 | `auth_create_token.json` | `create-token.md:139-160` | |
 | `auth_check_token.json` | `check-token.md:161-182,257-259` | |
-| `auth_oauth_token.json` | no vendor OpenAPI page found (see `openapi/README.md`) | built from `usage-rules/auth.md`'s own prior reading, not a vendor schema |
+| `auth_oauth_token.json` | no vendor OpenAPI page found (see `openapi/README.md`) | **NOT vendor-evidenced, field names or types.** Built from this package's own prior reading of the endpoint (the `usage-rules/auth.md` named earlier does not exist in this repository; `usage-rules.md`'s OAuth paragraph names only `rt_expires_in`). `expires_in`/`rt_expires_in` are strings here and integers in `DpExchange.Webull.Fake`; the vendor's type is unknown, `oauth_token/3` passes the body through without reading either, and no test may assert a type for them |
 | `watchlist_list.json` | `get-watchlist.md:145-171` (titled "List Watchlists" despite the filename) | |
 | `watchlist_get.json` | `get-watchlist-instruments.md:153-198` (titled "List Watchlist Instruments" despite the filename) | |
 | `watchlist_create.json` | `create-watchlist.md:169-179,250-253` | response is a bare `{"watchlist_id": ...}`, not a list |

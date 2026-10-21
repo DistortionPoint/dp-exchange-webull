@@ -165,7 +165,7 @@ defmodule DpExchange.Webull.FakeInjectionTest do
       assert {:ok, %{"BTC-USD" => @injected, "ETH-USD" => eth}} =
                Fake.get_prices(["BTC-USD", "ETH-USD"], credentials: @credentials)
 
-      refute eth == @injected
+      assert {:ok, %DpExchange.Core.Types.Quote{symbol: "ETH-USD"}} = eth
     end
   end
 
@@ -197,6 +197,9 @@ defmodule DpExchange.Webull.FakeInjectionTest do
     test "fail_always/2 does not reach subscribe/2" do
       FakeInjection.fail_always(:webull, @injected)
       assert Fake.subscribe(["BTC-USD"], credentials: @credentials) == :ok
+      # Not merely `:ok`: the subscription took effect, so the injected outcome was not
+      # swapped in for a real answer that happened to be `:ok` as well.
+      assert Fake.coverage()["BTC-USD"] == :stream
     end
   end
 end

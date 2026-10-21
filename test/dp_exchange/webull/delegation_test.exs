@@ -133,6 +133,8 @@ defmodule DpExchange.Webull.DelegationTest do
 
       assert {:ok, quote_struct} = Webull.get_price("BTC-USD", base(plug: json(body)))
       assert quote_struct.provider == :webull
+      assert quote_struct.symbol == "BTC-USD"
+      assert Decimal.equal?(quote_struct.price, Decimal.new("40000"))
     end
 
     test "get_top_of_book/2" do
@@ -168,6 +170,9 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.get_historical_prices("BTC-USD", "1m", [], base(plug: json(body)))
 
       assert candle.timeframe == "1m"
+      assert Decimal.equal?(candle.open, Decimal.new("1"))
+      assert Decimal.equal?(candle.high, Decimal.new("2"))
+      assert Decimal.equal?(candle.close, Decimal.new("1.5"))
     end
 
     test "get_symbols/1" do
@@ -196,6 +201,12 @@ defmodule DpExchange.Webull.DelegationTest do
 
       assert {:ok, book} = Webull.get_order_book("F", base(plug: json(body)))
       assert book.symbol == "F"
+      assert [{bid_price, bid_size}] = book.bids
+      assert Decimal.equal?(bid_price, Decimal.new("13.90"))
+      assert Decimal.equal?(bid_size, Decimal.new("5"))
+      assert [{ask_price, ask_size}] = book.asks
+      assert Decimal.equal?(ask_price, Decimal.new("13.91"))
+      assert Decimal.equal?(ask_size, Decimal.new("3"))
     end
 
     test "get_volume_profile/3" do
@@ -208,6 +219,7 @@ defmodule DpExchange.Webull.DelegationTest do
 
       assert {:ok, [profile]} = Webull.get_volume_profile("AAPL", "5m", base(plug: json(body)))
       assert profile.timeframe == "5m"
+      assert profile.symbol == "AAPL"
     end
 
     test "get_auction_imbalance/2" do
@@ -235,6 +247,7 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.get_balances(@credentials, base(account_id: @account, plug: json(body)))
 
       assert balance.currency == "USD"
+      assert Decimal.equal?(balance.balance, Decimal.new("100"))
     end
 
     test "get_positions/1" do
@@ -316,7 +329,7 @@ defmodule DpExchange.Webull.DelegationTest do
                Webull.cancel_order(
                  @credentials,
                  "abc",
-                 once(account_id: @account, plug: json(%{}))
+                 once(account_id: @account, plug: json(%{"client_order_id" => "abc"}))
                )
 
       assert {:ok, read} =

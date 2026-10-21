@@ -330,12 +330,17 @@ defmodule DpExchange.Webull.BatchPlaceTest do
         |> Plug.Conn.resp(403, Jason.encode!(%{"code" => "NOT_ENTITLED"}))
       end
 
-      assert {:refused, _reason} =
+      assert {:refused, reason} =
                Rest.place_orders(@credentials, [order()],
                  account_id: "acct-1",
                  plug: plug,
                  retry_attempts: 0
                )
+
+      # The status survives into the reason: a 403 (entitlement) is not a 400 (bad request).
+      assert is_tuple(reason)
+      assert elem(reason, 0) == :venue_error
+      assert elem(reason, 1) == 403
     end
   end
 
@@ -432,8 +437,10 @@ defmodule DpExchange.Webull.BatchPlaceTest do
       assert {:ok, [first, second]} =
                Fake.place_orders(@credentials, [order(), order()], account_id: "a")
 
-      assert first["order_id"]
-      assert second["error_code"]
+      assert is_binary(first["order_id"]) and first["order_id"] != ""
+      refute Map.has_key?(first, "error_code")
+      assert second["error_code"] == "INSUFFICIENT_BUYING_POWER"
+      refute Map.has_key?(second, "order_id")
     end
 
     test "the facade delegates" do

@@ -50,18 +50,47 @@ defmodule DpExchange.Webull.CountLimitsTest do
       assert {:error, {:invalid_option, :limit, 1_651}} =
                Rest.get_stock_bars("AAPL", "1m", [], @credentials, opts(limit: 1_651))
 
-      refute match?(
-               {:error, {:invalid_option, :limit, _n}},
-               Rest.get_stock_bars(
-                 "AAPL",
-                 "1m",
-                 [],
-                 @credentials,
-                 plug: empty_ok(),
-                 retry_attempts: 0,
-                 limit: 1_650
-               )
-             )
+      # The boundary value must reach the wire as the count, not merely avoid this refusal:
+      # a reply of any other shape would also "not be the refusal".
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+        empty_ok().(conn)
+      end
+
+      _result =
+        Rest.get_stock_bars(
+          "AAPL",
+          "1m",
+          [],
+          @credentials,
+          plug: plug,
+          retry_attempts: 0,
+          limit: 1_650
+        )
+
+      assert_receive {:sent, %{"count" => 1_650, "timespan" => "M1"}}, 5_000
+    end
+
+    test "1200 is allowed on a wider width and is the count sent" do
+      me = self()
+
+      plug = fn conn ->
+        {:ok, raw, conn} = Plug.Conn.read_body(conn)
+        send(me, {:sent, Jason.decode!(raw)})
+        empty_ok().(conn)
+      end
+
+      _result =
+        Rest.get_stock_bars("AAPL", "1d", [], @credentials,
+          plug: plug,
+          retry_attempts: 0,
+          limit: 1_200
+        )
+
+      assert_receive {:sent, %{"count" => 1_200}}, 5_000
     end
 
     test "every other width stops at 1200" do

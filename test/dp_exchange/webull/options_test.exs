@@ -154,6 +154,8 @@ defmodule DpExchange.Webull.OptionsTest do
                )
 
       assert chain.expiries[~D[2026-03-20]][Decimal.new("100")].call
+      assert Types.OptionChain.expiry_dates(chain) == [~D[2026-03-20]]
+      assert map_size(chain.expiries[~D[2026-03-20]]) == 1
     end
 
     test "two expiries are two keys" do
@@ -421,7 +423,7 @@ defmodule DpExchange.Webull.OptionsTest do
     end
 
     test "greeks refuse, because the venue publishes none" do
-      assert {:error, :not_supported} = Fake.get_option_greeks("AAPL250320C00100000")
+      assert {:error, :not_supported} = Fake.get_option_greeks("AAPL250320C00100000", [])
       assert {:error, :not_supported} = DpExchange.Webull.get_option_greeks("X", [])
     end
   end

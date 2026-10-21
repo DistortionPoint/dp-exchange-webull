@@ -111,6 +111,13 @@ The watchlist `:category` is `"US_STOCK"` (the default), the one value the instr
 enum lists; any other is `{:error, {:invalid_category, v}}` before a request, in `Fake` too.
 A futures `replace_order/4` changes `:order_type` one way only (limit or stop to `:market`,
 stop-limit to `:limit`), else `{:error, {:unsupported_order_type_change, from, to}}`.
+`DpExchange.Webull.Fake` keeps a terminal order terminal: `cancel_order/3` of a `:filled`,
+`:cancelled`, `:rejected` or `:expired` order is `{:refused, {:order_not_cancellable, status}}`,
+`replace_order/4` of one is `{:refused, {:order_not_replaceable, status}}`, and an
+`opts[:order_type]` that is not the stored order's is `{:refused, {:order_type_mismatch, stored,
+named}}`; none changes the stored order. The venue's own wording for these is unmeasured (the real
+`cancel_order/3` and `replace_order/4` send the request and report what the venue says), and a
+partially filled order cancels and keeps its `filled_quantity`.
 Every 4xx but 408 and 429, on a REST read as on a REST write, is
 `{:refused, {:venue_error, status, reason}}` (404 is `{:refused, :not_found}`) and is never
 retried. The streaming calls (`subscribe/2` and its two siblings) answer their own HTTP
@@ -302,7 +309,9 @@ one in the venue's format (32 lower-case hex characters, as `Rest` generates), a
 it was created with, appears in `list_watchlists/1` under its name (and its renames), and
 reads as no rows (`{:error, :unexpected_response_shape}`) once deleted; `wl-1` is the canned
 one before you create any. Deleting an id the Fake does not hold (never created, or already
-deleted) is `{:refused, :not_found}`, as the real path answers a 404.
+deleted) is `{:refused, :not_found}`, as the real path answers a 404, and so is
+`update_watchlist/2` of one (it used to answer `{:ok, _}` for any id); a rename or a
+membership write on `wl-1` makes it a remembered watchlist, listed once (it was listed twice).
 These were missed by the earlier sweep because `dp_exchange_core`'s assertion 17 checks a
 fixed list of nine callback names that predates this surface and does not include any of
 them — passing that assertion is not evidence that the rest of your fake gates credentials.
@@ -862,6 +871,13 @@ top of book, the depth or the imbalance is still delivered). The stock snapshot,
 depth, the bars and the event pages state no unit and keep the seconds-or-milliseconds reading.
 All of this follows what the pages state; none of it was measured against a live response.
 
+**A time that cannot be read is `{:error, {:unparseable_venue_timestamp, text}}`, and `text` is
+bounded.** A time written in more than 64 bytes (the longest real one is about 35) is refused
+before it is parsed, and the tuple carries a 32-byte copy of it; shorter text is carried as
+written; a value that is not text at all (a map, a list, a float) is carried as a short
+description string. This holds for bars, ticks and a news item's `publish_time` alike. The 64-byte bound was chosen, not measured: the venue documents no
+time width.
+
 **An order's `created_at` is the venue's `place_time_at`** (ISO8601 UTC, per
 `order-detail.md`), and `updated_at` is `filled_time_at` ("time of the last executed trade")
 **only** for a `:filled` or `:partially_filled` order; for any other status it is `nil`, since
@@ -959,6 +975,17 @@ session `:invalid_session`; a `:coverage_change` for a shard that could not open
 `:open_failed` and for a failed resubscribe `:resubscribe_failed`. The free text (what the
 transport or venue said) is `details.message`. These carried an `inspect/1` string in
 `details.reason` before: that is a breaking change of the notice shape.
+
+The rest of the reasons this package puts on a notice: a `:degraded` with `reason:
+:silent_connection` (plus `silent_for_ms` and `session_id`) when a connected socket has heard
+nothing, not even a PINGRESP, for 90 s, after which it closes and reconnects as any other drop;
+a `:degraded` with `reason: :connection_limit` for CONNACK 105; and a `:coverage_change` with
+`reason: :feed_restarted` (above). These carry no `reason`: the `:info` `:coverage_change` that
+announces a rotation turn (`details.shard`, `session_id`, `symbols`), the `:info`
+`:coverage_change` that ends an `:open_failed` or a `:resubscribe_failed` (`details.shard`, and
+`symbol_count` for the second), and the `:refusal` that names the symbols the venue refused as
+`INVALID_SYMBOL` (`details.symbols`, canonical names; they stay excluded for
+`:rejected_symbol_ttl_ms` or until the symbol is no longer wanted).
 
 ## A slow subscriber gets dropped, and told — it does not get an unbounded mailbox
 
@@ -1063,7 +1090,9 @@ Six things to know before you build on them:
   `:down` at all, only its notice (`:credentials_rejected` for codes 3, 4, 5, 103 and 104,
   `:degraded` for 105, `:link_down` for any other). A socket process that crashed, and a shard rebuilt on
   INVALID_SESSION, each emit one `:down` if their link was up, with `reason` as bounded text.
-  `:down` is emitted only to close a `:up`.
+  So does a shard closed for carrying no symbol for `:idle_shard_ms` (`reason`
+  `"idle_shard_closed"`): it raises no notice, because nothing was lost. `:down` is emitted only
+  to close a `:up`.
 
 `:endpoint` metadata is the request URL with the query string removed. Deliberate: telemetry
 metadata reaches logs, aggregators and third-party exporters, and the query string is the one
@@ -1139,7 +1168,8 @@ Use `get_event_trades/2` and `get_event_order_book/2`, which return the venue's 
 nearest mapping would produce a number that looks right and belongs to **the other instrument
 of a two-instrument market**.
 
-The venue notes that in a binary market a yes bid at X equals a no ask at 1−X. That identity
+The venue notes that in a binary market a yes bid at X equals a no ask at 100-X (`event-depth.md`,
+in its own units). That identity
 is the venue's; this package does not derive one side from the other, because a derived level
 cannot be told from a quoted one.
 
@@ -1281,7 +1311,8 @@ on a stop or stop-limit order, `nil` on anything else.
 **Which pairs of `:order_type` and `:time_in_force` this venue actually accepts differs by
 instrument** — crypto's list is five pairs (`MARKET`/IOC, `LIMIT` and `STOP_LOSS_LIMIT` at
 DAY or GTC — no plain `STOP_LOSS`, no `TRAILING_STOP_LOSS`); equity, option and futures
-orders add `STOP_LOSS` and (equity only) `TRAILING_STOP_LOSS`; an event contract
+orders add `STOP_LOSS`, and equity and futures orders (not option ones: "Options not
+supported") `TRAILING_STOP_LOSS`; an event contract
 takes `LIMIT` only, at any of five time-in-force values. A pair outside the matrix is
 refused before the request is sent, naming both halves of what was wrong, rather than being
 sent and rejected by the venue.
@@ -1367,6 +1398,14 @@ refused), then the account option
 the same order, from the same function. A preview that is not a map is
 `{:invalid_order_request, r}` (it raised), and a preview of crypto is still
 `{:preview_not_supported, :crypto}` first.
+
+**A cash-sized preview is refused.** A `preview_order/3` request sized by `:amount` (wire
+`entrust_type` `AMOUNT` / `total_cash_amount`) is `{:error, {:cash_sizing_not_supported,
+instrument}}`, from Rest and the Fake alike, with nothing sent: `common-order-preview.md`
+documents no `total_cash_amount` field, so the venue may ignore it and price a different
+order than the one placed. It is judged after place's own checks (an order place refuses is
+refused with place's tuple) and after crypto. `place_order/3` is unaffected - its page
+documents the field - so preview by `:quantity`.
 
 **`replace_order/4` is told which order it edits.** `opts[:instrument_type]` and
 `opts[:order_type]` (the type of the order being amended, whose edit table applies) are
@@ -1507,8 +1546,10 @@ states. The fake refuses all of these identically.
 real `yyyy-MM-dd` string (`{:error, {:invalid_expire_date, v}}` otherwise; a missing one is
 `{:missing_field, :expire_date}`); `event_outcome` is `:yes`, `:no`, `"yes"` or `"no"`
 (`{:error, {:invalid_event_outcome, v}}`). `:support_trading_session` is `:core`, `:all` or
-`:night` (`{:error, {:unsupported_support_trading_session, v}}` otherwise); optional on
-`place_order/3`, left off the wire when absent. **Time bounds** (`:start`/`:end` on
+`:night` (`{:error, {:unsupported_support_trading_session, v}}` otherwise; on any instrument
+but `:equity` it is `{:error, {:unexpected_field, :support_trading_session}}`, and
+`event_outcome` on any instrument but `:event` is `{:unexpected_field, :event_outcome}`);
+optional on `place_order/3`, left off the wire when absent. **Time bounds** (`:start`/`:end` on
 `get_transfers/2` and `get_transactions/2`, `:since`/`:until` on a `history: true`
 `get_orders/2`) are `DateTime`s or absent: anything else is
 `{:error, {:invalid_time, key, value}}`. A `get_positions/2` side is read from the sign of
@@ -1561,7 +1602,9 @@ each symbol it models, and `coverage_by_kind/1` reports both (`:quotes` and `:to
 A symbol is covered only once it was delivered to a reachable subscriber; a `to:` atom that
 names no process is skipped, never raised on. `update_symbols/2` delivers the symbols it adds
 to the existing subscribers (it takes no `:to`, as the feed does), and covers nothing for a
-symbol it did not push. `subscribe_notices/1` sends no `:link_up`: the fake has no link.
+symbol it did not push. `Fake.wanted/1` is every symbol asked for, sorted, as the feed's is:
+a symbol the fake does not model is wanted and not covered (it used to report only what was
+delivered). `subscribe_notices/1` sends no `:link_up`: the fake has no link.
 
 **`Fake` streaming needs credentials where the feed does.** A `subscribe/2`,
 `unsubscribe/2` or `update_symbols/2` that changes what is wanted needs `credentials:` in its
@@ -1593,6 +1636,41 @@ A `Balance`'s own `balance` field may still be `nil`, and that is a different st
 venue named the asset and did not state a quantity for it. Read that as unknown, never as
 zero.
 
+## Refusals decided before a request, by name
+
+Each of these is `{:error, reason}`, answered before anything is signed or sent, and `Fake`
+answers the same. The ones the sections above already name (`:invalid_symbol`,
+`:invalid_option`, `:missing_field`, `:unexpected_field` and the rest of the order checks) are
+not repeated.
+
+| `reason` | When |
+|---|---|
+| `{:unsupported_category, category}` | `get_prices/2` with a `:category` other than `US_CRYPTO`. |
+| `{:unsupported_timeframe, width}` | A candle width the category's bar endpoint does not serve (crypto and event contracts stop at `1d`), or a `get_volume_profile/3` width outside `5s 15s 1m 5m 30m`. |
+| `{:unsupported_bar_range, :option \| :future \| :event}` | A `:start` or `:end` on option, futures or event bars: they serve only the latest `count` bars. |
+| `{:use_get_event_order_book, "US_EVENT"}` / `{:use_get_event_trades, "US_EVENT"}` | `get_top_of_book/2` on `US_EVENT` (the event book is `get_event_order_book/2`), and `get_trades/2` on `US_EVENT` (the event tape is `get_event_trades/2`). `get_order_book/2` on `US_EVENT` is `{:unsupported_book_category, "US_EVENT"}`, as for crypto and options. |
+| `{:unsupported_footprint_category, category}` / `{:unsupported_session, session}` | `get_volume_profile/3` on a category other than `US_STOCK` (the default) or `US_FUTURES`, or a `:session` other than `PRE`, `RTH`, `ATH` (`OVN` is in the venue's enum and its own page says it is unsupported). |
+| `{:limit_out_of_range, count, max: max}` | A `:count` over the page's maximum on `get_volume_profile/3` (1200), a statement kind of `get_financials/3` or `get_fundamental/3` (20) or `:capital_flows` (5). A `:limit` over a maximum is `{:invalid_option, :limit, n}`; this shape is the `:count` one. |
+| `{:cross_year_range, from, to}` | `get_transfers/2` or `get_transactions/2` with `:start` and `:end` in two calendar years. |
+| `{:unsupported_instrument_type, type}` | An `:instrument_type` that is not one of `:crypto`, `:equity`, `:futures`, `:event`, and `:option` on `place_order/3`, `preview_order/3` and `replace_order/4`: the venue names an option contract in `legs` (strike, expiry, call or put), which this package's request has no key to carry, so an option order is refused last, after its type, duration and size checks. |
+| `{:unexpected_field, :support_trading_session \| :event_outcome}` | `:support_trading_session` on any order but a stock one, or `:event_outcome` on any but an event one: the page scopes them ("U.S. stock market orders only", "event orders"). |
+| `{:cash_sizing_not_supported, instrument}` | `:amount` on a futures or option order: those take a quantity only. Also `:amount` on any `preview_order/3`: the preview page documents no cash-size field. |
+| `{:batch_instrument_not_supported, index, type}` | A `place_orders/3` entry whose `:instrument_type` is not equity (absent means equity there). |
+| `{:unsupported_order_edit, order_type, fields}` / `{:unsupported_order_type, type}` | `replace_order/4` changing a field the order type's edit table does not list (`fields` are the offending keys), or an `:order_type` option with no edit table. |
+| `{:invalid_watchlist_id, id}` / `{:invalid_watchlist_name, name}` / `{:invalid_sort, sort}` | A watchlist id that is not text or is `""`, a name that is not text, or a `:sort` that is neither absent nor a whole number (the pages type it as an integer). |
+| `{:unsupported_statement_kind, kind}` / `{:unsupported_event_kind, kind}` | `get_financials/3` with a kind that is not a statement, `get_corporate_events/1` with a `:kind` other than `:dividend` or `:earnings`. |
+| `{:unreadable_option_contract, keys}` | `get_option_chain/2` met a contract with no readable expiry, strike or right; `keys` are the keys the venue sent. |
+| `{:ambiguous_option_contract, expiry, strike, right, [symbol_a, symbol_b]}` | Two different contracts at one expiry, strike and right (an index's standard and weekly roots). Narrow with `:expiry` / `:strike`. |
+| `{:invalid_field, :token \| :client_id \| :client_secret}` | `check_token/2` or `oauth_token/3` given one that is not text. The value is never echoed. |
+
+**`get_order/3` refuses an order it cannot represent**, where `get_orders/2` wraps the same
+refusal as `{:unreadable_orders, ids}`: `{:unsupported_combo_type, combo}` for a parent with
+contingent children (`MASTER`, `OTO`, `OCO`, `OTOCO` or a word this package does not know),
+`{:unsupported_option_strategy, strategy | :multi_leg}` for an option strategy or a group of
+more than one contract, `{:unsupported_order, :event_outcome}` for an event contract order
+(an `Order` has nowhere to say yes or no), and `{:missing_required_field, :orders}` for a group
+that lists none. An order never reads as the single instrument it is not.
+
 ## A subscribe that is still in progress answers before it times out
 
 `subscribe/2`, `unsubscribe/2` and `update_symbols/2` wait for the venue's HTTP subscribe,
@@ -1618,9 +1696,14 @@ runs, and `unsubscribe(nil)` is refused rather than `:ok`. After the symbols, `s
 `false` included - is `{:error, {:invalid_subscriber, to}}`. `subscribe/2`, `unsubscribe/2`,
 `update_symbols/2` and `subscribe_notices/1` all take `opts \\ []`.
 
-**Neither needs a retry.** Your symbols are already recorded. The subscribe finishes or
-the shard connects, and your symbols go out with it. `coverage/1` tells you when they
-start arriving.
+**`{:reconcile_pending, ms}` needs no retry.** Your symbols are already recorded and the
+subscribe finishes in the background; `coverage/1` tells you when they start arriving.
+
+**`{:connack_timeout, ms}` is a refusal, and it needs a retry.** The call is undone: its symbols
+and the `to:` subscriber it added are taken back, so nothing is streamed to you until you call
+again (a refused call changes no state). When several calls for the same `to:` pid overlap, the
+pid stays registered while any of them is accepted or still pending, and is dropped once every
+one of them was refused; a pid registered before them is never dropped.
 
 ## Every answer a streaming call can give
 
@@ -1629,7 +1712,7 @@ wrapped as `{:error, reason}`:
 
 | `reason` | Meaning |
 |---|---|
-| `{:invalid_symbols, symbols}` | Your list was malformed (decided in your process), **or** the venue refused those symbols (a list of canonical names). The venue's refusals are excluded and the rest is retried, so you see this only when no retry is left. |
+| `{:invalid_symbols, symbols}` | Your list was malformed (decided in your process), **or** the venue refused those symbols (a list of canonical names). The venue's refusals are excluded and the rest is retried, so you see this only when no retry is left. A refusal message is read for its first 500 names only; any further name it lists is not read. |
 | `{:invalid_subscriber, to}` | `to:` is not a pid or a registered-name atom. |
 | `{:streaming_unavailable, :uat}` | There is no UAT broker. |
 | `{:missing_required_field, :app_key}` | A shard had to be opened and the credentials in use carried no usable `:app_key` (absent, not text, or blank). This package's own answer, not the venue's. |
@@ -1644,9 +1727,11 @@ wrapped as `{:error, reason}`:
 | `:oversubscribed` | The venue's per-session ceiling; the feed moves the overflow to another shard and retries, so it reaches you only when that retry is spent. |
 
 HTTP and signing failures of the subscribe itself keep their ordinary shapes
-(`{:error, {:refused, status, body}}` for a 400, 401 or 403,
-`{:error, {:exchange_error, :webull, text}}` for the rest, and
-`{:error, {:missing_credentials, :webull}}`).
+(`{:error, {:refused, status, body}}` for a 400, 401 or 403, with a text `body` cut at 2,048
+bytes; `{:error, {:exchange_error, :webull, text}}` for the rest, and
+`{:error, {:missing_credentials, :webull}}`). Note the difference from a REST read: a refused
+subscribe is `{:error, {:refused, status, body}}`, where a REST call is `{:refused,
+{:venue_error, status, reason}}`.
 
 **Symbols are released when the last data subscriber dies.** A subscriber that dies is
 dropped (it is monitored, and so is a `subscribe_notices/1` receiver). When the death empties
@@ -1670,7 +1755,7 @@ Passed in the options of `{DpExchange.Webull, opts}`. Every one is optional.
 | Option | Default | What it does |
 |---|---|---|
 | `:credentials` | none | Kept (wrapped) to replay subscriptions after a reconnect. A later call's own credentials replace them only if they can be signed with and the call is not refused. |
-| `:max_queue_len` | see the slow-subscriber section | Mailbox bound before a subscriber is skipped. |
+| `:max_queue_len` | 10_000 (see the slow-subscriber section) | Mailbox bound before a subscriber is skipped. A value that is not a positive integer raises `ArgumentError` at start. |
 | `:priority_symbols` | none | See `priority_symbols:` below. |
 | `:resubscribe_interval_ms` | 60_000, at least 1_000 | Blind re-assert cadence. A smaller value raises `ArgumentError` at start. |
 | `:resubscribe_failure_limit` | 12 | Consecutive failed re-asserts before a silent shard is reopened. |
@@ -1686,10 +1771,16 @@ Passed in the options of `{DpExchange.Webull, opts}`. Every one is optional.
 | `:url` | the venue's endpoint | Socket URL; `ws://` is refused except to a loopback host. |
 
 A timing or count option that is not an integer of at least 1 (0 or more for
-`:shard_spacing_ms`), a socket budget that is not a positive integer, and a `:url` the socket
-would refuse each raise `ArgumentError` when the feed starts, naming the option (a `:url` is
-never echoed, as it can carry credentials). They used to be accepted and fail inside the first
-call that used them, which restarted the feed for every consumer. A rejected symbol is
+`:shard_spacing_ms`), a socket budget that is not a positive integer, a `:max_queue_len` that
+is not a positive integer, a `:priority_symbols` that is not a list of strings and a `:url` the
+socket would refuse each raise `ArgumentError` in the feed's `init/1`, naming the option (a
+`:url` is never echoed, as it can carry credentials). **What you see is the start failing, not
+a raise in your process:** `DpExchange.Webull.start_link/1` answers `{:error, {:shutdown,
+{:failed_to_start_child, DpExchange.Webull.Feed, {%ArgumentError{}, stacktrace}}}}`, and a
+supervisor reports the child as failing to start. A `nil` for a timing, socket or priority
+option is "not given" and the default applies; a `nil` `:max_queue_len` is refused. They used to
+be accepted and fail inside the first call that used them, which
+restarted the feed for every consumer. A rejected symbol is
 remembered only while it is wanted: `unsubscribe/2` and `update_symbols/2` forget the refusals
 of what they stop wanting.
 

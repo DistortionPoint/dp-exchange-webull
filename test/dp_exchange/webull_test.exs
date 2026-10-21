@@ -415,7 +415,7 @@ defmodule DpExchange.WebullTest do
       assert {:ok, symbols} = Fake.get_symbols(credentials: @credentials)
       assert "BTC-USD" in symbols
 
-      assert {:ok, [_bar]} =
+      assert {:ok, [%{symbol: "BTC-USD", timeframe: "1m"}]} =
                Fake.get_historical_prices("BTC-USD", "1m", [], credentials: @credentials)
     end
 

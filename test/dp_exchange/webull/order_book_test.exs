@@ -82,6 +82,11 @@ defmodule DpExchange.Webull.OrderBookTest do
       [{best_bid, best_bid_size} | _rest] = book.bids
       assert Decimal.equal?(best_bid, Decimal.new("13.90"))
       assert Decimal.equal?(best_bid_size, Decimal.new("5"))
+
+      # The ask side is read from `asks`, not mirrored from `bids`.
+      [{best_ask, best_ask_size} | _rest] = book.asks
+      assert Decimal.equal?(best_ask, Decimal.new("13.91"))
+      assert Decimal.equal?(best_ask_size, Decimal.new("3"))
       assert book.provider == :webull
     end
 
@@ -173,7 +178,7 @@ defmodule DpExchange.Webull.OrderBookTest do
 
       assert book.bids != []
       assert book.venue_time == nil
-      assert book.observed_at
+      assert %DateTime{} = book.observed_at
       refute book.venue_time == book.observed_at
     end
 
@@ -293,7 +298,7 @@ defmodule DpExchange.Webull.OrderBookTest do
     test "an empty response is unreadable, not an empty book" do
       # No row means the venue said nothing about this symbol. An empty book would claim it
       # said there is no depth.
-      assert {:error, _reason} =
+      assert {:error, :unexpected_response_shape} =
                Rest.get_order_book("F", @credentials, plug: responding([]), retry_attempts: 0)
     end
   end
@@ -441,6 +446,9 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert t.symbol == "AAPL"
       assert Decimal.equal?(t.price, Decimal.new("48.07"))
       assert Decimal.equal?(t.quantity, Decimal.new("1"))
+      # `tick.md:223`: the tick's `time` is Unix epoch MILLISECONDS.
+      stamped = DateTime.from_unix!(1_761_182_953_043, :millisecond)
+      assert DateTime.compare(t.timestamp, stamped) == :eq
       # The row says "B", which the page does not define: nil (family convention MD10).
       assert t.side == nil
       assert t.provider == :webull
@@ -478,7 +486,30 @@ defmodule DpExchange.Webull.OrderBookTest do
                  retry_attempts: 0
                )
 
-      refute t.broken
+      # `refute` would also pass a `nil`; the contract is the boolean `false`.
+      assert t.broken == false
+    end
+
+    test "ticks come back oldest first whatever order the venue sent them in" do
+      body = [
+        %{
+          "symbol" => "AAPL",
+          "result" => [
+            %{"time" => 1_761_182_954_000, "price" => "48.09", "volume" => "2"},
+            %{"time" => 1_761_182_953_000, "price" => "48.07", "volume" => "1"}
+          ]
+        }
+      ]
+
+      assert {:ok, [first, second]} =
+               Rest.get_trades("AAPL", @credentials,
+                 plug: responding(body),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(first.price, Decimal.new("48.07"))
+      assert Decimal.equal?(second.price, Decimal.new("48.09"))
+      assert DateTime.compare(first.timestamp, second.timestamp) == :lt
     end
 
     test "an undated tick is refused, never stamped with the local clock" do
@@ -604,6 +635,7 @@ defmodule DpExchange.Webull.OrderBookTest do
       assert path == "/market-data/stocks/snapshots/list"
       assert query =~ "category=US_STOCK"
       assert quote_.symbol == "AAPL"
+      assert Decimal.equal?(quote_.price, Decimal.new("100"))
 
       # The stock snapshot's `volume` is the day's aggregate: a running total, said so
       # (dp-exchange-core issue #42).
@@ -626,9 +658,10 @@ defmodule DpExchange.Webull.OrderBookTest do
         )
       end
 
-      assert {:ok, _quote} =
+      assert {:ok, crypto_quote} =
                Rest.get_price("BTC-USD", @credentials, plug: plug, retry_attempts: 0)
 
+      assert Decimal.equal?(crypto_quote.price, Decimal.new("40000"))
       assert_receive {:path, "/market-data/crypto/snapshots/list"}
     end
 
@@ -1132,7 +1165,7 @@ defmodule DpExchange.Webull.OrderBookTest do
         |> Plug.Conn.resp(200, Jason.encode!(%{"data" => [%{"symbol" => "SPY"}]}))
       end
 
-      assert {:ok, _symbols} =
+      assert {:ok, ["SPY"]} =
                Rest.get_symbols(@credentials,
                  category: "US_ETF",
                  plug: plug,

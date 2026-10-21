@@ -1693,6 +1693,42 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert order.provider == :webull
       assert order.order_type == :limit
       assert order.time_in_force == :day
+
+      # The venue's reply carries only the ids, so every other field is the request's own,
+      # in the contract's vocabulary and number type. A decode that returned a constant
+      # symbol/side/size would pass the five assertions above.
+      assert order.symbol == req_order["symbol"]
+      assert order.side == :buy
+      assert Decimal.equal?(order.quantity, Decimal.new(req_order["quantity"]))
+      assert Decimal.equal?(order.price, Decimal.new(req_order["limit_price"]))
+      assert order.stop_price == nil
+    end
+
+    # The same reply naming another order is not an answer about the one sent.
+    test "a reply that names a different client_order_id is unconfirmed, not a placed order" do
+      fixture = fixture!("order_place.json")
+      req_order = fixture["request"]["new_orders"] |> List.first()
+      other = Map.put(fixture["response"], "client_order_id", "SOME-OTHER-ORDER")
+
+      request = %{
+        instrument_type: :equity,
+        symbol: req_order["symbol"],
+        side: :buy,
+        quantity: Decimal.new(req_order["quantity"]),
+        price: Decimal.new(req_order["limit_price"]),
+        order_type: :limit,
+        time_in_force: :day,
+        client_order_id: req_order["client_order_id"]
+      }
+
+      assert {:error, {:order_unconfirmed, sent_id, :unexpected_response_shape}} =
+               Rest.place_order(@credentials, request,
+                 plug: responding(other),
+                 account_id: fixture["request"]["account_id"],
+                 retry_attempts: 0
+               )
+
+      assert sent_id == req_order["client_order_id"]
     end
   end
 
@@ -1724,6 +1760,11 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert leaf["time_in_force"] == fixture_leaf["time_in_force"]
       assert leaf["quantity"] == fixture_leaf["quantity"]
       assert leaf["limit_price"] == fixture_leaf["limit_price"]
+      assert leaf["client_order_id"] == fixture_leaf["client_order_id"]
+      assert leaf["side"] == fixture_leaf["side"]
+      # The vendor's own example pairs MARKET with a limit_price (an inconsistency on its
+      # page); `batch_order_leaf/1` builds the LIMIT order that example's values describe.
+      assert leaf["order_type"] == "LIMIT"
       refute Map.has_key?(leaf, "qty")
     end
 
@@ -2111,10 +2152,12 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     # viewer renders the field-level schema client-side, and a plain fetch of the page
     # returned only the description and status-code list, no schema. This fixture is
     # therefore NOT a vendor worked example: it is built from the field names
-    # `usage-rules/auth.md` (this package's own prior reading of the vendor) documents
-    # this endpoint returning — `access_token`, `refresh_token`, `expires_in`,
-    # `rt_expires_in`, two expiries on two different clocks. See
-    # `docs/reference/webull/openapi/README.md`.
+    # this package's own prior reading of the vendor (`usage-rules.md` names only
+    # `rt_expires_in`; the `usage-rules/auth.md` once cited here does not exist) — so
+    # `access_token`, `refresh_token`, `expires_in` and `rt_expires_in` are UNVERIFIED names
+    # and their JSON types (strings in the fixture, integers in the Fake) are unknown. The
+    # decoder passes the body through, so these assertions prove the pass-through, not the
+    # vendor's shape. See `docs/reference/webull/openapi/README.md`.
     test "a code exchange reaches the OAuth host with the documented grant fields" do
       me = self()
 
@@ -2148,6 +2191,10 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # get-watchlist.md:145-171
       assert %Types.Watchlist{id: "12345678", name: "My Tech Stocks"} = watchlist
       assert watchlist.symbols == nil
+      assert watchlist.provider == :webull
+      # The page's `update_time` is a watchlist-edit time, not a quote time: it is not read
+      # into `venue_time`, and nothing else in the row is invented into the struct.
+      assert watchlist.venue_time == nil
     end
 
     test "reaches the documented path with no query parameters" do
@@ -2178,6 +2225,32 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert watchlist.id == "12345678"
       assert watchlist.symbols == ["AAPL"]
       assert watchlist.name == nil
+      assert watchlist.provider == :webull
+    end
+
+    # Test-only variant of the fixture: a second member from the same documented row shape
+    # (the fixture row with its own `symbol` replaced), to prove every member is read, in the
+    # order the venue sent them, and that a member with no text symbol refuses the read.
+    test "every member is read in the venue's order, and a member with no symbol refuses" do
+      %{"instruments" => [member]} = body = fixture!("watchlist_get.json")
+      second = Map.merge(member, %{"symbol" => "MSFT", "sort" => 2})
+      two = Map.put(body, "instruments", [member, second])
+
+      assert {:ok, watchlist} =
+               Rest.get_watchlist("12345678", @credentials,
+                 plug: responding(two),
+                 retry_attempts: 0
+               )
+
+      assert watchlist.symbols == ["AAPL", "MSFT"]
+
+      holed = Map.put(body, "instruments", [member, Map.delete(second, "symbol")])
+
+      assert {:error, :unexpected_response_shape} =
+               Rest.get_watchlist("12345678", @credentials,
+                 plug: responding(holed),
+                 retry_attempts: 0
+               )
     end
 
     test "the documented query parameter example reaches the wire" do
@@ -2211,8 +2284,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       # create-watchlist.md:169-179 (response) and :250-253 (jsonRequestBodyExample)
       assert watchlist.id == "12345678"
+      # No members were asked for, so this is the one request and the watchlist is empty.
+      assert watchlist.name == "My Tech Stocks"
+      assert watchlist.symbols == []
+      assert watchlist.provider == :webull
 
       assert_receive {:request, "POST", "/market-data/watchlists/create", _query, raw}
+      refute_receive {:request, _method, _path, _query, _raw}, 500
 
       # `sort` is documented as `"type": "integer"` (create-watchlist.md:150-155) — fixed
       # in `rest.ex`'s `put_present/3`, which used to run every non-Decimal value
@@ -2274,13 +2352,29 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert_receive {:request, "POST", "/market-data/watchlists/delete", _query, raw}
       assert Jason.decode!(raw) == %{"watchlist_id" => "12345678"}
     end
+
+    # A 200 that did not say `success: true` did nothing the caller can rely on; every
+    # watchlist write answers with that boolean rather than an error status.
+    test "a {success: false} is a refusal and a reply with no verdict is unconfirmed" do
+      assert {:refused, :watchlist_write_rejected} =
+               Rest.delete_watchlist("12345678", @credentials,
+                 plug: responding(%{"success" => false}),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:write_unconfirmed, nil, :unexpected_response_shape}} =
+               Rest.delete_watchlist("12345678", @credentials,
+                 plug: responding(%{"ok" => true}),
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "add_watchlist_instruments/4 — add-watchlist-instruments.md" do
     test "the request body matches the vendor's jsonRequestBodyExample" do
       me = self()
 
-      assert {:ok, _result} =
+      assert {:ok, %{"success" => true}} =
                Rest.add_watchlist_instruments("12345678", ["AAPL"], @credentials,
                  plug: capturing(fixture!("watchlist_add_instruments.json"), me),
                  retry_attempts: 0
@@ -2302,7 +2396,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     test "the request body matches the vendor's jsonRequestBodyExample" do
       me = self()
 
-      assert {:ok, _result} =
+      assert {:ok, %{"success" => true}} =
                Rest.remove_watchlist_instruments("12345678", ["AAPL"], @credentials,
                  plug: capturing(fixture!("watchlist_remove_instruments.json"), me),
                  retry_attempts: 0
@@ -2321,7 +2415,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     test "the request body matches the vendor's jsonRequestBodyExample, sort included" do
       me = self()
 
-      assert {:ok, _result} =
+      assert {:ok, %{"success" => true}} =
                Rest.sort_watchlist_instruments("12345678", @credentials,
                  sorts: %{"AAPL" => 1},
                  plug: capturing(fixture!("watchlist_sort_instruments.json"), me),
@@ -3109,6 +3203,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert event.announced_date == ~D[2026-05-01]
       assert Decimal.equal?(event.amount, Decimal.new("0.25"))
       assert event.currency == "USD"
+      assert event.symbol == "AAPL"
+      assert event.provider == :webull
+      assert event.confirmed == nil
+      # The venue's whole row rides in details, a string-typed amount and div_type included.
+      assert event.details["div_type"] == "CASH_DIVIDEND"
+      assert event.details["amount"] == "0.25"
+      assert event.details["market"] == "US"
     end
 
     # `div_type` is a seven-member enum; `amount` is "per share" and only a cash dividend's is
@@ -3147,7 +3248,17 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert event.kind == :earnings
       assert event.announced_date == ~D[2026-02-05]
       assert event.ex_date == nil
+      assert event.record_date == nil
+      assert event.pay_date == nil
+      assert event.amount == nil
       assert event.currency == "USD"
+      assert event.symbol == "AAPL"
+      assert event.provider == :webull
+      assert event.details["eps_actual"] == "2.18"
+      assert event.details["eps_est"] == "2.1"
+      assert event.details["rev_actual"] == "119580000000"
+      assert event.details["fiscal_year"] == 2026
+      assert event.details["fiscal_period"] == 1
     end
 
     test "both calendars are read without a kind, each on its own request" do
@@ -3306,6 +3417,17 @@ defmodule DpExchange.Webull.SpecExamplesTest do
         assert Decimal.equal?(Decimal.new(result.metrics[field]), Decimal.new(row[field])),
                "#{field} did not round-trip: #{inspect(result.metrics[field])}"
       end
+
+      # `metrics` IS the venue's row, so the loop above compares a value with itself and
+      # cannot fail. These pin the vendor's own per-field examples (`get-gainers-losers.md`
+      # lines 272-312) as the literal strings they are: nothing is converted, rounded or
+      # renamed on the way through, and the fixture cannot drift from the page unseen.
+      assert result.metrics == row
+      assert result.metrics["price"] == "12.002"
+      assert result.metrics["change_ratio"] == "0.091"
+      assert result.metrics["volume"] == "1111111"
+      assert result.metrics["turnover"] == "123434545656"
+      assert result.metrics["relative_volume_10d"] == "11.91"
     end
 
     test "a caller's own rank_type and direction win over the venue's default" do
@@ -3355,6 +3477,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
              )
 
       assert Decimal.equal?(Decimal.new(result.metrics["volume"]), Decimal.new(row["volume"]))
+
+      # The decimal comparisons above compare the row with itself (`metrics` is the venue's
+      # row); these pin the venue's strings as sent, unconverted and unrenamed.
+      assert result.symbol == "TSLA"
+      assert result.screener == "top_actives"
+      assert result.metrics == row
+      assert result.metrics["volume"] == "1111111"
     end
 
     # `get-top-active.md` documents `sort_by` as a fourth query parameter (default
@@ -3445,6 +3574,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                Decimal.new(result.metrics["change_ratio_52w"]),
                Decimal.new(row["change_ratio_52w"])
              )
+
+      # `metrics` is the venue's row, so the comparisons above are a value against itself;
+      # these pin the strings as the page's example gives them (get-week-52-high-low.md).
+      assert result.symbol == "TSLA"
+      assert result.metrics == row
+      assert result.metrics["price_52w"] == "1.01"
+      assert result.metrics["change_ratio_52w"] == "0.0111"
     end
 
     # `get-week-52-high-low.md` documents `sort_by` alongside `rank_type`, `category` and
@@ -3486,6 +3622,12 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(Decimal.new(result.metrics["yield"]), Decimal.new(row["yield"]))
       assert Decimal.equal?(Decimal.new(result.metrics["dividend"]), Decimal.new(row["dividend"]))
       assert result.metrics["ex_date"] == row["ex_date"]
+
+      # Pinned as literals: the lines above compare the venue's row with itself.
+      assert result.symbol == "TSLA"
+      assert result.metrics == row
+      assert result.metrics["yield"] == "0.1111"
+      assert result.metrics["ex_date"] == "2026-01-08"
     end
 
     # `get-high-dividend.md` documents `sort_by` (default `YIELD`) alongside `category`
@@ -3542,6 +3684,12 @@ defmodule DpExchange.Webull.SpecExamplesTest do
              )
 
       assert result.metrics["data"] == sector["data"]
+
+      # A sector is named by its `name`, not its id, and its row is kept whole.
+      assert result.symbol == "Energy - Fossil Fuels"
+      assert result.metrics == sector
+      assert result.metrics["id"] == "6391"
+      assert result.metrics["change_ratio"] == "0.0111"
     end
   end
 
@@ -3576,6 +3724,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                Decimal.new(result.metrics["market_value"]),
                Decimal.new(stock_row["market_value"])
              )
+
+      # The stock row under the sector, whole — not the sector's own fields, and not a
+      # row renamed or converted. Literal strings, since the decimals above are self-compared.
+      assert result.symbol == "TSLA"
+      assert result.metrics == stock_row
+      assert result.metrics["price"] == "11.01"
+      assert result.metrics["market_value"] == "12345678901"
     end
 
     test "market_sectors and market_sector both follow the fixture's own pagination_key" do
@@ -3598,12 +3753,18 @@ defmodule DpExchange.Webull.SpecExamplesTest do
           |> Plug.Conn.resp(200, Jason.encode!(body))
         end
 
-        assert {:ok, [_first, _second]} =
+        assert {:ok, [first, second]} =
                  Rest.get_screener(name, @credentials,
                    sector_id: "6391",
                    plug: plug,
                    retry_attempts: 0
                  )
+
+        # One page walked twice: both reads are kept, in the order the venue gave them, and
+        # the rank is the position across the whole walk, not within each page.
+        assert [first.rank, second.rank] == [1, 2]
+        assert first.screener == name
+        assert first.symbol == second.symbol
       end
     end
   end
@@ -3640,6 +3801,9 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert row["status"] == fixture_row["status"]
       assert row["contract_type"] == fixture_row["contract_type"]
       assert row["settlement"] == fixture_row["settlement"]
+      # The venue's row comes back whole and unrenamed; every comparison above reads the
+      # fixture against itself, so this is the one that fails if a field is dropped.
+      assert row == fixture_row
     end
 
     test "a code alone satisfies symbols_or_code, and no status filter is sent unasked" do
@@ -3684,6 +3848,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert row["product_class_id"] == fixture_row["product_class_id"]
       assert is_integer(row["product_class_id"])
       assert row["product_class_name"] == fixture_row["product_class_name"]
+      assert row == fixture_row
     end
   end
 
@@ -3807,6 +3972,13 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert market["name"] == "Will the Fed cut rates 3 times?"
       assert market["status"] == "LISTING"
       assert market["tradable_status"] == "NT"
+      # The two booleans stay booleans and the price ladder stays a list of string-priced
+      # ranges (`event-market-list.md`: `boolean` / `PriceRange` with string start/end/step).
+      assert market["can_close_early"] === true
+      assert market["fractionable"] === true
+      assert market["price_ranges"] == [%{"start" => "0.0", "end" => "1.0", "step" => "0.01"}]
+      assert market["yes_condition"] == "Exactly 3 cuts"
+      assert market["payout_date"] == "2025-12-31"
       assert pagination_key == "eyJ2IjoxLCJsYXN0SWQiOiI5MTMyNDQ3NjkiLCJwYWdlSW===="
 
       assert_receive {:request, "GET", "/trading/instruments/event-contracts/markets/list", query,
@@ -4122,6 +4294,11 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       refute body["sub_types"] == fixture["sub_types"]
       assert body["category"] == "US_CRYPTO"
       refute body["category"] == fixture["category"]
+      # `unsubscribe_all` is in the vendor's own example and is never sent: the symbols are
+      # named, and an `unsubscribe_all` the caller never asked for would drop every other
+      # symbol on the session.
+      refute Map.has_key?(body, "unsubscribe_all")
+      assert Enum.sort(Map.keys(body)) == ["category", "session_id", "sub_types", "symbols"]
     end
   end
 
@@ -4137,6 +4314,30 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # trade_time (field 2) preferred over Basic.timestamp (field 3) —
       # `QuoteProto.decode_snapshot/1`'s own comment.
       assert snapshot.timestamp == fixture["trade_time"]
+      # The message-assembly time (Basic.timestamp) is a different event and must not stand
+      # in for the trade time; the two differ in this fixture so a swap would show.
+      refute snapshot.timestamp == fixture["basic"]["timestamp"]
+
+      # The numeric fields sit beside `price` and none of them may be read as it: each is
+      # distinct in the fixture, so a wrong field number would change `price` or `volume`.
+      for other <- ~w(open high low pre_close change change_ratio) do
+        refute snapshot.price == fixture[other]
+        refute snapshot.volume == fixture[other]
+      end
+
+      assert Enum.sort(Map.keys(snapshot)) == [:price, :symbol, :timestamp, :volume]
+    end
+
+    test "a snapshot with no trade_time carries no timestamp, never Basic.timestamp" do
+      fixture = fixture!("stream_snapshot_fields.json")
+
+      payload =
+        field(1, encode_basic(fixture["basic"])) <>
+          field(3, fixture["price"]) <> field(8, fixture["volume"])
+
+      assert {:ok, snapshot} = QuoteProto.decode_snapshot(payload)
+      assert snapshot.price == fixture["price"]
+      assert snapshot.timestamp == nil
     end
   end
 
@@ -4151,6 +4352,10 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert tick.volume == fixture["volume"]
       assert tick.side == fixture["side"]
       assert tick.timestamp == fixture["time"]
+      # Basic.timestamp is carried separately, as the fallback `Socket` reads when field 2
+      # is unreadable; it differs from `time` in this fixture, so a swap would show.
+      assert tick.basic_timestamp == fixture["basic"]["timestamp"]
+      refute tick.basic_timestamp == tick.timestamp
     end
   end
 
@@ -4168,6 +4373,262 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert quote_msg.bid == first_bid["price"]
       assert quote_msg.bid_size == first_bid["size"]
       assert quote_msg.timestamp == fixture["basic"]["timestamp"]
+    end
+  end
+
+  # =========================================================================================
+  # Mappings the vendor's own examples cannot prove
+  # =========================================================================================
+  #
+  # Several of the vendor's per-field examples repeat one value across fields that mean
+  # different things (the stock book's bid and ask are both `13.9` x `5`; the event book's
+  # four sides are one level; the crypto quantization row is `2.0` in five fields; the
+  # futures bar's open, high, low and close are all `1.3362`; the stock snapshot's price and
+  # open are both `100`, and its three last-trade times are one instant). A decoder that read
+  # the wrong field, or swapped two sides, answers those fixtures exactly as the right one
+  # does. The tests below keep each fixture's shape and field names and change ONLY the
+  # values, to distinct ones, so a wrong mapping can fail. They are test-only variants and
+  # are labelled so; they are not vendor examples.
+  describe "stock snapshot — each reading comes from its own field" do
+    test "price, volume and venue_time are the regular session's, not another field's" do
+      [row] = fixture!("quote_stock_snapshot.json")
+
+      variant =
+        Map.merge(row, %{
+          "price" => "123.45",
+          "volume" => "777",
+          "last_trade_time" => 1_640_688_000_000,
+          "open" => "11",
+          "close" => "22",
+          "high" => "33",
+          "low" => "44",
+          "pre_close" => "55",
+          "extend_hour_last_price" => "66",
+          "extend_hour_volume" => "88",
+          "extend_hour_last_trade_time" => 1_700_000_000_000,
+          "ovn_price" => "99",
+          "ovn_volume" => "111",
+          "ovn_last_trade_time" => 1_710_000_000_000
+        })
+
+      assert {:ok, %Types.Quote{} = quote} =
+               Rest.get_price("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding([variant]),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quote.price, Decimal.new("123.45"))
+      assert Decimal.equal?(quote.volume, Decimal.new("777"))
+      assert DateTime.compare(quote.venue_time, ms(1_640_688_000_000)) == :eq
+    end
+
+    test "bid, ask and their sizes are not swapped, and the quote carries no trade time" do
+      [row] = fixture!("quote_stock_snapshot.json")
+
+      variant =
+        Map.merge(row, %{"bid" => "13.8", "bid_size" => "7", "ask" => "14.1", "ask_size" => "9"})
+
+      assert {:ok, %Types.TopOfBook{} = book} =
+               Rest.get_top_of_book("AAPL", @credentials,
+                 category: "US_STOCK",
+                 plug: responding([variant]),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(book.bid, Decimal.new("13.8"))
+      assert Decimal.equal?(book.bid_size, Decimal.new("7"))
+      assert Decimal.equal?(book.ask, Decimal.new("14.1"))
+      assert Decimal.equal?(book.ask_size, Decimal.new("9"))
+      # `last_trade_time` is in the row and is a different event from the quote.
+      assert book.venue_time == nil
+    end
+  end
+
+  # Unsorted on purpose, with a zero-size level on the bid side: the venue's row order is
+  # not the contract's, and a level with no size is no liquidity.
+  defp distinct_book(fixture) do
+    Map.merge(fixture, %{
+      "bids" => [
+        %{"price" => "13.7", "size" => "1"},
+        %{"price" => "13.9", "size" => "5"},
+        %{"price" => "13.6", "size" => "0"},
+        %{"price" => "13.8", "size" => "3"}
+      ],
+      "asks" => [
+        %{"price" => "14.1", "size" => "2"},
+        %{"price" => "14.0", "size" => "4"}
+      ]
+    })
+  end
+
+  defp levels(side) do
+    Enum.map(side, fn {price, size} -> {Decimal.to_string(price), size} end)
+  end
+
+  describe "order book depth — bids and asks are not swapped, and each is sorted best-first" do
+    test "the stock book" do
+      variant = distinct_book(fixture!("depth_order_book_stock.json"))
+
+      assert {:ok, %Types.OrderBook{} = book} =
+               Rest.get_order_book("F", @credentials,
+                 plug: responding(variant),
+                 retry_attempts: 0
+               )
+
+      assert [{"13.9", bid_1}, {"13.8", bid_2}, {"13.7", bid_3}] = levels(book.bids)
+      assert Enum.map([bid_1, bid_2, bid_3], &Decimal.to_integer/1) == [5, 3, 1]
+      assert [{"14.0", ask_1}, {"14.1", ask_2}] = levels(book.asks)
+      assert Enum.map([ask_1, ask_2], &Decimal.to_integer/1) == [4, 2]
+    end
+
+    test "the futures book" do
+      variant = distinct_book(fixture!("depth_order_book_futures.json"))
+
+      assert {:ok, %Types.OrderBook{} = book} =
+               Rest.get_order_book("SILZ5", @credentials,
+                 category: "US_FUTURES",
+                 plug: responding(variant),
+                 retry_attempts: 0
+               )
+
+      assert [{"13.9", _size_1}, {"13.8", _size_2}, {"13.7", _size_3}] = levels(book.bids)
+      assert [{"14.0", _ask_size_1}, {"14.1", _ask_size_2}] = levels(book.asks)
+      assert DateTime.compare(book.venue_time, ms(1_761_131_409_276)) == :eq
+    end
+  end
+
+  describe "event order book — each of the four sides is its own" do
+    test "yes_bids, yes_asks, no_bids and no_asks are not read from one another" do
+      [row] = fixture!("event_order_book.json")
+
+      variant =
+        Map.merge(row, %{
+          "yes_bids" => [%{"price" => "0.11", "size" => "1"}],
+          "yes_asks" => [%{"price" => "0.12", "size" => "2"}],
+          "no_bids" => [%{"price" => "0.88", "size" => "3"}],
+          "no_asks" => [%{"price" => "0.89", "size" => "4"}]
+        })
+
+      assert {:ok, book} =
+               Rest.get_event_order_book("KXCPI-26JAN-T0.3", @credentials,
+                 plug: responding([variant]),
+                 retry_attempts: 0
+               )
+
+      assert book.yes_bids == [%{"price" => "0.11", "size" => "1"}]
+      assert book.yes_asks == [%{"price" => "0.12", "size" => "2"}]
+      assert book.no_bids == [%{"price" => "0.88", "size" => "3"}]
+      assert book.no_asks == [%{"price" => "0.89", "size" => "4"}]
+    end
+  end
+
+  describe "quantization — each limit comes from its own field" do
+    test "the six crypto fields are not read from one another" do
+      %{"data" => [row]} = fixture!("quote_quantization_crypto.json")
+
+      variant =
+        Map.merge(row, %{
+          "price_step" => "0.01",
+          "lot_size" => "0.001",
+          "min_trade_qty" => "0.002",
+          "max_trade_qty" => "5000",
+          "min_trade_amt" => "10",
+          "max_trade_amt" => "100000"
+        })
+
+      assert {:ok, quantum} =
+               Rest.quantization("BTC-USD", @credentials,
+                 plug: responding(%{"data" => [variant]}),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(quantum.price_increment, Decimal.new("0.01"))
+      assert Decimal.equal?(quantum.quantity_increment, Decimal.new("0.001"))
+      assert Decimal.equal?(quantum.min_quantity, Decimal.new("0.002"))
+      assert Decimal.equal?(quantum.max_quantity, Decimal.new("5000"))
+      assert Decimal.equal?(quantum.min_quote_size, Decimal.new("10"))
+      assert Decimal.equal?(quantum.max_quote_size, Decimal.new("100000"))
+    end
+
+    test "a fractionable stock publishes no quantity increment, a whole-share one does" do
+      %{"data" => [row]} = fixture!("quote_quantization_stock.json")
+
+      for {fractionable, expected} <- [{true, nil}, {false, Decimal.new("1.0")}] do
+        assert {:ok, quantum} =
+                 Rest.quantization("AAPL", @credentials,
+                   plug: responding(%{"data" => [Map.put(row, "fractionable", fractionable)]}),
+                   retry_attempts: 0
+                 )
+
+        assert quantum.price_increment == nil
+
+        case expected do
+          nil -> assert quantum.quantity_increment == nil
+          step -> assert Decimal.equal?(quantum.quantity_increment, step)
+        end
+      end
+    end
+
+    test "an increment the venue sent as zero or text is an error, never a nil" do
+      %{"data" => [row]} = fixture!("quote_quantization_crypto.json")
+
+      assert {:error, {:non_positive_size, :price_step, "0"}} =
+               Rest.quantization("BTC-USD", @credentials,
+                 plug: responding(%{"data" => [Map.put(row, "price_step", "0")]}),
+                 retry_attempts: 0
+               )
+
+      assert {:error, {:invalid_decimal, :lot_size, "abc"}} =
+               Rest.quantization("BTC-USD", @credentials,
+                 plug: responding(%{"data" => [Map.put(row, "lot_size", "abc")]}),
+                 retry_attempts: 0
+               )
+    end
+  end
+
+  describe "bars — open, high, low, close and volume are each their own field" do
+    test "a futures bar with five distinct values" do
+      [group] = aligned_bars(fixture!("bars_futures.json"))
+      [bar] = group["result"]
+
+      distinct =
+        Map.merge(bar, %{
+          "open" => "1.10",
+          "high" => "1.40",
+          "low" => "1.00",
+          "close" => "1.30",
+          "volume" => "77"
+        })
+
+      assert {:ok, [%Types.Candle{} = candle]} =
+               Rest.get_historical_prices("SILZ5", "1m", [], @credentials,
+                 category: "US_FUTURES",
+                 plug: responding([Map.put(group, "result", [distinct])]),
+                 retry_attempts: 0
+               )
+
+      assert Decimal.equal?(candle.open, Decimal.new("1.10"))
+      assert Decimal.equal?(candle.high, Decimal.new("1.40"))
+      assert Decimal.equal?(candle.low, Decimal.new("1.00"))
+      assert Decimal.equal?(candle.close, Decimal.new("1.30"))
+      assert Decimal.equal?(candle.volume, Decimal.new("77"))
+    end
+
+    test "bars come back oldest first whatever order the venue sent them in" do
+      [group] = aligned_bars(fixture!("bars_crypto.json"))
+      [bar] = group["result"]
+      later = Map.put(bar, "time", "2021-12-28T09:01:00.000+0000")
+      earlier = Map.put(bar, "time", "2021-12-28T09:00:00.000+0000")
+
+      assert {:ok, [first, second]} =
+               Rest.get_historical_prices("BTC-USD", "1m", [], @credentials,
+                 plug: responding([Map.put(group, "result", [later, earlier])]),
+                 retry_attempts: 0
+               )
+
+      assert DateTime.compare(first.opened_at, ~U[2021-12-28 09:00:00.000Z]) == :eq
+      assert DateTime.compare(second.opened_at, ~U[2021-12-28 09:01:00.000Z]) == :eq
     end
   end
 end

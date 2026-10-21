@@ -837,7 +837,7 @@ defmodule DpExchange.Webull.AccountsTest do
         |> Plug.Conn.resp(200, Jason.encode!([%{"activity_type" => "FEES"}]))
       end
 
-      assert {:ok, [_row]} =
+      assert {:ok, [%{"activity_type" => "FEES"}]} =
                DpExchange.Webull.get_transactions(@credentials,
                  account_id: "acct-1",
                  plug: plug,

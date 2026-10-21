@@ -101,10 +101,39 @@ defmodule DpExchange.Webull.QuoteProtoTest do
       assert tick.price == "77845.79"
       assert tick.volume == "0.5"
       assert tick.side == "BUY"
+      assert tick.symbol == "BTCUSD"
+      # The tick's own `trade_time` (field 2), not the assembly timestamp inside `Basic`.
+      assert tick.timestamp == "1787936147000"
+      assert tick.basic_timestamp == "1787936147000"
+    end
+
+    test "the tick's own time wins over the assembly time, which is carried separately" do
+      payload =
+        field(1, basic("BTCUSD", "1111111111111")) <>
+          field(2, "2222222222222") <> field(3, "77845.79")
+
+      assert {:ok, tick} = QuoteProto.decode_tick(payload)
+      assert tick.timestamp == "2222222222222"
+      assert tick.basic_timestamp == "1111111111111"
+    end
+
+    test "a tick with no trade time falls back to the message timestamp, and says nothing else" do
+      payload = field(1, basic("BTCUSD", "1111111111111")) <> field(3, "77845.79")
+
+      assert {:ok, tick} = QuoteProto.decode_tick(payload)
+      assert tick.timestamp == "1111111111111"
+      assert tick.volume == nil
+      assert tick.side == nil
     end
 
     test "a tick with no price is an error" do
       assert QuoteProto.decode_tick(field(1, basic("BTCUSD"))) == :error
+    end
+
+    test "a tick with no symbol, and garbage, are errors" do
+      assert QuoteProto.decode_tick(field(3, "77845.79")) == :error
+      assert QuoteProto.decode_tick(<<0xFF, 0xFF, 0xFF>>) == :error
+      assert QuoteProto.decode_tick(:not_a_binary) == :error
     end
   end
 
@@ -119,6 +148,15 @@ defmodule DpExchange.Webull.QuoteProtoTest do
       assert {:ok, quote_msg} = QuoteProto.decode_quote(payload)
       assert quote_msg.ask == "77846.48"
       assert quote_msg.bid == "77845.79"
+      assert quote_msg.symbol == "BTCUSD"
+      # Dated by `Basic.timestamp`: a book message has no trade time of its own.
+      assert quote_msg.timestamp == "1787936147000"
+    end
+
+    test "a quote with no symbol, and garbage, are errors" do
+      assert QuoteProto.decode_quote(field(2, field(1, "2"))) == :error
+      assert QuoteProto.decode_quote(<<0xFF, 0xFF, 0xFF>>) == :error
+      assert QuoteProto.decode_quote(:not_a_binary) == :error
     end
 
     test "computes no mid — that is the caller's decision" do

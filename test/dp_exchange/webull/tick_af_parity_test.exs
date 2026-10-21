@@ -70,7 +70,8 @@ defmodule DpExchange.Webull.TickAFParityTest do
 
     test "a listed session, several, or none are still accepted" do
       for good <- [nil, "PRE", "OVN", :RTH, ["PRE", "RTH"], ["PRE", "RTH", "ATH", "OVN"]] do
-        assert {:ok, _ticks} = Fake.get_trades("AAPL", credentials: @creds, sessions: good)
+        assert {:ok, [_first | _rest]} =
+                 Fake.get_trades("AAPL", credentials: @creds, sessions: good)
       end
     end
   end
@@ -190,6 +191,10 @@ defmodule DpExchange.Webull.TickAFParityTest do
 
       assert_receive {:timer, timer}, 5_000
 
+      # Control: the timer is live before the refusal, so `== false` below can only mean the
+      # Feed cancelled it (an already-expired or never-armed timer would read false too).
+      assert is_integer(timer_remaining(feed, timer))
+
       details = %{session_id: session, connack: 4}
       refused = DpExchange.Core.Notice.new(:credentials_rejected, :webull, details: details)
       send(feed, {:dp_exchange, :webull, refused})
@@ -235,6 +240,9 @@ defmodule DpExchange.Webull.TickAFParityTest do
       end)
 
       assert_receive {:timer, timer}, 5_000
+
+      # Control: live before the open, so `== false` below means the Feed cancelled it.
+      assert is_integer(timer_remaining(feed, timer))
 
       send(feed, {:open_shard, 0, ["BTCUSD"], [credentials: credentials()]})
       _settled = DpExchange.Webull.Feed.coverage(feed)

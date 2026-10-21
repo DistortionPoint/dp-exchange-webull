@@ -585,64 +585,88 @@ defmodule DpExchange.Webull.FuturesAndEventsTest do
   end
 
   describe "the facade reaches all of it" do
-    test "each venue-specific function delegates" do
+    # Every body here is empty, so a delegate wired to a sibling `Rest` function would answer
+    # the same `{:ok, []}`. The path the request arrives on is what tells them apart.
+    test "each venue-specific function delegates to its own endpoint" do
+      me = self()
+
       assert {:ok, []} =
                DpExchange.Webull.list_futures_contracts(
                  credentials: @credentials,
                  code: "ES",
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/futures/contracts/list", _query}, 5_000
 
       assert {:ok, []} =
                DpExchange.Webull.list_futures_product_classes(
                  credentials: @credentials,
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/futures/product-classes/list", _q}, 5_000
 
       assert {:ok, []} =
                DpExchange.Webull.list_event_categories(
                  credentials: @credentials,
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/event-contracts/categories/list", _q},
+                     5_000
 
       assert {:ok, %{rows: []}} =
                DpExchange.Webull.list_event_series(
                  credentials: @credentials,
-                 plug: responding(%{"data" => []}),
+                 plug: capturing(%{"data" => []}, me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/event-contracts/series/list", _q}, 5_000
 
       assert {:ok, []} =
                DpExchange.Webull.list_event_events(
                  credentials: @credentials,
                  series_symbol: "KX",
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/event-contracts/events/list", query},
+                     5_000
+
+      assert query =~ "series_symbol=KX"
 
       assert {:ok, %{rows: []}} =
                DpExchange.Webull.list_event_markets(
                  credentials: @credentials,
-                 plug: responding(%{"data" => []}),
+                 plug: capturing(%{"data" => []}, me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/trading/instruments/event-contracts/markets/list", _q}, 5_000
 
       assert {:ok, []} =
                DpExchange.Webull.get_event_trades("KX-T1",
                  credentials: @credentials,
-                 plug: responding([%{"symbol" => "KX-T1", "result" => []}]),
+                 plug: capturing([%{"symbol" => "KX-T1", "result" => []}], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/market-data/event-contracts/ticks/list", _q}, 5_000
 
       assert {:ok, %{yes_bids: []}} =
                DpExchange.Webull.get_event_order_book("KX-T1",
                  credentials: @credentials,
-                 plug: responding([%{"symbol" => "KX-T1", "quote_time" => 1}]),
+                 plug: capturing([%{"symbol" => "KX-T1", "quote_time" => 1}], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "/market-data/event-contracts/depths/list", _q}, 5_000
     end
   end
 end

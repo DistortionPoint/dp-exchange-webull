@@ -59,7 +59,7 @@ ten falsify no `capabilities/0` declaration; the reasoning per page is in
 | FD Events | 13 | 0 |
 | Custom | 12 | 0 |
 | Connect | 4 | 3 — see below; only the consent redirect stays with the host |
-| **total documented** | **229** | **47 of 88 contract callbacks, per `capabilities/0`** |
+| **total documented** | **229** | **48 of 89 contract callbacks `:experimental`, 41 `:unsupported` (31 of them the venue's own absence), per `capabilities/0` as checked 2026-10-21** |
 
 ### Connect is not all "auth", and only half of it is the host's
 
@@ -224,7 +224,8 @@ POST   /trading/orders/replace                      common-order-replace
 
 ### Added since the capture above — 2026-10-18
 
-Not part of the 85 counted above. `GET`, Non-Display Solution. Only the first is called.
+Not part of the 85 counted above. `GET`, Non-Display Solution. Only the first, and the
+`list-hot-tickers` line at the end (added 2026-10-12, not in the 11 below), are called.
 
 ```
 GET    /market-data/news/stock-news/list            list-stock-news   (get_news/1)
@@ -238,6 +239,7 @@ GET    /market-data/fundamentals/institutions/holding-changes/list list-institut
 GET    /market-data/fundamentals/economic-calendars/list list-economic-calendars
 GET    /market-data/screeners/fear-greed-indexes/get get-fear-and-greed-index
 GET    /market-data/screeners/unusual-activities/list list-stock-unusual-activities
+GET    /market-data/communities/stock-rankings/list list-hot-tickers (get_screener("hot_stocks"))
 ```
 
 ### Category index pages (not endpoints)

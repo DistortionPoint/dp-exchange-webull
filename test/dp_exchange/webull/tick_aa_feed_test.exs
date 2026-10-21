@@ -42,7 +42,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:dp_exchange, :webull, notice})
 
-      assert_receive {:dp_exchange, :webull, ^notice}
+      assert_receive {:dp_exchange, :webull, ^notice}, 5_000
     end
 
     test "a refusal for a shard nobody is parked on is forwarded and changes nothing" do
@@ -54,7 +54,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:dp_exchange, :webull, notice})
 
-      assert_receive {:dp_exchange, :webull, ^notice}
+      assert_receive {:dp_exchange, :webull, ^notice}, 5_000
       shard = :sys.get_state(feed).shards[0]
       assert shard.reply_to == nil
       assert shard.connected?
@@ -125,7 +125,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:caller_due, {self(), ref}})
       _settled = Feed.coverage(feed)
 
-      refute_receive {^ref, _reply}
+      refute_receive {^ref, _reply}, 500
       assert [{^bystander, []}] = :sys.get_state(feed).shards[3].reply_to
     end
 
@@ -141,7 +141,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:caller_due, {self(), ref}})
       _settled = Feed.coverage(feed)
 
-      refute_receive {^ref, _reply}
+      refute_receive {^ref, _reply}, 500
       assert Map.has_key?(:sys.get_state(feed).reconciling, {:background, 0})
     end
 
@@ -190,7 +190,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:reconcile_done, {:background, 0}, {:error, {:invalid_symbols, ["ZZZ-USD"]}}})
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :refusal} = notice}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :refusal} = notice}, 5_000
       assert notice.details.symbols == ["ZZZ-USD"]
       assert Map.has_key?(:sys.get_state(feed).rejected, "ZZZ-USD")
     end
@@ -204,7 +204,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:reconcile_done, {:background, 0}, {:error, {:invalid_session, nil}}})
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :link_down} = notice}, 5_000
       assert notice.details.session_id == "s0"
       refute Map.has_key?(:sys.get_state(feed).shards, 0)
     end
@@ -234,7 +234,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:reconcile_done, {:background, 7}, {:error, {:invalid_session, "gone"}}})
       _settled = Feed.coverage(feed)
 
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 500
       assert Map.keys(:sys.get_state(feed).shards) == [0]
     end
   end
@@ -286,11 +286,11 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:reconcile_done, {:resubscribe, 3}, {:error, :boom}})
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}, 5_000
       state = :sys.get_state(feed)
       assert state.shards == %{}
       assert state.resubscribe_failed == %{3 => 1}
-      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}, 500
     end
   end
 
@@ -309,7 +309,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:dp_exchange, :webull, position})
 
-      assert_receive {:dp_exchange, :webull, ^position}
+      assert_receive {:dp_exchange, :webull, ^position}, 5_000
       assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
       by_kind = Feed.coverage_by_kind(feed)
       assert Enum.all?(by_kind, fn {_kind, per_symbol} -> per_symbol == %{} end)
@@ -333,7 +333,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
 
       send(feed, {:dp_exchange, :webull, trade})
 
-      assert_receive {:dp_exchange, :webull, ^trade}
+      assert_receive {:dp_exchange, :webull, ^trade}, 5_000
       assert Feed.coverage(feed) == %{}
     end
   end
@@ -375,7 +375,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       opts = [credentials: credentials(), environment: :uat, retry_attempts: 0]
       send(feed, {:open_shard, 0, ["BTC-USD"], opts})
 
-      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}
+      assert_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change} = notice}, 5_000
       assert notice.message =~ "could not be opened"
       assert notice.message =~ "insecure_url"
     end

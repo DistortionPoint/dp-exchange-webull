@@ -284,7 +284,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     test "without a kind both calendars are read" do
       me = self()
 
-      assert {:ok, _events} =
+      assert {:ok, []} =
                Rest.get_corporate_events(@credentials,
                  symbol: "AAPL",
                  plug: capturing([], me),
@@ -320,7 +320,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert_receive {:request, "GET", "/market-data/fundamentals/dividend-calendars/list", _q,
                       _r}
 
-      refute_receive {:request, "GET", _other, _q2, _r2}
+      refute_receive {:request, "GET", _other, _q2, _r2}, 500
     end
 
     test "an earnings row's date is expected_publish_date, carried under announced_date" do
@@ -848,12 +848,17 @@ defmodule DpExchange.Webull.ReferenceDataTest do
                  retry_attempts: 0
                )
 
-      assert {:ok, _rows} =
+      me = self()
+
+      assert {:ok, []} =
                Rest.get_screener("week52_high_low", @credentials,
                  rank_type: "NEW_HIGH",
-                 plug: responding([]),
+                 plug: capturing([], me),
                  retry_attempts: 0
                )
+
+      assert_receive {:request, "GET", _path, query, _raw}
+      assert query =~ "rank_type=NEW_HIGH"
     end
 
     test "market_sector sends sort_by, not agg_type — that belongs to market_sectors" do
@@ -997,41 +1002,55 @@ defmodule DpExchange.Webull.ReferenceDataTest do
     test "the facade delegates each of the six" do
       base = [credentials: @credentials, retry_attempts: 0]
 
-      assert {:ok, [_statement]} =
+      # Each answer is checked for the shape of ITS OWN function, so a facade function
+      # delegating to a neighbour (right arity, wrong endpoint) cannot pass.
+      assert {:ok, [statement]} =
                DpExchange.Webull.get_financials(
                  "AAPL",
                  :balance_sheet,
                  base ++ [plug: responding([%{"end_date" => "2025-12-27"}])]
                )
 
-      assert {:ok, [_event]} =
+      assert %Types.FinancialStatement{kind: :balance_sheet, period_end: ~D[2025-12-27]} =
+               statement
+
+      assert {:ok, [event]} =
                DpExchange.Webull.get_corporate_events(
                  base ++ [symbol: "AAPL", kind: :dividend, plug: responding([%{}])]
                )
 
-      assert {:ok, [_filing]} =
-               DpExchange.Webull.get_filings(
-                 "AAPL",
-                 base ++ [plug: responding(%{"filings" => [%{"id" => "f-1"}]})]
-               )
+      assert event.kind == :dividend
 
-      assert {:ok, [_item]} =
+      filings_body = %{"filings" => [%{"title" => "10-Q", "url" => "https://x.invalid"}]}
+
+      assert {:ok, [filing]} =
+               DpExchange.Webull.get_filings("AAPL", base ++ [plug: responding(filings_body)])
+
+      assert %Types.Filing{title: "10-Q", url: "https://x.invalid"} = filing
+
+      assert {:ok, [item]} =
                DpExchange.Webull.get_news(
                  base ++ [symbols: ["AAPL"], plug: responding(news_body([news_row(%{})]))]
                )
 
-      assert {:ok, [_row]} =
+      assert item.id == "20261008-001"
+
+      assert {:ok, [row]} =
                DpExchange.Webull.get_screener(
                  "top_actives",
                  base ++ [plug: responding([%{"symbol" => "AAPL"}])]
                )
 
-      assert {:ok, [_row]} =
+      assert {row.symbol, row.rank} == {"AAPL", 1}
+
+      assert {:ok, [profile]} =
                DpExchange.Webull.get_fundamental(
                  :company_profile,
                  "AAPL",
-                 base ++ [plug: responding([%{}])]
+                 base ++ [plug: responding([%{"company_name" => "Apple"}])]
                )
+
+      assert profile["company_name"] == "Apple"
 
       assert DpExchange.Webull.fundamental_kinds() == Rest.fundamental_kinds()
       assert DpExchange.Webull.screeners() == Rest.screeners()

@@ -39,8 +39,10 @@ defmodule DpExchange.Webull.RestTest do
         Req.Test.json(conn, [%{"price" => "1", "time" => 1_787_936_147_000}])
       end
 
-      assert {:ok, _quote} =
+      assert {:ok, %Types.Quote{symbol: "BTC-USD"} = signed} =
                Rest.get_price("BTC-USD", @credentials, plug: plug, retry_attempts: 0)
+
+      assert Decimal.equal?(signed.price, Decimal.new("1"))
     end
 
     test "without credentials it refuses rather than sending an unsigned request" do
@@ -86,7 +88,7 @@ defmodule DpExchange.Webull.RestTest do
         end
 
       assert Enum.sort(sizes) == [5, 20, 20]
-      refute_receive {:batch, _natives}
+      refute_receive {:batch, _natives}, 500
       assert map_size(results) == 45
       assert {:ok, %Types.Quote{symbol: "C7-USD"}} = results["C7-USD"]
     end
@@ -194,7 +196,7 @@ defmodule DpExchange.Webull.RestTest do
       assert map_size(results) == 20
       assert {:refused, {:venue_error, 401, _msg}} = results["C1-USD"]
       assert_received :request
-      refute_receive :request
+      refute_receive :request, 500
     end
 
     test "only US_CRYPTO — another category's snapshot limit is not read here" do
@@ -347,8 +349,8 @@ defmodule DpExchange.Webull.RestTest do
 
       assert Decimal.equal?(quoted.price, Decimal.new("1"))
       assert quoted.venue_time == nil
-      assert quoted.observed_at
-      refute quoted.venue_time == quoted.observed_at
+      assert %DateTime{} = quoted.observed_at
+      assert abs(DateTime.diff(DateTime.utc_now(), quoted.observed_at)) < 60
     end
 
     test "a response with no price is an unreadable snapshot, not a nil-priced quote" do
@@ -465,18 +467,29 @@ defmodule DpExchange.Webull.RestTest do
       assert path =~ "/crypto/", "category: nil was routed to #{path}"
     end
 
-    test "an unknown category still means stocks — only `nil` changed" do
-      # The `_stock` catch-all is the package's own answer for a named category it does not
-      # recognise, and that stays as it was. The fix is about "nothing was said", not about
-      # what an unrecognised word means.
-      Rest.get_historical_prices("AAPL", "1m", [], @credentials,
-        category: "US_STOCK",
-        plug: path_recording(self()),
-        retry_attempts: 0
-      )
+    test "a stock category routes to the stock bars, and an unrecognised one is refused" do
+      # `validate_category_bars/3` refuses a category that is neither a named bar category nor
+      # a stock one (`book_category/1`), so the `_stock` branch is reached only by a stock
+      # category and a made-up word is no longer read as stocks.
+      for category <- ["US_STOCK", "US_ETF"] do
+        Rest.get_historical_prices("AAPL", "1m", [], @credentials,
+          category: category,
+          plug: path_recording(self()),
+          retry_attempts: 0
+        )
 
-      assert_receive {:path, path}
-      assert path =~ "/stocks/"
+        assert_receive {:path, path}
+        assert path =~ "/stocks/", "#{category} was routed to #{path}"
+      end
+
+      assert {:error, {:unsupported_book_category, "NOT_A_CATEGORY"}} =
+               Rest.get_historical_prices("AAPL", "1m", [], @credentials,
+                 category: "NOT_A_CATEGORY",
+                 plug: path_recording(self()),
+                 retry_attempts: 0
+               )
+
+      refute_receive {:path, _path}, 500
     end
   end
 

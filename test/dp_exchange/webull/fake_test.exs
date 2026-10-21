@@ -119,7 +119,8 @@ defmodule DpExchange.Webull.FakeTest do
       assert {:ok, %Types.TopOfBook{} = book} = Fake.get_top_of_book("BTC-USD", @opts)
       assert Decimal.lt?(book.bid, book.ask)
       refute Map.has_key?(book, :price)
-      assert book.observed_at
+      assert %DateTime{} = book.observed_at
+      assert book.provider == :webull
     end
 
     test "a symbol this venue does not list is refused, not an empty answer" do
@@ -406,8 +407,8 @@ defmodule DpExchange.Webull.FakeTest do
       assert accepted["client_order_id"] =~ @client_id
       assert accepted["order_id"] =~ ~r/\A[0-9A-Z]{26}\z/
       assert refused["client_order_id"] =~ @client_id
-      assert refused["error_code"]
-      assert refused["message"]
+      assert is_binary(refused["error_code"]) and refused["error_code"] != ""
+      assert is_binary(refused["message"]) and refused["message"] != ""
       refute accepted["client_order_id"] == refused["client_order_id"]
 
       id = accepted["client_order_id"]

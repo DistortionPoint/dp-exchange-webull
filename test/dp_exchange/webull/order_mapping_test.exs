@@ -193,6 +193,94 @@ defmodule DpExchange.Webull.OrderMappingTest do
     test "an order with no stop leaves stop_price nil rather than 0" do
       assert fetch(%{"order_type" => "LIMIT"}).stop_price == nil
     end
+
+    # The mapping tests above pin the vocabulary; these pin the NUMBERS and TIMES an order
+    # carries, which are where a wrong-field read (`qty` for `total_quantity`, a float for a
+    # string) would stay plausible. Every figure is distinct so a swap cannot pass.
+    test "a partially filled order keeps its sizes, prices and times from their own fields" do
+      order =
+        fetch(%{
+          "status" => "PARTIAL_FILLED",
+          "total_quantity" => "0.5",
+          "filled_quantity" => "0.2",
+          "limit_price" => "101.25",
+          "filled_price" => "100.75",
+          "place_time_at" => "2026-10-10T11:00:00.000Z",
+          "filled_time_at" => "2026-10-10T12:30:00.000Z"
+        })
+
+      assert order.status == :partially_filled
+      assert order.id == "abc"
+      assert order.symbol == "BTC-USD"
+      assert Decimal.equal?(order.quantity, Decimal.new("0.5"))
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.2"))
+      assert Decimal.equal?(order.price, Decimal.new("101.25"))
+      assert Decimal.equal?(order.average_price, Decimal.new("100.75"))
+      assert DateTime.compare(order.created_at, ~U[2026-10-10 11:00:00.000Z]) == :eq
+      assert DateTime.compare(order.updated_at, ~U[2026-10-10 12:30:00.000Z]) == :eq
+    end
+
+    test "a cancelled order that had fills keeps filled_quantity and has no updated_at" do
+      order =
+        fetch(%{
+          "status" => "CANCELLED",
+          "filled_quantity" => "0.2",
+          "filled_price" => "100.75",
+          "filled_time_at" => "2026-10-10T12:30:00.000Z"
+        })
+
+      assert order.status == :cancelled
+      assert Decimal.equal?(order.filled_quantity, Decimal.new("0.2"))
+      assert Decimal.equal?(order.average_price, Decimal.new("100.75"))
+      assert order.updated_at == nil
+    end
+
+    test "a quantity that is not a number is nil, never zero" do
+      order = fetch(%{"total_quantity" => "null", "filled_quantity" => "NaN"})
+
+      assert order.quantity == nil
+      assert order.filled_quantity == nil
+    end
+
+    test "a multi-leg group is refused with its combo type, not decomposed" do
+      body = [%{"combo_type" => "OCO", "orders" => [row(%{}), row(%{})]}]
+
+      assert {:error, {:unsupported_combo_type, "OCO"}} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding(body),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an order list holding an unreadable group is refused, naming the group" do
+      body = %{
+        "data" => [
+          group(%{"client_order_id" => "ok-1"}),
+          %{
+            "client_order_id" => "combo-1",
+            "combo_type" => "OTO",
+            "orders" => [row(%{}), row(%{})]
+          }
+        ]
+      }
+
+      assert {:error, {:unreadable_orders, ["combo-1"]}} =
+               Rest.get_orders(@credentials,
+                 plug: responding(body),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
+
+    test "an order the venue names differently is not the one asked for" do
+      assert {:error, :not_in_response} =
+               Rest.get_order(@credentials, "abc",
+                 plug: responding([group(%{"client_order_id" => "other"})]),
+                 account_id: @account,
+                 retry_attempts: 0
+               )
+    end
   end
 
   describe "what the venue said when it said no" do

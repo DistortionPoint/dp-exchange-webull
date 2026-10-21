@@ -54,7 +54,7 @@ defmodule DpExchange.Webull.FeedTerminateLogTest do
   defp dead_pid do
     pid = spawn(fn -> :ok end)
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}, 5_000
     pid
   end
 

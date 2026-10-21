@@ -78,7 +78,10 @@ defmodule DpExchange.Webull.Feed do
   `"Maximum number of subscribe tickers:100"`, confirmed against a real collection run
   that hit it (`dp-exchange-core` issue #13). A consumer with more than 100 symbols on
   this venue could not reach full coverage through one session no matter how the HTTP
-  calls were split, because the limit is per-session, not per-request.
+  calls were split, because that limit is per-session. The vendor's subscribe and
+  unsubscribe specs (`docs/reference/webull/openapi/`) state a second, per-request one,
+  "maximum 100 symbols per query"; a shard never holds, and so never sends, more than 100,
+  so a request cannot breach it.
 
   This is not new ground for the family — `DpExchange.Coinbase.Feed` shards for the
   identical reason, and its shape (recompute from the full wanted set, touch only what
@@ -98,6 +101,13 @@ defmodule DpExchange.Webull.Feed do
   cannot cause a sixth socket, because a consumer cannot ask for sockets at all. Five
   shards of 100 is 500 symbols; a universe larger than that on this venue needs a second
   App Key, not a bigger number here.
+
+  The venue's connection rules (`docs/reference/webull/streaming-api.md`) are: at most five
+  concurrent connections per App Key (CONNACK 105 beyond that), connection state held for
+  about a minute after a disconnect, and at most three pushed messages per second per
+  connection. Only the first is enforced here (`@max_shards`); the second is why a reconnect
+  is backed off rather than immediate; the third is a delivery ceiling the venue applies to
+  what it sends, and nothing in this package counts, paces or shards by it.
 
   ## A shard that rejects a batch is this package's problem to solve, not the host's
 
@@ -150,9 +160,15 @@ defmodule DpExchange.Webull.Feed do
   `@connack_timeout_ms`, the same two-thirds-of-`@call_timeout` budget a parked caller gets.
   If the caller is still unanswered then, it is answered: `{:error, {:reconcile_pending, ms}}`
   when it rides a primary reconcile, `{:error, {:connack_timeout, ms}}` when it is parked on a
-  shard (and it is removed from that shard's `reply_to`). The work carries on and its result
-  is applied. Its own later reply to that `from` is dropped by `gen`, because the call has
-  already returned.
+  shard (and it is removed from that shard's `reply_to`). The two are not alike afterwards:
+
+  - `{:reconcile_pending, ms}`: the work carries on. The call is settled when its reconcile
+    concludes, so its symbols stay wanted until then and are kept if it answers `:ok` (a
+    failure undoes them). Its own later reply to that `from` is dropped by `gen`, because the
+    call has already returned.
+  - `{:connack_timeout, ms}`: the call is a refusal, settled at once. Its symbols are taken back
+    out of `wanted` (and so out of the shard's list), and so is the subscriber it registered,
+    like any refused call; the caller retries.
 
   The timer is keyed by `from`, not by shard index and not per reconcile. It used to be armed
   for each primary reconcile and matched on the index, so an `:oversubscribed` or
@@ -367,8 +383,8 @@ defmodule DpExchange.Webull.Feed do
 
   ## A symbol list that cannot be used is refused, not crashed on
 
-  `subscribe/3`, `unsubscribe/3` and `update_symbols/3` take a list of non-empty strings and
-  answer `{:error, {:invalid_symbols, symbols}}` (the argument exactly as given) before any
+  `subscribe/3`, `unsubscribe/3` and `update_symbols/3` take a list of non-blank strings (empty
+  or whitespace-only is blank, see `check_symbols/1`) and answer `{:error, {:invalid_symbols, symbols}}` (the argument exactly as given) before any
   state moves. This is one named process for every caller, and a
   raise inside `handle_call/3` restarted it from its static options with everyone's symbols
   gone. The facade has long returned the same tuple when the VENUE refused a symbol, which is
@@ -411,11 +427,41 @@ defmodule DpExchange.Webull.Feed do
 
   ## Options are judged when the feed starts
 
-  Every timing and count option (`@settings`), each socket budget and the socket `:url` is
-  checked in `init/1` before anything is started, and a bad one raises `ArgumentError` naming
-  it. They used to be accepted and fail inside the first call that used them (a
-  `Process.send_after/3` given text), which crashed this one process for every consumer and
-  restarted it from the same options. `:ssl_options` is forwarded to every socket.
+  Every timing and count option (`@settings`), `:resubscribe_interval_ms` (an integer of at
+  least 1_000), each socket budget, `:priority_symbols` (a list of strings) and the socket
+  `:url` is checked in `init/1` before anything is started, and a bad one raises
+  `ArgumentError` naming it (so `start_link/1` answers `{:error, {%ArgumentError{}, stack}}`).
+  `nil` is absent; `false` is a value and is refused. They used to be accepted and fail
+  inside the first call that used them (a `Process.send_after/3` given text), which crashed
+  this one process for every consumer and restarted it from the same options. `:ssl_options`
+  is forwarded to every socket and is not judged here: `Socket` merges a keyword list over
+  its verified TLS defaults and reads anything else as "none given".
+
+  The keys this feed reads, with their defaults (the whole start table, which also holds the
+  tree's own keys, is `DpExchange.Webull.Options.check_start/1`; `usage-rules.md` describes
+  each for a consumer):
+
+    * `:name` - registered name, default this module.
+    * `:credentials`, `:environment`, `:limiter`, `:plug`, `:rate_limit_blocking` - kept for
+      every replay (`:rate_limit_blocking` defaults to `true` there, see above).
+    * `:max_queue_len` - `Core.Fanout`'s subscriber mailbox bound.
+    * `:ledger` - the process that holds this feed's intent across a restart.
+    * `:priority_symbols` - default none.
+    * `:resubscribe_interval_ms` - 60_000, at least 1_000.
+    * `:connack_timeout_ms` - 10_000 (two thirds of the 15_000 call timeout).
+    * `:reconcile_timeout_ms` - 60_000.
+    * `:resubscribe_failure_limit` - 12.
+    * `:stale_delivery_ms` - 300_000.
+    * `:rejected_symbol_ttl_ms` - 86_400_000.
+    * `:open_retry_base_ms` and `:open_retry_max_ms` - 1_000 and 60_000.
+    * `:shard_spacing_ms` - 5_000, 0 or more.
+    * `:idle_shard_ms` - 600_000.
+    * `:socket_connect_timeout` and `:socket_recv_timeout` - `Socket`'s own defaults (3_000 and
+      2_000 ms) when absent.
+    * `:url` - the venue's endpoint, or one `Socket.secure_url?/1` accepts.
+    * `:ssl_options` - see above.
+    * `:shards` and `:shard_capacity` - test injection only: an already-built shard map, and
+      per-index capacities.
 
   ## A shard with nothing to carry is closed after `idle_shard_ms`
 
@@ -425,6 +471,64 @@ defmodule DpExchange.Webull.Feed do
   so a feed with nothing to stream does not hold the App Key's five connections for the life
   of the node. A later subscribe opens a fresh one. `state.rejected` is likewise kept only for
   symbols still wanted.
+
+  ## What `subscribe/3`, `unsubscribe/3` and `update_symbols/3` answer
+
+  `:ok`, or `{:error, reason}` with one of these reasons (`usage-rules.md` gives the consumer's
+  view of the same table):
+
+    * `{:invalid_symbols, symbols}` - the list was malformed (`check_symbols/1`, before any state
+      moves), or the venue refused those symbols (canonical names) and no retry was left.
+    * `{:invalid_subscriber, to}` - `subscribe/3` only: `to` is not a pid or a registered name.
+    * `{:streaming_unavailable, environment}` - `subscribe/3` only: the environment has no
+      broker (UAT).
+    * `{:missing_required_field, :app_key}` - a shard had to be opened and the credentials in
+      use carry no usable App Key.
+    * `{:connection_refused, details}` - the venue refused a connecting shard's MQTT session;
+      `details` is the refusal notice's own, with the CONNACK code.
+    * `{:shard_crashed, reason}` - the shard's socket died while the caller was parked on it.
+    * `{:invalid_session, session_id}` - the venue discarded the shard's session; the shard is
+      reopened on a fresh one.
+    * `{:reconcile_pending, ms}` - the HTTP subscribe was still running when the caller's own
+      budget (`connack_timeout_ms`) ran out; the work carries on and is settled when it ends.
+    * `{:connack_timeout, ms}` - the shard had not finished connecting within that budget; the
+      call is refused and its changes are undone (the caller retries).
+    * `{:reconcile_timeout, ms, :no_venue_response}` and `{:reconcile_task_down, reason}` - the
+      HTTP subscribe never answered, or its task died.
+    * `:oversubscribed` - the venue's per-session ceiling, after the internal retries.
+    * `{:capacity_exceeded, symbols}` - every shard is full; these symbols fit nowhere.
+    * `{:partial_failure, failed: reason, capacity_exceeded: symbols}` - both of the above.
+    * Whatever `Subscription` answers for the HTTP call itself (`{:refused, status, body}`,
+      `{:exchange_error, :webull, text}`, `{:missing_credentials, :webull}`,
+      `{:invalid_sub_types, value}`), and `Socket.start_link/1`'s own error when a socket could
+      not be started.
+
+  `subscribe_notices/2` answers `:ok` or `{:error, {:invalid_subscriber, to}}`. A call message
+  this feed does not know answers `{:error, :unknown_call}`; no function here sends one.
+
+  ## Notices this feed raises
+
+  Delivered to `subscribe_notices/2` receivers as `{:dp_exchange, :webull, %Notice{}}`. Those
+  the feed makes itself (`details.reason`, where there is one, is an atom):
+
+    * `:coverage_change`, warning, `reason: :feed_restarted` - the feed restarted and restored
+      its intent from `Ledger`; `symbols` names what is wanted.
+    * `:coverage_change`, info, no `reason` - a quiet shard is being re-asserted in rotation;
+      `shard`, `session_id`, `symbols`.
+    * `:coverage_change`, warning, `reason: :open_failed` - a shard's socket would not open
+      (once per outage); `:coverage_change`, info, `details: %{shard: index}` - it opened.
+    * `:coverage_change`, warning, `reason: :resubscribe_failed` - a shard's blind resubscribe
+      failed generically (once per outage, per shard); `:coverage_change`, info,
+      `details: %{shard: index, symbol_count: n}` - it recovered.
+    * `:refusal`, no `reason`, `details: %{symbols: [...]}` - the venue refused these symbols
+      (canonical names); they are excluded for `rejected_symbol_ttl_ms`.
+    * `:link_down`, `reason: :socket_crashed` or `reason: :invalid_session`, with the shard's
+      `session_id` and a `message`.
+    * `:degraded` from `Core.Fanout` when a data subscriber is over `max_queue_len`, and again
+      when it catches up.
+
+  The notices `Socket` raises (`:link_up`, `:link_down`, `:credentials_rejected`, `:degraded`,
+  `:data_quality` and the venue's own `notice`-topic frames) are forwarded unchanged.
   """
 
   use GenServer
@@ -578,6 +682,14 @@ defmodule DpExchange.Webull.Feed do
     idle_shard_ms: {@idle_shard_ms, 1}
   }
 
+  @doc """
+  Starts the feed, registered as `opts[:name]` (default this module; `name: nil` for none).
+
+  Every option is judged first (see the moduledoc's "Options are judged when the feed starts"):
+  a bad one raises `ArgumentError` inside `init/1`, which `GenServer.start_link/3` reports as
+  `{:error, {%ArgumentError{}, stacktrace}}`. A `:credentials` entry is wrapped before it can
+  reach a crash report.
+  """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     # Wrapped (idempotently) before the options reach OTP: a crash report or a child spec
@@ -587,7 +699,18 @@ defmodule DpExchange.Webull.Feed do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
-  @spec subscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
+  @doc """
+  Adds `symbols` to what is wanted and delivers their payloads to `opts[:to]` (default the
+  caller), answering when the venue has answered, or when the call's own budget runs out.
+
+  `symbols` must be a list of non-blank strings and `to` a pid or registered name; anything
+  else is refused before any state moves. A refused call changes nothing. `opts` also carries
+  the credentials and transport keys every replay reuses, and `:sub_types`.
+
+  Answers `:ok` or `{:error, reason}`; the moduledoc's "What `subscribe/3`, `unsubscribe/3` and
+  `update_symbols/3` answer" lists every `reason`.
+  """
+  @spec subscribe(GenServer.server(), term(), keyword()) :: :ok | {:error, term()}
   def subscribe(feed, symbols, opts) do
     GenServer.call(
       feed,
@@ -596,11 +719,25 @@ defmodule DpExchange.Webull.Feed do
     )
   end
 
-  @spec unsubscribe(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
+  @doc """
+  Removes `symbols` from what is wanted and from the venue, and forgets their coverage and any
+  refusal remembered for them.
+
+  Same answers and same up-front refusal of a malformed list as `subscribe/3`, minus the
+  `:to` checks. A payload that still arrives for a removed symbol is dropped.
+  """
+  @spec unsubscribe(GenServer.server(), term(), keyword()) :: :ok | {:error, term()}
   def unsubscribe(feed, symbols, opts),
     do: GenServer.call(feed, {:unsubscribe, symbols, opts}, @call_timeout)
 
-  @spec update_symbols(GenServer.server(), [String.t()], keyword()) :: :ok | {:error, term()}
+  @doc """
+  Makes `symbols` exactly what is wanted: the ones not yet carried are subscribed, the ones no
+  longer listed are unsubscribed. Delivers to the subscribers already registered; it takes no
+  `:to`.
+
+  Same answers and same up-front refusal of a malformed list as `subscribe/3`.
+  """
+  @spec update_symbols(GenServer.server(), term(), keyword()) :: :ok | {:error, term()}
   def update_symbols(feed, symbols, opts),
     do: GenServer.call(feed, {:update_symbols, symbols, opts}, @call_timeout)
 
@@ -616,6 +753,12 @@ defmodule DpExchange.Webull.Feed do
   # The blocking is fixed at its sources rather than papered over here; this is the second
   # line of defence. A read that has to queue behind something should WAIT for it, never
   # die of it.
+  @doc """
+  The symbols a payload has arrived for, each `:stream`. Observed, never intended: a symbol
+  enters on arrival and leaves on unsubscribe, a link drop or a shard teardown. This feed has
+  no polling, so `:internal_poll` and `:not_covered` are never values here; a symbol absent
+  from the map is not covered.
+  """
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
   def coverage(feed), do: GenServer.call(feed, :coverage, @call_timeout)
 
@@ -626,6 +769,11 @@ defmodule DpExchange.Webull.Feed do
   @spec wanted(GenServer.server()) :: [String.t()]
   def wanted(feed), do: GenServer.call(feed, :wanted, @call_timeout)
 
+  @doc """
+  `coverage/1` split by data kind: `:quotes` (the `snapshot` topic) and `:top_of_book` (the
+  `quote` topic), one `:stream` entry per symbol observed under that kind. `:trades` is never a
+  key: a `Trade` is delivered but not counted (see the moduledoc).
+  """
   @spec coverage_by_kind(GenServer.server()) :: %{
           DpExchange.Core.Capabilities.data_kind() => %{
             String.t() => :stream | :internal_poll | :not_covered
@@ -646,7 +794,13 @@ defmodule DpExchange.Webull.Feed do
   # A `GenServer.call/3` timeout exits in the CALLER, not in the feed. So the channel a host
   # uses to *hear that something is wrong* was the one call that could kill the host's
   # calling process for asking during exactly the conditions it exists to report.
-  @spec subscribe_notices(GenServer.server(), keyword()) :: :ok | {:error, term()}
+  @doc """
+  Registers `opts[:to]` (default the caller) to receive this feed's notices, which are listed
+  in the moduledoc's "Notices this feed raises". `{:error, {:invalid_subscriber, to}}` when `to`
+  is not a pid or a registered name.
+  """
+  @spec subscribe_notices(GenServer.server(), keyword()) ::
+          :ok | {:error, {:invalid_subscriber, term()}}
   def subscribe_notices(feed, opts),
     do: GenServer.call(feed, {:subscribe_notices, Config.opt(opts, :to, self())}, @call_timeout)
 
@@ -676,8 +830,12 @@ defmodule DpExchange.Webull.Feed do
     settings = validate_settings!(opts)
     validate_socket_options!(opts)
 
+    # `Config.opt/3`, not `Keyword.get(...) || default`: `nil` is absent, but `false` is a value
+    # and is refused like any other non-integer. `||` read `false` as absent and started the
+    # feed on the default, the substitute where there should be an error.
     resubscribe_interval_ms =
-      (Keyword.get(opts, :resubscribe_interval_ms) || @resubscribe_interval_ms)
+      opts
+      |> Config.opt(:resubscribe_interval_ms, @resubscribe_interval_ms)
       |> validate_resubscribe_interval_ms!()
 
     # Every shard's socket links here (WebSockex's ordinary behaviour), and every
@@ -774,8 +932,9 @@ defmodule DpExchange.Webull.Feed do
        # same arriving payloads — never from `wanted` or from what was subscribed. See
        # the moduledoc's "Coverage by kind" and `kind_for/1`.
        delivering_by_kind: %{},
-       # index => %{session_id:, socket:, connected?:, symbols:, reply_to:}, where `reply_to`
-       # is `nil` or the list of callers parked on this shard. `symbols` is
+       # index => %{session_id:, socket:, connected?:, symbols:, reply_to:, link:}, where
+       # `reply_to` is `nil` or the list of callers parked on this shard and `link` (absent
+       # until the first CONNACK) counts that shard's CONNACKs. `symbols` is
        # what this shard is meant to carry as of the last reshard, independent of whether
        # the HTTP call that asks the venue for it has actually gone out yet. `reply_to`
        # is set only while this shard is the primary of a call still waiting on this
@@ -797,9 +956,10 @@ defmodule DpExchange.Webull.Feed do
        # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
        rejected: %{},
        rejected_symbol_ttl_ms: settings.rejected_symbol_ttl_ms,
-       # Shard indices currently latched into a generic blind-resubscribe failure — see the
-       # moduledoc's "A generic resubscribe failure is reported too, latched per shard".
-       # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
+       # shard index => consecutive blind-resubscribe failures, present while that shard is
+       # latched into a generic failure — see the moduledoc's "A generic resubscribe failure is
+       # reported too, latched per shard" and `count_resubscribe_failure/2`.
+       # A top-level map rather than a field on each shard's own map: `isolate_crashed_shard/3`
        # deletes and rebuilds a shard's entry wholesale on a crash, and this latch's own
        # lifecycle is deliberately independent of that — see the comment there.
        resubscribe_failed: %{},
@@ -816,8 +976,8 @@ defmodule DpExchange.Webull.Feed do
        # from => timer reference of the `{:caller_due, from}` deadline `reshard/3` armed, held
        # until the caller is answered and cancelled then. See `reply_caller/3`.
        caller_timers: %{},
-       # from => {added, removed} `wanted` symbols a call changed, undone if the call is refused.
-       # See `record_undo/5`.
+       # from => {added, removed, replay, joined}: the `wanted` symbols, replay options and
+       # subscriber a call changed, undone if the call is refused. See `record_undo/6`.
        call_undo: %{},
        # from => [timer reference] of the `{:connack_timeout, ...}` timers armed for a caller
        # parked on a connecting shard, cancelled when the caller is released. See
@@ -1065,9 +1225,10 @@ defmodule DpExchange.Webull.Feed do
         record_undo(
           state,
           from,
-          changed(wanted, state.wanted),
+          claimed(state, symbols, true),
           [],
-          {state.resubscribe_opts, replay}
+          {state.resubscribe_opts, replay},
+          {subscriber, registered_before?(state, subscriber)}
         )
 
       state = %{
@@ -1090,7 +1251,7 @@ defmodule DpExchange.Webull.Feed do
   defp apply_unsubscribe(symbols, opts, from, state) do
     opts = Credentials.wrap_opt(opts)
     wanted = MapSet.difference(state.wanted, MapSet.new(symbols))
-    state = record_undo(state, from, [], changed(state.wanted, wanted), nil)
+    state = record_undo(state, from, [], claimed(state, symbols, false), nil, nil)
 
     state = %{
       state
@@ -1109,13 +1270,20 @@ defmodule DpExchange.Webull.Feed do
     wanted = MapSet.new(symbols)
     replay = replayable(opts, state)
 
+    dropped =
+      state.wanted
+      |> MapSet.union(pending_claims(state))
+      |> MapSet.difference(wanted)
+      |> MapSet.to_list()
+
     state =
       record_undo(
         state,
         from,
-        changed(wanted, state.wanted),
-        changed(state.wanted, wanted),
-        {state.resubscribe_opts, replay}
+        claimed(state, symbols, true),
+        claimed(state, dropped, false),
+        {state.resubscribe_opts, replay},
+        nil
       )
 
     state = %{
@@ -1769,7 +1937,8 @@ defmodule DpExchange.Webull.Feed do
     )
   end
 
-  # Overridable at start, defaulting to `@resubscribe_interval_ms`.
+  # `:resubscribe_interval_ms` - judged by `validate_resubscribe_interval_ms!/1` below, which
+  # `init/1` calls. Overridable at start, defaulting to `@resubscribe_interval_ms`.
   #
   # It was a hardcoded attribute until dp-exchange-core issue #33, where a consumer watching
   # "Permission grabbed by other session, category : us-crypto" arrive ~3.5 times a minute
@@ -1815,6 +1984,7 @@ defmodule DpExchange.Webull.Feed do
   # Validated rather than coerced, the same way that package validates its own: a value that
   # cannot schedule anything fails `init/1` loudly instead of silently reverting to the
   # default and leaving the experiment looking like a negative result.
+
   # `priority_symbols:`, canonical and upper-cased, the form every symbol reaches this `Feed` in
   # from the facade. Absent or `nil` is no priority. Anything that is not a list of
   # strings fails `init/1` loudly, because a priority this package silently ignored would
@@ -2104,47 +2274,336 @@ defmodule DpExchange.Webull.Feed do
   # so the next reconnect or reopen was sent with them: `{:missing_required_field, :app_key}`
   # from `open_socket/2` on a feed that had been streaming. `replay` is `{previous, applied}`
   # (or `nil` for a call that changes nothing replayable) and the refusal puts `previous` back.
+  #
+  # **The subscriber a refused `subscribe/3` registered is taken back too.** `joined` is
+  # `{subscriber, was_already_registered?}` (or `nil` for the calls that register none). A call
+  # that was refused used to leave its `to:` in `state.subscribers`, so a process whose subscribe
+  # was answered an error went on receiving every payload another caller's symbols produced.
   @spec record_undo(
           map(),
           GenServer.from(),
           [String.t()],
           [String.t()],
-          {keyword(), keyword()} | nil
+          {keyword(), keyword()} | nil,
+          {term(), boolean()} | nil
         ) :: map()
-  defp record_undo(state, from, added, removed, replay),
-    do: %{state | call_undo: Map.put(state.call_undo, from, {added, removed, replay})}
+  defp record_undo(state, from, added, removed, replay, joined) do
+    entry = {added, removed, replay, joined, System.unique_integer([:monotonic])}
+    %{state | call_undo: Map.put(state.call_undo, from, entry)}
+  end
 
   defp settle_undo(state, from, result) do
     case Map.pop(state.call_undo, from) do
       {nil, _same} ->
         state
 
-      {{added, removed, replay}, rest} ->
-        undo_refusal(%{state | call_undo: rest}, added, removed, replay, result)
+      {{added, removed, replay, joined, seq}, rest} ->
+        undo_refusal(%{state | call_undo: rest}, {added, removed, replay, seq}, joined, result)
     end
   end
 
-  defp undo_refusal(state, added, _removed, _replay, {:error, {:capacity_exceeded, overflow}}),
-    do: restore_wanted(state, Enum.filter(added, &(&1 in overflow)), [])
+  defp undo_refusal(
+         state,
+         {added, removed, replay, seq},
+         joined,
+         {:error, {:capacity_exceeded, overflow}}
+       ) do
+    {overflowed, placed} = Enum.split_with(added, &(&1 in overflow))
 
-  defp undo_refusal(state, added, removed, replay, {:error, _refused}) do
+    state =
+      state
+      |> keep_claims(seq, placed, true)
+      |> keep_claims(seq, removed, false)
+      |> revert_claims(seq, overflowed, [])
+
+    # Refused outright only when nothing this call added was placed.
+    if added != [] and placed == [],
+      do: forget_joined(state, joined),
+      else: state |> keep_replay(seq, replay) |> keep_joined(joined)
+  end
+
+  defp undo_refusal(state, {added, removed, replay, seq}, joined, {:error, _refused}) do
     # The re-plan runs first, from the options the call itself brought (its `:plug`,
     # `:limiter` and the rest of the transport seam): reverting them first would send the
     # cleanup unsubscribe of what the call added with none of them. Then they go back.
-    state |> restore_wanted(added, removed) |> restore_replay_opts(replay)
+    state
+    |> revert_claims(seq, added, removed)
+    |> restore_replay_opts(seq, replay)
+    |> forget_joined(joined)
   end
 
-  defp undo_refusal(state, _added, _removed, _replay, _kept), do: state
+  defp undo_refusal(state, {added, removed, replay, seq}, joined, _kept) do
+    state
+    |> keep_claims(seq, added, true)
+    |> keep_claims(seq, removed, false)
+    |> keep_replay(seq, replay)
+    |> keep_joined(joined)
+  end
 
+  # **Wanted symbols are judged across every call still in flight, in the order the calls
+  # arrived, as subscribers are.** A call records a CLAIM on each symbol it sets: `added` for
+  # one it makes wanted, `removed` for one it makes unwanted. A symbol is claimed when the call
+  # changes it OR when a pending call has already claimed it (`claimed/3`), so a call that does
+  # nothing to the symbol only because an earlier pending call already did it still holds it.
+  # Each entry carries a sequence number (`record_undo/6`), because which of two calls arrived
+  # first is what decides the answer: subscribe-then-unsubscribe and unsubscribe-then-subscribe
+  # of one symbol record the same pair of claims, and a refusal of the earlier one must leave
+  # the symbol as the later one made it, while a refusal of the later one must leave it as the
+  # earlier one did.
+  #
+  # Found 2026-10-21 (tick AR): a subscribe that added X, then an unsubscribe of X, both refused
+  # in turn - the unsubscribe's refusal put back a symbol that was never wanted before the
+  # subscribe, because its `removed` held every symbol it took out of `wanted`, including the
+  # one a pending call had just added.
+  #
+  # A REFUSED call (`revert_claims/4`) leaves a symbol alone when a later pending call claims it
+  # (that call's result is what `wanted` holds now). Otherwise it puts the symbol back to what
+  # it was before this call: the result of the latest earlier pending claim, or, when none,
+  # the opposite of what this call set (a claim with no earlier pending claim means it changed
+  # the symbol). The next later claim, which assumed this call's result, is dropped when what
+  # this call's refusal restores is already that later call's result.
+  #
+  # An ACCEPTED (or placed) call (`keep_claims/4`) makes its result real: every earlier pending
+  # claim on the symbol is dropped (overridden), and so is the next later one when it sets the
+  # same value (it then changes nothing), so a sibling's later refusal leaves the symbol alone.
+  defp claimed(state, symbols, result) do
+    pending = pending_claims(state)
+
+    symbols
+    |> Enum.uniq()
+    |> Enum.filter(fn symbol ->
+      MapSet.member?(state.wanted, symbol) != result or MapSet.member?(pending, symbol)
+    end)
+  end
+
+  defp pending_claims(state) do
+    for {_from, {added, removed, _replay, _joined, _seq}} <- state.call_undo,
+        symbol <- added ++ removed,
+        into: MapSet.new(),
+        do: symbol
+  end
+
+  # `{from, seq, result}` for every pending call claiming `symbol`: `result` is true when the
+  # call makes it wanted.
+  defp claimants(state, symbol) do
+    for {from, {added, removed, _replay, _joined, seq}} <- state.call_undo,
+        symbol in added or symbol in removed,
+        do: {from, seq, symbol in added}
+  end
+
+  defp earlier_claim(others, seq) do
+    others
+    |> Enum.filter(fn {_from, other_seq, _result} -> other_seq < seq end)
+    |> Enum.sort_by(fn {_from, other_seq, _result} -> other_seq end, :desc)
+    |> List.first()
+  end
+
+  defp later_claim(others, seq) do
+    others
+    |> Enum.filter(fn {_from, other_seq, _result} -> other_seq > seq end)
+    |> Enum.sort_by(fn {_from, other_seq, _result} -> other_seq end)
+    |> List.first()
+  end
+
+  defp revert_claims(state, _seq, [], []), do: state
+
+  defp revert_claims(state, seq, added, removed) do
+    claims = Enum.map(added, &{&1, true}) ++ Enum.map(removed, &{&1, false})
+
+    {state, unwant, rewant} =
+      Enum.reduce(claims, {state, [], []}, &revert_claim(&1, &2, seq))
+
+    restore_wanted(state, unwant, rewant)
+  end
+
+  defp revert_claim({symbol, result}, {state, unwant, rewant}, seq) do
+    others = claimants(state, symbol)
+    earlier = earlier_claim(others, seq)
+
+    case later_claim(others, seq) do
+      nil ->
+        previous = if earlier == nil, do: not result, else: elem(earlier, 2)
+
+        if previous,
+          do: {state, unwant, [symbol | rewant]},
+          else: {state, [symbol | unwant], rewant}
+
+      {later_from, _later_seq, later_result} ->
+        # A later call's result is what `wanted` holds. Only when nothing earlier is pending
+        # does what this refusal restores matter to it: it then no longer changes anything.
+        state =
+          if earlier == nil and later_result != result,
+            do: strip_claim(state, [later_from], symbol),
+            else: state
+
+        {state, unwant, rewant}
+    end
+  end
+
+  defp keep_claims(state, _seq, [], _result), do: state
+
+  defp keep_claims(state, seq, symbols, result) do
+    Enum.reduce(symbols, state, &strip_overridden(&2, seq, &1, result))
+  end
+
+  defp strip_overridden(state, seq, symbol, result) do
+    others = claimants(state, symbol)
+    earlier = for {from, other_seq, _other_result} <- others, other_seq < seq, do: from
+
+    overridden =
+      case later_claim(others, seq) do
+        {later_from, _later_seq, ^result} -> [later_from | earlier]
+        _opposite_or_none -> earlier
+      end
+
+    strip_claim(state, overridden, symbol)
+  end
+
+  defp strip_claim(state, [], _symbol), do: state
+
+  defp strip_claim(state, froms, symbol) do
+    undo =
+      Map.new(state.call_undo, fn {from, {added, removed, replay, joined, seq}} ->
+        if from in froms do
+          {from, {List.delete(added, symbol), List.delete(removed, symbol), replay, joined, seq}}
+        else
+          {from, {added, removed, replay, joined, seq}}
+        end
+      end)
+
+    %{state | call_undo: undo}
+  end
+
+  # **Registration is judged per pid across every call still in flight, not per call.** The
+  # flag in `joined` is "was the pid registered BEFORE the first of the pending calls that name
+  # it": `registered_before?/2` copies it from a pending call for the same pid instead of
+  # reading `state.subscribers`, which an earlier pending call has already written to. So two
+  # overlapping calls for one pid both carry `false`, and the flag means one thing for both:
+  # nobody had registered it but these calls.
+  #
+  # Then a refusal removes the pid only when no other pending call names it (the last one out
+  # takes it back, whichever order they are refused in), and a call that is ACCEPTED makes the
+  # registration real: `keep_joined/2` turns every other pending call's flag to `true`, so a
+  # refusal of the later one leaves the pid its accepted sibling needs. A pid registered before
+  # any of them has `true` throughout and is never removed here.
+  defp registered_before?(state, subscriber) do
+    pending =
+      for {_from, {_added, _removed, _replay, {^subscriber, was}, _seq}} <- state.call_undo,
+          do: was
+
+    case pending do
+      [was | _more] -> was
+      [] -> MapSet.member?(state.subscribers, subscriber)
+    end
+  end
+
+  # The call was accepted (or only part-refused): its subscriber stays, so the other calls
+  # pending for it must not take it back.
+  defp keep_joined(state, {subscriber, false}) do
+    undo =
+      Map.new(state.call_undo, fn
+        {from, {added, removed, replay, {^subscriber, false}, seq}} ->
+          {from, {added, removed, replay, {subscriber, true}, seq}}
+
+        other_entry ->
+          other_entry
+      end)
+
+    %{state | call_undo: undo}
+  end
+
+  defp keep_joined(state, _already_registered_or_none), do: state
+
+  # Only a subscriber no pending call has registered before this one: see `registered_before?/2`.
+  defp forget_joined(state, {subscriber, false}) do
+    if pending_subscriber?(state, subscriber) do
+      state
+    else
+      monitors =
+        if is_pid(subscriber) and not MapSet.member?(state.notice_subscribers, subscriber),
+          do: Fanout.forget(subscriber, state.monitors),
+          else: state.monitors
+
+      %{state | subscribers: MapSet.delete(state.subscribers, subscriber), monitors: monitors}
+    end
+  end
+
+  defp forget_joined(state, _already_registered_or_none), do: state
+
+  defp pending_subscriber?(state, subscriber) do
+    Enum.any?(state.call_undo, fn {_from, {_added, _removed, _replay, joined, _seq}} ->
+      match?({^subscriber, _was_registered}, joined)
+    end)
+  end
+
+  # **The replay options are judged across the calls still in flight, as claims and
+  # subscribers are.** Found 2026-10-21 (tick AR): a feed given its credentials only by its
+  # calls took two overlapping subscribes, and refusing the EARLIER one put back the options
+  # from before it: no credentials. The later call, still pending and carrying them, was then
+  # replayed by the link-up with none and answered `{:missing_credentials, :webull}`.
+  #
+  # So a refusal puts `previous` back only when no later pending call has stored options of
+  # its own; when one has, that call's `previous` becomes this call's, and what the feed holds
+  # now (the later call's options) stays. A call that is ACCEPTED makes its options real, and
+  # `keep_replay/3` drops the record every EARLIER pending call holds, so that one's later
+  # refusal cannot put back options the accepted call replaced.
+  #
   # Only while the options are still the ones THIS call stored: a call that answered in the
   # meantime has its own, and putting an older set back over them would undo that call.
-  defp restore_replay_opts(state, {previous, applied}) do
+  defp restore_replay_opts(state, seq, {previous, applied}) do
+    case next_replay_call(state, seq) do
+      nil -> put_back_replay_opts(state, previous, applied)
+      later_from -> hand_down_replay_opts(state, later_from, previous, applied)
+    end
+  end
+
+  defp restore_replay_opts(state, _seq, nil), do: state
+
+  defp put_back_replay_opts(state, previous, applied) do
     if state.resubscribe_opts == applied,
       do: %{state | resubscribe_opts: previous},
       else: state
   end
 
-  defp restore_replay_opts(state, nil), do: state
+  # The `from` of the earliest pending call after `seq` that stored replay options, if any.
+  defp next_replay_call(state, seq) do
+    later =
+      for {from, {_added, _removed, {_previous, _applied}, _joined, other_seq}} <-
+            state.call_undo,
+          other_seq > seq,
+          do: {other_seq, from}
+
+    case Enum.sort(later) do
+      [] -> nil
+      [{_other_seq, from} | _rest] -> from
+    end
+  end
+
+  defp hand_down_replay_opts(state, later_from, previous, applied) do
+    undo =
+      Map.update!(state.call_undo, later_from, fn
+        {added, removed, {later_previous, later_applied}, joined, seq} ->
+          later_previous = if later_previous == applied, do: previous, else: later_previous
+          {added, removed, {later_previous, later_applied}, joined, seq}
+      end)
+
+    %{state | call_undo: undo}
+  end
+
+  defp keep_replay(state, _seq, nil), do: state
+
+  defp keep_replay(state, seq, {_previous, _applied}) do
+    undo =
+      Map.new(state.call_undo, fn
+        {from, {added, removed, {_earlier, _stored}, joined, other_seq}} when other_seq < seq ->
+          {from, {added, removed, nil, joined, other_seq}}
+
+        other_entry ->
+          other_entry
+      end)
+
+    %{state | call_undo: undo}
+  end
 
   @spec restore_wanted(map(), [String.t()], [String.t()]) :: map()
   defp restore_wanted(state, added, removed) do
@@ -2160,9 +2619,6 @@ defmodule DpExchange.Webull.Feed do
       resync(%{state | wanted: wanted})
     end
   end
-
-  # The symbols in `set` that `other` lacks, as the list `record_undo/5` holds.
-  defp changed(set, other), do: set |> MapSet.difference(other) |> MapSet.to_list()
 
   defp release_caller(state, from) do
     state = release_connack_timers(state, from)

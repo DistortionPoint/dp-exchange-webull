@@ -143,7 +143,7 @@ defmodule DpExchange.Webull.WatchlistsTest do
       assert watchlist.symbols == []
       assert_receive {:request, "POST", "/market-data/watchlists/create", _query, raw}
       assert Jason.decode!(raw) == %{"name" => "Empty"}
-      refute_receive {:request, "POST", "/market-data/watchlists/instruments/add", _q, _r}
+      refute_receive {:request, "POST", "/market-data/watchlists/instruments/add", _q, _r}, 500
     end
 
     test "a create response with no watchlist_id is refused, not returned with a nil id" do
@@ -281,7 +281,17 @@ defmodule DpExchange.Webull.WatchlistsTest do
       assert {:refused, :not_found} =
                Rest.delete_watchlist("nope", @credentials, refusing.(404))
 
-      assert {:refused, _reason} = Rest.delete_watchlist("wl-1", @credentials, refusing.(403))
+      forbidden = fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.resp(403, Jason.encode!(%{"message" => "forbidden"}))
+      end
+
+      assert {:refused, {:venue_error, 403, "forbidden"}} =
+               Rest.delete_watchlist("wl-1", @credentials, plug: forbidden, retry_attempts: 0)
+
+      assert {:refused, {:venue_error, 403}} =
+               Rest.delete_watchlist("wl-1", @credentials, refusing.(403))
 
       assert {:refused, :watchlist_write_rejected} =
                Rest.delete_watchlist("wl-1", @credentials,
@@ -362,11 +372,11 @@ defmodule DpExchange.Webull.WatchlistsTest do
         end
       end
 
-      assert {:error, {:watchlist_created_without_members, "wl-orphan", _reason}} =
-               Rest.create_watchlist("Tech", ["AAPL"], @credentials,
-                 plug: plug,
-                 retry_attempts: 0
-               )
+      result =
+        Rest.create_watchlist("Tech", ["AAPL"], @credentials, plug: plug, retry_attempts: 0)
+
+      assert {:error, {:watchlist_created_without_members, "wl-orphan", reason}} = result
+      assert reason == :watchlist_write_rejected
 
       assert_receive :created
     end

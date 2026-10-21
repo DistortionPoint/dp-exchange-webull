@@ -126,7 +126,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       _settled = Feed.coverage(feed)
 
-      refute_receive {_ref, {:error, {:connection_refused, _details}}}
+      refute_receive {_ref, {:error, {:connection_refused, _details}}}, 500
       assert :sys.get_state(feed).shards[0].reply_to != nil
     end
 
@@ -154,7 +154,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:connack_timeout, 0, "a-previous-session"})
       _settled = Feed.coverage(feed)
 
-      refute_receive {_ref, {:error, {:connack_timeout, _ms}}}
+      refute_receive {_ref, {:error, {:connack_timeout, _ms}}}, 500
       assert :sys.get_state(feed).shards[0].reply_to != nil
     end
 
@@ -589,7 +589,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
 
       assert Feed.coverage(feed) == %{}
-      refute_receive {:dp_exchange, :webull, %{symbol: "BTC-USD"}}
+      refute_receive {:dp_exchange, :webull, %{symbol: "BTC-USD"}}, 500
     end
 
     test "a link drop clears what that shard's dead connection had been delivering" do
@@ -800,6 +800,9 @@ defmodule DpExchange.Webull.FeedTest do
       _refused = Feed.subscribe(feed, ["BTC-USD"], subscribe_opts(limiter, environment: :uat))
 
       assert Feed.coverage(feed) == %{}
+      # `coverage/1` is empty for anything not yet delivering, so it cannot show the refused
+      # symbol was never registered; the wanted set can.
+      assert :sys.get_state(feed).wanted == MapSet.new()
     end
   end
 
@@ -968,6 +971,8 @@ defmodule DpExchange.Webull.FeedTest do
       _settled = Feed.coverage(feed)
 
       assert Process.alive?(feed)
+      # The frame was still observed from the venue even though nobody was there to take it.
+      assert Feed.coverage(feed) == %{"BTC-USD" => :stream}
     end
   end
 

@@ -55,11 +55,12 @@ defmodule DpExchange.Webull.EmptySubscribeTest do
 
     # The call above is synchronous, but a request could still be made by a task it left
     # behind, so the negative is held for the suite's full window.
-    refute_receive {:request, _path}
+    refute_receive {:request, _path}, 500
   end
 
   test "the fake agrees: an empty subscribe delivers nothing and covers nothing" do
-    assert :ok = Fake.subscribe([], [])
+    assert :ok = Fake.subscribe([], to: self())
     assert Fake.coverage() == %{}
+    refute_receive {:dp_exchange, _venue, _message}, 500
   end
 end

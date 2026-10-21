@@ -121,7 +121,9 @@ defmodule DpExchange.Webull.RestIdAndSideShapeTest do
 
       assert {:ok, book} = book(row)
       assert book.bids == []
-      assert [{_price, _size}] = book.asks
+      assert [{price, size}] = book.asks
+      assert Decimal.equal?(price, Decimal.new("13.91"))
+      assert Decimal.equal?(size, Decimal.new("3"))
     end
   end
 

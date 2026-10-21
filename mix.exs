@@ -95,7 +95,16 @@ defmodule DpExchangeWebull.MixProject do
       # contract test opts into group 41 (`unlisted_symbol:`, `padded_credentials:`, Core 0.3.94),
       # which an older Core ignores - a silent pass; and 0.3.95 makes groups 7, 37 and 39 fail
       # instead of passing having examined nothing. Resolved and compiled against in this change.
-      {:dp_exchange_core, "~> 0.3.119"},
+      #
+      # `0.3.120` (tick AR) is the floor the line below states, and the only one that is: the
+      # `0.x` floors above are the history of why each earlier one was raised, every one of them
+      # since superseded. Core 0.3.119 made the value types refuse non-positive prices and
+      # negative sizes, added conformance groups 52 and 53, and had group 26 require coverage to
+      # empty after the last unsubscribe. Core 0.3.120 adds group 54 (every Order and Fill the
+      # Fake answers is one `new/1` builds, a status never contradicting its filled quantity)
+      # and fails groups 33, 35 and 37 that used to pass having examined nothing; an older Core
+      # runs a suite that checks none of that and passes.
+      {:dp_exchange_core, "~> 0.3.120"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

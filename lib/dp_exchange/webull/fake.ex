@@ -71,16 +71,22 @@ defmodule DpExchange.Webull.Fake do
   every id they return is accepted by this fake's `get_order/3` and `cancel_order/3`
   (`close_position/3` is unsupported here, so it issues none). Watchlists from
   `create_watchlist/3` read back their members; only the fixture's own `wl-1` returns canned
-  ones. `get_watchlist/2` for any other id is `{:refused, :not_found}` - **the real venue's
-  answer for an unknown watchlist id is unmeasured** (`get-watchlist-instruments.md` states
-  only the generic error bodies), so the fake fails closed rather than guess one.
+  ones. `get_watchlist/2`, `update_watchlist/2`, `delete_watchlist/2` and the membership
+  writes for any other id are `{:refused, :not_found}` (a deleted one reads back as
+  `{:error, :unexpected_response_shape}`, no rows) - **the real venue's answer for an unknown
+  watchlist id is unmeasured** (`get-watchlist-instruments.md` states only the generic error
+  bodies), so the fake fails closed rather than guess one.
 
   ## Failure injection and anonymous mode
 
-  Every function below that has a real success path (not an unconditional
-  `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1` or `/2`
-  first — a queued or always-set outcome from `FakeInjection.queue_failures/2,3` or
-  `fail_always/2,3` short-circuits the fake's normal logic and is returned as-is.
+  Every call below that reaches the venue in the real adapter and has a success path (not an
+  unconditional `Venue.not_supported()`) checks `DpExchange.Core.FakeInjection.next_outcome/1`
+  or `/2` after its option checks — a queued or always-set outcome from
+  `FakeInjection.queue_failures/2,3` or `fail_always/2,3` short-circuits the fake's normal
+  logic and is returned as-is. `get_prices/2` has no check of its own: it asks `get_price/2`
+  per symbol, so an outcome is consumed once per symbol. The in-process reads (`coverage/1`,
+  `wanted/1`, `coverage_by_kind/1`, `subscribe_notices/1`, `streaming?/1`, `live?/1`) and the
+  pure helpers have none, because nothing in them leaves the process.
   `authenticated/1` also checks `FakeInjection.credentials_bypassed?/1` before its normal
   `{:error, {:missing_credentials, :webull}}` path. Neither changes anything for a test
   that never calls `FakeInjection` — see that module for the full contract.
@@ -137,6 +143,9 @@ defmodule DpExchange.Webull.Fake do
   @requested_key {__MODULE__, :requested}
   @shard_key {__MODULE__, :shard_open}
   @system_order_prefix "80HG7CPSFDPCAL3TP66LKB"
+
+  # Final order states: no cancel and no replace moves an order out of one.
+  @terminal_statuses [:filled, :cancelled, :rejected, :expired]
 
   # The one token `create_token/1` mints; `check_token/2` knows only this one.
   @fake_token "fake-webull-token-1"
@@ -206,8 +215,8 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
-  defp do_get_price(symbol, opts) do
-    with_injection(symbol, fn ->
+  defp do_get_price(symbol, opts, injected? \\ true) do
+    injecting(injected?, symbol, fn ->
       category = Config.opt(opts, :category, "US_CRYPTO")
 
       # The category before credentials, from `Rest`'s own list: a category the real path has
@@ -292,8 +301,8 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
-  defp do_get_top_of_book(symbol, opts) do
-    with_injection(symbol, fn ->
+  defp do_get_top_of_book(symbol, opts, injected? \\ true) do
+    injecting(injected?, symbol, fn ->
       category = Config.opt(opts, :category, "US_CRYPTO")
 
       # `US_EVENT` is refused as `Rest.get_top_of_book/3` refuses it (it has two books, not a
@@ -622,7 +631,7 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  Not served by this venue: answers `{:error, :not_supported}`.
+  Not ported: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_market_overview/1`.
   """
   @impl true
@@ -918,21 +927,21 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.list_payment_methods/2`.
   """
   @impl true
-  def list_payment_methods(_credentials, _opts \\ []), do: Venue.not_supported()
+  def list_payment_methods(_credentials, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_payment_method/3`.
   """
   @impl true
-  def get_payment_method(_credentials, _id, _opts \\ []), do: Venue.not_supported()
+  def get_payment_method(_credentials, _id, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.add_payment_method/2`.
   """
   @impl true
-  def add_payment_method(_details, _opts \\ []), do: Venue.not_supported()
+  def add_payment_method(_details, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
@@ -946,7 +955,7 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.request_approved_address/4`.
   """
   @impl true
-  def request_approved_address(_asset, _network, _address, _opts \\ []),
+  def request_approved_address(_asset, _network, _address, _opts),
     do: Venue.not_supported()
 
   @doc """
@@ -954,47 +963,47 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.remove_approved_address/3`.
   """
   @impl true
-  def remove_approved_address(_network, _address, _opts \\ []), do: Venue.not_supported()
+  def remove_approved_address(_network, _address, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.list_networks/2`.
   """
   @impl true
-  def list_networks(_asset, _opts \\ []), do: Venue.not_supported()
+  def list_networks(_asset, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.list_fee_promos/1`.
   """
   @impl true
-  def list_fee_promos(_opts \\ []), do: Venue.not_supported()
+  def list_fee_promos(_opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_fx_rate/3`.
   """
   @impl true
-  def get_fx_rate(_pair, _at, _opts \\ []), do: Venue.not_supported()
+  def get_fx_rate(_pair, _at, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_notional_balances/3`.
   """
   @impl true
-  def get_notional_balances(_credentials, _currency, _opts \\ []), do: Venue.not_supported()
+  def get_notional_balances(_credentials, _currency, _opts), do: Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.list_custody_fees/2`.
   """
   @impl true
-  def list_custody_fees(_credentials, _opts \\ []), do: Venue.not_supported()
+  def list_custody_fees(_credentials, _opts), do: Venue.not_supported()
 
-  # Both refused, matching the real venue. A fake that answered where the real one
-  # refuses lets a consumer's suite go green against behaviour that cannot happen.
   @doc """
-  A fixed estimated cost and fee for a valid request; no order is remembered.
+  A fixed estimated cost and fee for a valid request; no order is remembered. A crypto
+  instrument is refused, as the real preview refuses it, and so is a cash-sized order
+  (`{:cash_sizing_not_supported, instrument}`).
 
   Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.preview_order/3`.
   """
@@ -1027,7 +1036,9 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  Amends an order this process remembers; an unknown id is `{:refused, :not_found}`.
+  Amends an order this process remembers; an unknown id is `{:refused, :not_found}`, a
+  terminal one is `{:refused, {:order_not_replaceable, status}}`, and an `opts[:order_type]`
+  that is not the stored order's type is `{:refused, {:order_type_mismatch, stored, named}}`.
 
   Requires `opts[:account_id]` and the credentials. See `DpExchange.Webull.replace_order/4`.
   """
@@ -1048,7 +1059,7 @@ defmodule DpExchange.Webull.Fake do
     with :ok <- Rest.validate_replace(client_order_id, changes, opts),
          :ok <- fake_account(opts),
          :ok <- credentialed(credentials),
-         {:ok, base} <- replaceable_order(client_order_id) do
+         {:ok, base} <- replaceable_order(client_order_id, opts) do
       # Remembered (per process) under the same id, as the venue amends in place and
       # `Rest.replace_order/4` reads that order back: an id this returns is then accepted by
       # `get_order/3` and `cancel_order/3`. The order keeps its own fields except the ones
@@ -1059,11 +1070,39 @@ defmodule DpExchange.Webull.Fake do
 
   # Only an order this process placed (or the fixed order) can be replaced. An id the fake
   # never issued is refused as `get_order/3` and `cancel_order/3` refuse it, never invented.
-  defp replaceable_order(client_order_id) do
+  #
+  # **Two more refusals the amendment table alone cannot make.** A terminal order
+  # (`@terminal_statuses`) is not amended: a replace of a cancelled or filled order used to
+  # answer `{:ok, order}` with the new fields on an order that stayed done, which the venue does
+  # not do (`{:refused, {:order_not_replaceable, status}}`; the venue's own wording is
+  # UNMEASURED). And `opts[:order_type]` names the type of the order being edited, which
+  # chooses the edit table; naming one the stored order is not would have been judged against
+  # the wrong table and then applied (`{:refused, {:order_type_mismatch, stored, named}}`).
+  # Both leave the stored order untouched.
+  defp replaceable_order(client_order_id, opts) do
+    with {:ok, %Types.Order{} = order} <- lookup_found(client_order_id),
+         :ok <- not_terminal(order) do
+      same_order_type(order, Config.opt(opts, :order_type, nil))
+    end
+  end
+
+  defp lookup_found(client_order_id) do
     case lookup_order(client_order_id) do
       {:ok, _order} = found -> found
       :error -> {:refused, :not_found}
     end
+  end
+
+  defp not_terminal(%Types.Order{status: status}) do
+    if status in @terminal_statuses,
+      do: {:refused, {:order_not_replaceable, status}},
+      else: :ok
+  end
+
+  defp same_order_type(%Types.Order{order_type: stored} = order, named) do
+    if stored == named,
+      do: {:ok, order},
+      else: {:refused, {:order_type_mismatch, stored, named}}
   end
 
   # The order as the venue reads it back after the amendment (`Rest.replace_order/4` reads
@@ -1206,9 +1245,10 @@ defmodule DpExchange.Webull.Fake do
   `self()`), as `{:dp_exchange, :webull, payload}`.
 
   Under `environment: :uat` it answers `{:error, {:streaming_unavailable, :uat}}`, as the
-  real feed does. A call that changes what is wanted needs `opts[:credentials]` (the App Key
-  while no shard is open, `{:error, {:missing_required_field, :app_key}}` otherwise missing
-  credentials, `{:error, {:missing_credentials, :webull}}`); see `stream_gate/2`. State is per
+  real feed does. A call that changes what is wanted needs `opts[:credentials]`: with no
+  shard open yet, missing credentials are `{:error, {:missing_required_field, :app_key}}`
+  (only the App Key is read); with one open, `{:error, {:missing_credentials, :webull}}`. A
+  call that changes nothing needs none, and a refused call changes nothing. State is per
   process. See `c:DpExchange.Core.Venue.subscribe/2`.
   """
   @impl true
@@ -1290,8 +1330,8 @@ defmodule DpExchange.Webull.Fake do
     opts = [credentials: %{app_key: "fake", app_secret: "fake"}]
 
     for symbol <- symbols do
-      push_kind(get_price(symbol, opts), symbol, targets, __MODULE__)
-      push_kind(get_top_of_book(symbol, opts), symbol, targets, @top_key)
+      push_kind(do_get_price(symbol, opts, false), symbol, targets, __MODULE__)
+      push_kind(do_get_top_of_book(symbol, opts, false), symbol, targets, @top_key)
     end
 
     :ok
@@ -1330,7 +1370,11 @@ defmodule DpExchange.Webull.Fake do
 
   @doc """
   Drops the named symbols from this process's fake subscription and answers `:ok`.
-  See `c:DpExchange.Core.Venue.unsubscribe/2`.
+
+  Dropping a symbol that is wanted is a change, so it needs credentials as `subscribe/2` does
+  (`{:error, {:missing_required_field, :app_key}}` or `{:error, {:missing_credentials,
+  :webull}}`), and answers `:ok` with none for symbols that are not wanted. See
+  `c:DpExchange.Core.Venue.unsubscribe/2`.
   """
   @impl true
   def unsubscribe(symbols, opts \\ []) do
@@ -1353,8 +1397,9 @@ defmodule DpExchange.Webull.Fake do
   # covered only when it has been pushed to a subscriber, so an update before any `subscribe/2`
   # covers nothing.
   @doc """
-  Narrows this process's fake subscription to the listed symbols and delivers fixtures for
-  newly added ones. See `c:DpExchange.Core.Venue.update_symbols/2`.
+  Replaces this process's wanted symbols with the listed ones: a symbol left out stops being
+  covered at once, and fixtures are delivered for a listed symbol not yet covered. A change
+  needs credentials as `subscribe/2` does. See `c:DpExchange.Core.Venue.update_symbols/2`.
   """
   @impl true
   def update_symbols(symbols, opts \\ []) do
@@ -1388,14 +1433,16 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  The symbols this process's fake was asked to stream, sorted. The fake delivers at once, so
-  this is the union of what it has delivered to; see `DpExchange.Webull.wanted/1`.
+  The symbols this process's fake was asked to stream, sorted, whether or not anything was
+  delivered for them: a symbol the fake does not model (or one whose subscriber is
+  unreachable) is wanted and not covered, as on the real feed. See
+  `DpExchange.Webull.wanted/1`.
   """
   @spec wanted(keyword()) :: [DpExchange.Core.Venue.symbol()]
   @impl true
   def wanted(opts \\ []) do
     Options.check!(:wanted, opts)
-    subscribed() |> MapSet.union(top()) |> MapSet.to_list() |> Enum.sort()
+    requested() |> MapSet.to_list() |> Enum.sort()
   end
 
   # Both kinds the real feed streams (`capabilities/0`'s `streamable`), each reported only
@@ -1454,6 +1501,13 @@ defmodule DpExchange.Webull.Fake do
     end
   end
 
+  # `with_injection/2` unless `injected?` is false: `push/2`'s internal reads of the fixture
+  # must not consume or obey an outcome meant for a facade call (`subscribe/2` is deliberately
+  # not wired to `FakeInjection`, so a `fail_always/2` on `get_price/2` must not stop it
+  # delivering).
+  defp injecting(true, symbol, fun), do: with_injection(symbol, fun)
+  defp injecting(false, _symbol, fun), do: fun.()
+
   defp with_injection(symbol \\ nil, fun) do
     case FakeInjection.next_outcome(:webull, symbol) do
       {:override, outcome} -> outcome
@@ -1492,11 +1546,13 @@ defmodule DpExchange.Webull.Fake do
   # `:end` is exclusive on `opened_at`, as in `Rest` (family convention MD2).
   defp before_end?(candle, finish), do: DateTime.compare(candle.opened_at, finish) == :lt
 
-  # --- Declared but not yet implemented -----------------------------------
+  # --- Calls declared `:unsupported` (and the positions read) ---------------------------
   #
-  # Core 0.1.16 widened the facade to the surface the venues actually publish. These answer
-  # `{:error, :not_supported}` and are declared `:unsupported` in `capabilities/0`, so a
-  # consumer routing on the declaration is told the truth.
+  # Core 0.1.16 widened the facade to the surface the venues actually publish. The ones below
+  # whose doc says "Not served" or "Not ported" answer `{:error, :not_supported}` and are
+  # declared `:unsupported` in `capabilities/0` (`@venue_does_not_serve` and `@not_ported`
+  # there), so a consumer routing on the declaration is told the truth. The doc says which of
+  # the two it is.
   #
   # **`:unsupported` here is a statement about this package, not about the venue.** That
   # distinction is the one Phase 1 had to correct after a package spent a year asserting a
@@ -1508,7 +1564,7 @@ defmodule DpExchange.Webull.Fake do
   See `DpExchange.Webull.get_positions/1`.
   """
   @impl true
-  def get_positions(opts \\ []) do
+  def get_positions(opts) do
     with :ok <- Options.check(:get_positions, opts) do
       do_get_positions(opts)
     end
@@ -1551,63 +1607,63 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.get_funding/2`.
   """
   @impl true
-  def get_funding(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_funding(_symbol, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_contract_stats/2`.
   """
   @impl true
-  def get_contract_stats(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_contract_stats(_symbol, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_staking_rates/1`.
   """
   @impl true
-  def get_staking_rates(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_rates(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_staking_balances/1`.
   """
   @impl true
-  def get_staking_balances(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_balances(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_staking_rewards/1`.
   """
   @impl true
-  def get_staking_rewards(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_rewards(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_staking_history/1`.
   """
   @impl true
-  def get_staking_history(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_staking_history(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.stake/3`.
   """
   @impl true
-  def stake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def stake(_asset, _amount, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.unstake/3`.
   """
   @impl true
-  def unstake(_asset, _amount, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def unstake(_asset, _amount, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.quote_conversion/4`.
   """
   @impl true
-  def quote_conversion(_from, _to, _amount, _opts \\ []),
+  def quote_conversion(_from, _to, _amount, _opts),
     do: DpExchange.Core.Venue.not_supported()
 
   @doc """
@@ -1615,14 +1671,14 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.commit_conversion/2`.
   """
   @impl true
-  def commit_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def commit_conversion(_id, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_conversion/2`.
   """
   @impl true
-  def get_conversion(_id, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_conversion(_id, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
@@ -1643,14 +1699,14 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.list_portfolios/1`.
   """
   @impl true
-  def list_portfolios(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def list_portfolios(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_deposit_address/3`.
   """
   @impl true
-  def get_deposit_address(_asset, _network, _opts \\ []),
+  def get_deposit_address(_asset, _network, _opts),
     do: DpExchange.Core.Venue.not_supported()
 
   @doc """
@@ -1658,14 +1714,14 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.list_approved_addresses/1`.
   """
   @impl true
-  def list_approved_addresses(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def list_approved_addresses(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not served by this venue: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.estimate_withdrawal_fee/4`.
   """
   @impl true
-  def estimate_withdrawal_fee(_asset, _network, _amount, _opts \\ []),
+  def estimate_withdrawal_fee(_asset, _network, _amount, _opts),
     do: DpExchange.Core.Venue.not_supported()
 
   @doc """
@@ -1673,7 +1729,7 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.withdraw/5`.
   """
   @impl true
-  def withdraw(_asset, _network, _amount, _address, _opts \\ []),
+  def withdraw(_asset, _network, _amount, _address, _opts),
     do: DpExchange.Core.Venue.not_supported()
 
   @doc """
@@ -1690,6 +1746,7 @@ defmodule DpExchange.Webull.Fake do
   defp do_get_option_chain(underlying, opts) do
     with_injection(underlying, fn ->
       with :ok <- Rest.validate_symbol(underlying),
+           :ok <- Rest.validate_option_filters(opts),
            :ok <- authenticated(opts) do
         {:ok,
          %Types.OptionChain{
@@ -1719,6 +1776,7 @@ defmodule DpExchange.Webull.Fake do
   defp do_get_option_expirations(underlying, opts) do
     with_injection(underlying, fn ->
       with :ok <- Rest.validate_symbol(underlying),
+           :ok <- Rest.validate_option_filters(opts),
            :ok <- authenticated(opts) do
         {:ok, underlying |> fake_option_grid(opts) |> Map.keys() |> Enum.sort(Date)}
       end
@@ -1794,7 +1852,7 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.get_option_greeks/2`.
   """
   @impl true
-  def get_option_greeks(_symbol, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_option_greeks(_symbol, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   The fixture watchlist `wl-1` plus any this process created, with `symbols` `nil`.
@@ -1815,8 +1873,12 @@ defmodule DpExchange.Webull.Fake do
         #
         # The canned `wl-1` (unless it was deleted here), then the watchlists this process
         # created, so a create is visible in the listing as it is at the venue.
+        #
+        # `wl-1` is listed from the fixture only while this process holds no record of it: a
+        # membership write or a rename makes it a remembered one, listed once, from that record
+        # (it was listed twice, from both).
         canned =
-          if Map.get(watchlists(), "wl-1") == :deleted,
+          if Map.has_key?(watchlists(), "wl-1"),
             do: [],
             else: [watchlist_struct("wl-1", "My Tech Stocks", nil)]
 
@@ -1847,7 +1909,8 @@ defmodule DpExchange.Webull.Fake do
 
   @doc """
   One watchlist with its members: the fixture `wl-1` or one this process created.
-  Any other id is `{:refused, :not_found}`. See `DpExchange.Webull.get_watchlist/2`.
+  Any other id is `{:refused, :not_found}`, and one this process deleted reads as no rows,
+  `{:error, :unexpected_response_shape}`. See `DpExchange.Webull.get_watchlist/2`.
   """
   @impl true
   def get_watchlist(id, opts \\ []) do
@@ -1928,8 +1991,9 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  Renames a watchlist; `opts[:symbols]` is refused because membership is not changed here.
-  Requires `opts[:credentials]`. See `DpExchange.Webull.update_watchlist/2`.
+  Renames a watchlist this fake holds (`wl-1` or one created in this process); another id is
+  `{:refused, :not_found}`. `opts[:symbols]` is refused because membership is not changed
+  here. Requires `opts[:credentials]`. See `DpExchange.Webull.update_watchlist/2`.
   """
   @impl true
   def update_watchlist(id, opts \\ []) do
@@ -1946,12 +2010,20 @@ defmodule DpExchange.Webull.Fake do
       with :ok <- Rest.validate_watchlist_target(:id, id),
            :ok <- membership_not_in_update(opts),
            :ok <- Rest.validate_watchlist_sort(Keyword.get(opts, :sort)),
-           :ok <- authenticated(opts) do
+           :ok <- Rest.validate_watchlist_rename(opts),
+           :ok <- authenticated(opts),
+           :ok <- known_watchlist(id) do
         rename_watchlist(id, Keyword.get(opts, :name))
         {:ok, watchlist_struct(id, Keyword.get(opts, :name), nil)}
       end
     end)
   end
+
+  # An id this process does not hold (never created, or deleted) is the refusal every other
+  # watchlist write here gives, not a rename that reports success on nothing. The venue's own
+  # answer is UNMEASURED (see the moduledoc).
+  defp known_watchlist(id),
+    do: if(watchlist_exists?(id), do: :ok, else: {:refused, :not_found})
 
   defp membership_not_in_update(opts) do
     if Keyword.has_key?(opts, :symbols),
@@ -1959,13 +2031,22 @@ defmodule DpExchange.Webull.Fake do
       else: :ok
   end
 
-  # A rename of a watchlist this process created shows in the next listing.
-  defp rename_watchlist(id, name) do
+  # A rename shows in the next listing. The fixture's own `wl-1` becomes a remembered
+  # watchlist (with its canned members) on its first rename, as on its first membership write.
+  defp rename_watchlist(id, name) when is_binary(name) do
     case Map.fetch(watchlists(), id) do
-      {:ok, %{} = created} when is_binary(name) -> put_watchlist(id, %{created | name: name})
-      _other -> :ok
+      {:ok, %{} = created} ->
+        put_watchlist(id, %{created | name: name})
+
+      :error when id == @canned_watchlist_id ->
+        put_watchlist(id, %{name: name, symbols: ["AAPL", "GOOG"]})
+
+      _other ->
+        :ok
     end
   end
+
+  defp rename_watchlist(_id, _no_name), do: :ok
 
   @doc """
   Deletes a watchlist this process knows; an unknown id is `{:refused, :not_found}`.
@@ -2798,21 +2879,21 @@ defmodule DpExchange.Webull.Fake do
   See `c:DpExchange.Core.Venue.create_account/1`.
   """
   @impl true
-  def create_account(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def create_account(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.rename_account/3`.
   """
   @impl true
-  def rename_account(_id, _name, _opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def rename_account(_id, _name, _opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Not ported: answers `{:error, :not_supported}`.
   See `c:DpExchange.Core.Venue.get_roles/1`.
   """
   @impl true
-  def get_roles(_opts \\ []), do: DpExchange.Core.Venue.not_supported()
+  def get_roles(_opts), do: DpExchange.Core.Venue.not_supported()
 
   @doc """
   Remembers an order for this process and returns it, so `get_order/3` and `cancel_order/3`
@@ -2981,7 +3062,8 @@ defmodule DpExchange.Webull.Fake do
 
   @doc """
   Marks a remembered order cancelled and answers `{:ok, :cancelled}`; an unknown id is
-  `{:refused, :not_found}`.
+  `{:refused, :not_found}`, and an order already `:filled`, `:cancelled`, `:rejected` or
+  `:expired` is `{:refused, {:order_not_cancellable, status}}` with nothing changed.
 
   Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.cancel_order/3`.
   """
@@ -3000,15 +3082,28 @@ defmodule DpExchange.Webull.Fake do
            :ok <- fake_account(opts),
            :ok <- credentialed(credentials) do
         case lookup_order(client_order_id) do
-          {:ok, order} ->
-            remember_order(%{order | status: :cancelled})
-            {:ok, :cancelled}
-
-          :error ->
-            {:refused, :not_found}
+          {:ok, order} -> cancel_working_order(order)
+          :error -> {:refused, :not_found}
         end
       end
     end)
+  end
+
+  # **A terminal order cannot be cancelled.** `:filled`, `:cancelled`, `:rejected` and
+  # `:expired` are final: the venue does not cancel an order that is already done, and a fake
+  # that answered `{:ok, :cancelled}` for one (a second cancel, or a cancel of a filled order)
+  # would let a consumer's suite go green on a call the venue refuses and, worse, overwrite a
+  # `:filled` order's status with `:cancelled`. The venue's own wording for this refusal is
+  # UNMEASURED (`common-order-cancel.md` states only the generic error bodies), so the reason is
+  # this package's, shaped `{:order_not_cancellable, status}`. Nothing is stored on a refusal,
+  # and a partially filled order keeps its `filled_quantity` when it is cancelled.
+  defp cancel_working_order(%Types.Order{status: status} = order) do
+    if status in @terminal_statuses do
+      {:refused, {:order_not_cancellable, status}}
+    else
+      remember_order(%{order | status: :cancelled})
+      {:ok, :cancelled}
+    end
   end
 
   @doc """
@@ -3060,7 +3155,10 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
-  The one fixed order plus every order this process placed.
+  The one fixed order plus every order this process placed, on the side their status puts
+  them: the working ones (`:pending`, `:partially_filled`) by default, the rest with
+  `history: true` (the fixed order is then listed as `:filled` unless this process has
+  stored a copy of it, which is listed as it stands).
 
   Requires `opts[:account_id]` and the credentials. See `c:DpExchange.Core.Venue.get_orders/2`.
   """
@@ -3107,10 +3205,18 @@ defmodule DpExchange.Webull.Fake do
   # canned pending order is open and, as history, a filled one. Stored (cancelled, replaced):
   # wherever its own status puts it, and only there.
   defp fixed_order_sides(nil),
-    do: {[fake_order()], [%{fake_order() | status: :filled}]}
+    do: {[fake_order()], [filled_fake_order()]}
 
   defp fixed_order_sides(%Types.Order{status: status} = order) do
     if status in @open_statuses, do: {[order], []}, else: {[], [order]}
+  end
+
+  # The canned order as history reads it: filled, so it carries its whole quantity as
+  # `filled_quantity` and the price it filled at (`Core.Types.Order.new/1` refuses `:filled`
+  # with nothing, or only part, filled).
+  defp filled_fake_order do
+    base = fake_order()
+    %{base | status: :filled, filled_quantity: base.quantity, average_price: base.price}
   end
 
   # **`:pending`, not `:open`.** `order-detail.md:215`'s documented `status` enum is

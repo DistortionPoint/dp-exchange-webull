@@ -54,5 +54,56 @@ defmodule DpExchange.Webull.SymbolFormatTest do
       assert SymbolFormat.mapping().quotes == SymbolFormat.quotes()
       assert SymbolFormat.mapping().sep == ""
     end
+
+    # `quotes/0` is defined as `mapping().quotes`, so the test above holds for ANY mapping,
+    # including an empty one. This pins what the venue's mapping actually is.
+    test "the mapping is the venue's: no separator, and exactly these quote currencies" do
+      assert SymbolFormat.mapping() == %{sep: "", quotes: ~w(USDT USDC USD BTC ETH)}
+    end
+  end
+
+  describe "concrete conversions, so a mapping that round-trips wrongly cannot pass" do
+    # A round trip passes however the cut is made (`BTCUSDT` -> `BTCUS`/`DT` -> `BTCUSDT`),
+    # so each direction is also asserted against the value the venue actually uses.
+    test "native to canonical" do
+      assert SymbolFormat.to_canonical_symbol("BTCUSDT") == "BTC-USDT"
+      assert SymbolFormat.to_canonical_symbol("ETHUSDC") == "ETH-USDC"
+      assert SymbolFormat.to_canonical_symbol("BTCETH") == "BTC-ETH"
+      assert SymbolFormat.to_canonical_symbol("ETHBTC") == "ETH-BTC"
+      assert SymbolFormat.to_canonical_symbol("GYENUSD") == "GYEN-USD"
+    end
+
+    test "canonical to native" do
+      assert SymbolFormat.to_exchange_symbol("BTC-USDT") == "BTCUSDT"
+      assert SymbolFormat.to_exchange_symbol("ETH-USDC") == "ETHUSDC"
+      assert SymbolFormat.to_exchange_symbol("ETH-BTC") == "ETHBTC"
+      assert SymbolFormat.to_exchange_symbol("GALA-USD") == "GALAUSD"
+    end
+
+    test "case is normalised in both directions" do
+      assert SymbolFormat.to_canonical_symbol("btcusd") == "BTC-USD"
+      assert SymbolFormat.to_exchange_symbol("btc-usd") == "BTCUSD"
+    end
+
+    # A symbol that is not a pair comes back as it was and is never decorated, so a ticker
+    # or a bare quote is not turned into a pair nobody listed.
+    test "a symbol with no base, or no quote, is not split or decorated" do
+      assert SymbolFormat.to_canonical_symbol("AAPL") == "AAPL"
+      assert SymbolFormat.to_canonical_symbol("USD") == "USD"
+      assert SymbolFormat.to_exchange_symbol("AAPL") == "AAPL"
+      assert SymbolFormat.to_exchange_symbol("-USD") == "-USD"
+    end
+
+    # The hazard `Rest` guards by splitting only crypto pairs: this module cuts at ANY
+    # trailing quote, so an equity ticker ending in one is a pair to it. Pinned so nobody
+    # routes a stock ticker through it believing it is safe.
+    test "an equity ticker ending in a quote currency IS split, which is why Rest never asks" do
+      assert SymbolFormat.to_canonical_symbol("GBTC") == "G-BTC"
+    end
+
+    test "a non-binary is refused rather than converted" do
+      assert_raise FunctionClauseError, fn -> SymbolFormat.to_canonical_symbol(nil) end
+      assert_raise FunctionClauseError, fn -> SymbolFormat.to_exchange_symbol(:btc_usd) end
+    end
   end
 end

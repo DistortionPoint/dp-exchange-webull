@@ -404,6 +404,12 @@ defmodule DpExchange.Webull.TickALTest do
       for {from, to} <- [limit: :market, stop: :market, stop_limit: :limit] do
         result = futures_replace(Rest, from, to)
         refute match?({:error, {:unsupported_order_type_change, _from, _to}}, result)
+        # Not refused locally means a request actually went out; a different local refusal
+        # would also pass the refute above.
+        assert hits() >= 1, "#{from} to #{to} never reached the venue"
+
+        fake = futures_replace(Fake, from, to)
+        refute match?({:error, {:unsupported_order_type_change, _from, _to}}, fake)
       end
     end
 
@@ -417,6 +423,7 @@ defmodule DpExchange.Webull.TickALTest do
         )
 
       refute match?({:error, {:unsupported_order_type_change, _from, _to}}, result)
+      assert hits() >= 1
     end
   end
 

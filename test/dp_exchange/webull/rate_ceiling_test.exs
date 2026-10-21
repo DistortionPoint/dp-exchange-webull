@@ -54,6 +54,16 @@ defmodule DpExchange.Webull.RateCeilingTest do
       assert global == %{limit: 300, per_ms: 60_000, burst: 10}
     end
 
+    test "production's per-endpoint bucket IS the declared ceiling, not a second copy of it" do
+      # The describe title says "derives from that declaration"; without this, editing one
+      # number and not the other would pass every other test in the file.
+      caps = DpExchange.Webull.capabilities()
+      %{default: endpoint} = WebullSupervisor.limits(environment: :production)
+
+      assert endpoint.limit == caps.public_ceiling.limit
+      assert endpoint.per_ms == caps.public_ceiling.per_ms
+    end
+
     test "the two environments do not share a figure" do
       # The Supervisor already gives production and UAT separately *named* limiters so one
       # cannot spend the other's budget. Handing both the same LIMITS would leave that

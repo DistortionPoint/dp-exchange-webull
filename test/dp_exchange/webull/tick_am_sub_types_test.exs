@@ -209,6 +209,9 @@ defmodule DpExchange.Webull.TickAmSubTypesTest do
       {:ok, transactions} = Fake.get_transactions(@credentials, opts)
       {:ok, transfers} = Fake.get_transfers(@credentials, opts)
 
+      # A comprehension over no rows asserts nothing: both must hold rows to be judged.
+      assert transactions != [] and transfers != []
+
       for row <- transactions ++ transfers, field <- @required ++ @required_amounts do
         assert is_binary(row[field]), "#{inspect(row["id"])} lacks #{field}"
       end

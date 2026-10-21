@@ -203,7 +203,7 @@ defmodule DpExchange.Webull.TickAaRestBTest do
       assert {:ok, _chain} =
                chain([contract()], strike: 100, plug: capturing([contract()], self()))
 
-      assert_receive {:request, _path, query}
+      assert_receive {:request, _path, query}, 5_000
       params = URI.decode_query(query)
       assert params["strike_price_gte"] == "100"
       assert params["strike_price_lte"] == "100"
@@ -274,7 +274,7 @@ defmodule DpExchange.Webull.TickAaRestBTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, _path, query}
+      assert_receive {:request, _path, query}, 5_000
       assert URI.decode_query(query)["sort_by"] == "100"
     end
 
@@ -289,7 +289,7 @@ defmodule DpExchange.Webull.TickAaRestBTest do
                  retry_attempts: 0
                )
 
-      assert_receive {:request, _path, query}
+      assert_receive {:request, _path, query}, 5_000
       assert URI.decode_query(query)["sort_by"] == "1.5"
     end
   end

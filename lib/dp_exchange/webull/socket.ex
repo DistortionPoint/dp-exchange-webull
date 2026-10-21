@@ -104,8 +104,22 @@ defmodule DpExchange.Webull.Socket do
   A `snapshot`, `quote` or `tick` that cannot be turned into a `Quote`, `TopOfBook` or
   `Trade`, a topic it does not decode, and a packet type it does not handle each raise a
   `:data_quality` notice, once per reason per connection and for at most 64 distinct
-  reasons. The reason never carries the venue's offending value (that is in `details`), so
-  the set of reasons already reported cannot grow with what the venue sends.
+  reasons. `details.reason` is always an atom. The key that decides "already reported"
+  carries no offending number (a `{:invalid_decimal, :price}` names the field, and the value
+  is in `details`), but two keys do carry text or a code the venue chose: the topic name of
+  an unrecognised topic and the type of an unhandled packet. Those are bounded by the same 64
+  distinct reasons, so the set of reasons already reported cannot grow with what the venue
+  sends.
+
+  ## One `:link_down` notice per outage
+
+  `handle_disconnect/2` runs once for the drop of a live link and again for every reconnect
+  that fails afterwards. Only the first sends the `:link_down` notice (`state.link_down_sent?`);
+  the flag is cleared when a CONNACK 0 brings the link back up. Each failed retry is still
+  visible as a `link_reconnect_attempt` telemetry event with the delay actually waited. A
+  CONNACK the venue refused with a code this package does not name is a `:link_down` notice of
+  its own, because it is the venue's answer rather than a transport drop. The `[:dp_exchange,
+  :link, :down]` telemetry event is separate: it is emitted only to close a `link_up`.
 
   ## What it does not do
 
@@ -113,7 +127,7 @@ defmodule DpExchange.Webull.Socket do
   with the same `session_id` this connection registered as its MQTT client id. The socket's
   only job is to connect, stay connected, and turn payloads into `Core.Types.Quote` (the
   `snapshot` topic), `Core.Types.TopOfBook` (the `quote` topic) or `Core.Types.Trade` (the
-  `tick` topic) — see `emit/3` below.
+  `tick` topic), and to report the `notice` topic as a `Core.Notice`.
 
   ## `tick` carries no trade id, and `Trade.id` is `nil` rather than invented
 
@@ -252,7 +266,7 @@ defmodule DpExchange.Webull.Socket do
   # does not help: the raise happens while computing the argument to `min/2`. So the
   # function written to survive a reconnect storm crashed during a long one, at roughly
   # attempt 1025, which at the 30-second cap is about 8.5 hours of continuous failure. That
-  # is an ordinary overnight outage or an access token nobody has refreshed yet, and the
+  # is an ordinary overnight outage or an App Key the venue has revoked, and the
   # crash lands inside `handle_disconnect/2` where it reads as this socket's fault rather
   # than the venue's.
   #
@@ -293,6 +307,32 @@ defmodule DpExchange.Webull.Socket do
   def jittered_delay_ms(delay_ms) when is_integer(delay_ms),
     do: delay_ms - :rand.uniform(div(delay_ms, 4))
 
+  @doc """
+  Opens the WebSocket and links the socket process to the caller. Internal: `Feed` is the
+  only caller, and nothing here is reachable from the facade.
+
+  Required options, each read with `Keyword.fetch!/2` (a missing one raises `KeyError`, it is
+  not an error tuple):
+
+    * `:url` - the broker URL. `wss://` with a host, or `ws://` to a loopback host only; see
+      `secure_url?/1`.
+    * `:subscriber` - the pid that receives `{:dp_exchange, :webull, payload_or_notice}`.
+    * `:session_id` - the MQTT client id, the same value the HTTP subscribe names.
+    * `:app_key` - the App Key, sent as the CONNECT user name. Held wrapped, never bare.
+
+  Optional options, forwarded to `connection_opts/1`: `:socket_connect_timeout` (default
+  #{@socket_connect_timeout_ms} ms), `:socket_recv_timeout` (default
+  #{@socket_recv_timeout_ms} ms) and `:ssl_options`. The two timeouts must be positive
+  integers; `Feed` checks that where the tree starts, and this function does not. The whole
+  opening handshake ends at their sum. Any other key is ignored here; `Feed` builds this list
+  itself from the keys it forwards.
+
+  Returns `{:ok, pid}` once the WebSocket upgrade succeeded. That is the transport, not the
+  link: the CONNACK arrives later and is reported as `:link_up`. Returns
+  `{:error, {:insecure_url, :webull}}` for a URL `secure_url?/1` refuses (the URL is not
+  echoed, as it can carry userinfo), or `{:error, reason}` with the transport's own error
+  struct (for example `%WebSockex.ConnError{}`) when the upgrade fails or misses its deadline.
+  """
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) do
     url = Keyword.fetch!(opts, :url)
@@ -347,6 +387,8 @@ defmodule DpExchange.Webull.Socket do
       # moduledoc's "QoS 2 is delivered once".
       qos2_pending: MapSet.new(),
       connected?: false,
+      # Whether this outage's `:link_down` notice has gone out; see `handle_disconnect/2`.
+      link_down_sent?: false,
       # Monotonic ms of the last CONNACK 0, for `stable_session?/1`.
       connected_at: nil,
       ping: nil,
@@ -363,6 +405,15 @@ defmodule DpExchange.Webull.Socket do
 
   Exposed so the deliberate timeouts can be asserted without opening a real socket — a
   later refactor must not be able to drop them back to the dependency's defaults unnoticed.
+
+  Only `:socket_connect_timeout`, `:socket_recv_timeout` and `:ssl_options` are read from
+  `opts`; every other key is dropped. The timeouts default to
+  #{@socket_connect_timeout_ms} ms and #{@socket_recv_timeout_ms} ms and are passed through
+  unchecked (`Feed` validates them). `:ssl_options` is always present in the result and always
+  verifies the peer: a keyword list is merged over `verify: :verify_peer`, the operating
+  system's CA certificates and the HTTPS hostname rule, so only an explicit `:verify` of the
+  caller's changes that. `nil`, an empty list or a value that is not a keyword list means "none
+  given" and yields the verified defaults, never an unverified connection.
   """
   @spec connection_opts(keyword()) :: keyword()
   def connection_opts(opts) do
@@ -425,13 +476,19 @@ defmodule DpExchange.Webull.Socket do
   crash the shutdown asking for this. `{:error, reason}` says so; there is nothing a
   caller mid-shutdown can usefully do with it beyond logging, which `Feed` does.
 
+  The errors are `{:error, :calling_self}` for the calling process's own pid,
+  `{:error, :not_alive}` for a process that has gone, `{:error, {kind, reason}}` for anything
+  the send raised, exited or threw (a send that times out is `{:error, {:exit, reason}}`), and
+  whatever error tuple the transport returns (for example a `%WebSockex.NotConnectedError{}`
+  while the socket is reconnecting).
+
   The `pid == self()` guard exists because this runs from inside `Feed`'s own
   `terminate/2`: a call this deep can legitimately end up with `pid` being the calling
   process itself only through a test fixture, never in production (a shard's socket is
-  always a distinct `Socket.start_link/1` process) — but `WebSockex.send_frame/3` answers
-  that specific case by *raising* `WebSockex.CallingSelfError` rather than returning an
-  error, which the `catch` below alone would not stop. Checked first so this function's
-  own "never raises" holds regardless.
+  always a distinct `Socket.start_link/1` process). `WebSockex.send_frame/3` answers that
+  case by *raising* `WebSockex.CallingSelfError`, which the `catch` below would also turn
+  into an error tuple, but a wrapped exception `{:error, {:error, %CallingSelfError{}}}`
+  is not a reason a caller can match on. Checked first, it is the stable `:calling_self`.
   """
   @spec disconnect(pid(), timeout()) :: :ok | {:error, term()}
   def disconnect(pid, timeout \\ @disconnect_timeout_ms)
@@ -478,16 +535,23 @@ defmodule DpExchange.Webull.Socket do
   def handle_disconnect(%{reason: reason} = status, state) do
     # session_id rides along so a Feed managing several shards' sockets can tell which
     # one just dropped — the message alone carries no sender identity otherwise.
-    notify(
-      state,
-      Notice.new(:link_down, :webull,
-        details: %{
-          reason: :disconnected,
-          message: bound_text(inspect(reason)),
-          session_id: state.session_id
-        }
+    #
+    # **One notice per outage, not one per retry.** This callback runs again for every
+    # reconnect that fails, so a venue that stayed down sent a `:link_down` every attempt, up to
+    # one per 30s per shard, none of them news. Only the first of an outage is sent;
+    # `link_down_sent?` is cleared at CONNACK 0, so the next outage reports again.
+    if not Map.get(state, :link_down_sent?, false) do
+      notify(
+        state,
+        Notice.new(:link_down, :webull,
+          details: %{
+            reason: :disconnected,
+            message: bound_text(inspect(reason)),
+            session_id: state.session_id
+          }
+        )
       )
-    )
+    end
 
     # Only for a link that WAS up. `connected?` is set at CONNACK 0 (where `link_up` is
     # emitted) and cleared below, so a failed reconnect that never reached CONNACK 0 emits no
@@ -558,6 +622,7 @@ defmodule DpExchange.Webull.Socket do
        connected?: false,
        connected_at: nil,
        ping: nil,
+       link_down_sent?: true,
        unconnected_sessions: unconnected
      })}
   end
@@ -752,7 +817,12 @@ defmodule DpExchange.Webull.Socket do
     # is a condition a consumer must ACT on, telemetry is aggregate and lossy by design.
     Telemetry.link_up(:webull)
     # A new connection gets its own drop reports: see `report_drop/3`.
-    Map.merge(state, %{connected?: true, connected_at: now_ms(), drops_reported: MapSet.new()})
+    Map.merge(state, %{
+      connected?: true,
+      connected_at: now_ms(),
+      drops_reported: MapSet.new(),
+      link_down_sent?: false
+    })
   end
 
   # The venue's connection error codes mean genuinely different things, and two of them
@@ -1397,7 +1467,7 @@ defmodule DpExchange.Webull.Socket do
 
   # For the types whose contract makes the venue's time OPTIONAL.
   #
-  # `emit_top_of_book/2` and `emit_decoded/2` used to gate on `venue_time/1` and emit nothing
+  # `emit_top_of_book/4` and the snapshot path used to gate on `venue_time/1` and emit nothing
   # when it failed, under "on a stream, refusing to substitute means dropping the frame
   # rather than stamping it with our own clock". Refusing to substitute is right, and that
   # was not it: writing our own clock into `venue_time` would be the substitution, and

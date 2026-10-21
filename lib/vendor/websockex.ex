@@ -129,8 +129,8 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
 
   Every function body and every `@spec` is copied verbatim from
   `deps/websockex/lib/websockex.ex` at 0.5.1 — `diff` against that file to see the fix's
-  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, and the handshake
-  deadline. A handful of doc comments were additionally edited, never behaviour: the two
+  true size: two clauses, the `spawn_process/5`/`do_spawn/2` glue, the handshake deadline
+  and the frame-size bound. A handful of doc comments were additionally edited, never behaviour: the two
   self-referential examples in this moduledoc's closing section (`use WebSockex` → `use
   DpExchange.Webull.Vendor.WebSockex`), the two `@doc` headers for `start/4` and
   `start_link/4`, and a few backtick spans de-linked to plain text where this package's
@@ -184,7 +184,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   this exact defect, drop this vendor module, restore `use WebSockex` /
   `WebSockex.start_link` / `WebSockex.send_frame` in `DpExchange.Webull.Socket`, and
   relax `mix.exs`'s pin back to `~>`. Until then, every future upstream release should be
-  diffed here for anything beyond this file's own three marked changes.
+  diffed here for anything beyond this file's own four marked changes.
 
   ---
 
@@ -578,7 +578,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   def start(conn_info, module, state, opts \\ [])
 
   def start(%WebSockex.Conn{} = conn, module, state, opts) do
-    # ## VENDORED FIX (2 of 3) — `spawn_process/5` below, not `Utils.spawn/5`. See the
+    # ## VENDORED FIX (2 of 4) — `spawn_process/5` below, not `Utils.spawn/5`. See the
     # moduledoc's "What stayed a dependency, and why".
     spawn_process(:no_link, conn, module, state, opts)
   end
@@ -610,7 +610,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
   def start_link(conn_info, module, state, opts \\ [])
 
   def start_link(conn = %WebSockex.Conn{}, module, state, opts) do
-    # ## VENDORED FIX (2 of 3) — see the moduledoc's "What stayed a dependency, and why".
+    # ## VENDORED FIX (2 of 4) — see the moduledoc's "What stayed a dependency, and why".
     spawn_process(:link, conn, module, state, opts)
   end
 
@@ -625,7 +625,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
     end
   end
 
-  # ## VENDORED FIX (2 of 3) — inlined from the real `WebSockex.Utils.spawn/5` and
+  # ## VENDORED FIX (2 of 4) — inlined from the real `WebSockex.Utils.spawn/5` and
   # `WebSockex.Utils`'s private `do_spawn/2`, changed in exactly one place: the
   # `:proc_lib` entry module is `__MODULE__` here, not the literal atom `WebSockex` those
   # functions hardcode. See the moduledoc's "What stayed a dependency, and why" — this is
@@ -876,7 +876,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
         new_state = Map.drop(state, [:task, :handshake_deadline])
         {:error, reason, new_state}
     after
-      # ## VENDORED FIX (3 of 3) — upstream 0.5.1's `receive` has no `after`, and nothing
+      # ## VENDORED FIX (3 of 4) — upstream 0.5.1's `receive` has no `after`, and nothing
       # below it has an overall deadline either. `WebSockex.Conn`'s `wait_for_response/2`
       # reads the upgrade response with `socket_recv_timeout` per `recv`, and every chunk
       # restarts it. So a peer that trickles the response, never finishing its headers,
@@ -921,7 +921,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
 
         handle_frame(frame, parent, debug, %{state | buffer: buffer})
 
-      # ## VENDORED FIX (1 of 3) — dp-exchange-core issue #27. Upstream 0.5.1 has no
+      # ## VENDORED FIX (1 of 4) — dp-exchange-core issue #27. Upstream 0.5.1 has no
       # clause for this even though `WebSockex.Frame.parse_frame/1`'s own `@spec` names
       # it as a real return value; an unguarded `case` here means a peer sending a
       # frame `WebSockex.Frame` correctly rejects (Webull's malformed close frame,
@@ -1400,7 +1400,7 @@ defmodule DpExchange.Webull.Vendor.WebSockex do
     my_pid = self()
     debug = Utils.sys_debug(debug, :connect, state)
 
-    # ## VENDORED FIX (3 of 3) — the handshake has a deadline. See `open_loop/3`.
+    # ## VENDORED FIX (3 of 4) — the handshake has a deadline. See `open_loop/3`.
     deadline =
       System.monotonic_time(:millisecond) + conn.socket_connect_timeout +
         conn.socket_recv_timeout

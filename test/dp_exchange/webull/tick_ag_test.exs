@@ -23,7 +23,7 @@ defmodule DpExchange.Webull.TickAGTest do
       # The venue keeps sending for a moment after an unsubscribe.
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
       assert Feed.coverage(feed) == %{}
-      refute_receive {:dp_exchange, :webull, %Quote{}}
+      refute_receive {:dp_exchange, :webull, %Quote{}}, 500
 
       assert :ok = Feed.subscribe(feed, ["BTC-USD"], opts)
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
@@ -53,7 +53,7 @@ defmodule DpExchange.Webull.TickAGTest do
       _settled = Feed.coverage(feed)
 
       assert_received {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
-      refute_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}
+      refute_receive {:dp_exchange, :webull, %Quote{symbol: "BTC-USD"}}, 500
     end
   end
 

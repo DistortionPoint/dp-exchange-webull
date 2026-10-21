@@ -459,6 +459,13 @@ defmodule DpExchange.Webull.TradingConventionsTest do
       for number <- [Decimal.new("1.5"), 2, "0.25"] do
         assert :ok == Rest.validate_order_request(equity(%{quantity: number, price: number}))
       end
+
+      # The other half of the title: a float is refused, naming the field, never rounded in.
+      assert {:error, {:invalid_quantity, 1.5}} =
+               Rest.validate_order_request(equity(%{quantity: 1.5}))
+
+      assert {:error, {:invalid_price, 10.5}} =
+               Rest.validate_order_request(equity(%{price: 10.5}))
     end
 
     test "no order type and no duration is inferred, for every instrument" do
@@ -696,7 +703,9 @@ defmodule DpExchange.Webull.TradingConventionsTest do
         responding(%{"msg" => "down"}, 503).(conn)
       end
 
-      assert {:error, _reason} =
+      # A cancel is never an order_unconfirmed (it carries no order to place twice): the
+      # venue's 5xx is Core's plain, retryable exchange_error naming the status.
+      assert {:error, {:exchange_error, :webull, "Server error (503)" <> _rest}} =
                Rest.cancel_order(@credentials, "abc",
                  account_id: @account,
                  plug: plug,

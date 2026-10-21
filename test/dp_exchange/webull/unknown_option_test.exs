@@ -252,6 +252,9 @@ defmodule DpExchange.Webull.UnknownOptionTest do
         assert result == {:error, {:invalid_options, [:oops]}},
                "#{name} answered #{inspect(result)} for a non-keyword opts"
       end
+
+      # Still queued: nothing above reached `FakeInjection`.
+      assert Fake.get_symbols(credentials: @credentials) == @injected
     end
   end
 
