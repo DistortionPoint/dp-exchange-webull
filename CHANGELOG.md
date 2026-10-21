@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.169] - 2026-10-21
+
 ### Changed (tick AR)
 
 - **`DpExchange.Webull.Fake` no longer exports short arities the facade does not have** (29
