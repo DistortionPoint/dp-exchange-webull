@@ -107,6 +107,10 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     |> Jason.decode!()
   end
 
+  # An instant from epoch milliseconds. Times are compared with `DateTime.compare/2`, never
+  # `==`: two `DateTime`s for one instant differ in precision and are not `==`.
+  defp ms(epoch_ms), do: DateTime.from_unix!(epoch_ms, :millisecond)
+
   @example_bar_time ~U[2021-12-28 09:00:09.945Z]
   @aligned_bar_time ~U[2021-12-28 09:00:00.000Z]
 
@@ -227,7 +231,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(quote.price, Decimal.new("100.5"))
       # No crypto volume anywhere on this venue — nil, never zero.
       assert quote.volume == nil
-      assert quote.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+      assert DateTime.compare(quote.venue_time, ms(1_640_688_000_000)) == :eq
 
       assert_receive {:request, "GET", "/market-data/crypto/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -254,7 +258,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert quote.symbol == "AAPL"
       assert Decimal.equal?(quote.price, Decimal.new("100"))
       assert Decimal.equal?(quote.volume, Decimal.new("1000"))
-      assert quote.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+      assert DateTime.compare(quote.venue_time, ms(1_640_688_000_000)) == :eq
 
       assert_receive {:request, "GET", "/market-data/stocks/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -281,7 +285,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(quote.price, Decimal.new("47.35"))
       assert Decimal.equal?(quote.volume, Decimal.new("48906"))
       assert quote.volume_window == :running_total
-      assert quote.venue_time == DateTime.from_unix!(1_761_131_406_558, :millisecond)
+      assert DateTime.compare(quote.venue_time, ms(1_761_131_406_558)) == :eq
 
       assert_receive {:request, "GET", "/market-data/options/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -307,7 +311,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(quote.price, Decimal.new("47.35"))
       assert Decimal.equal?(quote.volume, Decimal.new("48906"))
       assert quote.volume_window == :running_total
-      assert quote.venue_time == DateTime.from_unix!(1_761_131_406_558, :millisecond)
+      assert DateTime.compare(quote.venue_time, ms(1_761_131_406_558)) == :eq
 
       assert_receive {:request, "GET", "/market-data/futures/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -332,7 +336,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert quote.symbol == "KXCPI-26JAN-T0.3"
       assert Decimal.equal?(quote.price, Decimal.new("0.13"))
       assert Decimal.equal?(quote.volume, Decimal.new("32"))
-      assert quote.venue_time == DateTime.from_unix!(1_768_861_137_000, :millisecond)
+      assert DateTime.compare(quote.venue_time, ms(1_768_861_137_000)) == :eq
 
       assert_receive {:request, "GET", "/market-data/event-contracts/snapshots/list", query, _raw}
       decoded = URI.decode_query(query)
@@ -385,7 +389,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert {:ok, %Types.Quote{} = btc_quote} = results["BTC-USD"]
       assert Decimal.equal?(btc_quote.price, Decimal.new("100.5"))
       assert btc_quote.volume == nil
-      assert btc_quote.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+      assert DateTime.compare(btc_quote.venue_time, ms(1_640_688_000_000)) == :eq
 
       assert {:ok, %Types.Quote{} = eth_quote} = results["ETH-USD"]
       assert Decimal.equal?(eth_quote.price, Decimal.new("2000.25"))
@@ -413,7 +417,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(book.ask_size, Decimal.new("1387.5"))
       # Dated by the QUOTE (`quote_time`, a string of milliseconds here), not by the last
       # trade (`last_trade_time`, 1640688000000 in the same row).
-      assert book.venue_time == DateTime.from_unix!(1_761_131_401_742, :millisecond)
+      assert DateTime.compare(book.venue_time, ms(1_761_131_401_742)) == :eq
     end
 
     test "the stock snapshot's bid/ask carry through the same way" do
@@ -619,7 +623,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
 
       assert bar.symbol == "BTC-USD"
       assert bar.timeframe == "1m"
-      assert bar.opened_at == @aligned_bar_time
+      assert DateTime.compare(bar.opened_at, @aligned_bar_time) == :eq
       assert Decimal.equal?(bar.open, Decimal.new("150.25"))
       assert Decimal.equal?(bar.high, Decimal.new("153.15"))
       assert Decimal.equal?(bar.low, Decimal.new("149.8"))
@@ -675,7 +679,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == @aligned_bar_time
+      assert DateTime.compare(bar.opened_at, @aligned_bar_time) == :eq
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.high, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.low, Decimal.new("1.3362"))
@@ -725,7 +729,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == @aligned_bar_time
+      assert DateTime.compare(bar.opened_at, @aligned_bar_time) == :eq
       assert Decimal.equal?(bar.open, Decimal.new("0.05"))
       assert Decimal.equal?(bar.high, Decimal.new("0.05"))
       assert Decimal.equal?(bar.low, Decimal.new("0.05"))
@@ -777,7 +781,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == @aligned_bar_time
+      assert DateTime.compare(bar.opened_at, @aligned_bar_time) == :eq
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.close, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.volume, Decimal.new("10"))
@@ -864,7 +868,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # futures schema's own field examples here, and this fixture is quoted verbatim
       # rather than "corrected" to a more plausible stock symbol.
       assert bar.symbol == "AAPL"
-      assert bar.opened_at == @aligned_bar_time
+      assert DateTime.compare(bar.opened_at, @aligned_bar_time) == :eq
       assert Decimal.equal?(bar.open, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.high, Decimal.new("1.3362"))
       assert Decimal.equal?(bar.low, Decimal.new("1.3362"))
@@ -973,7 +977,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(ask_size, Decimal.new("5"))
 
       # quotes.md's `quote_time` example is "1640688000000", a millisecond epoch string.
-      assert book.venue_time == DateTime.from_unix!(1_640_688_000_000, :millisecond)
+      assert DateTime.compare(book.venue_time, ms(1_640_688_000_000)) == :eq
       assert book.provider == :webull
     end
   end
@@ -1014,7 +1018,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(ask_size, Decimal.new("10"))
 
       # futures-depth-of-book.md's `quote_time` example is an integer millisecond epoch.
-      assert book.venue_time == DateTime.from_unix!(1_761_131_409_276, :millisecond)
+      assert DateTime.compare(book.venue_time, ms(1_761_131_409_276)) == :eq
     end
   end
 
@@ -1060,7 +1064,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       # footprint.md's `time` example is an ISO-8601-ish string, "+0000" (no colon), not
       # an epoch. `DateTime.from_iso8601/1` on this project's toolchain accepts that
       # offset form.
-      assert profile.opened_at == ~U[2025-09-30 05:47:00.000Z]
+      assert DateTime.compare(profile.opened_at, ~U[2025-09-30 05:47:00.000Z]) == :eq
     end
   end
 
@@ -1097,7 +1101,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(imbalance.reference_price, Decimal.new("253.83"))
       assert Decimal.equal?(imbalance.near_price, Decimal.new("253.93"))
       assert Decimal.equal?(imbalance.far_price, Decimal.new("253.98"))
-      assert imbalance.venue_time == DateTime.from_unix!(1_774_272_599_000, :millisecond)
+      assert DateTime.compare(imbalance.venue_time, ms(1_774_272_599_000)) == :eq
       assert imbalance.provider == :webull
     end
 
@@ -1161,7 +1165,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(bar.reference_price, Decimal.new("172.35"))
       assert Decimal.equal?(bar.near_price, Decimal.new("173.1"))
       assert Decimal.equal?(bar.far_price, Decimal.new("175.5"))
-      assert bar.venue_time == DateTime.from_unix!(1_711_262_998_500, :millisecond)
+      assert DateTime.compare(bar.venue_time, ms(1_711_262_998_500)) == :eq
     end
   end
 
@@ -1196,7 +1200,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert trade.side == nil
       assert trade.broken == false
       assert trade.provider == :webull
-      assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
+      assert DateTime.compare(trade.timestamp, ms(1_761_182_953_043)) == :eq
     end
 
     # `tick.md` describes `side` as "Such as: B S G L N" and defines none of them - not whose
@@ -1257,7 +1261,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
       assert trade.side == nil
-      assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
+      assert DateTime.compare(trade.timestamp, ms(1_761_182_953_043)) == :eq
     end
   end
 
@@ -1291,7 +1295,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert Decimal.equal?(trade.price, Decimal.new("48.07"))
       assert Decimal.equal?(trade.quantity, Decimal.new("1"))
       assert trade.side == nil
-      assert trade.timestamp == DateTime.from_unix!(1_761_182_953_043, :millisecond)
+      assert DateTime.compare(trade.timestamp, ms(1_761_182_953_043)) == :eq
     end
   end
 
@@ -3196,7 +3200,8 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert filing.url ==
                "https://www.sec.gov/Archives/edgar/data/0000320193/000032019325000071/aapl-20250731.htm"
 
-      assert filing.filed_at == DateTime.new!(~D[2025-07-31], ~T[00:00:00], "Etc/UTC")
+      filed = DateTime.new!(~D[2025-07-31], ~T[00:00:00], "Etc/UTC")
+      assert DateTime.compare(filing.filed_at, filed) == :eq
     end
   end
 
@@ -3216,7 +3221,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
       assert item.id == "20261008-001"
       assert item.headline == "NVIDIA Announces New AI Chip"
       assert item.source == "Reuters"
-      assert item.published_at == ~U[2026-10-08 13:30:00.000Z]
+      assert DateTime.compare(item.published_at, ~U[2026-10-08 13:30:00.000Z]) == :eq
       assert item.symbols == ["TSLA", "NVDA", "AMD"]
 
       assert_receive {:request, "GET", "/market-data/news/stock-news/list", _query, _raw}

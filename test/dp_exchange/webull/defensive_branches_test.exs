@@ -250,7 +250,8 @@ defmodule DpExchange.Webull.DefensiveBranchesTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == DateTime.from_unix!(1_787_935_680_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_935_680_000, :millisecond)
+      assert DateTime.compare(bar.opened_at, expected) == :eq
     end
 
     test "a limit is passed to the venue rather than applied here" do

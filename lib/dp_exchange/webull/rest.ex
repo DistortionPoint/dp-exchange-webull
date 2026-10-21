@@ -1405,7 +1405,13 @@ defmodule DpExchange.Webull.Rest do
   # way. The category picks; the default is crypto, which is what this package listed before
   # its asset classes widened.
   @doc """
-  Rounds a price and quantity to what the venue will actually accept.
+  The increments and limits the venue publishes for one symbol. **It rounds nothing**: the
+  caller sizes and prices an order from these, and this package refuses (rather than trims) a
+  quantity finer than the venue documents. See `place_order/3`.
+
+  An increment or limit the venue sent and this package cannot read (text, `NaN`, a negative,
+  or an increment of zero) is an error (`{:invalid_decimal, field, raw}` /
+  `{:non_positive_size, field, raw}`), never a `nil`: `nil` means the row publishes none.
 
   Reads the same `instruments/.../profiles/list` endpoint `get_symbols/2` already calls —
   filtered to one symbol — rather than a separate lookup. **Crypto and stock instruments
@@ -1420,6 +1426,10 @@ defmodule DpExchange.Webull.Rest do
   A stock/ETF symbol therefore answers with `quantity_increment` alone and every other
   field `nil` — not a guess at what the venue does not name, and not the crypto shape
   reused because it was already written.
+
+  **Unless the row says `fractionable: true`**, in which case `quantity_increment` is `nil` as
+  well: the page's `lot_size` is not the step of a fractional order, and reporting it would
+  claim whole shares on an instrument that sells fractions.
 
   Category is read from the symbol's own shape (a canonical pair has a dash; a ticker does
   not) rather than asked for, because `quantization/1`'s contract takes only a symbol.
@@ -1441,33 +1451,90 @@ defmodule DpExchange.Webull.Rest do
          params = %{"category" => category, "symbols" => native},
          {:ok, body} <- get_symbol(path, params, credentials, opts),
          {:ok, row} <- symbol_row(body, native) do
-      {:ok, quantum_from_row(row, category)}
+      quantum_from_row(row, category)
     end
   end
 
+  # **A figure the venue sent and this package cannot read refuses the answer; it is never
+  # `nil`.** `nil` here means "the venue publishes none" (the stock row has no price step), and
+  # an increment or limit that WAS sent as `"abc"`, `"NaN"` or `"-1"` used to read as exactly
+  # that. These are the numbers a caller sizes and prices an order from, so "the venue states no
+  # step" and "the venue stated one we could not read" must not look alike. An increment must
+  # be above zero (a step of `0` divides by nothing); a limit may not be negative.
   defp quantum_from_row(row, "US_CRYPTO") do
-    %{
-      price_increment: decimal(value(row, ["price_step"])),
-      quantity_increment: decimal(value(row, ["lot_size"])),
-      min_quantity: decimal(value(row, ["min_trade_qty"])),
-      max_quantity: decimal(value(row, ["max_trade_qty"])),
-      min_quote_size: decimal(value(row, ["min_trade_amt"])),
-      max_quote_size: decimal(value(row, ["max_trade_amt"])),
-      status: value(row, ["status"])
-    }
+    with {:ok, price_increment} <- increment(row, "price_step", :price_step),
+         {:ok, quantity_increment} <- increment(row, "lot_size", :lot_size),
+         {:ok, min_quantity} <- limit(row, "min_trade_qty", :min_trade_qty),
+         {:ok, max_quantity} <- limit(row, "max_trade_qty", :max_trade_qty),
+         {:ok, min_quote_size} <- limit(row, "min_trade_amt", :min_trade_amt),
+         {:ok, max_quote_size} <- limit(row, "max_trade_amt", :max_trade_amt) do
+      {:ok,
+       %{
+         price_increment: price_increment,
+         quantity_increment: quantity_increment,
+         min_quantity: min_quantity,
+         max_quantity: max_quantity,
+         min_quote_size: min_quote_size,
+         max_quote_size: max_quote_size,
+         status: value(row, ["status"])
+       }}
+    end
   end
 
+  # **A fractionable stock has no quantity increment this package can state.**
+  # `instrument-list.md` gives a stock row `lot_size` ("Lot size") and `fractionable`
+  # ("Instrument is fractionable or not") and says nothing of the step a fractional order may
+  # take. A fractionable row that reports `lot_size: "1.0"` would, taken as the
+  # `quantity_increment`, claim whole shares only on an instrument that sells fractions: a
+  # plausible number with the wrong meaning. It is `nil` ("not published"), and a
+  # non-fractionable row (or one that does not say) keeps its `lot_size`. The `lot_size`
+  # itself is still read and judged, so an unreadable one refuses.
   defp quantum_from_row(row, _stock_or_etf) do
-    %{
-      price_increment: nil,
-      quantity_increment: decimal(value(row, ["lot_size"])),
-      min_quantity: nil,
-      max_quantity: nil,
-      min_quote_size: nil,
-      max_quote_size: nil,
-      status: value(row, ["status"])
-    }
+    with {:ok, lot_size} <- increment(row, "lot_size", :lot_size) do
+      quantity_increment = if value(row, ["fractionable"]) == true, do: nil, else: lot_size
+
+      {:ok,
+       %{
+         price_increment: nil,
+         quantity_increment: quantity_increment,
+         min_quantity: nil,
+         max_quantity: nil,
+         min_quote_size: nil,
+         max_quote_size: nil,
+         status: value(row, ["status"])
+       }}
+    end
   end
+
+  defp increment(row, key, field) do
+    raw = value(row, [key])
+
+    with {:ok, step} <- optional_decimal(raw, field) do
+      positive_step(step, field, raw)
+    end
+  end
+
+  defp limit(row, key, field) do
+    raw = value(row, [key])
+
+    with {:ok, bound} <- optional_decimal(raw, field) do
+      non_negative_bound(bound, field, raw)
+    end
+  end
+
+  defp positive_step(nil, _field, _raw), do: {:ok, nil}
+
+  defp positive_step(step, field, raw) do
+    if Decimal.positive?(step), do: {:ok, step}, else: bad_size(field, raw)
+  end
+
+  defp non_negative_bound(nil, _field, _raw), do: {:ok, nil}
+
+  defp non_negative_bound(bound, field, raw) do
+    if Decimal.negative?(bound), do: bad_size(field, raw), else: {:ok, bound}
+  end
+
+  defp bad_size(field, raw), do: {:error, {:non_positive_size, field, raw}}
 
   defp instruments_path("US_CRYPTO"), do: {:ok, "/trading/instruments/crypto/profiles/list"}
 
@@ -2492,7 +2559,10 @@ defmodule DpExchange.Webull.Rest do
          {:ok, order_type} <- replace_option(opts, :order_type),
          :ok <- previewable(instrument),
          {:ok, _allowed} <- allowed_combinations(instrument),
-         :ok <- amendable(order_type, changes) do
+         :ok <- amendable(order_type, changes),
+         # An amended size is judged as a placed one is (an event contract takes at most two
+         # decimal places); a change that names no quantity has nothing to judge.
+         :ok <- quantity_precision(Map.get(changes, :quantity), "QTY", instrument) do
       futures_type_change(instrument, order_type, changes)
     end
   end
@@ -4780,6 +4850,10 @@ defmodule DpExchange.Webull.Rest do
   # A venue that has already worded the period ("FY2026") sent a label, and a label is what
   # this field wants. A numeric string is the legend's code in another type and goes through
   # the legend: passed on as it was, "0" would have been published as a period label.
+  # Longer than any label or code is no label: `nil`, and not `Integer.parse/1` over text of
+  # whatever size the body held. The raw value is still in `line_items`.
+  defp fiscal_period_label(period) when is_binary(period) and byte_size(period) > 32, do: nil
+
   defp fiscal_period_label(period) when is_binary(period) do
     case Integer.parse(period) do
       {code, ""} -> fiscal_period_label(code)
@@ -6213,12 +6287,26 @@ defmodule DpExchange.Webull.Rest do
     end
   end
 
+  # **A time written in more than 64 bytes is no time of this venue.** The longest thing read
+  # here is an ISO 8601 stamp with an offset (about 35 characters) or an epoch of thirteen
+  # digits, and `Integer.parse/1` builds an integer as large as the text it is handed - from a
+  # body of any size the HTTP client allows, in the caller's process. Refused before the parse,
+  # as `Socket` refuses an over-long stream timestamp. The refusal carries a bounded copy of the
+  # text, not the megabyte. **Chosen, not measured**: the venue documents no time width.
+  @max_time_chars 64
+
+  defp unreadable_time(text),
+    do: {:error, {:unparseable_venue_timestamp, text |> binary_part(0, 32) |> :binary.copy()}}
+
   # A time the page states in milliseconds, read as milliseconds and nothing else: a number at
   # or below 100_000_000_000 (1973 as milliseconds, so a seconds-sized value) or past thirteen
   # digits is `:invalid_unix_time`, never reinterpreted in another unit. A number written as
   # text is read the same way; anything that is not a number (an ISO 8601 string) is read as
   # written by `parse_time/1`.
   defp parse_time_ms(value) when is_integer(value), do: strict_epoch_ms(value)
+
+  defp parse_time_ms(value) when is_binary(value) and byte_size(value) > @max_time_chars,
+    do: unreadable_time(value)
 
   defp parse_time_ms(value) when is_binary(value) do
     case Integer.parse(value) do
@@ -6235,6 +6323,9 @@ defmodule DpExchange.Webull.Rest do
   defp strict_epoch_ms(_not_a_millisecond_time), do: {:error, :invalid_unix_time}
 
   defp parse_time(value) when is_integer(value), do: from_epoch(value)
+
+  defp parse_time(value) when is_binary(value) and byte_size(value) > @max_time_chars,
+    do: unreadable_time(value)
 
   defp parse_time(value) when is_binary(value) do
     case Integer.parse(value) do
@@ -6666,12 +6757,17 @@ defmodule DpExchange.Webull.Rest do
   defp invalid_number_tag(:stop_price), do: :invalid_stop_price
   defp invalid_number_tag(:trailing_stop_step), do: :invalid_trailing_stop_step
 
+  # The family's 34-digit rule: a coefficient below 10^34. Zero is one digit. Applied to every
+  # number read from the venue (`decimal/1`) and to the numbers an order carries, so a size or
+  # price this package would refuse to read back is not sent either.
+  @digit_limit 10 ** 34
+
   defp positive_number?(%Decimal{} = value) do
-    not (Decimal.nan?(value) or Decimal.inf?(value) or absurd_exponent?(value)) and
+    not (Decimal.nan?(value) or Decimal.inf?(value) or unreadable_magnitude?(value)) and
       Decimal.gt?(value, 0)
   end
 
-  defp positive_number?(value) when is_integer(value), do: value > 0
+  defp positive_number?(value) when is_integer(value), do: value > 0 and value < @digit_limit
 
   defp positive_number?(value) when is_binary(value) do
     case decimal(value) do
@@ -6682,10 +6778,16 @@ defmodule DpExchange.Webull.Rest do
 
   defp positive_number?(_not_a_number), do: false
 
+  # **Every number read from the venue, in whatever JSON type it arrived, passes one bound.**
+  # A coefficient of 35 digits or more is no price, size or rate on this venue (the family's
+  # 34-digit rule, Decimal128's width) and is unreadable exactly as `NaN` is: `nil`. The string
+  # clause had an exponent and a text bound but no digit bound, and the integer, float and
+  # `Decimal` clauses had no bound at all, so a 40-digit JSON integer was a price.
+  # `unreadable_magnitude?/1` is the one place the exponent and the digits are judged.
   defp decimal(nil), do: nil
-  defp decimal(%Decimal{} = value), do: value
-  defp decimal(value) when is_integer(value), do: Decimal.new(value)
-  defp decimal(value) when is_float(value), do: Decimal.from_float(value)
+  defp decimal(%Decimal{} = value), do: readable(value)
+  defp decimal(value) when is_integer(value), do: value |> Decimal.new() |> readable()
+  defp decimal(value) when is_float(value), do: value |> Decimal.from_float() |> readable()
 
   # **A number written in more than 1,024 characters is no price, size or rate on this venue.**
   # `absurd_exponent?/1` bounds the EXPONENT but not the coefficient: `"1"` followed by two
@@ -6710,9 +6812,7 @@ defmodule DpExchange.Webull.Rest do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or absurd_exponent?(parsed),
-          do: nil,
-          else: parsed
+        readable(parsed)
 
       _unparsable ->
         nil
@@ -6720,6 +6820,15 @@ defmodule DpExchange.Webull.Rest do
   end
 
   defp decimal(_other), do: nil
+
+  defp readable(%Decimal{} = value) do
+    if Decimal.nan?(value) or Decimal.inf?(value) or unreadable_magnitude?(value),
+      do: nil,
+      else: value
+  end
+
+  defp unreadable_magnitude?(%Decimal{coef: coef} = value),
+    do: absurd_exponent?(value) or coef >= @digit_limit
 
   # `"1E999999999"` parses, and is a finite `Decimal` whose exponent is a nine-digit number.
   # The first `Decimal.add/2`, `compare/2` or `to_string(:normal)` over it aligns coefficients
@@ -6839,6 +6948,17 @@ defmodule DpExchange.Webull.Rest do
   `{:invalid_trailing_stop_step, v}`); `:client_order_id`
   (`{:invalid_client_order_id, v}`, 32 characters at most); then the account option
   (`{:missing_option, :account_id}`) and the credentials.
+
+  ## A quantity finer than the venue's documented places is refused, never rounded
+
+  `common-order-place.md`: a crypto quantity has "up to 8 decimal places" and an event
+  contract's "0-2 decimal places". A `QTY` order with more places (counted on the digits that
+  go on the wire, so `"1.50000000000"` is eleven) is `{:error, {:invalid_quantity, value}}`
+  before anything is signed. Nothing is trimmed or rounded for the caller, in either
+  direction: a size rounded up spends what the account does not hold. Stock quantities may be
+  fractional and the page states no places for them, so none are judged; whether a given
+  stock is fractionable, and its price tick, are the venue's to answer (`quantization/3`
+  reports the increments it publishes, and this package applies none of them for you).
   """
   @spec place_order(map(), term(), keyword()) ::
           {:ok, Order.t()} | {:error, term()} | {:refused, term()}
@@ -7454,6 +7574,7 @@ defmodule DpExchange.Webull.Rest do
 
     with :ok <- positive_numbers(request, [:quantity, :amount]),
          {:ok, entrust, sizing} <- entrust(request, order_type, instrument),
+         :ok <- quantity_precision(Map.get(request, :quantity), entrust, instrument),
          :ok <- event_amount_rules(entrust, instrument, request),
          :ok <- unexpected_price_fields(request, order_type),
          :ok <- required_order_prices(request, order_type),
@@ -7482,6 +7603,42 @@ defmodule DpExchange.Webull.Rest do
         |> put_present("support_trading_session", session)
 
       {:ok, leaf}
+    end
+  end
+
+  # **A quantity finer than the venue documents is refused, never rounded.**
+  # `common-order-place.md`'s `quantity`: "Crypto trading supports quantities with up to 8
+  # decimal places. Event contract trading accept 0-2 decimal places on input." A ninth place
+  # on a crypto order was sent as typed for the venue to refuse, or to truncate in a way the
+  # caller never saw, and a sell sized to a rounded-up quantity spends coins the caller does not
+  # hold. Judged on the digits that go on the wire (`wire_number/1`), so `"1.50000000000"` is
+  # eleven places and is refused rather than trimmed behind the caller's back. Stock quantities
+  # may be fractional "for US stocks" and the page gives no places for them, and the page's
+  # whole-contract wording is for the legs of a combo order, which this package does not send,
+  # so no other instrument is judged here. A cash `AMOUNT` is a different field and is not
+  # judged. The refusal is the family's `{:invalid_quantity, value}`.
+  @quantity_places %{crypto: 8, event: 2}
+
+  defp quantity_precision(quantity, "QTY", instrument) do
+    case Map.fetch(@quantity_places, instrument) do
+      {:ok, max_places} ->
+        if wire_places(quantity) <= max_places,
+          do: :ok,
+          else: {:error, {:invalid_quantity, quantity}}
+
+      :error ->
+        :ok
+    end
+  end
+
+  defp quantity_precision(_quantity, _entrust, _instrument), do: :ok
+
+  # The decimal places of a number as it is written on the wire. Only called with a quantity
+  # `positive_numbers/2` has already accepted.
+  defp wire_places(number) do
+    case number |> wire_number() |> String.split(".", parts: 2) do
+      [_whole, fraction] -> String.length(fraction)
+      [_whole] -> 0
     end
   end
 

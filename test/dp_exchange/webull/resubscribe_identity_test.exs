@@ -165,7 +165,7 @@ defmodule DpExchange.Webull.ResubscribeIdentityTest do
       assert [{^tag, %{pid: ^second}}] = Map.to_list(:sys.get_state(feed).reconciling),
              "one tag, one tracked attempt — and it is the successor, still running"
 
-      refute_received {:DOWN, ^second_ref, :process, ^second, _reason}
+      refute_receive {:DOWN, ^second_ref, :process, ^second, _reason}
       assert Process.alive?(second)
 
       assert Process.alive?(feed)

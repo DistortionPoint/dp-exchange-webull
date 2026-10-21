@@ -297,7 +297,8 @@ defmodule DpExchange.Webull.MicrostructureTest do
                  retry_attempts: 0
                )
 
-      assert imbalance.venue_time == DateTime.from_unix!(1_774_272_599_000, :millisecond)
+      stamped = DateTime.from_unix!(1_774_272_599_000, :millisecond)
+      assert DateTime.compare(imbalance.venue_time, stamped) == :eq
       assert imbalance.observed_at
       assert DateTime.compare(imbalance.observed_at, imbalance.venue_time) == :gt
     end

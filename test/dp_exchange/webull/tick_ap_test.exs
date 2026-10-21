@@ -94,7 +94,8 @@ defmodule DpExchange.Webull.TickAPTest do
     test "a millisecond time, as a number or as the string the page types it, is read as one" do
       for time <- [1_787_936_147_000, "1787936147000"] do
         assert {:ok, [trade]} = Rest.get_trades("AAPL", @credentials, answer(tape(time)))
-        assert trade.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+        expected = DateTime.from_unix!(1_787_936_147_000, :millisecond)
+        assert DateTime.compare(trade.timestamp, expected) == :eq
       end
     end
 

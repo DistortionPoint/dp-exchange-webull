@@ -118,7 +118,8 @@ defmodule DpExchange.Webull.OrderBookTest do
                  retry_attempts: 0
                )
 
-      assert book.venue_time == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      stamped = DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert DateTime.compare(book.venue_time, stamped) == :eq
     end
 
     test "bids come back highest first and asks lowest first, whatever the venue sent" do

@@ -309,7 +309,17 @@ defmodule DpExchange.Webull.Socket do
 
   @loopback_hosts ["127.0.0.1", "localhost", "::1"]
 
-  defp secure_url?(url) when is_binary(url) do
+  @doc """
+  Whether `url` is one this socket will dial: `wss://` with a host, or `ws://` to a loopback
+  host (the tier-1 test seam). Anything else - cleartext to a real host, another scheme, text
+  that is not a URL, a term that is not text - is `false`.
+
+  `start_link/1` asks it before connecting, and `DpExchange.Webull.Feed` asks it when the tree
+  starts, so a `:url` the socket would refuse fails at start and not at the first call that
+  opens a socket.
+  """
+  @spec secure_url?(term()) :: boolean()
+  def secure_url?(url) when is_binary(url) do
     case URI.parse(url) do
       %URI{scheme: "wss", host: host} when is_binary(host) and host != "" -> true
       %URI{scheme: "ws", host: host} when host in @loopback_hosts -> true
@@ -317,7 +327,7 @@ defmodule DpExchange.Webull.Socket do
     end
   end
 
-  defp secure_url?(_not_a_string), do: false
+  def secure_url?(_not_a_string), do: false
 
   defp start_socket(url, opts) do
     state = %{
@@ -1436,15 +1446,25 @@ defmodule DpExchange.Webull.Socket do
   defp decimal(value) when is_binary(value) do
     case Decimal.parse(value) do
       {parsed, ""} ->
-        # An exponent past +-1000 is no price on this venue; arithmetic over `1E999999999`
-        # allocates a gigabyte integer. Chosen, not measured. See `Rest`'s `decimal/1`.
-        if Decimal.nan?(parsed) or Decimal.inf?(parsed) or abs(parsed.exp) > 1_000,
-          do: nil,
-          else: parsed
+        readable(parsed)
 
       _unparsable ->
         nil
     end
+  end
+
+  # The family's 34-digit rule, as in `Rest`'s `decimal/1`: a coefficient of 35 digits or more
+  # is no price or size on this venue, unreadable exactly as `NaN` is.
+  @digit_limit 10 ** 34
+
+  # An exponent past +-1000 is no price on this venue either; arithmetic over `1E999999999`
+  # allocates a gigabyte integer. Chosen, not measured. See `Rest`'s `decimal/1`.
+  defp readable(parsed) do
+    unreadable? =
+      Decimal.nan?(parsed) or Decimal.inf?(parsed) or abs(parsed.exp) > 1_000 or
+        parsed.coef >= @digit_limit
+
+    if unreadable?, do: nil, else: parsed
   end
 
   # No clause for a value that is neither `nil` nor text: every caller passes a field read

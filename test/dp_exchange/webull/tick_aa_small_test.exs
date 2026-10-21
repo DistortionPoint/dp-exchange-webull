@@ -168,7 +168,7 @@ defmodule DpExchange.Webull.TickAASmallTest do
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("snapshot", payload)}, state())
 
       assert_receive {:dp_exchange, :webull, %Quote{} = quoted}, 5_000
-      assert quoted.venue_time == DateTime.from_unix!(1_787_936_147)
+      assert DateTime.compare(quoted.venue_time, DateTime.from_unix!(1_787_936_147)) == :eq
     end
   end
 

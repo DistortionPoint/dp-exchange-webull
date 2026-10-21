@@ -1478,7 +1478,21 @@ numeric text (a float is refused): otherwise `{:error, {:invalid_quantity, v}}` 
 `{:invalid_amount, v}` / `{:invalid_price, v}` / `{:invalid_stop_price, v}` /
 `{:invalid_trailing_stop_step, v}` (it was `{:invalid_number, field, v}`), by index inside a
 batch. They go out as the venue's strings in full notation (`"0.00000001"`, never `"1.0e-8"`
-and never a JSON number). `replace_order/4` holds its `changes` to the same rule, treats a
+and never a JSON number). **A quantity finer than the venue documents is refused, never
+rounded:** a `QTY` crypto order takes at most 8 decimal places and an event contract at most 2
+(`common-order-place.md`), counted on the digits that go on the wire, so `"1.50000000000"` is
+eleven. It is `{:error, {:invalid_quantity, v}}` before anything is signed, in `Fake` and in
+`replace_order/4` too. Stock quantities may be fractional and the page states no places, so
+none are judged; whether a stock is fractionable and its price tick are the venue's to answer.
+`quantization/2` reports the increments the venue publishes and rounds nothing: one it sent
+that cannot be read (text, `NaN`, a negative, an increment of zero) is `{:error,
+{:invalid_decimal, field, raw}}` / `{:error, {:non_positive_size, field, raw}}`, never a `nil`
+(which means the row publishes none). A stock row with `fractionable: true` reports
+`quantity_increment: nil`: the page's `lot_size` is not the step of a fractional order, and
+`1.0` would claim whole shares only. **A number with 35 or more digits is unreadable**, like
+`NaN`, whatever JSON type the venue sent it in (string, integer or float; the family's 34-digit
+rule), on REST and on the stream, and an order's quantity or price that long is refused as
+`{:invalid_quantity, v}` / `{:invalid_price, v}`. `replace_order/4` holds its `changes` to the same rule, treats a
 present `nil` as `place_order/3` judges it (`%{price: nil}` is `{:invalid_price, nil}`; an empty
 map is `{:invalid_order_request, %{}}`), and refuses an
 `:order_type` or `:time_in_force` it has no wire name for
@@ -1637,8 +1651,11 @@ HTTP and signing failures of the subscribe itself keep their ordinary shapes
 **Symbols are released when the last data subscriber dies.** A subscriber that dies is
 dropped (it is monitored, and so is a `subscribe_notices/1` receiver). When the death empties
 the set of data subscribers, the feed releases every wanted symbol through the same path
-`unsubscribe/2` takes: the venue subscription is removed and no socket is held for nobody
-(`wanted/1` and `coverage/1` become empty). A restarted consumer calls `subscribe/2` again
+`unsubscribe/2` takes: the venue subscription is removed (`wanted/1` and `coverage/1` become
+empty). The sockets are not closed at once: an emptied shard keeps its connection for
+`:idle_shard_ms` (ten minutes by default) so a consumer that replaces its universe reuses it,
+and the resubscribe tick then closes it, so a feed with nothing to stream does not hold the
+App Key's five connections for the life of the node. A restarted consumer calls `subscribe/2` again
 with its new pid. A notice-only receiver's death releases nothing. A registered name is never
 monitored and stays in the set, so it keeps the symbols: the holder of the name may die and
 be restarted under it. Subscribing twice from one pid is one subscriber, and delivers once.
@@ -1662,9 +1679,31 @@ Passed in the options of `{DpExchange.Webull, opts}`. Every one is optional.
 | `:reconcile_timeout_ms` | 60_000 | Deadline of one HTTP subscribe. |
 | `:rejected_symbol_ttl_ms` | 24 hours | How long a venue-refused symbol is excluded. |
 | `:open_retry_base_ms`, `:open_retry_max_ms` | 1_000, 60_000 | Backoff of a shard that failed to open. |
-| `:shard_spacing_ms` | 5_000 | Gap between background socket opens. |
+| `:shard_spacing_ms` | 5_000 | Gap between background socket opens (0 or more). |
+| `:idle_shard_ms` | 600_000 | How long a shard that carries no symbol keeps its socket before the resubscribe tick closes it. |
 | `:socket_connect_timeout`, `:socket_recv_timeout` | 3_000, 2_000 | TCP connect and upgrade budget per socket. |
+| `:ssl_options` | verified TLS | Your own TLS options for the socket, merged over the verified defaults (see above). |
 | `:url` | the venue's endpoint | Socket URL; `ws://` is refused except to a loopback host. |
+
+A timing or count option that is not an integer of at least 1 (0 or more for
+`:shard_spacing_ms`), a socket budget that is not a positive integer, and a `:url` the socket
+would refuse each raise `ArgumentError` when the feed starts, naming the option (a `:url` is
+never echoed, as it can carry credentials). They used to be accepted and fail inside the first
+call that used them, which restarted the feed for every consumer. A rejected symbol is
+remembered only while it is wanted: `unsubscribe/2` and `update_symbols/2` forget the refusals
+of what they stop wanting.
+
+A tree with no `:name` has the child id `DpExchange.Webull` in production and
+`DpExchange.Webull.Uat` in the sandbox, so both can be children of one supervisor.
+
+**An option the tree does not read is refused when it starts.** `start_link/1` (and so the
+child) answers `{:error, {:unknown_option, key}}` for a key outside the table above and the
+tree's own keys (`:name`, `:feed`, `:limiter`, `:ledger`, `:environment`, `:plug`,
+`:rate_limit_blocking`, `:shards`, `:shard_capacity`), and `{:error, {:invalid_options, opts}}`
+for options that are not a keyword list, with `:credentials` redacted. A per-call key such as
+`:retry_attempts` is not a start option and is refused too. `Fake.start_link/1` refuses the same
+keys before answering `:ignore`. Before, a misspelt `resubscribe_interval:` started the tree
+with the default and said nothing.
 
 ### Options some reads require
 

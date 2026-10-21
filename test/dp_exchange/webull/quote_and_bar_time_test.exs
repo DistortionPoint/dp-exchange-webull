@@ -63,7 +63,7 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
                  retry_attempts: 0
                )
 
-      assert top.venue_time == DateTime.from_unix!(@quote_ms, :millisecond)
+      assert DateTime.compare(top.venue_time, DateTime.from_unix!(@quote_ms, :millisecond)) == :eq
     end
 
     test "a row with only last_trade_time, as the stock snapshot has, is undated: nil" do
@@ -188,7 +188,8 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
                  retry_attempts: 0
                )
 
-      assert quote_struct.venue_time == DateTime.from_unix!(@last_trade_ms, :millisecond)
+      traded = DateTime.from_unix!(@last_trade_ms, :millisecond)
+      assert DateTime.compare(quote_struct.venue_time, traded) == :eq
     end
   end
 
@@ -219,7 +220,7 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
         assert {:ok, [done]} =
                  Rest.get_historical_prices("AAPL", unquote(timeframe), [], @credentials, opts)
 
-        assert done.opened_at == DateTime.from_unix!(old_ms, :millisecond)
+        assert DateTime.compare(done.opened_at, DateTime.from_unix!(old_ms, :millisecond)) == :eq
 
         # A caller who asks for the forming bar keeps it.
         assert {:ok, [_done, forming]} =
@@ -231,7 +232,8 @@ defmodule DpExchange.Webull.QuoteAndBarTimeTest do
                    [include_partial: true] ++ opts
                  )
 
-        assert forming.opened_at == DateTime.from_unix!(forming_ms, :millisecond)
+        forming_at = DateTime.from_unix!(forming_ms, :millisecond)
+        assert DateTime.compare(forming.opened_at, forming_at) == :eq
       end
     end
 

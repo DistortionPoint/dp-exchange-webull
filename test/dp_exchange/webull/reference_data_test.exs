@@ -420,7 +420,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert item.summary == "NVIDIA unveiled its next-generation AI chip at GTC."
       assert item.source == "Reuters"
       assert item.url == "https://www.example.com/news/nvidia-ai-chip"
-      assert item.published_at == ~U[2026-10-08 13:30:00.000Z]
+      assert DateTime.compare(item.published_at, ~U[2026-10-08 13:30:00.000Z]) == :eq
       assert item.symbols == ["TSLA", "NVDA", "AMD"]
       assert item.provider == :webull
     end
@@ -1111,7 +1111,7 @@ defmodule DpExchange.Webull.ReferenceDataTest do
       assert {:ok, [filing]} =
                Rest.get_filings("AAPL", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert filing.filed_at == ~U[2026-08-31 00:00:00Z]
+      assert DateTime.compare(filing.filed_at, ~U[2026-08-31 00:00:00Z]) == :eq
     end
 
     test "a single symbol reaches get_news/2 as a one-element list" do

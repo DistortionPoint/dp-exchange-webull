@@ -633,7 +633,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       # Until the attempt has finished, not for a guessed interval: a blocking attempt
       # would send its request after the ~300ms wait and BEFORE `reconciling` empties.
       await_idle(feed)
-      refute_received {:request, ["BTCUSD"]}
+      refute_receive {:request, ["BTCUSD"]}
 
       # The attempt WAS made and was refused by our own limiter: without this the refute above
       # also passes when no re-assert was ever started, which would prove nothing about
@@ -680,7 +680,7 @@ defmodule DpExchange.Webull.ResubscribeTimerTest do
       _settled = Feed.coverage(feed)
 
       await_idle(feed)
-      refute_received {:request, ["BTCUSD"]}
+      refute_receive {:request, ["BTCUSD"]}
 
       # The attempt WAS made and was refused by our own limiter: without this the refute above
       # also passes when no re-assert was ever started, which would prove nothing about

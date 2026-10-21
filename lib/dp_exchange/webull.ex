@@ -210,7 +210,12 @@ defmodule DpExchange.Webull do
   appear in a crash report.
 
   Supervise it as `{DpExchange.Webull, opts}`; nothing starts until you do. The child is a
-  `:supervisor` and `opts[:name]` becomes its id. See `c:DpExchange.Core.Venue.child_spec/1`.
+  `:supervisor`. Its id is `opts[:name]`, else `DpExchange.Webull` in production and
+  `DpExchange.Webull.Uat` in the sandbox, so a production tree and a sandbox tree can be
+  children of one supervisor without a `:name`. An `:environment` that is neither raises
+  `ArgumentError` here. The other options are checked when the tree starts, not here: an
+  unknown key is `{:error, {:unknown_option, key}}` from `start_link/1`, which the parent
+  reports as the child failing to start. See `c:DpExchange.Core.Venue.child_spec/1`.
   """
   @impl true
   def child_spec(opts) do
@@ -231,14 +236,38 @@ defmodule DpExchange.Webull do
     # its own terms. Found by a cross-package audit comparing `child_spec/1` across all
     # five venues; `dp_exchange_schwab` was the only one that already declared this.
     %{
-      id: Keyword.get(opts, :name, __MODULE__),
+      id: child_id(opts),
       start: {__MODULE__, :start_link, [opts]},
       type: :supervisor
     }
   end
 
+  # **Two trees of one venue need two ids, and `name:` alone is not the only way to get two.**
+  # The id was `opts[:name]` or this module, so `{DpExchange.Webull, environment: :uat}` beside
+  # `{DpExchange.Webull, []}` (production and the sandbox side by side, which the supervisor
+  # derives distinct names for) gave a parent supervisor two children with one id, and it refused
+  # to start the second. A tree with no `:name` takes its id from its environment, the way its
+  # registered names do: production keeps `DpExchange.Webull` (so an existing
+  # `terminate_child/2` still finds it) and the sandbox is `DpExchange.Webull.Uat`. An
+  # environment that is not one of the two raises here, at the call that builds the spec, and
+  # not when the tree is started.
+  defp child_id(opts) do
+    case Keyword.get(opts, :name) do
+      nil -> environment_id(Environment.resolve(opts))
+      name -> name
+    end
+  end
+
+  defp environment_id(:production), do: __MODULE__
+  defp environment_id(:uat), do: DpExchange.Webull.Uat
+
   @doc """
   Starts this venue's supervision tree (`DpExchange.Webull.Supervisor.start_link/1`).
+
+  A key nothing reads is `{:error, {:unknown_option, key}}`, and options that are not a keyword
+  list are `{:error, {:invalid_options, opts}}` (credentials redacted), before anything starts;
+  `DpExchange.Webull.Options.check_start/1` holds the table. An invalid timing option or
+  `:url` raises `ArgumentError` from the feed's `init/1`.
 
   Prefer supervising `child_spec/1`. Calling this directly wraps the credentials too, but a
   child spec you build yourself does not. See `c:DpExchange.Core.Venue.start_link/1`.
@@ -1204,7 +1233,8 @@ defmodule DpExchange.Webull do
   def market_status(_opts), do: Venue.not_supported()
 
   @doc """
-  Rounds a price and quantity to what the venue will actually accept.
+  The price and quantity increments and limits the venue publishes for one symbol. It rounds
+  nothing, and an increment the venue sent that cannot be read is an error, not a `nil`.
 
   See `DpExchange.Webull.Rest.quantization/3` for the source and the crypto/stock field
   split. **This venue signs every request** (`credential_benefit: :required`), and

@@ -34,17 +34,25 @@ defmodule DpExchange.Webull.Supervisor do
   use Supervisor
 
   alias DpExchange.Core.DefaultRateLimiter
-  alias DpExchange.Webull.{Environment, Feed, Ledger}
+  alias DpExchange.Webull.{Credentials, Environment, Feed, Ledger, Options}
 
-  @spec start_link(keyword()) :: Supervisor.on_start()
+  @doc """
+  Starts the tree. The options are checked first (`DpExchange.Webull.Options.check_start/1`):
+  a key nothing reads is `{:error, {:unknown_option, key}}`, and options that are not a keyword
+  list are `{:error, {:invalid_options, opts}}`, with credentials redacted, before anything is
+  started.
+  """
+  @spec start_link(term()) :: Supervisor.on_start() | {:error, term()}
   def start_link(opts) do
-    # Wrapped here as well as in `DpExchange.Webull.child_spec/1`: a caller that reaches
-    # `start_link/1` directly (the documented route for a delivery target other than the
-    # supervisor) used to leave the raw map in the init argument and in the Feed child
-    # spec's start arguments, both of which OTP prints in a crash or supervisor report.
-    # Idempotent - `Credentials.wrap/1` passes a wrapped struct through.
-    opts = DpExchange.Webull.Credentials.wrap_opt(opts)
-    Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    with :ok <- Options.check_start(opts) do
+      # Wrapped here as well as in `DpExchange.Webull.child_spec/1`: a caller that reaches
+      # `start_link/1` directly (the documented route for a delivery target other than the
+      # supervisor) used to leave the raw map in the init argument and in the Feed child
+      # spec's start arguments, both of which OTP prints in a crash or supervisor report.
+      # Idempotent - `Credentials.wrap/1` passes a wrapped struct through.
+      opts = Credentials.wrap_opt(opts)
+      Supervisor.start_link(__MODULE__, opts, name: supervisor_name(opts))
+    end
   end
 
   @impl true

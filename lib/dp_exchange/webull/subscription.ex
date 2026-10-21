@@ -340,8 +340,13 @@ defmodule DpExchange.Webull.Subscription do
   # `nil` when the shape changes, never a raise and never a guess, because the caller's
   # recovery (reopen the shard) does not depend on the id and must not be blocked by a
   # message this parser has not seen before.
+  #
+  # An id is at most 128 characters (the ones the venue issues are 32). A run longer than that
+  # is not an id: matched whole and copied, a megabyte of `A` after `session:` became the id of
+  # the error `Feed` logs and holds. The lookahead refuses a run that goes on past the bound,
+  # rather than reading its first 128 characters as though they were the id.
   defp session_id_from(%{"message" => message}) when is_binary(message) do
-    case Regex.run(~r/session:\s*([A-Za-z0-9_-]+)/, message) do
+    case Regex.run(~r/session:\s*([A-Za-z0-9_-]{1,128})(?![A-Za-z0-9_-])/, message) do
       # Copied: the capture is a view into the whole response body, and the id outlives it in
       # the `{:invalid_session, id}` error that `Feed` logs and holds.
       [_match, session_id] -> :binary.copy(session_id)
@@ -351,13 +356,19 @@ defmodule DpExchange.Webull.Subscription do
 
   defp session_id_from(_no_message), do: nil
 
+  # At most `@max_named_symbols` are read from one message. A request carries at most a shard's
+  # 100 symbols, so a message naming thousands is not answering this request, and each name goes
+  # into a notice, a log line and `Feed`'s state. **Chosen, not measured.**
+  @max_named_symbols 500
+
   defp invalid_symbols(%{"message" => message}) when is_binary(message) do
     case Regex.run(invalid_symbol_list_re(), message) do
       [_match, listed] ->
         case listed
              |> String.split(",")
              |> Enum.map(&String.trim/1)
-             |> Enum.reject(&(&1 == "")) do
+             |> Enum.reject(&(&1 == ""))
+             |> Enum.take(@max_named_symbols) do
           [] -> :error
           symbols -> {:ok, symbols}
         end

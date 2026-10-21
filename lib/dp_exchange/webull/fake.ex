@@ -153,9 +153,16 @@ defmodule DpExchange.Webull.Fake do
 
   @doc """
   Answers `:ignore`: the fake has no processes. See `c:DpExchange.Core.Venue.start_link/1`.
+
+  The options are refused as the real tree refuses them
+  (`DpExchange.Webull.Options.check_start/1`): `{:error, {:unknown_option, key}}`, or
+  `{:error, {:invalid_options, opts}}` for a non-keyword with credentials redacted, so a
+  mistyped start option fails against the fake too.
   """
   @impl true
-  def start_link(_opts), do: :ignore
+  def start_link(opts) do
+    with :ok <- Options.check_start(opts), do: :ignore
+  end
 
   @doc """
   The real adapter's name, `DpExchange.Webull.provider_name/0`.

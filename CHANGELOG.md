@@ -22,6 +22,113 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed (tick AQ)
+
+- **A caller told `:ok` could find the tree's Ledger not yet written.** The Feed answered a
+  subscribe, unsubscribe or update before writing the accepted change to its Ledger, so a
+  `Ledger.fetch/1` made straight after the reply could reach the Ledger first and read `:none`
+  (seen as an intermittent failure in `tick_ao_tree_test`). The change is now settled and
+  written before the caller is answered, on the reply path and on the connack-timeout path.
+- **A venue number of 35 or more digits was a price.** The family's 34-digit rule (tick AN)
+  bounded the text (1,024 characters) and the exponent, but not the coefficient, and the
+  integer, float and `Decimal` clauses of `Rest.decimal/1` had no bound at all. A coefficient
+  of 35 digits or more is now unreadable, exactly like `NaN`, on every path that turns venue
+  JSON into a `Decimal` (strings, integers, floats) in `Rest`, and on the stream in `Socket`.
+  An order's quantity or price that long is refused (`{:invalid_quantity, v}` and kin). 34
+  digits are accepted. Test: `tick_aq_test.exs`, "a venue number is bounded to 34 digits".
+
+- **Start options nothing reads were accepted.** `DpExchange.Webull.start_link/1`,
+  `Supervisor.start_link/1` and `Fake.start_link/1` now check the options against the keys the
+  tree, `Feed` and `Socket` read (`Options.check_start/1`): `{:error, {:unknown_option, key}}`,
+  or `{:error, {:invalid_options, opts}}` (credentials redacted) for a non-keyword, before
+  anything starts. A misspelt `resubscribe_interval:` used to start the tree on the default.
+  Test: `tick_aq_test.exs`, "a tree is started with options it reads".
+
+- **A fractionable stock reported a whole-share `quantity_increment`.** `lot_size` is not the
+  step of a fractional order (`instrument-list.md` states none), so a row with `fractionable:
+  true` now reports `quantity_increment: nil` ("not published"). Test: `tick_aq_test.exs`,
+  "a fractionable stock states no quantity increment".
+
+- **A quantity finer than the venue documents was sent as typed.** `common-order-place.md`
+  gives a crypto quantity "up to 8 decimal places" and an event contract "0-2". A `QTY` order
+  with more (counted on the digits that go on the wire, so `"1.50000000000"` is eleven) is now
+  `{:error, {:invalid_quantity, value}}` before anything is signed, in `place_order/3`,
+  `preview_order/3`, `replace_order/4` (an event amendment) and `Fake`. Nothing is rounded in
+  either direction. Stock quantities may be fractional and the page states no places, so none
+  are judged. Test: `tick_aq_test.exs`, "a quantity finer than the venue documents".
+
+- **`quantization/2` reported a figure it could not read as "the venue publishes none".** A
+  `price_step`, `lot_size` or limit that was sent as `"abc"`, `"NaN"` or `"Infinity"` came back
+  `nil`, the answer for a row that carries none, and a step of `0` or a negative limit was
+  returned as a number. They are now `{:error, {:invalid_decimal, field, raw}}` and
+  `{:error, {:non_positive_size, field, raw}}`; an absent field is still `nil`. The docs said it
+  "rounds" a price and quantity; it rounds nothing, and now says so. Test:
+  `tick_aq_test.exs`, "quantization reports what the venue sent, or refuses".
+
+- **Venue text was parsed or copied whole, whatever its size.** A bar, tick or snapshot time
+  written in thousands of digits went to `Integer.parse/1` (a bignum as large as the text), and
+  a `fiscal_period` the same. Over 64 bytes (32 for a fiscal period) a time is now
+  `{:error, {:unparseable_venue_timestamp, text}}` with a 32-byte copy of the text, a snapshot
+  time is `nil`, and a fiscal label is `nil`. An `INVALID_SESSION` message's session id is read
+  up to 128 characters (a longer run is `nil`, not its first 128), and an `INVALID_SYMBOL`
+  message is read for its first 500 names. Test: `tick_aq_test.exs`, "text from the venue is
+  bounded before it is parsed or copied".
+
+- **`:ssl_options` given to the tree was dropped.** `usage-rules.md` told a consumer to pass it,
+  `Socket.connection_opts/1` read it, and `Feed` never forwarded it to the socket, so the socket
+  always used the defaults. It is forwarded now and listed in the feed's option table. Test:
+  `tick_aq_test.exs`, ":ssl_options given to the tree reaches every socket it opens".
+
+- **Feed options that could not schedule a timer were accepted at start and failed inside a
+  call.** `:connack_timeout_ms`, `:reconcile_timeout_ms`, `:resubscribe_failure_limit`,
+  `:stale_delivery_ms`, `:rejected_symbol_ttl_ms`, `:open_retry_base_ms`, `:open_retry_max_ms`,
+  `:shard_spacing_ms`, `:socket_connect_timeout`, `:socket_recv_timeout` and a `:url` the socket
+  would refuse (cleartext to a real host, not a URL) are now judged in `init/1`, before anything is
+  started: `ArgumentError` naming the option (a URL is never echoed). Before, `"5"` or `-1`
+  crashed the one `Feed` process at its first `Process.send_after/3`, for every consumer, and
+  it restarted from the same options. `Socket.secure_url?/1` is public for the check. Test:
+  `tick_aq_test.exs`, "feed options are judged when the feed starts".
+
+- **A production tree and a sandbox tree had one child id.** `child_spec/1` took its id from
+  `:name`, else `DpExchange.Webull`, so `{DpExchange.Webull, []}` beside
+  `{DpExchange.Webull, environment: :uat}` (which the supervisor already names apart) gave a
+  parent two children with one id. A tree with no `:name` takes its id from its environment:
+  production keeps `DpExchange.Webull`, the sandbox is `DpExchange.Webull.Uat`. An unknown
+  environment raises where the spec is built. Test: `tick_aq_test.exs`, "two trees of one venue
+  have two child ids".
+
+- **`state.rejected` kept every symbol the venue ever named.** A refusal was recorded for
+  whatever the `INVALID_SYMBOL` message listed, wanted or not, and only an expiry removed it
+  (24 hours). It is recorded only for a symbol that is wanted (the notice still names them
+  all), and `unsubscribe/3`, `update_symbols/3`, a refused call's undo and the release when the
+  last data subscriber dies drop the entries of what they stop wanting. Test: `tick_aq_test.exs`,
+  "a refusal is remembered only while its symbol is wanted".
+
+- **An emptied shard held its socket for the life of the node.** `unsubscribe/2` of everything,
+  or the death of the last subscriber, left every shard standing with its socket open: one of the
+  App Key's five connections, pinging for nobody. The docs said "no socket is held for nobody".
+  The resubscribe tick now closes a shard that has carried no symbol, with nobody parked on it and
+  no request in flight, for `:idle_shard_ms` (default 600,000 ms; new option). A later subscribe
+  opens a fresh one. Test: `tick_aq_test.exs`, "a shard with nothing to carry does not hold its
+  socket for ever".
+
+### Tests (tick AQ)
+
+- **Times are compared as instants, and a negative is held for a full window.** Every
+  `venue_time`, `timestamp`, `opened_at`, `filed_at` and `published_at` assertion that used `==`
+  against a `DateTime` (about forty, across `spec_examples_test`, `socket_test`, `rest_test`,
+  `quote_and_bar_time_test` and eleven other files) is now `DateTime.compare/2 == :eq`: two
+  values for one instant differ in precision and are not `==`. Every `refute_received` (an
+  instantaneous look, which passes whether or not the guarded message was still on its way) is
+  now `refute_receive` on the suite's 500 ms window. No assertion was loosened.
+
+### Dependencies
+
+- `dp_exchange_core` floor raised to `~> 0.3.119` (tick AQ: value types refuse non-positive
+  prices and negative sizes, conformance groups 52 and 53, group 26 requires coverage to
+  empty after the last unsubscribe).
+
+
 ## [0.4.167] - 2026-10-20
 
 ### Dependencies

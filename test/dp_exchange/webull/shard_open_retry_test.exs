@@ -57,7 +57,7 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
       # the attempt has been handled before the refute runs: no wait window decides it.
       send(feed, {:reopen_shard, 0, ["BTCUSD"], unopenable_opts(), 2})
       _settled = Feed.coverage(feed)
-      refute_received {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
 
       assert Process.alive?(feed)
     end
@@ -93,7 +93,7 @@ defmodule DpExchange.Webull.ShardOpenRetryTest do
       # hand and handled before the refute runs, announces nothing and opens nothing.
       send(feed, {:reopen_shard, 0, ["BTCUSD"], unopenable_opts(), 3})
       _settled = Feed.coverage(feed)
-      refute_received {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :coverage_change}}
       assert :sys.get_state(feed).shards[0].session_id == "recovered"
     end
 

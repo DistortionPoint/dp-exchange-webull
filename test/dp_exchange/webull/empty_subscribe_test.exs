@@ -53,8 +53,9 @@ defmodule DpExchange.Webull.EmptySubscribeTest do
     assert state.shards == %{}
     assert state.wanted == MapSet.new()
 
-    # The call above is synchronous: a request or a shard would already have happened.
-    refute_received {:request, _path}
+    # The call above is synchronous, but a request could still be made by a task it left
+    # behind, so the negative is held for the suite's full window.
+    refute_receive {:request, _path}
   end
 
   test "the fake agrees: an empty subscribe delivers nothing and covers nothing" do

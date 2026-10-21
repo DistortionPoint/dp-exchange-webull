@@ -125,7 +125,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:caller_due, {self(), ref}})
       _settled = Feed.coverage(feed)
 
-      refute_received {^ref, _reply}
+      refute_receive {^ref, _reply}
       assert [{^bystander, []}] = :sys.get_state(feed).shards[3].reply_to
     end
 
@@ -141,7 +141,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:caller_due, {self(), ref}})
       _settled = Feed.coverage(feed)
 
-      refute_received {^ref, _reply}
+      refute_receive {^ref, _reply}
       assert Map.has_key?(:sys.get_state(feed).reconciling, {:background, 0})
     end
 
@@ -181,6 +181,9 @@ defmodule DpExchange.Webull.TickAaFeedTest do
     test "INVALID_SYMBOL is still recorded, because it is true whichever session carried it" do
       feed = start_feed(shards: %{0 => connected_shard("new")})
       :ok = Feed.subscribe_notices(feed, to: self())
+      # Wanted, as a symbol the venue refuses always is: a refusal for a symbol nobody wants
+      # is reported but not remembered (see `tick_aq_test.exs`).
+      want(feed, ["ZZZ-USD"])
 
       attempt = %{session_id: "old", added: ["ZZZ-USD"], removed: []}
       :sys.replace_state(feed, &put_in(&1.settled[{:background, 0}], attempt))
@@ -231,7 +234,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       send(feed, {:reconcile_done, {:background, 7}, {:error, {:invalid_session, "gone"}}})
       _settled = Feed.coverage(feed)
 
-      refute_received {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
       assert Map.keys(:sys.get_state(feed).shards) == [0]
     end
   end
@@ -287,7 +290,7 @@ defmodule DpExchange.Webull.TickAaFeedTest do
       state = :sys.get_state(feed)
       assert state.shards == %{}
       assert state.resubscribe_failed == %{3 => 1}
-      refute_received {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
     end
   end
 

@@ -150,6 +150,54 @@ defmodule DpExchange.Webull.Options do
     oauth_token: [:code, :refresh_token, :oauth_url]
   }
 
+  # Every key the tree reads when it starts: `Supervisor` (the names, the environment, the
+  # credentials), `Feed` (its timing and count settings, `Fanout`'s `:max_queue_len`, the
+  # priority set, the injected `:shards` and `:shard_capacity` the tests and the process probe
+  # use) and `Socket` (the URL, the two budgets, the TLS options). `:plug` and
+  # `:rate_limit_blocking` are the two transport keys the feed keeps for its replays; the other
+  # transport keys are per-call and were silently dropped here.
+  @start_keys [
+    :name,
+    :feed,
+    :limiter,
+    :ledger,
+    :environment,
+    :credentials,
+    :plug,
+    :rate_limit_blocking,
+    :max_queue_len,
+    :priority_symbols,
+    :resubscribe_interval_ms,
+    :resubscribe_failure_limit,
+    :stale_delivery_ms,
+    :connack_timeout_ms,
+    :reconcile_timeout_ms,
+    :rejected_symbol_ttl_ms,
+    :open_retry_base_ms,
+    :open_retry_max_ms,
+    :shard_spacing_ms,
+    :idle_shard_ms,
+    :socket_connect_timeout,
+    :socket_recv_timeout,
+    :ssl_options,
+    :url,
+    :shards,
+    :shard_capacity
+  ]
+
+  @doc """
+  Checks the options a tree is started with (`DpExchange.Webull.start_link/1`,
+  `DpExchange.Webull.Supervisor.start_link/1`, `DpExchange.Webull.Fake.start_link/1`) against
+  the keys a tree reads.
+
+  A key nothing reads is `{:error, {:unknown_option, key}}`, and options that are not a keyword
+  list are `{:error, {:invalid_options, opts}}` with a `:credentials` entry redacted. A misspelt
+  `resubscribe_interval:` used to start the tree with the default and say nothing.
+  """
+  @spec check_start(term()) ::
+          :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
+  def check_start(opts), do: CoreOptions.check(opts, @start_keys)
+
   @doc """
   The keys `function` reads beyond `DpExchange.Core.Options.transport_options/0`.
 

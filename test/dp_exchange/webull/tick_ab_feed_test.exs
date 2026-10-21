@@ -166,7 +166,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
       assert state.shards[0].session_id == "s0"
       assert state.shards[0].socket == socket
       assert Process.alive?(socket)
-      refute_received {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
     end
 
     test "answered after the shard reconnected, it does not tear the new connection down",
@@ -187,7 +187,7 @@ defmodule DpExchange.Webull.TickAbFeedTest do
       state = :sys.get_state(feed)
       assert state.shards[0].socket == socket
       assert Process.alive?(socket)
-      refute_received {:dp_exchange, :webull, %Notice{kind: :link_down}}
+      refute_receive {:dp_exchange, :webull, %Notice{kind: :link_down}}
       assert state.resubscribe_failed == %{}
     end
 

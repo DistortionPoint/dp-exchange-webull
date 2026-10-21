@@ -408,6 +408,23 @@ defmodule DpExchange.Webull.Feed do
   reduction — into whichever shard (in index order) still has room. `reshard_step/4`'s
   `touched` computation is what actually limits HTTP calls to changed shards; this is what
   makes that set small in the first place.
+
+  ## Options are judged when the feed starts
+
+  Every timing and count option (`@settings`), each socket budget and the socket `:url` is
+  checked in `init/1` before anything is started, and a bad one raises `ArgumentError` naming
+  it. They used to be accepted and fail inside the first call that used them (a
+  `Process.send_after/3` given text), which crashed this one process for every consumer and
+  restarted it from the same options. `:ssl_options` is forwarded to every socket.
+
+  ## A shard with nothing to carry is closed after `idle_shard_ms`
+
+  `unsubscribe/3`, `update_symbols/3` and the death of the last data subscriber empty a shard
+  and leave it standing. The resubscribe tick closes a shard that has carried nothing, with
+  nobody parked on it and no request in flight, for `idle_shard_ms` (see `close_idle_shards/1`),
+  so a feed with nothing to stream does not hold the App Key's five connections for the life
+  of the node. A later subscribe opens a fresh one. `state.rejected` is likewise kept only for
+  symbols still wanted.
   """
 
   use GenServer
@@ -534,6 +551,33 @@ defmodule DpExchange.Webull.Feed do
   # `opts[:rejected_symbol_ttl_ms]`.
   @rejected_symbol_ttl_ms 24 * 60 * 60 * 1000
 
+  # How long a shard may sit with nothing to carry before its socket is closed. **Chosen, not
+  # measured.** An unsubscribe of everything, or the death of the last subscriber, empties
+  # every shard's symbol list and leaves the shards, and their sockets, standing: each holds one
+  # of the five connections an App Key is allowed and pings every thirty seconds for nobody.
+  # Ten minutes is long enough that an unsubscribe followed by a subscribe (a consumer
+  # replacing its universe) reuses the sockets it already has, and short enough that a
+  # consumer who has stopped streaming does not hold the connection budget of a second tree
+  # on the same App Key (CONNACK 105) for the life of the node.
+  @idle_shard_ms 600_000
+
+  # Every timing and count option the feed reads, with its default and the smallest value it
+  # accepts. Checked together, before anything is started, by `validate_settings!/1`: a value
+  # that cannot schedule a timer (text, a float, zero, a negative) used to be accepted here and
+  # fail at the first `Process.send_after/3` that used it, in the middle of somebody's call,
+  # which crashed this one process for every consumer and restarted it from the same options.
+  @settings %{
+    connack_timeout_ms: {@connack_timeout_ms, 1},
+    reconcile_timeout_ms: {@reconcile_timeout_ms, 1},
+    resubscribe_failure_limit: {@resubscribe_failure_limit, 1},
+    stale_delivery_ms: {@stale_delivery_ms, 1},
+    rejected_symbol_ttl_ms: {@rejected_symbol_ttl_ms, 1},
+    open_retry_base_ms: {@open_retry_base_ms, 1},
+    open_retry_max_ms: {@open_retry_max_ms, 1},
+    shard_spacing_ms: {@shard_spacing_ms, 0},
+    idle_shard_ms: {@idle_shard_ms, 1}
+  }
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     # Wrapped (idempotently) before the options reach OTP: a crash report or a child spec
@@ -627,16 +671,21 @@ defmodule DpExchange.Webull.Feed do
 
   @impl true
   def init(opts) do
+    # Every option is judged BEFORE anything is started, so a refusal leaves no task
+    # supervisor and no timer behind. See `@settings`.
+    settings = validate_settings!(opts)
+    validate_socket_options!(opts)
+
+    resubscribe_interval_ms =
+      (Keyword.get(opts, :resubscribe_interval_ms) || @resubscribe_interval_ms)
+      |> validate_resubscribe_interval_ms!()
+
     # Every shard's socket links here (WebSockex's ordinary behaviour), and every
     # control-plane HTTP call now runs in a task this owns — trapping exits is what keeps
     # either kind of crash from taking the whole Feed (and every other shard) down with it.
     # See the moduledoc's "A shard's socket crash is contained to that shard".
     Process.flag(:trap_exit, true)
     {:ok, task_supervisor} = Task.Supervisor.start_link()
-
-    resubscribe_interval_ms =
-      (Keyword.get(opts, :resubscribe_interval_ms) || @resubscribe_interval_ms)
-      |> validate_resubscribe_interval_ms!()
 
     Process.send_after(self(), :resubscribe, resubscribe_interval_ms)
 
@@ -650,18 +699,22 @@ defmodule DpExchange.Webull.Feed do
        # `@call_timeout` and then exits it.
        reconciling: %{},
        # See `@connack_timeout_ms`. Overridable so a test proving it fires need not wait.
-       connack_timeout_ms: Keyword.get(opts, :connack_timeout_ms) || @connack_timeout_ms,
+       connack_timeout_ms: settings.connack_timeout_ms,
        # See `@reconcile_timeout_ms`. Overridable so a test proving the timeout fires need
        # not wait out the real one.
-       reconcile_timeout_ms: Keyword.get(opts, :reconcile_timeout_ms) || @reconcile_timeout_ms,
+       reconcile_timeout_ms: settings.reconcile_timeout_ms,
        # See `@resubscribe_failure_limit`. Overridable so a test proving the escalation fires
        # need not drive twelve real resubscribe ticks, and so an operator with a different
        # tolerance than the one incident behind that number can set their own.
-       resubscribe_failure_limit:
-         Keyword.get(opts, :resubscribe_failure_limit) || @resubscribe_failure_limit,
+       resubscribe_failure_limit: settings.resubscribe_failure_limit,
        # See `@stale_delivery_ms`. Overridable so a test proving the delivery gate need not
        # wait out five real minutes of silence.
-       stale_delivery_ms: Keyword.get(opts, :stale_delivery_ms) || @stale_delivery_ms,
+       stale_delivery_ms: settings.stale_delivery_ms,
+       # See `@idle_shard_ms`. `idle_since` is index => monotonic ms the shard was first
+       # seen carrying nothing, rebuilt on every tick from the shards that still are
+       # (`close_idle_shards/1`).
+       idle_shard_ms: settings.idle_shard_ms,
+       idle_since: %{},
        # See `@priority_shard`. Symbols to plan into one shard that keeps the stream.
        priority: priority_symbols(opts),
        resubscribe_interval_ms: resubscribe_interval_ms,
@@ -673,7 +726,11 @@ defmodule DpExchange.Webull.Feed do
            # deliberate defaults rather than inheriting websockex's, which do not fit
            # inside this module's own `@call_timeout` — see `Socket.connection_opts/1`.
            :socket_connect_timeout,
-           :socket_recv_timeout
+           :socket_recv_timeout,
+           # Documented in `usage-rules.md` as the way to pass your own TLS options, and read
+           # by `Socket.connection_opts/1` - but never taken from here, so an `:ssl_options`
+           # given to the tree was dropped and the socket always used the defaults.
+           :ssl_options
          ]),
        # Retained so a reconnect (or a rebalance) can replay a shard's subscription. The
        # venue restores nothing, and a replay needs credentials — so a consumer that
@@ -739,7 +796,7 @@ defmodule DpExchange.Webull.Feed do
        # venue-rejected symbol is excluded, timed, and reported". Never removed from
        # `state.wanted` itself; `active_rejections/1` is what makes the exclusion time-bound.
        rejected: %{},
-       rejected_symbol_ttl_ms: Config.opt(opts, :rejected_symbol_ttl_ms, @rejected_symbol_ttl_ms),
+       rejected_symbol_ttl_ms: settings.rejected_symbol_ttl_ms,
        # Shard indices currently latched into a generic blind-resubscribe failure — see the
        # moduledoc's "A generic resubscribe failure is reported too, latched per shard".
        # A top-level set rather than a field on each shard's own map: `isolate_crashed_shard/3`
@@ -785,11 +842,11 @@ defmodule DpExchange.Webull.Feed do
        reopen_timers: %{},
        # Overridable for the same reason every other cadence here is: a test proving the
        # retry actually recurs should not have to wait out a real second to see it.
-       open_retry_base_ms: Config.opt(opts, :open_retry_base_ms, @open_retry_base_ms),
-       open_retry_max_ms: Config.opt(opts, :open_retry_max_ms, @open_retry_max_ms),
+       open_retry_base_ms: settings.open_retry_base_ms,
+       open_retry_max_ms: settings.open_retry_max_ms,
        # See `@shard_spacing_ms`. Overridable so a test proving the stagger need not wait
        # out several real five-second gaps.
-       shard_spacing_ms: Config.opt(opts, :shard_spacing_ms, @shard_spacing_ms),
+       shard_spacing_ms: settings.shard_spacing_ms,
        # Monotonic ms of the last background (staggered) open; see `{:open_staggered, ...}`.
        last_background_open: nil,
        # The process that outlives this one and holds its durable intent (`Ledger`), or `nil`
@@ -1039,7 +1096,9 @@ defmodule DpExchange.Webull.Feed do
       state
       | wanted: wanted,
         delivering: Map.drop(state.delivering, symbols),
-        delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, symbols)
+        delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, symbols),
+        # A refusal is remembered only for what is still wanted.
+        rejected: Map.drop(state.rejected, symbols)
     }
 
     reshard(state, opts, from)
@@ -1064,6 +1123,7 @@ defmodule DpExchange.Webull.Feed do
       | wanted: wanted,
         delivering: Map.take(state.delivering, symbols),
         delivering_by_kind: take_symbols_by_kind(state.delivering_by_kind, symbols),
+        rejected: Map.take(state.rejected, symbols),
         resubscribe_opts: replay
     }
 
@@ -1501,7 +1561,9 @@ defmodule DpExchange.Webull.Feed do
 
     # After the re-plan above, which is what returns an expired symbol to a shard. The entry
     # itself is dead weight from the moment it expires; see `prune_rejections/1`.
-    {:noreply, prune_rejections(state)}
+    #
+    # Last, so a shard the re-plan above just gave something to is not judged idle.
+    {:noreply, state |> prune_rejections() |> close_idle_shards()}
   end
 
   # A shard's socket links here (`Socket.start_link/1` -> `WebSockex.start_link/4`), and
@@ -1788,6 +1850,47 @@ defmodule DpExchange.Webull.Feed do
             "problem rather than a safety net."
   end
 
+  # Every entry of `@settings`, read from `opts` (`nil` is absent) and judged. See there.
+  defp validate_settings!(opts) do
+    Map.new(@settings, fn {key, {default, smallest}} ->
+      {key, integer_setting!(Config.opt(opts, key, default), key, smallest)}
+    end)
+  end
+
+  defp integer_setting!(value, _key, smallest) when is_integer(value) and value >= smallest,
+    do: value
+
+  defp integer_setting!(value, key, smallest) do
+    raise ArgumentError,
+          "DpExchange.Webull.Feed #{inspect(key)} must be an integer of at least #{smallest}, " <>
+            "got #{inspect(value)}"
+  end
+
+  # The socket options the feed forwards to every socket it opens. A budget that is not a
+  # positive integer, or a URL the socket would refuse, used to be accepted here and answered
+  # by the FIRST call that opened a socket, as an error naming nothing the caller passed. The
+  # URL is not echoed: it can carry credentials in its userinfo.
+  defp validate_socket_options!(opts) do
+    Enum.each([:socket_connect_timeout, :socket_recv_timeout], fn key ->
+      case Config.opt(opts, key, nil) do
+        nil -> :ok
+        budget -> integer_setting!(budget, key, 1)
+      end
+    end)
+
+    case Config.opt(opts, :url, nil) do
+      nil -> :ok
+      url -> if Socket.secure_url?(url), do: :ok, else: refuse_url!()
+    end
+  end
+
+  @spec refuse_url!() :: no_return()
+  defp refuse_url! do
+    raise ArgumentError,
+          "DpExchange.Webull.Feed :url must be a wss:// URL (ws:// only to a loopback host); " <>
+            "the value is not shown, as a URL can carry credentials"
+  end
+
   # ## Which shards a tick re-asserts, and why it is a rotation
   #
   # A shard is a candidate only once it has linked up (`on_link_up/2`'s replay covers one
@@ -1973,9 +2076,15 @@ defmodule DpExchange.Webull.Feed do
   # Answers `from` and cancels its deadline. A timer that has already fired cancels to
   # `false` and its message has been (or is about to be) handled by `answer_overdue_caller/2`,
   # which finds nobody waiting and does nothing, so no flush is needed.
+  #
+  # **The ledger is written before the caller is answered.** Replying first let a caller that
+  # read the tree's Ledger straight after `subscribe/2` returned `:ok` find it not yet written
+  # (`:none`): the Feed's `Ledger.put/2` was still behind the caller's `Ledger.fetch/1`. An
+  # accepted change is durable by the time anyone is told it was accepted.
   defp reply_caller(state, from, result) do
+    state = state |> release_caller(from) |> settle_undo(from, result) |> persist()
     GenServer.reply(from, result)
-    state |> release_caller(from) |> settle_undo(from, result) |> persist()
+    state
   end
 
   # **A refused call changes no state.** `apply_subscribe/5`, `apply_unsubscribe/4` and
@@ -2041,6 +2150,9 @@ defmodule DpExchange.Webull.Feed do
   defp restore_wanted(state, added, removed) do
     wanted =
       state.wanted |> MapSet.difference(MapSet.new(added)) |> MapSet.union(MapSet.new(removed))
+
+    # What the refused call added is no longer wanted, so a refusal it drew is not kept either.
+    state = %{state | rejected: Map.drop(state.rejected, added)}
 
     if MapSet.equal?(wanted, state.wanted) do
       state
@@ -2124,10 +2236,12 @@ defmodule DpExchange.Webull.Feed do
       {:parked, overflow} ->
         timeout = {:error, {:connack_timeout, state.connack_timeout_ms}}
         answer = combine_overflow(timeout, overflow)
-        GenServer.reply(from, answer)
         # Parked callers are released here and never answered again, so this is where the
         # refusal is settled: the shard is not connected, so re-planning only edits its list.
-        state |> settle_undo(from, answer) |> persist()
+        # Settled and written before the answer, as in `reply_caller/3`.
+        state = state |> settle_undo(from, answer) |> persist()
+        GenServer.reply(from, answer)
+        state
 
       {:reconciling, overflow} ->
         GenServer.reply(
@@ -2566,11 +2680,12 @@ defmodule DpExchange.Webull.Feed do
   # restart under the same name.
   #
   # **When the LAST data subscriber dies, the feed's wanted symbols are released.** A dead pid
-  # can receive nothing, so keeping the sockets and subscriptions for it held up to five
-  # connections for nobody. A registered name is never monitored and stays in `subscribers`,
-  # so it keeps the set alive; a notice-only subscriber's death releases nothing. The release
-  # narrows the shards through `resync/1`, the caller-less form of the path `unsubscribe/2`
-  # takes.
+  # can receive nothing, so keeping the subscriptions for it held up to five connections for
+  # nobody. A registered name is never monitored and stays in `subscribers`, so it keeps the
+  # set alive; a notice-only subscriber's death releases nothing. The release narrows the shards
+  # through `resync/1`, the caller-less form of the path `unsubscribe/2` takes. The emptied
+  # shards keep their sockets for `idle_shard_ms`, after which the resubscribe tick closes them
+  # (`close_idle_shards/1`).
   defp drop_dead_subscriber(state, pid) do
     was_data_subscriber? = MapSet.member?(state.subscribers, pid)
 
@@ -2590,7 +2705,13 @@ defmodule DpExchange.Webull.Feed do
   end
 
   defp release_wanted(state) do
-    resync(%{state | wanted: MapSet.new(), delivering: %{}, delivering_by_kind: %{}})
+    resync(%{
+      state
+      | wanted: MapSet.new(),
+        delivering: %{},
+        delivering_by_kind: %{},
+        rejected: %{}
+    })
   end
 
   # Which in-flight reconcile a monitor ref belongs to, or `nil` for a ref this feed tracks
@@ -2968,7 +3089,15 @@ defmodule DpExchange.Webull.Feed do
     # expiries and the nonce next to it are wall-clock on purpose, because those instants
     # come from the venue and are compared against the venue's clock, not ours.
     expires_at = System.monotonic_time(:millisecond) + state.rejected_symbol_ttl_ms
-    rejected = Enum.reduce(symbols, state.rejected, &Map.put(&2, &1, expires_at))
+
+    # **Only a symbol somebody wants is remembered as refused.** The names come from the venue's
+    # message, and an entry for one nobody asked for (or that was unsubscribed while the request
+    # was in flight) could only sit in this map until its TTL ran out, 24 hours by default. It
+    # is still reported below: the venue said it, and a consumer reading the notice sees all.
+    # `unsubscribe/2`, `update_symbols/2` and a released feed drop the entries of what they stop
+    # wanting, so the map is bounded by `state.wanted`.
+    named_and_wanted = Enum.filter(symbols, &MapSet.member?(state.wanted, &1))
+    rejected = Enum.reduce(named_and_wanted, state.rejected, &Map.put(&2, &1, expires_at))
 
     Logger.warning(
       "[Webull Feed] shard #{index} rejected #{length(symbols)} symbol(s) as " <>
@@ -3688,6 +3817,78 @@ defmodule DpExchange.Webull.Feed do
 
     live = Map.filter(state.rejected, fn {_symbol, expires_at} -> expires_at > now end)
     %{state | rejected: live}
+  end
+
+  # **A shard with nothing to carry does not hold its socket for the life of the node.**
+  # `unsubscribe/2` of everything, `update_symbols/2` to a smaller set and the death of the last
+  # data subscriber all empty a shard's symbol list and leave the shard standing, with its
+  # socket open: one of the App Key's five connections, pinging every thirty seconds for nobody,
+  # and a CONNACK 105 for any second tree on the same key. The moduledoc of `Feed` promised "no
+  # socket is held for nobody" and nothing closed one.
+  #
+  # Run on the resubscribe tick. A shard is idle when it carries no symbol, nobody is parked on
+  # it and no request for it is in flight. It is closed once it has been seen idle for
+  # `idle_shard_ms` (ten minutes by default; the tick's granularity applies), so a consumer that
+  # replaces its universe reuses the sockets it has. The first time a tick sees a shard idle
+  # only records the instant; `state.idle_since` is rebuilt from the shards that still are, so
+  # a shard that took a symbol again, or went away by another route, leaves no entry behind.
+  defp close_idle_shards(state) do
+    now = now_ms()
+
+    idle =
+      for {index, shard} <- state.shards, idle_shard?(state, index, shard), into: %{} do
+        {index, Map.get(state.idle_since, index, now)}
+      end
+
+    {expired, waiting} =
+      Enum.split_with(idle, fn {_index, since} -> now - since >= state.idle_shard_ms end)
+
+    Enum.reduce(expired, %{state | idle_since: Map.new(waiting)}, fn {index, _since}, state ->
+      close_idle_shard(state, index)
+    end)
+  end
+
+  defp idle_shard?(state, index, shard) do
+    shard.symbols == [] and Map.get(shard, :reply_to) in [nil, []] and
+      not shard_in_flight?(state, index)
+  end
+
+  defp shard_in_flight?(state, index) do
+    Enum.any?(Map.keys(state.reconciling), &(reconcile_index(&1) == index))
+  end
+
+  defp reconcile_index({:primary, index, _from, _overflow, _retries_left, _opts}), do: index
+
+  defp reconcile_index({kind, index}) when kind in [:background, :link_up, :resubscribe],
+    do: index
+
+  defp reconcile_index(_other_tag), do: nil
+
+  # The shard leaves `state.shards` BEFORE its socket is stopped, so the `{:EXIT, ...}` that
+  # stopping it produces finds no shard for that pid and is ignored - the order
+  # `rebuild_stale_shard/3` documents. No MQTT `DISCONNECT` is sent: this runs inside the tick,
+  # and `Socket.disconnect/2` can wait half a second per shard. The link gauge is closed here, as
+  # `rebuild_stale_shard/3` closes it, because the socket will not report its own end.
+  defp close_idle_shard(state, index) do
+    shard = Map.fetch!(state.shards, index)
+
+    Logger.info(
+      "[Webull Feed] shard #{index} has carried no symbol for #{state.idle_shard_ms}ms — " <>
+        "closing its socket; a later subscribe opens a fresh one"
+    )
+
+    if shard.connected?, do: Telemetry.link_down(:webull, "idle_shard_closed")
+
+    state = %{
+      cancel_reopen_timer(state, index)
+      | shards: Map.delete(state.shards, index),
+        resubscribe_failed: Map.delete(state.resubscribe_failed, index),
+        rotated_at: Map.delete(state.rotated_at, index),
+        unsettled: MapSet.delete(state.unsettled, index)
+    }
+
+    stop_socket(shard.socket)
+    state
   end
 
   # Every path that removes a shard answers whoever was parked on it, through here.

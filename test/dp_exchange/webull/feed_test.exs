@@ -126,7 +126,7 @@ defmodule DpExchange.Webull.FeedTest do
 
       _settled = Feed.coverage(feed)
 
-      refute_received {_ref, {:error, {:connection_refused, _details}}}
+      refute_receive {_ref, {:error, {:connection_refused, _details}}}
       assert :sys.get_state(feed).shards[0].reply_to != nil
     end
 
@@ -154,7 +154,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:connack_timeout, 0, "a-previous-session"})
       _settled = Feed.coverage(feed)
 
-      refute_received {_ref, {:error, {:connack_timeout, _ms}}}
+      refute_receive {_ref, {:error, {:connack_timeout, _ms}}}
       assert :sys.get_state(feed).shards[0].reply_to != nil
     end
 
@@ -589,7 +589,7 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, {:dp_exchange, :webull, quote_for("BTC-USD")})
 
       assert Feed.coverage(feed) == %{}
-      refute_received {:dp_exchange, :webull, %{symbol: "BTC-USD"}}
+      refute_receive {:dp_exchange, :webull, %{symbol: "BTC-USD"}}
     end
 
     test "a link drop clears what that shard's dead connection had been delivering" do

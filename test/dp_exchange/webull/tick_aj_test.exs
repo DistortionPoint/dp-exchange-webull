@@ -140,7 +140,7 @@ defmodule DpExchange.Webull.TickAJTest do
       assert {:ok, [trade]} =
                Rest.get_trades("AAPL", @credentials, answer(tape("2026-08-01T10:00:00Z")))
 
-      assert trade.timestamp == ~U[2026-08-01 10:00:00Z]
+      assert DateTime.compare(trade.timestamp, ~U[2026-08-01 10:00:00Z]) == :eq
     end
   end
 

@@ -194,7 +194,7 @@ defmodule DpExchange.Webull.RestTest do
       assert map_size(results) == 20
       assert {:refused, {:venue_error, 401, _msg}} = results["C1-USD"]
       assert_received :request
-      refute_received :request
+      refute_receive :request
     end
 
     test "only US_CRYPTO — another category's snapshot limit is not read here" do
@@ -629,7 +629,8 @@ defmodule DpExchange.Webull.RestTest do
                  retry_attempts: 0
                )
 
-      assert bar.opened_at == DateTime.from_unix!(1_787_935_740_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_935_740_000, :millisecond)
+      assert DateTime.compare(bar.opened_at, expected) == :eq
     end
   end
 
@@ -656,7 +657,7 @@ defmodule DpExchange.Webull.RestTest do
                  retry_attempts: 0
                )
 
-      assert from_seconds.venue_time == ~U[2026-08-28 16:55:47Z]
+      assert DateTime.compare(from_seconds.venue_time, ~U[2026-08-28 16:55:47Z]) == :eq
       assert DateTime.compare(from_millis.venue_time, ~U[2026-08-28 16:55:47Z]) == :eq
     end
 
@@ -713,7 +714,7 @@ defmodule DpExchange.Webull.RestTest do
       assert {:ok, quote_struct} =
                Rest.get_price("BTC-USD", @credentials, plug: responding(body), retry_attempts: 0)
 
-      assert quote_struct.venue_time == ~U[2026-08-28 17:00:01Z]
+      assert DateTime.compare(quote_struct.venue_time, ~U[2026-08-28 17:00:01Z]) == :eq
     end
 
     test "an unparseable timestamp is nil, not a guess" do

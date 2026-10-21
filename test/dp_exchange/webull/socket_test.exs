@@ -187,7 +187,8 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, traded}, state())
       assert_receive {:dp_exchange, :webull, %Quote{} = dated}
-      assert dated.venue_time == DateTime.from_unix!(1_787_936_148_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_936_148_000, :millisecond)
+      assert DateTime.compare(dated.venue_time, expected) == :eq
     end
 
     for bad <- ["0", "0.0", "-1"] do
@@ -469,7 +470,8 @@ defmodule DpExchange.Webull.SocketTest do
 
       assert {:ok, _state} = Socket.handle_frame({:binary, publish("tick", frame)}, state())
       assert_receive {:dp_exchange, :webull, %Trade{} = trade}
-      assert trade.timestamp == DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      expected = DateTime.from_unix!(1_787_936_147_000, :millisecond)
+      assert DateTime.compare(trade.timestamp, expected) == :eq
     end
 
     test "a tick with no volume is reported, not silently dropped" do
@@ -902,7 +904,7 @@ defmodule DpExchange.Webull.SocketTest do
       untouched = state()
 
       assert {:ok, ^untouched} = Socket.handle_frame({:text, "hello"}, untouched)
-      refute_received {:dp_exchange, :webull, _anything}
+      refute_receive {:dp_exchange, :webull, _anything}
     end
   end
 
