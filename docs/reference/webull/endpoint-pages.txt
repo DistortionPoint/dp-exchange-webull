@@ -137,7 +137,27 @@
 #   * The other six read and write social posts and comments. `DpExchange.Core.Venue` has no
 #     callback for social content, so no `capabilities/0` declaration rests on their absence
 #     and none is made false by their arrival.
-
+#
+# ## Re-diffed 2026-10-26 — one page renamed, three appeared, one vanished; no claim changed
+#
+# Each page was fetched (`.md` appended to its URL) and read before this file was touched.
+#
+#   * `list-hot-tickers` is now `list-hot-stocks`; the old URL answers 404. Same path
+#     (`GET /market-data/communities/stock-rankings/list`), same response and no query
+#     parameter. Only the `operationId` (`listHotTickers` → `listHotStocks`) and one row
+#     description changed. The committed capture moved to `openapi/list-hot-stocks.md`, and
+#     every citation of it followed; the `"hot_stocks"` screener is unchanged.
+#   * `broker-market-data-api/event-forecast-using-get` (probability curves per outcome for
+#     an event contract, by `event_symbol`, `period`, `category`),
+#     `broker-market-data-api/structured-target-using-get` and
+#     `broker-fd-api/structured-targets-list` (the teams and players event contracts
+#     reference, paginated by `pagination_key`). Broker Market Data and the Broker API are
+#     product tiers this package implements none of (`endpoint-inventory.md`), and no
+#     `capabilities/0` declaration or document claim rests on an event forecast or a
+#     structured target being absent, so none is falsified.
+#   * `fd-events/sod-events` vanished (404). It is on the FD Events surface, which this
+#     package does not reach, and nothing here cites it.
+#
 account-balance
 account-list
 account-position
@@ -220,6 +240,7 @@ broker-fd-api/order-executions
 broker-fd-api/order-history
 broker-fd-api/order-open
 broker-fd-api/orders
+broker-fd-api/structured-targets-list
 broker-fd-api/summary
 broker-fd-api/transfer-detail
 broker-fd-api/transfer-list
@@ -234,6 +255,7 @@ broker-market-data-api/corp-market-using-get
 broker-market-data-api/corporate-actions
 broker-market-data-api/create-client-token
 broker-market-data-api/event-contract-market-data
+broker-market-data-api/event-forecast-using-get
 broker-market-data-api/event-game-stats-using-get
 broker-market-data-api/event-list-using-get
 broker-market-data-api/event-live-data-using-get
@@ -256,6 +278,7 @@ broker-market-data-api/screeners
 broker-market-data-api/series-list-using-get
 broker-market-data-api/snapshot-using-get
 broker-market-data-api/sports-filter-using-get
+broker-market-data-api/structured-target-using-get
 broker-market-data-api/subscribe-using-post
 broker-market-data-api/tick-using-get
 broker-market-data-api/top-active-using-get-new
@@ -316,7 +339,6 @@ fd-events/funding-events
 fd-events/instruments-events
 fd-events/journal-events
 fd-events/position-events
-fd-events/sod-events
 fd-events/subscribe-events
 fd-events/trading-events
 filings
@@ -369,7 +391,7 @@ industry-comparison
 instrument-list
 instruments
 list-economic-calendars
-list-hot-tickers
+list-hot-stocks
 list-insider-transactions
 list-institution-holding-changes
 list-institution-holdings

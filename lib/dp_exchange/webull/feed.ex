@@ -381,6 +381,24 @@ defmodule DpExchange.Webull.Feed do
   that returns them to a shard. `active_rejections/1` always ignored an expired entry, but
   nothing removed it, so the map only grew.
 
+  **A refused symbol is never unsubscribed** (issue #12). The venue answers an unsubscribe
+  naming a symbol it does not carry with the same whole-request `INVALID_SYMBOL` it gives a
+  subscribe. The refused symbols used to stay on the shard's list until a re-plan diffed them
+  away as removed and sent that unsubscribe. The answer was then taken for a new rejection,
+  and the failed delta was reverted, which put the symbols back. The next re-plan sent the
+  same unsubscribe again: a closed loop, measured at about a thousand warnings in 35 minutes
+  on 0.4.121. Now:
+
+    * `handle_subscribe_result/3` takes the named symbols off the shard's list itself. It
+      re-plans only when that or a newly recorded exclusion changed what a plan would send,
+      so an answer that changes neither cannot re-send the request just refused.
+    * An unsubscribe answered `INVALID_SYMBOL` is sent again without what it named, because
+      dropping such a symbol is the unsubscribe (`unsubscribe_known/3`).
+    * A revert never puts a venue-unknown symbol back.
+    * A post-CONNACK replay the venue refused is sent again without what it named. Every
+      other symbol on the shard was refused with it, on a connection that has only just come
+      up.
+
   ## A symbol list that cannot be used is refused, not crashed on
 
   `subscribe/3`, `unsubscribe/3` and `update_symbols/3` take a list of non-blank strings (empty
@@ -1792,7 +1810,7 @@ defmodule DpExchange.Webull.Feed do
     state = %{state | settled: settled}
 
     if current_session?(state, index, context) do
-      state = complete_link_up(state, index, result)
+      state = complete_link_up(state, index, context, result)
       {:noreply, unsubscribe_stale(state, index, context, result)}
     else
       {state, rebalanced?} = settle_stale(state, index, result)
@@ -2931,6 +2949,13 @@ defmodule DpExchange.Webull.Feed do
     shard = state.shards[index]
     link = Map.get(shard, :link, 0) + 1
     state = update_in(state.shards[index], &Map.merge(&1, %{connected?: true, link: link}))
+    replay_shard(state, index)
+  end
+
+  # The post-CONNACK whole-list subscribe, on the connection `on_link_up/2` just counted.
+  defp replay_shard(state, index) do
+    shard = state.shards[index]
+    link = Map.get(shard, :link, 0)
 
     case shard.symbols do
       [] ->
@@ -2991,12 +3016,41 @@ defmodule DpExchange.Webull.Feed do
     end
   end
 
+  # **A replay refused `INVALID_SYMBOL` is sent again without what it named.** The venue
+  # refuses the whole request, so the refusal left every OTHER symbol on the shard unsubscribed
+  # on a connection that has only just come up, and nothing re-sent them: the re-plan sees a
+  # list that already matches, and the blind resubscribe reaches a quiet shard a tick later at
+  # best, one shard per tick while a sibling streams. `handle_subscribe_result/3` has already
+  # taken the named symbols off the list, so the second replay is strictly shorter. A refusal
+  # naming nothing that was sent cannot shorten it, and is answered as it came.
+  defp complete_link_up(state, index, %{sent: sent}, {:error, {:invalid_symbols, named}} = result)
+       when is_list(named) do
+    if Enum.any?(named, &(&1 in sent)) do
+      {state, rebalanced?} = handle_subscribe_result(state, index, result)
+      state = if rebalanced?, do: resync(state), else: state
+
+      case Map.get(state.shards, index) do
+        %{symbols: [_first | _rest]} -> replay_shard(state, index)
+        _emptied_or_gone -> finish_link_up(state, index, :ok)
+      end
+    else
+      complete_link_up(state, index, result)
+    end
+  end
+
+  defp complete_link_up(state, index, _context, result),
+    do: complete_link_up(state, index, result)
+
   # The tail of `on_link_up/2`, shared with the async completion of the HTTP subscribe it
   # may have started — see `handle_info({:reconcile_done, {:link_up, index}, result}, ...)`.
   defp complete_link_up(state, index, result) do
     {state, rebalanced?} = handle_subscribe_result(state, index, result)
     state = if rebalanced?, do: resync(state), else: state
+    finish_link_up(state, index, result)
+  end
 
+  # Answers whoever is parked on the shard with `result`.
+  defp finish_link_up(state, index, result) do
     case Map.get(state.shards, index) do
       %{reply_to: nil} ->
         state
@@ -3014,7 +3068,7 @@ defmodule DpExchange.Webull.Feed do
         # Stated as the funnel rather than as a list of the paths that reach it, because an
         # earlier version of this comment named `isolate_crashed_shard/3` alone — correctly,
         # when it was the only one. `rebuild_stale_shard/3` was then added to
-        # `handle_subscribe_result/3`, which is called on the FIRST line of this function,
+        # `handle_subscribe_result/3`, which `complete_link_up/3` calls just before this,
         # and did not answer anybody; a caller parked on a still-connecting shard whose
         # replay came back INVALID_SESSION waited out `@call_timeout` and took its own
         # process down with it. The invariant held here is what made that invisible, so what
@@ -3033,11 +3087,37 @@ defmodule DpExchange.Webull.Feed do
   # returned, because it is the one `handle_subscribe_result/3` has recoveries for
   # (`INVALID_SYMBOL`, `INVALID_SESSION`, `:oversubscribed`).
   defp reconcile_by_session(session_id, added, removed, opts) do
-    unsubscribed = Subscription.unsubscribe(session_id, removed, opts)
+    unsubscribed = unsubscribe_known(session_id, removed, opts)
 
     case Subscription.subscribe(session_id, added, opts) do
       :ok -> unsubscribed
       {:error, _reason} = failed -> failed
+    end
+  end
+
+  # **An unsubscribe the venue answers `INVALID_SYMBOL` is sent again without the symbols it
+  # named, never handed back as a fresh rejection.** The venue refuses an unsubscribe naming a
+  # symbol it does not carry exactly as it refuses a subscribe: the whole request, with the
+  # same 417 (issue #12). That answer used to reach `handle_subscribe_result/3`, which logged
+  # the symbols as rejected all over again, and `revert_failed_delta/4` put them back on the
+  # shard as though the unsubscribe had never happened. The re-plan that followed removed them
+  # once more and sent the same unsubscribe: a closed loop, about a thousand warnings in
+  # 35 minutes against a feed whose host had subscribed once.
+  #
+  # A symbol the venue says it does not carry has no publication to stop, so dropping it IS
+  # the unsubscribe. The rest of the request was refused with it and is still subscribed, so it
+  # goes again. Each pass sends strictly fewer symbols; an answer naming nothing that was sent
+  # cannot shrink the request and is returned as it came.
+  defp unsubscribe_known(session_id, removed, opts) do
+    case Subscription.unsubscribe(session_id, removed, opts) do
+      {:error, {:invalid_symbols, named}} = refused ->
+        case removed -- named do
+          ^removed -> refused
+          rest -> unsubscribe_known(session_id, rest, opts)
+        end
+
+      answered ->
+        answered
     end
   end
 
@@ -3553,7 +3633,21 @@ defmodule DpExchange.Webull.Feed do
     # `unsubscribe/2`, `update_symbols/2` and a released feed drop the entries of what they stop
     # wanting, so the map is bounded by `state.wanted`.
     named_and_wanted = Enum.filter(symbols, &MapSet.member?(state.wanted, &1))
+    already_excluded = active_rejections(state)
     rejected = Enum.reduce(named_and_wanted, state.rejected, &Map.put(&2, &1, expires_at))
+
+    # **A refused symbol leaves the shard's list here, not through a re-plan's unsubscribe.**
+    # The venue refused the whole request, so nothing it named was subscribed by it, and a
+    # symbol the venue says it does not carry has nothing to unsubscribe. Left on the list, the
+    # next re-plan diffed it as REMOVED and sent an unsubscribe for it, which the venue refuses
+    # with the same `INVALID_SYMBOL` (issue #12).
+    {state, trimmed?} = drop_from_shard(state, index, symbols)
+
+    # Re-planning helps only when this answer changed what a plan would send: a symbol newly
+    # excluded, or one taken off the shard. An answer that changes neither (it names symbols
+    # nobody wants, or ones already excluded) would re-plan to the very request just refused.
+    changed? =
+      trimmed? or Enum.any?(named_and_wanted, &(not MapSet.member?(already_excluded, &1)))
 
     Logger.warning(
       "[Webull Feed] shard #{index} rejected #{length(symbols)} symbol(s) as " <>
@@ -3570,7 +3664,7 @@ defmodule DpExchange.Webull.Feed do
        )}
     )
 
-    {%{state | rejected: rejected}, true}
+    {%{state | rejected: rejected}, changed?}
   end
 
   # See `rebuild_stale_shard/3`. Placed in this shared funnel rather than in one
@@ -3596,6 +3690,20 @@ defmodule DpExchange.Webull.Feed do
   end
 
   defp handle_subscribe_result(state, _index, {:error, _other}), do: {state, false}
+
+  # `symbols` taken off shard `index`'s list, and whether that removed anything.
+  defp drop_from_shard(state, index, symbols) do
+    case Map.fetch(state.shards, index) do
+      {:ok, %{symbols: current}} ->
+        case current -- symbols do
+          ^current -> {state, false}
+          kept -> {put_in(state.shards[index].symbols, kept), true}
+        end
+
+      :error ->
+        {state, false}
+    end
+  end
 
   defp stale_invalid_session?(_state, _index, nil), do: false
 
@@ -3697,11 +3805,11 @@ defmodule DpExchange.Webull.Feed do
   defp revert_failed_delta(state, index, _context, {:error, {:invalid_session, _sid}}),
     do: forget_unsettled(state, index)
 
-  defp revert_failed_delta(state, index, %{added: added, removed: removed}, {:error, _reason}) do
+  defp revert_failed_delta(state, index, %{added: added, removed: removed}, {:error, reason}) do
     case Map.fetch(state.shards, index) do
       {:ok, shard} ->
         kept = shard.symbols -- added
-        reverted = kept ++ (removed -- kept)
+        reverted = kept ++ ((removed -- kept) -- venue_unknown(reason))
 
         state = put_in(state.shards[index].symbols, reverted)
         %{state | unsettled: MapSet.put(state.unsettled, index)}
@@ -3718,6 +3826,12 @@ defmodule DpExchange.Webull.Feed do
   # revert, so it only clears the index's unsettled mark. Every context recorded for a primary
   # or background reconcile carries both.
   defp revert_failed_delta(state, index, _no_delta, _result), do: forget_unsettled(state, index)
+
+  # Symbols the venue said it does not carry. A revert never puts one of these back on a shard:
+  # there is no publication of it to stop, and restoring it is what made a re-plan send the
+  # same refused unsubscribe again (issue #12).
+  defp venue_unknown({:invalid_symbols, named}) when is_list(named), do: named
+  defp venue_unknown(_reason), do: []
 
   defp forget_unsettled(state, index),
     do: %{state | unsettled: MapSet.delete(state.unsettled, index)}

@@ -50,7 +50,7 @@ was true of whatever capture method produced `endpoint-inventory.md`; it is not 
 | `get-week-52-high-low.md` | `get_screener/3` (`"week52_high_low"`) — no documented `rank_type` default |
 | `get-market-sectors.md` | `get_screener/3` (`"market_sectors"`) — `agg_type`, `pagination_key` |
 | `get-market-sectors-detail.md` | `get_screener/3` (`"market_sector"`) — `sort_by` (not `agg_type`), `pagination_key` |
-| `list-hot-tickers.md` | `get_screener/3` (`"hot_stocks"`) — community-activity ranking, bare `[{rank, symbol, category}]`, no query parameter. **Fetched 2026-10-12**, the day the vendor's sitemap first listed it |
+| `list-hot-stocks.md` | `get_screener/3` (`"hot_stocks"`) — community-activity ranking, bare `[{rank, symbol, category}]`, no query parameter. **Fetched 2026-10-12** as `list-hot-tickers`, the day the vendor's sitemap first listed it; **re-fetched 2026-10-26** under its new name, where only `operationId` (`listHotTickers` → `listHotStocks`) and one row description changed |
 | `fund-dividends.md` | `get_fundamental/4` (`:fund_dividends`) — `pagination_key`, no `count` |
 | `fund-files.md` | `get_fundamental/4` (`:fund_files`) — no `count` |
 | `fund-holdings.md` | `get_fundamental/4` (`:fund_holdings`) — no `count` |

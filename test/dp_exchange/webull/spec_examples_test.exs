@@ -3504,7 +3504,7 @@ defmodule DpExchange.Webull.SpecExamplesTest do
     end
   end
 
-  describe "get_screener/3 \"hot_stocks\" — list-hot-tickers.md" do
+  describe "get_screener/3 \"hot_stocks\" — list-hot-stocks.md" do
     # The page's own example row (`rank` 1, `symbol` "AAPL", `category` "US_STOCK"), as the
     # bare array the page documents.
     @hot_rows [

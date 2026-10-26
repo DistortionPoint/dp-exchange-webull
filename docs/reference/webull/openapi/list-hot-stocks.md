@@ -30,7 +30,7 @@ Gets the list of hot stocks based on community activity. The rank is continuous 
     "Community"
   ],
   "description": "Gets the list of hot stocks based on community activity. The rank is continuous and starts from 1. Stocks with null category are filtered out automatically.",
-  "operationId": "listHotTickers",
+  "operationId": "listHotStocks",
   "parameters": [
     {
       "name": "x-app-key",
@@ -159,7 +159,7 @@ Gets the list of hot stocks based on community activity. The rank is continuous 
                   "example": "US_STOCK"
                 }
               },
-              "description": "Hot ticker ranking item.",
+              "description": "Hot stock ranking item.",
               "title": "HotTickerVo"
             }
           }

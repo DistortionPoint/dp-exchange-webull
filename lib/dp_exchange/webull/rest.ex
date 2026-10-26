@@ -5611,7 +5611,7 @@ defmodule DpExchange.Webull.Rest do
     # `sort_by:` opt was silently dropped.
     "week52_high_low" =>
       {"/market-data/screeners/week52-high-low/list", [:rank_type, :sort_by, :direction]},
-    # `list-hot-tickers.md` (fetched 2026-10-12, when the vendor's sitemap first listed it):
+    # `list-hot-stocks.md` (first fetched 2026-10-12 as `list-hot-tickers`; renamed 2026-10-26):
     # stocks ranked by community activity, a bare array of `{rank, symbol, category}`. The
     # page documents NO query parameter at all, so nothing is sent — not even `category`.
     "hot_stocks" => {"/market-data/communities/stock-rankings/list", []}
@@ -5667,7 +5667,7 @@ defmodule DpExchange.Webull.Rest do
   (`get-market-sectors.md:96`) and this follows it to the end, bounded — see `paginate/1`.
 
   `hot_stocks` ranks stocks by **community activity**, not by price or volume
-  (`list-hot-tickers.md`). Its page documents no query parameter, so none is sent; each row's
+  (`list-hot-stocks.md`). Its page documents no query parameter, so none is sent; each row's
   `metrics` carries the venue's own `rank` and `category`.
 
   An identifier this venue does not publish is `{:error, {:unknown_screener, name}}`.
@@ -5779,7 +5779,7 @@ defmodule DpExchange.Webull.Rest do
     # under `symbol` was published as one; it is the same unnamed row as a missing key.
     #
     # A row is named by its `symbol` (`get-gainers-losers.md`, `get-top-active.md`,
-    # `list-hot-tickers.md:151`, and the stocks under a sector, `get-market-sectors-detail.md`);
+    # `list-hot-stocks.md:151`, and the stocks under a sector, `get-market-sectors-detail.md`);
     # only the `market_sectors` listing names a row by its sector's `name`
     # (`get-market-sectors.md:224`). No page shows `sector_name`, and a stock row's `name` is
     # the company's, not its symbol.

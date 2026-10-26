@@ -22,6 +22,44 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Feed` no longer loops on symbols the venue refused as `INVALID_SYMBOL`** (issue #12). The
+  venue refuses an unsubscribe that names a symbol it does not carry with the same
+  whole-request `INVALID_SYMBOL` it gives a subscribe. Refused symbols stayed on the shard's
+  list, so the re-plan after a refusal sent an unsubscribe for them. That answer was treated
+  as a fresh rejection: it was logged and announced again, and the reverted delta put the
+  symbols back. The next re-plan sent the same unsubscribe, in a closed loop: about a
+  thousand warnings and `:refusal` notices in 35 minutes, on 0.4.121, after a single
+  subscribe at boot.
+  - A refusal now takes the named symbols off the shard itself. It re-plans only when that,
+    or a newly recorded exclusion, changed what a plan would send.
+  - An unsubscribe refused `INVALID_SYMBOL` is sent again without the named symbols.
+  - A failed delta's revert never restores a symbol the venue said it does not carry.
+- **A post-CONNACK replay refused `INVALID_SYMBOL` is sent again at once without the named
+  symbols.** Every other symbol on the shard was refused with them. They waited for a later
+  blind resubscribe (one quiet shard per tick while a sibling streams), and a caller parked
+  on the connecting shard was answered with the refusal instead of `:ok` for what the venue
+  carries.
+
+### Documentation
+
+- **Endpoint index re-diffed 2026-10-26.** The vendor renamed `list-hot-tickers` to
+  `list-hot-stocks`; the old URL answers 404. The endpoint, its response and its absent
+  parameters are unchanged, so the `"hot_stocks"` screener is too. The committed page moved
+  to `openapi/list-hot-stocks.md`, and the code comments and docs citing it followed.
+  - Three pages appeared: event forecasts and structured targets, on the Broker and Broker
+    Market Data tiers.
+  - `fd-events/sod-events` vanished.
+  - Both affect tiers this package does not implement, and no claim changed. The reasoning
+    is in `endpoint-pages.txt`.
+
+### Tests
+
+- Two socket handshake tests that needed a SUCCESSFUL connection ran with the 500 ms
+  deadline the trickle tests use. A loaded cover run overran it (`:timeout` on start). They
+  now use timeouts sized for what they test.
+
 ## [0.4.169] - 2026-10-21
 
 ### Changed (tick AR)

@@ -52,13 +52,22 @@ defmodule DpExchange.Webull.SocketHandshakeDeadlineTest do
 
     on_exit(fn -> Process.exit(server, :kill) end)
 
-    {:ok, socket_pid} = Socket.start_link(socket_opts(port))
+    # A 5 s deadline rather than the 500 ms the start test uses: the FIRST connection here must
+    # succeed, and one deadline governs both it and the trickling reconnect. 500 ms is what a
+    # loaded suite overran on the redaction test below (2026-10-26). The trickle still never
+    # completes, so only the deadline ends it, whatever its length.
+    opts =
+      socket_opts(port)
+      |> Keyword.put(:socket_connect_timeout, 2_000)
+      |> Keyword.put(:socket_recv_timeout, 3_000)
+
+    {:ok, socket_pid} = Socket.start_link(opts)
     on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
 
     # The first reconnect trickles. Only a deadline ends it, and only then can the socket
     # make its next attempt: attempt 2 waits one second of backoff, so this lands at about
-    # 1.5 s. Without the deadline it never arrives.
-    assert_receive :third_connection, 10_000
+    # 6 s. Without the deadline it never arrives.
+    assert_receive :third_connection, 20_000
   end
 
   test "a wss peer whose certificate nothing trusts is refused" do
@@ -117,7 +126,14 @@ defmodule DpExchange.Webull.SocketHandshakeDeadlineTest do
 
     on_exit(fn -> Process.exit(server, :kill) end)
 
-    opts = Keyword.put(socket_opts(port), :app_key, "LEAK_PROOF_SOCKET_APP_KEY")
+    # Generous timeouts: this asserts redaction, not the deadline, and the 500 ms handshake
+    # deadline the other tests use was overrun under the full cover gate (2026-10-26), failing
+    # the start with `:timeout` before there was a state to inspect.
+    opts =
+      socket_opts(port)
+      |> Keyword.merge(app_key: "LEAK_PROOF_SOCKET_APP_KEY", socket_connect_timeout: 10_000)
+      |> Keyword.put(:socket_recv_timeout, 10_000)
+
     {:ok, socket_pid} = Socket.start_link(opts)
     on_exit(fn -> if Process.alive?(socket_pid), do: Process.exit(socket_pid, :kill) end)
 

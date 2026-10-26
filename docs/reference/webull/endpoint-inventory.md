@@ -51,6 +51,19 @@ screener, was also not counted in the 85). **One claim changed**: `get_news/1` n
 ten falsify no `capabilities/0` declaration; the reasoning per page is in
 `endpoint-pages.txt`'s header. The table below stays at its capture date.
 
+**Re-checked 2026-10-26.** The vendor renamed `list-hot-tickers` to `list-hot-stocks`. The
+path, the response and the absent query parameters are unchanged; only the `operationId`
+and one row description differ. The capture moved to `openapi/list-hot-stocks.md` and
+every citation followed it. Three pages appeared, all on tiers this package implements none
+of:
+
+- `broker-market-data-api/event-forecast-using-get` and
+  `broker-market-data-api/structured-target-using-get`, on Broker Market Data.
+- `broker-fd-api/structured-targets-list`, on the Broker API.
+
+`fd-events/sod-events` vanished from FD Events. **No claim changed**; the reasoning is in
+`endpoint-pages.txt`'s header.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
@@ -225,7 +238,8 @@ POST   /trading/orders/replace                      common-order-replace
 ### Added since the capture above — 2026-10-18
 
 Not part of the 85 counted above. `GET`, Non-Display Solution. Only the first, and the
-`list-hot-tickers` line at the end (added 2026-10-12, not in the 11 below), are called.
+`list-hot-stocks` line at the end (added 2026-10-12 as `list-hot-tickers`, not in the 11
+below), are called.
 
 ```
 GET    /market-data/news/stock-news/list            list-stock-news   (get_news/1)
@@ -239,7 +253,7 @@ GET    /market-data/fundamentals/institutions/holding-changes/list list-institut
 GET    /market-data/fundamentals/economic-calendars/list list-economic-calendars
 GET    /market-data/screeners/fear-greed-indexes/get get-fear-and-greed-index
 GET    /market-data/screeners/unusual-activities/list list-stock-unusual-activities
-GET    /market-data/communities/stock-rankings/list list-hot-tickers (get_screener("hot_stocks"))
+GET    /market-data/communities/stock-rankings/list list-hot-stocks (get_screener("hot_stocks"))
 ```
 
 ### Category index pages (not endpoints)

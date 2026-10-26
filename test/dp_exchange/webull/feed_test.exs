@@ -25,6 +25,24 @@ defmodule DpExchange.Webull.FeedTest do
     end
   end
 
+  # Polls until shard `index` carries exactly `symbols` (in any order), or flunks after 5s.
+  defp await_shard_symbols(feed, index, symbols, deadline \\ nil) do
+    deadline = deadline || System.monotonic_time(:millisecond) + 5_000
+    current = :sys.get_state(feed).shards[index].symbols
+
+    cond do
+      Enum.sort(current) == Enum.sort(symbols) ->
+        :ok
+
+      System.monotonic_time(:millisecond) > deadline ->
+        flunk("shard #{index} carries #{inspect(current)}, never #{inspect(symbols)}")
+
+      true ->
+        Process.sleep(25)
+        await_shard_symbols(feed, index, symbols, deadline)
+    end
+  end
+
   describe "the two transports are joined by one session id" do
     test "the shard's own session id is used for the HTTP subscribe", %{limiter: limiter} do
       # A mismatch fails in the most expensive way available: the HTTP call succeeds, the
@@ -1574,12 +1592,11 @@ defmodule DpExchange.Webull.FeedTest do
       assert_receive {:request, "/market-data/streaming/subscribe", "shard-1",
                       ["DDDUSD", "BADTWOUSD", "BADTHREEUSD"]}
 
-      # The rejection triggers a background trim on each shard, dropping only the symbols
-      # the venue actually named.
-      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-0", ["BADONEUSD"]}
-
-      assert_receive {:request, "/market-data/streaming/unsubscribe", "shard-1", removed1}
-      assert Enum.sort(removed1) == Enum.sort(["BADTWOUSD", "BADTHREEUSD"])
+      # The rejection trims each shard of only the symbols the venue actually named, and sends
+      # no unsubscribe for them: the venue refuses that too, which was issue #12's loop.
+      await_shard_symbols(feed, 0, ["AAA-USD", "CCC-USD"])
+      await_shard_symbols(feed, 1, ["DDD-USD"])
+      refute_receive {:request, "/market-data/streaming/unsubscribe", _session, _symbols}, 300
 
       # The next tick reasserts each shard with only the good symbols — and it succeeds.
       send(feed, :resubscribe)
@@ -1736,9 +1753,9 @@ defmodule DpExchange.Webull.FeedTest do
       send(feed, :resubscribe)
 
       assert_receive {:request, "/market-data/streaming/subscribe", ["GOODUSD", "BADUSD"]}
-      # This trim only completes (updating the shard's own remembered symbol list) once
-      # this unsubscribe fires — a reliable barrier for the next tick to observe it.
-      assert_receive {:request, "/market-data/streaming/unsubscribe", ["BADUSD"]}
+      # The refusal trims the shard's own list, with no unsubscribe (issue #12); waiting for the
+      # trim is the barrier for the next tick to observe it.
+      await_shard_symbols(feed, 0, ["GOOD-USD"])
 
       # Well inside the TTL: BAD-USD stays excluded.
       send(feed, :resubscribe)
