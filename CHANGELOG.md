@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.170] - 2026-10-26
+
 ### Fixed
 
 - **`Feed` no longer loops on symbols the venue refused as `INVALID_SYMBOL`** (issue #12). The
