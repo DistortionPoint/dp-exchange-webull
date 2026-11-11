@@ -57,6 +57,7 @@ defmodule DpExchange.Webull.Options do
   whatever it is given.
   """
 
+  alias DpExchange.Core.{Capabilities, Venue}
   alias DpExchange.Core.Options, as: CoreOptions
   alias DpExchange.Webull.Rest
 
@@ -216,8 +217,103 @@ defmodule DpExchange.Webull.Options do
   @spec check(atom(), term(), [atom()]) ::
           :ok | {:error, {:unknown_option, atom()} | {:invalid_options, term()}}
   def check(function, opts, extra \\ []) do
-    allowed = transport(function) ++ name_keys(function) ++ own_keys(function) ++ extra
-    CoreOptions.check(opts, allowed)
+    CoreOptions.check(opts, allowed(function, extra))
+  end
+
+  # The one list `check/3` refuses against and `declared/1` reports, so the two cannot drift.
+  defp allowed(function, extra) do
+    transport(function) ++ name_keys(function) ++ own_keys(function) ++ extra
+  end
+
+  @doc """
+  Every key `DpExchange.Webull.start_link/1` and `child_spec/1` accept, in the order the table
+  holds them: the list `check_start/1` refuses against, not a copy of it.
+
+  Answered by `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @spec start_keys() :: [atom()]
+  def start_keys, do: @start_keys
+
+  # Functions that read no option at all, and are not in the table: they take no `opts`.
+  @no_options [
+    :provider_name,
+    :runtime_id,
+    :asset_classes,
+    :capabilities,
+    :start_options,
+    :call_options,
+    :venue_does_not_serve,
+    :adjusted?,
+    :quotes,
+    :fundamental_kinds,
+    :screeners
+  ]
+
+  @doc """
+  The keys a call to `function` is not refused for: `{:ok, keys}`, or `:error` for a name this
+  venue has no options for.
+
+  Built from the same lists `check/3` reads (transport keys, `:name`, `own_keys/1` and the
+  `extra` keys of the two calls that pass any), so it cannot say a key is accepted when
+  `check/3` refuses it. `get_fundamental` and `get_screener` take part of their keys from the
+  kind or name argument, so they answer the union over every kind and name; a given kind or
+  name accepts a subset of it. `child_spec` and `start_link` answer `start_keys/0`, and a
+  function that takes no `opts` answers `{:ok, []}`.
+
+  Whether the endpoint is active is not decided here: see `call_options/2`.
+  """
+  @spec declared(term()) :: {:ok, [atom()]} | :error
+  def declared(function) when function in @no_options, do: {:ok, []}
+  def declared(function) when function in [:child_spec, :start_link], do: {:ok, @start_keys}
+
+  def declared(function) when is_atom(function) do
+    if Map.has_key?(@own_keys, function) do
+      {:ok, function |> allowed(call_extras(function)) |> Enum.uniq()}
+    else
+      :error
+    end
+  end
+
+  def declared(_function), do: :error
+
+  defp call_extras(:get_fundamental),
+    do: union_keys(Rest.fundamental_kinds(), &Rest.fundamental_option_keys/1)
+
+  defp call_extras(:get_screener), do: union_keys(Rest.screeners(), &Rest.screener_option_keys/1)
+  defp call_extras(_function), do: []
+
+  defp union_keys(names, option_keys) do
+    Enum.flat_map(names, fn name ->
+      {:ok, keys} = option_keys.(name)
+      keys
+    end)
+  end
+
+  @doc """
+  The answer to `c:DpExchange.Core.Venue.call_options/1` for a facade with `capabilities`.
+
+  In this order: a `Core.Venue` callback whose endpoint is inactive is
+  `{:error, :not_supported}` whatever it is given; a function with declared keys is
+  `{:ok, keys}` (`declared/1`); anything else, a non-atom included, is
+  `{:error, {:unknown_function, name}}`. An unknown name is never `{:ok, []}`.
+  """
+  @spec call_options(term(), Capabilities.t()) ::
+          {:ok, [atom()]} | {:error, :not_supported | {:unknown_function, term()}}
+  def call_options(name, capabilities) do
+    if inactive?(name, capabilities) do
+      {:error, :not_supported}
+    else
+      case declared(name) do
+        {:ok, keys} -> {:ok, keys}
+        :error -> {:error, {:unknown_function, name}}
+      end
+    end
+  end
+
+  defp inactive?(name, capabilities) do
+    Enum.any?(Venue.behaviour_info(:callbacks), fn {callback, arity} ->
+      callback == name and not Capabilities.active?(capabilities, {callback, arity})
+    end)
   end
 
   # `:name` is the tree a call addresses (`DpExchange.Webull.Supervisor`): the facade resolves

@@ -174,6 +174,27 @@ defmodule DpExchange.Webull.Fake do
   end
 
   @doc """
+  The options `start_link/1` accepts: the list `DpExchange.Webull.Options.check_start/1`
+  refuses against, the same one the real tree reads.
+  See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: Options.start_keys()
+
+  @doc """
+  The option keys a call to `name` on this fake accepts. The fake checks every call against
+  the same `DpExchange.Webull.Options` table as the facade, so each key the facade declares for
+  an endpoint is one the fake accepts. `{:error, :not_supported}` for an inactive endpoint,
+  `{:error, {:unknown_function, name}}` for any other name.
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: Options.call_options(name, capabilities())
+
+  @doc """
   The real adapter's name, `DpExchange.Webull.provider_name/0`.
   See `c:DpExchange.Core.Venue.provider_name/0`.
   """

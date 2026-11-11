@@ -104,7 +104,7 @@ defmodule DpExchangeWebull.MixProject do
       # Fake answers is one `new/1` builds, a status never contradicting its filled quantity)
       # and fails groups 33, 35 and 37 that used to pass having examined nothing; an older Core
       # runs a suite that checks none of that and passes.
-      {:dp_exchange_core, "~> 0.3.120"},
+      {:dp_exchange_core, "~> 0.3.123"},
 
       # This venue's own transport. Core ships no transport library at any strength —
       # a venue that speaks WebSocket ships what it needs to speak it.

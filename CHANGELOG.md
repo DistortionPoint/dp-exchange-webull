@@ -22,6 +22,24 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `dp_exchange_core` 0.3.123 or later, the release that adds the required
+  `start_options/0` and `call_options/1` callbacks and conformance group 55.
+
+### Added
+
+- **`start_options/0` and `call_options/1`, the two callbacks Core adds for declared option
+  keys** (DistortionPoint/dp-exchange-core#43), on `DpExchange.Webull` and
+  `DpExchange.Webull.Fake`. A consumer sharing one `opts` list across venues was refused keys
+  such as `:subscriber` and `:channels` at start; it can now ask instead of guessing:
+  `Venue.start_link(Keyword.take(opts, Venue.start_options()))` and
+  `{:ok, keys} = Venue.call_options(:get_price)`. Both answer from the tables the checks refuse
+  against (`Options.start_keys/0`, `Options.declared/1`), so they cannot say a key is accepted
+  that is refused. An inactive endpoint is `{:error, :not_supported}`, an unknown or non-atom
+  name `{:error, {:unknown_function, name}}`. `get_fundamental` and `get_screener` answer the
+  union over every kind and name. The fake declares the same keys as the facade.
+
 ## [0.4.171] - 2026-11-11
 
 ### Fixed

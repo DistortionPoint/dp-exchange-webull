@@ -280,6 +280,37 @@ defmodule DpExchange.Webull do
   @impl true
   def start_link(opts), do: DpExchange.Webull.Supervisor.start_link(opts)
 
+  @doc """
+  Every option `start_link/1` and `child_spec/1` accept: the list
+  `DpExchange.Webull.Options.check_start/1` refuses against, so a key outside it is
+  `{:error, {:unknown_option, key}}` at start and every key inside it is not.
+
+  `Venue.start_link(Keyword.take(opts, Venue.start_options()))` hands this venue only what it
+  reads. See `c:DpExchange.Core.Venue.start_options/0`.
+  """
+  @impl true
+  @spec start_options() :: [atom()]
+  def start_options, do: Options.start_keys()
+
+  @doc """
+  The option keys a call to the function named `name` accepts without
+  `{:error, {:unknown_option, key}}`: `{:ok, keys}`, the shared transport keys it reads, its
+  own keys and `:credentials`.
+
+  `{:error, :not_supported}` for a callback this venue does not serve (whatever it is given),
+  `{:error, {:unknown_function, name}}` for a name that is not a function of this facade. Read
+  from the table the calls themselves check against (`DpExchange.Webull.Options`). The
+  fundamentals and screener calls answer the union over every kind and name; a given kind or
+  name accepts a subset of it. `child_spec` and `start_link` answer `start_options/0`.
+
+  `{:ok, keys} = Venue.call_options(:get_price); Venue.get_price(sym, Keyword.take(opts, keys))`.
+  See `c:DpExchange.Core.Venue.call_options/1`.
+  """
+  @impl true
+  @spec call_options(atom()) ::
+          {:ok, [atom()]} | {:error, :not_supported} | {:error, {:unknown_function, atom()}}
+  def call_options(name), do: Options.call_options(name, capabilities())
+
   # --- declaration -------------------------------------------------------
 
   @doc """

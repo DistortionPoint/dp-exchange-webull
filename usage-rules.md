@@ -107,6 +107,35 @@ same one.
 A kind or screener the venue does not publish is `{:error, {:unknown_fundamental, kind}}` /
 `{:error, {:unknown_screener, name}}`, answered before the options.
 
+### Ask the venue which keys a call takes: `start_options/0` and `call_options/1`
+
+Requires the `dp_exchange_core` release that adds both callbacks
+(DistortionPoint/dp-exchange-core#43). Both answer from the tables above, not from a second
+copy, on `DpExchange.Webull` and on `DpExchange.Webull.Fake`.
+
+```elixir
+Venue.start_link(Keyword.take(opts, Venue.start_options()))
+
+{:ok, keys} = Venue.call_options(:get_price)
+Venue.get_price(symbol, Keyword.take(opts, keys))
+```
+
+  * `start_options/0` is exactly the list `Options.check_start/1` refuses against, the keys
+    `start_link/1` and `child_spec/1` take. A key outside it (`:subscriber` and `:channels`
+    are not start options; `subscribe/2` takes `:to`) is `{:error, {:unknown_option, key}}`.
+  * `call_options/1` answers for a function name: `{:ok, keys}` (the transport keys that
+    call reads, its own keys, `:credentials`), `{:error, :not_supported}` for an endpoint
+    `capabilities/0` declares inactive, `{:error, {:unknown_function, name}}` for anything
+    else, a non-atom included. `child_spec` and `start_link` answer `start_options/0`.
+  * `quantization` answers the transport keys and `:credentials`, not `[]`: the call takes
+    them (a signed venue needs the credential there).
+  * `get_fundamental` and `get_screener` answer the **union** over every kind and name; a
+    given kind or name takes a subset, and the rest are `{:error, {:unknown_option, key}}`.
+  * A key the call reads **only to refuse it** with a specific answer (`:limit` on
+    `get_order_book`, `:since` on `get_trades`, `:real_time` on the bars, `:symbols` on
+    `update_watchlist`) is listed: it is not an `:unknown_option`, but passing it is still
+    an error. Do not pass it.
+
 The watchlist `:category` is `"US_STOCK"` (the default), the one value the instrument endpoints'
 enum lists; any other is `{:error, {:invalid_category, v}}` before a request, in `Fake` too.
 A futures `replace_order/4` changes `:order_type` one way only (limit or stop to `:market`,
