@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.171] - 2026-11-11
+
 ### Fixed
 
 - **`coverage/1` and `coverage_by_kind/1` reported pairs as `:stream` on sessions that had
