@@ -1101,6 +1101,11 @@ defmodule DpExchange.Webull do
   Which symbols are arriving on the stream, as `%{symbol => :stream}` read from the running
   feed.
 
+  A symbol on a session that has lost the us-crypto permission to a sibling session is left
+  out until it arrives again (issue #13), so a consumer covers it another way meanwhile. See
+  `DpExchange.Webull.Feed`'s "A session that lost the us-crypto permission is not
+  streaming".
+
   Answers `%{}` when no feed is running or it does not answer. Reads `opts[:feed]` to name
   a feed other than the default. See `c:DpExchange.Core.Venue.coverage/1`.
   """

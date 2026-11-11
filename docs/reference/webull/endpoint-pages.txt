@@ -158,6 +158,25 @@
 #   * `fd-events/sod-events` vanished (404). It is on the FD Events surface, which this
 #     package does not reach, and nothing here cites it.
 #
+# ## Re-diffed 2026-11-11 — four pages appeared, one vanished; no claim changed
+#
+# The weekly check flagged this on 2026-11-02 and 2026-11-09. Each page was read before this
+# file was touched.
+#
+#   * `broker-market-data-api/webull-open-api-reference` now answers 404, and
+#     `broker-market-data-api/webull-open-api-reference-1` appeared in its place. The new
+#     page ("Webull Open API Reference1") has no method, path or field table, only stray
+#     build-artifact text, so it is a placeholder, not an endpoint. Nothing here cites
+#     either page.
+#   * `broker-fd-api/create-debit-card-session`
+#     (`POST /broker/funding/debit-card-relationships/page-tokens/create`),
+#     `broker-fd-api/debit-card-relationship-list`
+#     (`GET /broker/funding/debit-card-relationships/list`) and
+#     `broker-fd-api/delete-debit-card-relationship`
+#     (`POST /broker/funding/debit-card-relationships/delete`): debit-card funding on the
+#     Broker API, a tier this package implements none of. None states a rate limit, and no
+#     `capabilities/0` declaration rests on them being absent.
+#
 account-balance
 account-list
 account-position
@@ -200,9 +219,12 @@ broker-fd-api/common-order-replace
 broker-fd-api/create-account-apply
 broker-fd-api/create-ach-relationship
 broker-fd-api/create-bank-relationship
+broker-fd-api/create-debit-card-session
 broker-fd-api/create-transfer
+broker-fd-api/debit-card-relationship-list
 broker-fd-api/delete-ach-relationship
 broker-fd-api/delete-bank-relationship
+broker-fd-api/delete-debit-card-relationship
 broker-fd-api/document
 broker-fd-api/document-download
 broker-fd-api/document-upload
@@ -284,7 +306,7 @@ broker-market-data-api/tick-using-get
 broker-market-data-api/top-active-using-get-new
 broker-market-data-api/top-gainers-using-get-new
 broker-market-data-api/unsubscribe-using-post
-broker-market-data-api/webull-open-api-reference
+broker-market-data-api/webull-open-api-reference-1
 broker-omnisub-api/broker-omnisub-api
 capital-flow
 check-token

@@ -22,6 +22,32 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`coverage/1` and `coverage_by_kind/1` reported pairs as `:stream` on sessions that had
+  lost the us-crypto permission** (issue #13). An App Key streams us-crypto on one session at
+  a time. The sessions that lost it stayed connected and subscribed, and the frames they
+  received before the grab kept their pairs reported indefinitely. Measured on four sessions
+  with `priority_symbols:`: 11 minutes after a start, 93 of 152 pairs reported `:stream`
+  had not ticked for 1 to 15 minutes. A consumer trusting the report did not poll them by
+  other means. A symbol now counts only if it arrived after its session was last judged to
+  have lost the stream:
+  - immediately, on a "Permission grabbed" notice to that session;
+  - on each resubscribe tick, when its shard has delivered nothing for a whole interval
+    while a sibling shard streams.
+
+  Its next frame restores it. This is not a per-symbol staleness window: a single quiet
+  pair on a streaming session stays covered, and when every session is silent nothing is
+  narrowed. Rotation and the shard reopen gate are unchanged.
+
+### Documentation
+
+- **Vendor index re-diffed 2026-11-11** (the weekly check flagged it on 2026-11-02 and
+  2026-11-09). Three debit-card funding endpoints appeared on the Broker API. Broker Market
+  Data's `webull-open-api-reference` page now answers 404 and was replaced by a placeholder
+  with no endpoint on it. Every page was read first; this package implements neither tier,
+  and no claim changed. `endpoint-pages.txt` and `endpoint-inventory.md` are updated.
+
 ## [0.4.170] - 2026-10-26
 
 ### Fixed

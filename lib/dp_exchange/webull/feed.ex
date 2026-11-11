@@ -30,6 +30,36 @@ defmodule DpExchange.Webull.Feed do
   subscribed, and not when the HTTP subscribe returns 200. On this venue those are three
   genuinely different moments, and only the last one means data.
 
+  ## A session that lost the us-crypto permission is not streaming
+
+  An App Key can stream us-crypto on only one session at a time. A sibling's subscribe takes
+  the permission and the venue stops publishing to the session that held it, which stays
+  connected and subscribed. The `delivering` evidence from before the grab then said
+  `:stream` indefinitely. Issue #13 measured it on four sessions with `priority_symbols:`:
+  11 minutes after a start, 93 of 152 pairs reported `:stream` had not ticked for 1 to 15
+  minutes.
+
+  So a symbol counts as covered only if it **arrived after its session was last judged to
+  have lost the stream** (`state.starved_at`). There are two judgements, because issue #11
+  measured that the venue's notice does not reliably reach the loser:
+
+    * a `:degraded` notice on a shard's own session whose text says "Permission grabbed",
+      handled the moment it arrives;
+    * on each `:resubscribe` tick, a connected shard none of whose symbols arrived within
+      `resubscribe_interval_ms` **while a sibling shard did**. One session streaming while
+      another of up to 100 pairs is entirely silent is the permission held elsewhere, not a
+      quiet market.
+
+  The symbol's first new frame brings it back, judged by this process's mailbox order rather
+  than by a clock, so a frame in the same millisecond as the judgement is not misread. Its
+  other kinds' pre-loss arrivals are dropped then, and each kind returns with its own next
+  frame, so `coverage_by_kind/1` never revives a topic that has not ticked. This is not a
+  staleness window, which Core's `coverage/1` contract rules out for a stream: a single
+  illiquid pair on a streaming session stays covered however long it is quiet, and when
+  EVERY shard is silent nothing is narrowed, because that is indistinguishable from the
+  whole stream being quiet. `delivering` itself is untouched, so the rotation order and the
+  reopen gate that read it behave as before.
+
   ## Coverage by kind, because this venue's streamed kinds really are independent
 
   Every subscribe asks the venue for `SNAPSHOT`, `QUOTE` and `TICK` (see `Subscription`:
@@ -773,8 +803,9 @@ defmodule DpExchange.Webull.Feed do
   # die of it.
   @doc """
   The symbols a payload has arrived for, each `:stream`. Observed, never intended: a symbol
-  enters on arrival and leaves on unsubscribe, a link drop or a shard teardown. This feed has
-  no polling, so `:internal_poll` and `:not_covered` are never values here; a symbol absent
+  enters on arrival and leaves on unsubscribe, a link drop, a shard teardown, or its session
+  losing the us-crypto permission to a sibling (issue #13; it returns with its next frame —
+  see the moduledoc). This feed has no polling, so `:internal_poll` and `:not_covered` are never values here; a symbol absent
   from the map is not covered.
   """
   @spec coverage(GenServer.server()) :: %{String.t() => :stream | :internal_poll | :not_covered}
@@ -942,6 +973,10 @@ defmodule DpExchange.Webull.Feed do
        max_queue_len: Fanout.max_queue_len!(opts, :webull),
        wanted: MapSet.new(),
        delivering: %{},
+       # symbol => monotonic ms its session was last judged to have lost the us-crypto
+       # permission. Coverage counts a symbol only if it arrived after this. See the
+       # moduledoc's "A session that lost the us-crypto permission is not streaming".
+       starved_at: %{},
        # shard index => monotonic ms its last rotation turn was granted. See
        # `resubscribe_quiet_shards/1`: a turn counts as recent activity, so a shard whose
        # symbols never tick does not win every rotation on a `last_delivery` of zero.
@@ -1148,7 +1183,7 @@ defmodule DpExchange.Webull.Feed do
   end
 
   def handle_call(:coverage, _from, state) do
-    {:reply, Map.new(state.delivering, fn {symbol, _at} -> {symbol, :stream} end), state}
+    {:reply, streaming(state.delivering, state.starved_at), state}
   end
 
   def handle_call(:wanted, _from, state) do
@@ -1158,7 +1193,7 @@ defmodule DpExchange.Webull.Feed do
   def handle_call(:coverage_by_kind, _from, state) do
     by_kind =
       Map.new(state.delivering_by_kind, fn {kind, per_symbol} ->
-        {kind, Map.new(per_symbol, fn {symbol, _at} -> {symbol, :stream} end)}
+        {kind, streaming(per_symbol, state.starved_at)}
       end)
 
     {:reply, by_kind, state}
@@ -1276,6 +1311,7 @@ defmodule DpExchange.Webull.Feed do
       | wanted: wanted,
         delivering: Map.drop(state.delivering, symbols),
         delivering_by_kind: drop_symbols_by_kind(state.delivering_by_kind, symbols),
+        starved_at: Map.drop(state.starved_at, symbols),
         # A refusal is remembered only for what is still wanted.
         rejected: Map.drop(state.rejected, symbols)
     }
@@ -1309,6 +1345,7 @@ defmodule DpExchange.Webull.Feed do
       | wanted: wanted,
         delivering: Map.take(state.delivering, symbols),
         delivering_by_kind: take_symbols_by_kind(state.delivering_by_kind, symbols),
+        starved_at: Map.take(state.starved_at, symbols),
         rejected: Map.take(state.rejected, symbols),
         resubscribe_opts: replay
     }
@@ -1569,7 +1606,10 @@ defmodule DpExchange.Webull.Feed do
   # not the connection attempt.
   def handle_info({:dp_exchange, :webull, %Notice{} = notice} = message, state)
       when notice.kind in [:credentials_rejected, :degraded] do
-    state = answer_refused_session(state, notice.details)
+    state =
+      state
+      |> answer_refused_session(notice.details)
+      |> starve_grabbed_session(notice)
 
     fan_out(state.notice_subscribers, message)
     {:noreply, state}
@@ -1726,7 +1766,11 @@ defmodule DpExchange.Webull.Feed do
   # exactly what is already wanted computes an empty diff.
   def handle_info(:resubscribe, state) do
     Process.send_after(self(), :resubscribe, state.resubscribe_interval_ms)
-    state = resubscribe_quiet_shards(state)
+
+    state =
+      state
+      |> starve_quiet_shards()
+      |> resubscribe_quiet_shards()
 
     # A TTL-expired rejection (see the moduledoc's "A venue-rejected symbol is excluded,
     # timed, and reported") only ever returns to a shard's own symbol list through
@@ -2233,6 +2277,54 @@ defmodule DpExchange.Webull.Feed do
       )
 
     fan_out(state.notice_subscribers, {:dp_exchange, :webull, notice})
+  end
+
+  # Issue #13. A connected shard silent for a whole interval while a sibling streams has lost
+  # the us-crypto permission to it, so its symbols stop counting as covered until they arrive
+  # again. Run before `resubscribe_quiet_shards/1`, which may hand one of them the permission
+  # back: those frames then restore it. Nothing is narrowed when no shard streams. See the
+  # moduledoc's "A session that lost the us-crypto permission is not streaming".
+  defp starve_quiet_shards(state) do
+    window = state.resubscribe_interval_ms
+
+    {streaming, quiet} =
+      state.shards
+      |> Enum.filter(fn {_index, shard} -> shard.connected? and shard.symbols != [] end)
+      |> Enum.split_with(fn {index, _shard} -> shard_delivered_within?(state, index, window) end)
+
+    if streaming == [], do: state, else: starve(state, Enum.map(quiet, &elem(&1, 0)))
+  end
+
+  # The venue's own word, on the session it was said to: "Permission grabbed by other session,
+  # category : us-crypto" (see `Socket.emit/3`). Matched on the words rather than a code, as
+  # the venue publishes no schema for its `notice` topic. Issue #11 measured that this does
+  # not always arrive, which is why `starve_quiet_shards/1` exists as well.
+  defp starve_grabbed_session(state, %Notice{
+         kind: :degraded,
+         message: message,
+         details: %{session_id: session_id}
+       })
+       when is_binary(message) do
+    with true <- message |> String.downcase() |> String.contains?("permission grabbed"),
+         index when is_integer(index) <- shard_index_for_session(state, session_id) do
+      starve(state, [index])
+    else
+      _not_a_grab_on_a_shard -> state
+    end
+  end
+
+  defp starve_grabbed_session(state, _notice), do: state
+
+  defp starve(state, indexes) do
+    now = now_ms()
+
+    starved_at =
+      for index <- indexes,
+          symbol <- state.shards[index].symbols,
+          into: state.starved_at,
+          do: {symbol, now}
+
+    %{state | starved_at: starved_at}
   end
 
   # --- resharding -----------------------------------------------------------
@@ -3246,6 +3338,7 @@ defmodule DpExchange.Webull.Feed do
       | wanted: MapSet.new(),
         delivering: %{},
         delivering_by_kind: %{},
+        starved_at: %{},
         rejected: %{}
     })
   end
@@ -4776,10 +4869,20 @@ defmodule DpExchange.Webull.Feed do
     symbol = quote_struct.symbol
     delivering = Map.put(state.delivering, symbol, now)
 
+    # Issue #13: the first frame after its session lost the stream restores the symbol. Its
+    # other kinds' arrivals date from before the loss, so they go, and each kind returns with
+    # its own next frame. Ordered by this process's mailbox, not by clock: a frame stamped in
+    # the same millisecond as the judgement is still unambiguously before or after it.
+    {starved_at, by_kind} =
+      case Map.pop(state.starved_at, symbol) do
+        {nil, _unchanged} -> {state.starved_at, state.delivering_by_kind}
+        {_at, rest} -> {rest, drop_symbols_by_kind(state.delivering_by_kind, [symbol])}
+      end
+
     delivering_by_kind =
       case kind_for(quote_struct) do
         {:ok, kind} ->
-          Map.update(state.delivering_by_kind, kind, %{symbol => now}, &Map.put(&1, symbol, now))
+          Map.update(by_kind, kind, %{symbol => now}, &Map.put(&1, symbol, now))
 
         :error ->
           # `coverage/1` above still counts this arrival — it is truthful about *any*
@@ -4793,10 +4896,16 @@ defmodule DpExchange.Webull.Feed do
               "coverage_by_kind/1 cannot"
           )
 
-          state.delivering_by_kind
+          by_kind
       end
 
-    {:noreply, %{state | delivering: delivering, delivering_by_kind: delivering_by_kind}}
+    {:noreply,
+     %{
+       state
+       | delivering: delivering,
+         delivering_by_kind: delivering_by_kind,
+         starved_at: starved_at
+     }}
   end
 
   # The scale `state.delivering` and `state.rotated_at` are written and compared on:
@@ -4812,4 +4921,13 @@ defmodule DpExchange.Webull.Feed do
   # Older than any reading `now_ms/0` can produce, so a symbol or shard that never delivered
   # or never had a turn is the oldest, and is never "recent" however small the monotonic clock.
   defp never_ms, do: -9_223_372_036_854_775_808
+
+  # `%{symbol => :stream}` for every arrival not on a session judged to have lost the stream
+  # since (issue #13). `record_quote/3` clears a symbol's judgement on its next frame.
+  defp streaming(arrivals, starved_at) do
+    for {symbol, _at} <- arrivals,
+        not Map.has_key?(starved_at, symbol),
+        into: %{},
+        do: {symbol, :stream}
+  end
 end

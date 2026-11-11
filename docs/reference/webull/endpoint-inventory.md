@@ -64,15 +64,22 @@ of:
 `fd-events/sod-events` vanished from FD Events. **No claim changed**; the reasoning is in
 `endpoint-pages.txt`'s header.
 
+**Re-checked 2026-11-11.** Three debit-card funding endpoints appeared on the Broker API
+(`create-debit-card-session`, `debit-card-relationship-list`,
+`delete-debit-card-relationship`), taking it from 78 to 81. Broker Market Data's
+`webull-open-api-reference` index page became a placeholder, `webull-open-api-reference-1`,
+with no endpoint on it, so that count is unchanged. **No claim changed**; see
+`endpoint-pages.txt`'s header.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
-| Broker API (`broker-fd-api`) | 78 | 0 |
+| Broker API (`broker-fd-api`) | 81 | 0 |
 | Broker Market Data | 37 | 0 |
 | FD Events | 13 | 0 |
 | Custom | 12 | 0 |
 | Connect | 4 | 3 — see below; only the consent redirect stays with the host |
-| **total documented** | **229** | **48 of 89 contract callbacks `:experimental`, 41 `:unsupported` (31 of them the venue's own absence), per `capabilities/0` as checked 2026-10-21** |
+| **total documented** | **232** | **48 of 89 contract callbacks `:experimental`, 41 `:unsupported` (31 of them the venue's own absence), per `capabilities/0` as checked 2026-10-21** |
 
 ### Connect is not all "auth", and only half of it is the host's
 
