@@ -22,6 +22,8 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+## [0.4.173] - 2026-11-23
+
 ### Documentation
 
 - **Vendor index re-diffed 2026-11-23** (the weekly inventory check failed on 2026-11-16).
