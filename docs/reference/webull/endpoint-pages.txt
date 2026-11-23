@@ -177,6 +177,35 @@
 #     Broker API, a tier this package implements none of. None states a rate limit, and no
 #     `capabilities/0` declaration rests on them being absent.
 #
+# ## Re-diffed 2026-11-23 — 49 pages appeared, three vanished; no claim changed
+#
+# The weekly check flagged this on 2026-11-16. The pages were read before this file was
+# touched.
+#
+#   * A second Broker API product, **Broker API (OmniSub)**, was published: 25 endpoint pages
+#     under `broker-omnisub-api/broker-omni-sub-*` (accounts, assets, funding, journals,
+#     instruments, orders, trade calendar; e.g. `POST /broker/orders/place`,
+#     `GET /broker/assets/balances/get`), ten section index pages under
+#     `broker-omnisub-api/`, eight push-event pages and their index under `omnisub-events/`,
+#     and the index
+#     pages `custom/broker-api` and `custom/broker-omnisub-api`. The vendor's sidebar files it
+#     under "Broker API" next to the existing "Broker API (FD)": an interface for a broker
+#     managing its customers' sub-accounts, on the broker-tier credential this package does
+#     not model. `broker-omnisub-api/broker-omnisub-api` (its former placeholder) now answers
+#     404.
+#   * `broker-fd-api/orders` now answers 404; `broker-fd-api/trading` and
+#     `broker-fd-api/order-query` appeared. Both are index pages with no endpoint of their
+#     own, listing the same place/preview/replace/cancel and open/history/detail/executions
+#     pages as before: a split of one index page, not a change to any endpoint.
+#   * `broker-market-data-api/webull-open-api-reference` is back and
+#     `webull-open-api-reference-1` answers 404: the 2026-11-11 placeholder was renamed
+#     back. The page is still a stub with no endpoint.
+#
+# OmniSub's `broker-omni-sub-trade-calendar` is a second Broker API trading calendar. It does
+# not change `negative-claims.md`'s market-status row, which already rests on the Broker API
+# being a separate product this package cannot reach; it is recorded there by name. No
+# `capabilities/0` declaration rests on any of these pages being absent.
+#
 account-balance
 account-list
 account-position
@@ -261,9 +290,10 @@ broker-fd-api/order-detail
 broker-fd-api/order-executions
 broker-fd-api/order-history
 broker-fd-api/order-open
-broker-fd-api/orders
+broker-fd-api/order-query
 broker-fd-api/structured-targets-list
 broker-fd-api/summary
+broker-fd-api/trading
 broker-fd-api/transfer-detail
 broker-fd-api/transfer-list
 broker-fd-api/update-account-apply
@@ -306,8 +336,42 @@ broker-market-data-api/tick-using-get
 broker-market-data-api/top-active-using-get-new
 broker-market-data-api/top-gainers-using-get-new
 broker-market-data-api/unsubscribe-using-post
-broker-market-data-api/webull-open-api-reference-1
-broker-omnisub-api/broker-omnisub-api
+broker-market-data-api/webull-open-api-reference
+broker-omnisub-api/accounts
+broker-omnisub-api/activities
+broker-omnisub-api/assets
+broker-omnisub-api/broker-omni-sub-account-application-detail
+broker-omnisub-api/broker-omni-sub-account-create
+broker-omnisub-api/broker-omni-sub-account-detail
+broker-omnisub-api/broker-omni-sub-account-list
+broker-omnisub-api/broker-omni-sub-account-update
+broker-omnisub-api/broker-omni-sub-asset-balance
+broker-omnisub-api/broker-omni-sub-asset-positions
+broker-omnisub-api/broker-omni-sub-asset-summary
+broker-omnisub-api/broker-omni-sub-cash-activities
+broker-omnisub-api/broker-omni-sub-corporate-actions
+broker-omnisub-api/broker-omni-sub-funding-create
+broker-omnisub-api/broker-omni-sub-funding-get
+broker-omnisub-api/broker-omni-sub-journal-create
+broker-omnisub-api/broker-omni-sub-journal-get
+broker-omnisub-api/broker-omni-sub-open-orders
+broker-omnisub-api/broker-omni-sub-option-contracts
+broker-omnisub-api/broker-omni-sub-order-cancel
+broker-omnisub-api/broker-omni-sub-order-detail
+broker-omnisub-api/broker-omni-sub-order-history
+broker-omnisub-api/broker-omni-sub-order-place
+broker-omnisub-api/broker-omni-sub-order-preview
+broker-omnisub-api/broker-omni-sub-order-replace
+broker-omnisub-api/broker-omni-sub-stock-instruments
+broker-omnisub-api/broker-omni-sub-stock-locate
+broker-omnisub-api/broker-omni-sub-trade-calendar
+broker-omnisub-api/funding
+broker-omnisub-api/instruments
+broker-omnisub-api/journals
+broker-omnisub-api/master-data
+broker-omnisub-api/order-query
+broker-omnisub-api/trading
+broker-omnisub-api/webull-open-api-reference
 capital-flow
 check-token
 common-order-cancel
@@ -327,7 +391,9 @@ crypto-bars
 crypto-instrument-list
 crypto-market-data
 crypto-snapshot
+custom/broker-api
 custom/broker-fd-api
+custom/broker-omnisub-api
 custom/display-solution
 custom/events
 custom/get-authorization-code
@@ -427,6 +493,15 @@ list-transfer-activities
 market-data-streaming
 news
 news-summary
+omnisub-events/account-application-events
+omnisub-events/account-events
+omnisub-events/ca-events
+omnisub-events/events-omnisub
+omnisub-events/funding-events
+omnisub-events/instruments-events
+omnisub-events/journal-events
+omnisub-events/master-data-events
+omnisub-events/trading-events
 option-contract-list
 option-historical-bars
 option-snapshot

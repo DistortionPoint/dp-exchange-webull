@@ -71,15 +71,27 @@ of:
 with no endpoint on it, so that count is unchanged. **No claim changed**; see
 `endpoint-pages.txt`'s header.
 
+**Re-checked 2026-11-23.** The vendor published a second Broker API product, **Broker API
+(OmniSub)**, for a broker managing its customers' sub-accounts: 25 endpoints
+(`broker-omnisub-api/broker-omni-sub-*`) and 8 push events (`omnisub-events/`), plus index
+pages, and two Custom index pages (`custom/broker-api`, `custom/broker-omnisub-api`). The
+Broker API (FD) `orders` index split into `trading` and `order-query` with no endpoint
+change, and the 2026-11-11 placeholder was renamed back to `webull-open-api-reference`.
+**No claim changed.** OmniSub's trade-calendar endpoint is named in `negative-claims.md`'s
+market-status row, which already rests on the Broker API being out of reach; see
+`endpoint-pages.txt`'s header.
+
 | surface | endpoints | in this package |
 |---|---|---|
 | **Trading + Market Data API** | **85** | most of the crypto, stock, option, futures and event-contract surface; see `capabilities/0` for the current, per-callback answer rather than a count frozen at capture time |
 | Broker API (`broker-fd-api`) | 81 | 0 |
+| Broker API (OmniSub, `broker-omnisub-api`) | 25 | 0 |
+| OmniSub Events | 8 | 0 |
 | Broker Market Data | 37 | 0 |
 | FD Events | 13 | 0 |
-| Custom | 12 | 0 |
+| Custom | 14 | 0 |
 | Connect | 4 | 3 — see below; only the consent redirect stays with the host |
-| **total documented** | **232** | **48 of 89 contract callbacks `:experimental`, 41 `:unsupported` (31 of them the venue's own absence), per `capabilities/0` as checked 2026-10-21** |
+| **total documented** | **267** | **50 of 91 contract callbacks `:experimental`, 41 `:unsupported` (31 of them the venue's own absence), per `capabilities/0` as checked 2026-11-23** |
 
 ### Connect is not all "auth", and only half of it is the host's
 

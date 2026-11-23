@@ -22,6 +22,16 @@ acceptable changelog line.
 
 ## [Unreleased]
 
+### Documentation
+
+- **Vendor index re-diffed 2026-11-23** (the weekly inventory check failed on 2026-11-16).
+  Webull published a second Broker API product, Broker API (OmniSub): 25 endpoints, 8 push
+  events and their index pages. Its `orders` index on Broker API (FD) split into `trading`
+  and `order-query`, and the 2026-11-11 placeholder was renamed back. All of it is
+  broker-tier; **no claim changed**. `endpoint-pages.txt` now holds the live 320 pages,
+  `endpoint-inventory.md` counts 267 endpoints, and `negative-claims.md`'s market-status
+  row names OmniSub's trade-calendar endpoint alongside the Broker API one it already cited.
+
 ## [0.4.172] - 2026-11-11
 
 ### Changed
